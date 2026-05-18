@@ -1,0 +1,31 @@
+[project]
+name = "helix-tpc"
+version = "0.1.0"
+description = "Hierarchical Encoding for Learned Inference on eXperimental data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "numpy>=1.24",
+    "h5py>=3.8",
+    "pywt>=1.4",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+gpu = ["jax[cuda12]>=0.4.20"]
+cpu = ["jax[cpu]>=0.4.20"]
+dev = [
+    "pytest>=7.0",
+    "pytest-benchmark",
+]
+
+[project.scripts]
+helix = "helix.run:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["helix*"]
