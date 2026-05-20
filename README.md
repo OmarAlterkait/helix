@@ -39,35 +39,45 @@ Two sequential stages, each derived from first principles:
 
 ### 1. Coherent noise removal
 
-Single-pass algorithm with four operations matched to the noise correlation structure:
+Multi-pass mask-accumulation algorithm. Each pass detects additional
+sub-threshold signal on the cleaned output, augments the mask, then
+re-estimates coherent noise from the **original** image:
 
-| Step | Operation | Why |
-|------|-----------|-----|
-| Mask | \|dig − group_median\| > 3σ | Identify signal pixels |
-| Temporal dilation | ±4 ticks | Coh and leakage both correlated in time → exclude |
-| Spatial kernel | (−β, 1, −β) across groups | Coh anti-correlated, leakage correlated → filter |
-| α subtraction | n_unflag / group_size | Scale by estimation confidence |
+| Pass | Operation |
+|------|-----------|
+| 1 | group_median → residual → mask(3σ) → dilate(±5) → masked_mean → α×subtract |
+| 2–3 | detect on cleaned → augment mask → re-estimate from original → α×subtract |
+
+The adaptive α = n_unflagged / group_size scales subtraction by estimation confidence.
 
 ### 2. Wavelet sparsification
 
 Per-wire coif3 DWT (level 4) with Donoho-Johnstone universal hard threshold (κ=1.0).
+GPU path uses matmul-based DWT/IDWT for full pipeline acceleration.
 
 ## Configuration
 
 ```python
 DetectorConfig(
-    group_size=64,           # wires per coherent group
-    beta=0.15,               # inter-group anti-correlation
-    temporal_dilation_ticks=9,
+    group_size=64,              # wires per coherent group
+    mask_threshold_nsigma=3.0,  # signal detection threshold
+    temporal_dilation_ticks=11, # mask dilation (±5 ticks)
+    n_passes=3,                 # coherent removal passes
     wavelet="coif3",
     dwt_level=4,
     threshold_kappa=1.0,
 )
 ```
 
-Presets: `DetectorConfig.sbnd()`, `.microboone()`, `.icarus()`
-
 ## Performance
+
+Measured on 200 edepsim events (SBND geometry, 1969/1443 wires × 4321 ticks, 5 noise seeds):
+
+| Plane | F0 (median) | Bias (ADC/pixel) | RMS (ADC) | Sparsity |
+|-------|-------------|------------------|-----------|----------|
+| U (induction) | 0.9145 | −0.069 | 2.218 | 99.22% |
+| V (induction) | 0.9059 | −0.113 | 2.175 | 99.38% |
+| Y (collection) | 0.9634 | −0.164 | 2.230 | 99.05% |
 
 | Backend | Per plane | Per event (6 planes) |
 |---------|-----------|---------------------|

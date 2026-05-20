@@ -30,9 +30,9 @@ def test_process_event(config, synthetic_plane):
     assert "plane_V" in results
 
 
-def test_config_presets():
-    for factory in [DetectorConfig.sbnd, DetectorConfig.microboone, DetectorConfig.icarus]:
-        cfg = factory()
-        assert cfg.group_size > 0
-        assert cfg.beta >= 0
-        assert cfg.dwt_level > 0
+def test_config_defaults():
+    cfg = DetectorConfig()
+    assert cfg.group_size == 64
+    assert cfg.beta == 0.15
+    assert cfg.dwt_level == 4
+    assert cfg.xblock_kernel == (-0.15, 1.0, -0.15)

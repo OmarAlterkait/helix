@@ -16,14 +16,12 @@ def main():
     )
     parser.add_argument("--input", required=True, help="Input sensor HDF5 file")
     parser.add_argument("--output", required=True, help="Output processed HDF5 file")
-    parser.add_argument("--config", default=None, help="Detector config TOML file (default: SBND)")
     parser.add_argument("--events", default=None, help="Event range, e.g. '0-19' or '5' (default: all)")
     parser.add_argument("--coh-only", action="store_true", help="Skip wavelet step, output cleaned images")
     parser.add_argument("--backend", choices=["auto", "jax", "numpy"], default="auto")
     args = parser.parse_args()
 
-    from helix.config import DetectorConfig
-    from helix.io import count_events, read_sensor_event, write_processed
+    from helix.io import config_from_file, count_events, read_sensor_event, write_processed
     from helix.coherent import remove_coherent
     from helix.wavelet import sparsify
     from helix._backend import get_backend
@@ -34,10 +32,7 @@ def main():
 
     print(f"HELIX v0.1.0 | backend: {get_backend()}")
 
-    if args.config:
-        config = DetectorConfig.from_toml(args.config)
-    else:
-        config = DetectorConfig.sbnd()
+    config = config_from_file(args.input)
 
     n_events = count_events(args.input)
     if args.events:

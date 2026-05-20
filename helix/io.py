@@ -1,7 +1,11 @@
-"""HDF5 I/O for JAXTPC production sensor files and processed output."""
+"""HDF5 I/O for JAXTPC production sensor files and processed output.
+
+Readout geometry is extracted from the file itself — no external config needed.
+"""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +14,44 @@ import h5py
 
 from helix.config import DetectorConfig
 from helix.wavelet import SparseResult
+
+
+def config_from_file(path: str | Path, **overrides) -> DetectorConfig:
+    """Build a DetectorConfig by reading geometry from a sensor HDF5 file.
+
+    Extracts plane labels, num_time_steps, and pedestals from the file
+    attributes. Algorithm parameters use defaults unless overridden.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a JAXTPC production sensor file.
+    **overrides
+        Any DetectorConfig field to override (e.g. beta=0.20).
+    """
+    with h5py.File(path, "r") as f:
+        evt_keys = sorted(k for k in f.keys() if k.startswith("event_"))
+        if not evt_keys:
+            raise ValueError(f"No events found in {path}")
+        evt = f[evt_keys[0]]
+
+        plane_labels = tuple(k for k in evt.keys() if isinstance(evt[k], h5py.Group))
+
+        num_time_steps = int(evt.attrs.get("num_time_steps", 2701))
+
+        pedestals = {}
+        for label in plane_labels:
+            grp = evt[label]
+            pt = label.split("_")[-1] if "_" in label else label
+            pedestals[pt] = int(grp.attrs.get("pedestal", 0))
+
+    kwargs: dict[str, Any] = dict(
+        plane_labels=plane_labels,
+        num_time_steps=num_time_steps,
+        pedestals=pedestals,
+    )
+    kwargs.update(overrides)
+    return DetectorConfig(**kwargs)
 
 
 def read_sensor_plane(
@@ -46,7 +88,7 @@ def read_sensor_event(
     planes = {}
     with h5py.File(path, "r") as f:
         evt = f[f"event_{event_idx}"]
-        available = list(evt.keys())
+        available = set(evt.keys())
 
     for label in config.plane_labels:
         if label in available:

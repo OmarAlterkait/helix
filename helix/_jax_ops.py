@@ -75,3 +75,68 @@ def pad_mask_to_groups(mask: jnp.ndarray, group_size: int) -> jnp.ndarray:
     if pad > 0:
         return jnp.concatenate([mask, jnp.ones((pad, nt), dtype=bool)], axis=0)
     return mask
+
+
+# ── DWT via matmul ────────────────────────────────────────────────────
+
+_dwt_cache: dict = {}
+
+
+def _get_dwt_matrices(wavelet: str, n_ticks: int, level: int):
+    """Get or build cached DWT matrices on GPU."""
+    key = (wavelet, n_ticks, level)
+    if key not in _dwt_cache:
+        from helix._dwt_matrix import build_dwt_matrices
+        W_fwd_np, W_inv_np, slices = build_dwt_matrices(wavelet, n_ticks, level)
+        _dwt_cache[key] = (
+            jnp.array(W_fwd_np),
+            jnp.array(W_inv_np),
+            slices,
+        )
+    return _dwt_cache[key]
+
+
+def dwt_matmul(image: jnp.ndarray, wavelet: str, level: int):
+    """GPU DWT via matmul. Returns (flat_coeffs, band_slices)."""
+    W_fwd, _, slices = _get_dwt_matrices(wavelet, image.shape[1], level)
+    return image @ W_fwd, slices
+
+
+def idwt_matmul(coeffs: jnp.ndarray, wavelet: str, n_ticks: int, level: int):
+    """GPU IDWT via matmul."""
+    _, W_inv, _ = _get_dwt_matrices(wavelet, n_ticks, level)
+    return coeffs @ W_inv
+
+
+def wavelet_pipeline_jax(image: jnp.ndarray, wavelet: str, level: int,
+                         kappa: float, include_approx: bool):
+    """Full GPU wavelet pipeline: DWT (matmul) → threshold → IDWT (matmul).
+
+    Everything on GPU in a single JIT-compiled function.
+    Returns (reconstructed, thresholded_coeffs, sigma_per_band, n_kept, n_total).
+    """
+    W_fwd, W_inv, slices = _get_dwt_matrices(wavelet, image.shape[1], level)
+    return _wavelet_kernel(image, W_fwd, W_inv,
+                           tuple((s.start, s.stop, i > 0 or include_approx)
+                                 for i, s in enumerate(slices)),
+                           kappa)
+
+
+@partial(jit, static_argnums=(3, 4))
+def _wavelet_kernel(image, W_fwd, W_inv, band_info, kappa):
+    coeffs = image @ W_fwd
+    thresholded = jnp.zeros_like(coeffs)
+    sigmas = []
+
+    for start, stop, do_thresh in band_info:
+        band = jax.lax.dynamic_slice(coeffs, (0, start), (coeffs.shape[0], stop - start))
+        sigma = jnp.median(jnp.abs(band)) / 0.6745
+        sigmas.append(sigma)
+        if do_thresh:
+            n_j = stop - start
+            t_j = kappa * sigma * jnp.sqrt(2.0 * jnp.log(jnp.float32(n_j)))
+            band = jnp.where(jnp.abs(band) >= t_j, band, 0.0)
+        thresholded = jax.lax.dynamic_update_slice(thresholded, band, (0, start))
+
+    recon = thresholded @ W_inv
+    return recon, thresholded, jnp.array(sigmas), jnp.count_nonzero(thresholded), thresholded.size
