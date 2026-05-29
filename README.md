@@ -1,6 +1,6 @@
-# HELIX
+# helix
 
-**Hierarchical Encoding for Learned Inference on eXperimental data**
+**hierarchical encoding for learned inference on experimental data**
 
 Signal processing pipeline for liquid argon TPC wire data: coherent noise removal followed by wavelet sparsification.
 
