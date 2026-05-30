@@ -61,6 +61,7 @@ def test_default_method_is_visushrink():
     from helix.optical import OpticalConfig
     th = OpticalConfig().threshold
     assert th.method == "universal" and th.func == "hard"
+    assert th.scale == 1.2        # 1× noise-RMS operating point (locked default)
 
 
 def test_visushrink_supplied_sigma():

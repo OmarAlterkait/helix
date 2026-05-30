@@ -8,8 +8,11 @@ DWT (coif3, level 10, periodization) + **VisuShrink hard thresholding** — a
 per-chunk noise-relative threshold t = scale·σ·sqrt(2 ln N), with σ estimated
 robustly from the chunk's finest detail (padding-independent). This is the
 principled denoiser-compressor for this data; ``threshold.scale`` (κ) is the
-fidelity/rate knob (κ≈1 = pure denoising; κ≈1.2/1.75/2.5 hit 1×/2×/3× the noise
-floor ≈ 33×/49×/85× compression). Surviving coefficients are quantized to
+fidelity/rate knob. The default κ=1.2 is the **1× noise-RMS operating point**:
+the reconstruction RMS over signal samples equals the noise floor (~2.57 ADC),
+i.e. the denoised residual is statistically indistinguishable from the noise it
+removed (κ≈1.2/1.75/2.5 → ~1×/2×/3× the noise floor ≈ 33×/49×/85× compression;
+κ≈1 is pure denoising at ~25×). Surviving coefficients are quantized to
 ``quant_bits`` for storage.
 """
 from __future__ import annotations
@@ -35,6 +38,6 @@ class OpticalConfig:
     wavelet: str = "coif3"
     dwt_level: int = 10
     dwt_mode: str = "periodization"
-    threshold: ThresholdSpec = field(
-        default_factory=lambda: ThresholdSpec(method="universal", func="hard", scale=1.0))
+    threshold: ThresholdSpec = field(   # κ=1.2 → 1× noise-RMS operating point (~33×)
+        default_factory=lambda: ThresholdSpec(method="universal", func="hard", scale=1.2))
     quant_bits: int = 12        # quantize surviving coefficients for storage (near-lossless ~0.1% peak)
