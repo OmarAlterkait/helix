@@ -10,6 +10,8 @@ band layout ``[cA, cD_L, …, cD_1]`` given by ``band_slices``.
 """
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -37,51 +39,66 @@ def _matrices(wavelet, n_ticks, level, mode):
     return _cache[key]
 
 
+@functools.partial(jax.jit, static_argnames=("slices_tuple", "func"))
+def _universal_core(x, Wf, lf, sigma, slices_tuple, scale, func):
+    """Fused VisuShrink: forward DWT → per-signal threshold → kept-count.
+
+    Whole path compiles to one executable. ``sigma`` is the per-signal noise
+    (caller-supplied, else None → MAD of the finest detail band). Returns
+    (thresholded coeffs, per-band reporting sigma, kept count)."""
+    coeffs = x @ Wf
+    band_sigma = jnp.array([jnp.median(jnp.abs(coeffs[:, a:b])) / 0.6745
+                            for (a, b) in slices_tuple])
+    if sigma is None:
+        fa, fb = slices_tuple[-1]
+        nsig = jnp.median(jnp.abs(coeffs[:, fa:fb]), axis=1) / 0.6745
+    else:
+        nsig = sigma
+    t = (scale * nsig)[:, None] * lf[None, :]
+    a = jnp.abs(coeffs)
+    if func == "soft":
+        thr = jnp.sign(coeffs) * jnp.maximum(a - t, 0.0)
+    elif func == "garrote":
+        thr = jnp.where(a >= t, coeffs - t * t / jnp.where(coeffs == 0, 1.0, coeffs), 0.0)
+    else:
+        thr = jnp.where(a >= t, coeffs, 0.0)
+    return thr, band_sigma, jnp.count_nonzero(thr)
+
+
 def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigma=None) -> SparseResult:
     x = jnp.asarray(image, dtype=jnp.float32)
     n_ticks = x.shape[-1]
     Wf, Wi, slices, lf = _matrices(wavelet, n_ticks, level, mode)
-    coeffs = x @ Wf                                  # (n_sig, n_coeffs)
-
-    band_sigma = jnp.array([jnp.median(jnp.abs(coeffs[:, s])) / 0.6745 for s in slices])  # per-band (reporting)
-    approx = slices[0]
-    detail = slice(approx.stop, coeffs.shape[1])
-    # per-signal noise sigma (VisuShrink): caller-supplied, else MAD of finest band
-    if sigma is not None:
-        nsig = jnp.asarray(sigma, dtype=jnp.float32)
-    else:
-        nsig = jnp.median(jnp.abs(coeffs[:, slices[-1]]), axis=1) / 0.6745   # (n_sig,)
 
     if th.method == "universal":
-        # Single vectorized threshold over all bands at once. ``lf`` carries the
-        # per-band sqrt(2 ln N_band); approx positions have lf=0 → kept untouched.
-        t = (th.scale * nsig)[:, None] * lf[None, :]   # (n_sig, n_coeffs)
-        a = jnp.abs(coeffs)
-        if th.func == "soft":
-            thr = jnp.sign(coeffs) * jnp.maximum(a - t, 0.0)
-        elif th.func == "garrote":
-            thr = jnp.where(a >= t, coeffs - t * t / jnp.where(coeffs == 0, 1.0, coeffs), 0.0)
-        else:
-            thr = jnp.where(a >= t, coeffs, 0.0)
-    else:
-        det = jnp.abs(coeffs[:, detail])             # (n_sig, D)
-        D = det.shape[1]
-        if th.method == "topk":
-            k = max(1, int(th.keep * D))
-            tvec = jax.lax.top_k(det, k)[0][:, -1]
-        else:  # energy
-            srt = jnp.sort(det, axis=1)[:, ::-1]
-            csum = jnp.cumsum(srt ** 2, axis=1)
-            tot = jnp.maximum(csum[:, -1:], 1e-30)
-            kc = jnp.clip((csum < th.energy * tot).sum(axis=1), 0, D - 1)
-            tvec = jnp.take_along_axis(srt, kc[:, None], axis=1)[:, 0]
-        mask = (jnp.abs(coeffs) >= tvec[:, None])
-        mask = mask.at[:, approx].set(True)          # keep approx untouched
-        thr = jnp.where(mask, coeffs, 0.0)
+        slices_tuple = tuple((s.start, s.stop) for s in slices)
+        sig = None if sigma is None else jnp.asarray(sigma, dtype=jnp.float32)
+        thr, band_sigma, nkept = _universal_core(
+            x, Wf, lf, sig, slices_tuple, float(th.scale), th.func)
+        return SparseResult(coeffs=thr, n_kept=int(nkept), n_total=int(thr.size),
+                            sigma_per_band=np.asarray(band_sigma),
+                            wavelet=wavelet, level=level, mode=mode)
 
-    n_kept = int(jnp.count_nonzero(thr))
-    n_total = int(thr.size)
-    return SparseResult(coeffs=thr, n_kept=n_kept, n_total=n_total,
+    # ---- non-universal (topk / energy): eager ----
+    coeffs = x @ Wf                                  # (n_sig, n_coeffs)
+    band_sigma = jnp.array([jnp.median(jnp.abs(coeffs[:, s])) / 0.6745 for s in slices])
+    approx = slices[0]
+    detail = slice(approx.stop, coeffs.shape[1])
+    det = jnp.abs(coeffs[:, detail])                 # (n_sig, D)
+    D = det.shape[1]
+    if th.method == "topk":
+        k = max(1, int(th.keep * D))
+        tvec = jax.lax.top_k(det, k)[0][:, -1]
+    else:  # energy
+        srt = jnp.sort(det, axis=1)[:, ::-1]
+        csum = jnp.cumsum(srt ** 2, axis=1)
+        tot = jnp.maximum(csum[:, -1:], 1e-30)
+        kc = jnp.clip((csum < th.energy * tot).sum(axis=1), 0, D - 1)
+        tvec = jnp.take_along_axis(srt, kc[:, None], axis=1)[:, 0]
+    mask = (jnp.abs(coeffs) >= tvec[:, None])
+    mask = mask.at[:, approx].set(True)              # keep approx untouched
+    thr = jnp.where(mask, coeffs, 0.0)
+    return SparseResult(coeffs=thr, n_kept=int(jnp.count_nonzero(thr)), n_total=int(thr.size),
                         sigma_per_band=np.asarray(band_sigma),
                         wavelet=wavelet, level=level, mode=mode)
 
