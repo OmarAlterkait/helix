@@ -1,6 +1,5 @@
 """Clean Pareto frontier (corrected sigma). Frontier curve + faint cloud +
-a few labeled operating points. Reads depth jsonl (fixed-bit) and, if present,
-final jsonl (entropy-coded)."""
+a few labeled operating points. Reads depth jsonl (fixed-bit event-total rate)."""
 import json, glob
 import numpy as np
 import matplotlib; matplotlib.use("Agg")
@@ -32,7 +31,6 @@ def frontier(A, dk):
 
 
 fix = load("depth", "comp")
-ent = load("final", "comp_entropy")
 nev = len({json.loads(l)["event"] for f in glob.glob(f"{OUT}/depth_gpu*.jsonl") for l in open(f)})
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
@@ -42,10 +40,6 @@ for ax, dk, lab in [(axes[0], "peak", "prompt-peak error  [%]"),
     fr = frontier(fix, dk)
     ax.plot([r["c"] for r in fr], [100 * r[dk] for r in fr], "-o", color="tab:blue", ms=4, lw=2,
             label="VisuShrink + quantization", zorder=3)
-    if ent:
-        fe = frontier(ent, dk)
-        ax.plot([r["c"] for r in fe], [100 * r[dk] for r in fe], "-s", color="tab:red", ms=3, lw=1.5,
-                label="+ entropy coding", zorder=2)
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("compression  (×)"); ax.set_ylabel(lab)
     ax.grid(alpha=0.25, which="both"); ax.legend(fontsize=9, loc="upper left")

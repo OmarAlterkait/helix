@@ -25,7 +25,7 @@ pytest tests/test_optical.py -q   # one file
 python tests/bench_numpy.py       # legacy numpy-ops microbenchmarks
 
 helix-tpc --input sensor.h5 --output out.h5 --backend jax   # TPC CLI (alias: helix); --coh-only, --events 0-19
-python scripts/optical/sweep_multigpu.py 20                 # optical wavelet sweep, sharded across all GPUs
+python scripts/optical/sweep_big.py depth 100              # optical rate-distortion campaign, sharded across all GPUs (stages: depth|complete_wav|complete_lev|complete_meth)
 ```
 
 ## Architecture
