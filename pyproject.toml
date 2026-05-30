@@ -13,15 +13,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = ["jax[cuda12]>=0.4.20"]
-cpu = ["jax[cpu]>=0.4.20"]
+# Backend frameworks are optional: helix.core imports only the selected one
+# lazily. NumPy (base dep) is always available; add jax and/or torch as needed.
+jax-cpu = ["jax[cpu]>=0.4.20"]
+jax-gpu = ["jax[cuda12]>=0.4.20"]
+torch-cpu = ["torch>=2.0"]          # CPU wheels: pip install --index-url https://download.pytorch.org/whl/cpu
+cpu = ["jax[cpu]>=0.4.20", "torch>=2.0"]
+gpu = ["jax[cuda12]>=0.4.20", "torch>=2.0"]
 dev = [
     "pytest>=7.0",
     "pytest-benchmark",
 ]
 
 [project.scripts]
-helix = "helix.run:main"
+helix = "helix.tpc.run:main"
+helix-tpc = "helix.tpc.run:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["temp", ".git", "*.egg-info"]
 
 [build-system]
 requires = ["setuptools>=68"]

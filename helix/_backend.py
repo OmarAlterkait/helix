@@ -1,26 +1,12 @@
-"""Backend detection: JAX (GPU/CPU) vs NumPy fallback."""
+"""Back-compat shim — backend selection moved to helix.core.backend.
 
-from __future__ import annotations
+Legacy code set ``helix._backend._backend = 'jax'``; use
+``helix.core.backend.set_backend('jax')`` instead.
+"""
+from helix.core.backend import get_backend, set_backend, array_namespace
 
-_backend: str | None = None
-
-
-def get_backend() -> str:
-    global _backend
-    if _backend is not None:
-        return _backend
-    try:
-        import jax
-        devices = jax.devices()
-        _backend = "jax"
-    except (ImportError, RuntimeError):
-        _backend = "numpy"
-    return _backend
+__all__ = ["get_backend", "set_backend", "array_module"]
 
 
 def array_module():
-    if get_backend() == "jax":
-        import jax.numpy as jnp
-        return jnp
-    import numpy as np
-    return np
+    return array_namespace()

@@ -1,5 +1,4 @@
-"""Allow `python -m helix`."""
-
-from helix.run import main
+"""Allow `python -m helix` (TPC pipeline)."""
+from helix.tpc.run import main
 
 main()
