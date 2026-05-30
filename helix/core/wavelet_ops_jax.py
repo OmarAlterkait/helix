@@ -24,14 +24,23 @@ def _matrices(wavelet, n_ticks, level, mode):
     key = (wavelet, n_ticks, level, mode)
     if key not in _cache:
         Wf, Wi, slices = build_dwt_matrices(wavelet, n_ticks, level, mode)
-        _cache[key] = (jnp.asarray(Wf), jnp.asarray(Wi), slices)
+        # Per-coefficient universal log-factor sqrt(2 ln N_band): each detail
+        # band gets its own length; the approx band (slices[0]) stays 0 so it
+        # is kept untouched (threshold 0 passes any coeff through for
+        # hard/soft/garrote). Lets the universal threshold run as one
+        # vectorized op instead of a per-band .at[].set() copy loop.
+        n_coeffs = int(Wf.shape[1])
+        lf = np.zeros(n_coeffs, dtype=np.float32)
+        for s in slices[1:]:
+            lf[s] = np.sqrt(2.0 * np.log(max(s.stop - s.start, 2)))
+        _cache[key] = (jnp.asarray(Wf), jnp.asarray(Wi), slices, jnp.asarray(lf))
     return _cache[key]
 
 
 def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigma=None) -> SparseResult:
     x = jnp.asarray(image, dtype=jnp.float32)
     n_ticks = x.shape[-1]
-    Wf, Wi, slices = _matrices(wavelet, n_ticks, level, mode)
+    Wf, Wi, slices, lf = _matrices(wavelet, n_ticks, level, mode)
     coeffs = x @ Wf                                  # (n_sig, n_coeffs)
 
     band_sigma = jnp.array([jnp.median(jnp.abs(coeffs[:, s])) / 0.6745 for s in slices])  # per-band (reporting)
@@ -44,19 +53,16 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
         nsig = jnp.median(jnp.abs(coeffs[:, slices[-1]]), axis=1) / 0.6745   # (n_sig,)
 
     if th.method == "universal":
-        thr = jnp.zeros_like(coeffs)
-        thr = thr.at[:, approx].set(coeffs[:, approx])
-        for s in slices[1:]:
-            band = coeffs[:, s]
-            t = (th.scale * nsig * jnp.sqrt(2.0 * jnp.log(max(s.stop - s.start, 2))))[:, None]
-            a = jnp.abs(band)
-            if th.func == "soft":
-                kept = jnp.sign(band) * jnp.maximum(a - t, 0.0)
-            elif th.func == "garrote":
-                kept = jnp.where(a >= t, band - t * t / jnp.where(a == 0, 1.0, band), 0.0)
-            else:
-                kept = jnp.where(a >= t, band, 0.0)
-            thr = thr.at[:, s].set(kept)
+        # Single vectorized threshold over all bands at once. ``lf`` carries the
+        # per-band sqrt(2 ln N_band); approx positions have lf=0 → kept untouched.
+        t = (th.scale * nsig)[:, None] * lf[None, :]   # (n_sig, n_coeffs)
+        a = jnp.abs(coeffs)
+        if th.func == "soft":
+            thr = jnp.sign(coeffs) * jnp.maximum(a - t, 0.0)
+        elif th.func == "garrote":
+            thr = jnp.where(a >= t, coeffs - t * t / jnp.where(coeffs == 0, 1.0, coeffs), 0.0)
+        else:
+            thr = jnp.where(a >= t, coeffs, 0.0)
     else:
         det = jnp.abs(coeffs[:, detail])             # (n_sig, D)
         D = det.shape[1]
@@ -81,5 +87,5 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
 
 
 def reconstruct(coeffs, wavelet: str, level: int, mode: str, n_time: int):
-    _, Wi, _ = _matrices(wavelet, n_time, level, mode)
+    Wi = _matrices(wavelet, n_time, level, mode)[1]
     return coeffs @ Wi
