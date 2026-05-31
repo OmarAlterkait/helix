@@ -31,7 +31,9 @@ class ThresholdSpec:
     scale: float = 1.0          # universal threshold multiplier (kappa)
     keep: float = 0.01          # topk: fraction of detail coeffs to keep
     energy: float = 0.999       # energy: fraction of detail energy to keep
-    include_approx: bool = True  # leave the approximation band unthresholded
+    include_approx: bool = True  # (legacy/no-op) approx kept unless threshold_approx
+    per_band_sigma: bool = False    # universal: per-band MAD sigma (else single finest/caller sigma)
+    threshold_approx: bool = False  # universal: also threshold the approx band (else keep it)
 
 
 @dataclass

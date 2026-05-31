@@ -54,19 +54,24 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
     band_sigma = np.array([_mad_sigma(c) for c in coeffs], dtype=np.float32)   # per-band (reporting)
     nsig = _noise_sigma(coeffs, sigma)                                          # per-signal (thresholding)
 
-    out = [coeffs[0]]
     if th.method == "universal":
-        for c in coeffs[1:]:
-            t = th.scale * nsig[..., None] * np.sqrt(2.0 * np.log(max(c.shape[-1], 2)))
+        out = []
+        for i, c in enumerate(coeffs):
+            if i == 0 and not th.threshold_approx:        # keep approx untouched (default / optical)
+                out.append(coeffs[0]); continue
+            lf = np.sqrt(2.0 * np.log(max(c.shape[-1], 2)))
+            if th.per_band_sigma:                          # per-band MAD sigma (TPC / original)
+                t = th.scale * band_sigma[i] * lf
+            else:                                          # single per-signal sigma (optical)
+                t = th.scale * nsig[..., None] * lf
             out.append(_apply(c, t, th.func))
-    else:  # topk / energy
+    else:  # topk / energy (approx kept untouched)
+        out = [coeffs[0]]
         tvec = _detail_threshold_per_signal(
             coeffs, th.keep if th.method == "topk" else None,
             th.energy if th.method == "energy" else None)[..., None]
         for c in coeffs[1:]:
             out.append((c * (np.abs(c) >= tvec)).astype(np.float32))
-    if not th.include_approx:
-        out[0] = coeffs[0].copy()
 
     n_kept = sum(int(np.count_nonzero(c)) for c in out)
     n_total = sum(c.size for c in out)

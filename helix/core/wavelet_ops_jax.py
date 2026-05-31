@@ -32,29 +32,39 @@ def _matrices(wavelet, n_ticks, level, mode):
         # hard/soft/garrote). Lets the universal threshold run as one
         # vectorized op instead of a per-band .at[].set() copy loop.
         n_coeffs = int(Wf.shape[1])
-        lf = np.zeros(n_coeffs, dtype=np.float32)
+        lf = np.zeros(n_coeffs, dtype=np.float32)         # approx=0 -> kept untouched
         for s in slices[1:]:
             lf[s] = np.sqrt(2.0 * np.log(max(s.stop - s.start, 2)))
-        _cache[key] = (jnp.asarray(Wf), jnp.asarray(Wi), slices, jnp.asarray(lf))
+        lf_all = lf.copy()                                # also threshold the approx band
+        a0 = slices[0]
+        lf_all[a0] = np.sqrt(2.0 * np.log(max(a0.stop - a0.start, 2)))
+        _cache[key] = (jnp.asarray(Wf), jnp.asarray(Wi), slices,
+                       jnp.asarray(lf), jnp.asarray(lf_all))
     return _cache[key]
 
 
-@functools.partial(jax.jit, static_argnames=("slices_tuple", "func"))
-def _universal_core(x, Wf, lf, sigma, slices_tuple, scale, func):
-    """Fused VisuShrink: forward DWT → per-signal threshold → kept-count.
+@functools.partial(jax.jit, static_argnames=("slices_tuple", "func", "per_band"))
+def _universal_core(x, Wf, lf, sigma, slices_tuple, scale, func, per_band):
+    """Fused VisuShrink: forward DWT → threshold → kept-count.
 
-    Whole path compiles to one executable. ``sigma`` is the per-signal noise
-    (caller-supplied, else None → MAD of the finest detail band). Returns
-    (thresholded coeffs, per-band reporting sigma, kept count)."""
+    ``per_band`` False: one per-signal sigma (caller-supplied, else MAD of finest
+    detail band) for all bands — optical. True: per-band MAD sigma broadcast to
+    each band's coeffs — TPC (colored noise). ``lf`` selects keep-approx vs
+    threshold-approx. Returns (thresholded coeffs, per-band reporting sigma, count)."""
     coeffs = x @ Wf
     band_sigma = jnp.array([jnp.median(jnp.abs(coeffs[:, a:b])) / 0.6745
                             for (a, b) in slices_tuple])
-    if sigma is None:
-        fa, fb = slices_tuple[-1]
-        nsig = jnp.median(jnp.abs(coeffs[:, fa:fb]), axis=1) / 0.6745
+    if per_band:
+        sig_vec = jnp.concatenate([jnp.full(b - a, band_sigma[k])
+                                   for k, (a, b) in enumerate(slices_tuple)])
+        t = scale * sig_vec[None, :] * lf[None, :]
     else:
-        nsig = sigma
-    t = (scale * nsig)[:, None] * lf[None, :]
+        if sigma is None:
+            fa, fb = slices_tuple[-1]
+            nsig = jnp.median(jnp.abs(coeffs[:, fa:fb]), axis=1) / 0.6745
+        else:
+            nsig = sigma
+        t = (scale * nsig)[:, None] * lf[None, :]
     a = jnp.abs(coeffs)
     if func == "soft":
         thr = jnp.sign(coeffs) * jnp.maximum(a - t, 0.0)
@@ -68,13 +78,14 @@ def _universal_core(x, Wf, lf, sigma, slices_tuple, scale, func):
 def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigma=None) -> SparseResult:
     x = jnp.asarray(image, dtype=jnp.float32)
     n_ticks = x.shape[-1]
-    Wf, Wi, slices, lf = _matrices(wavelet, n_ticks, level, mode)
+    Wf, Wi, slices, lf, lf_all = _matrices(wavelet, n_ticks, level, mode)
 
     if th.method == "universal":
         slices_tuple = tuple((s.start, s.stop) for s in slices)
         sig = None if sigma is None else jnp.asarray(sigma, dtype=jnp.float32)
+        lf_use = lf_all if th.threshold_approx else lf
         thr, band_sigma, nkept = _universal_core(
-            x, Wf, lf, sig, slices_tuple, float(th.scale), th.func)
+            x, Wf, lf_use, sig, slices_tuple, float(th.scale), th.func, bool(th.per_band_sigma))
         return SparseResult(coeffs=thr, n_kept=int(nkept), n_total=int(thr.size),
                             sigma_per_band=np.asarray(band_sigma),
                             wavelet=wavelet, level=level, mode=mode)

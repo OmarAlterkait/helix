@@ -50,8 +50,13 @@ class DetectorConfig:
         return (-self.beta, 1.0, -self.beta)
 
     def threshold_spec(self):
-        """Build a helix.core ThresholdSpec from the TPC threshold fields."""
+        """Build a helix.core ThresholdSpec from the TPC threshold fields.
+
+        TPC default = the original pre-optical suppression: per-band MAD sigma
+        (colored intrinsic noise needs each band thresholded at its own level)
+        and threshold the approximation band too. This yields ~60k coeffs/plane,
+        vs ~930k with the optical-style single-sigma keep-approx."""
         from helix.core.wavelet import ThresholdSpec
         return ThresholdSpec(method="universal", func=self.threshold_mode,
-                             scale=self.threshold_kappa,
-                             include_approx=self.threshold_include_approx)
+                             scale=self.threshold_kappa, per_band_sigma=True,
+                             threshold_approx=self.threshold_include_approx)
