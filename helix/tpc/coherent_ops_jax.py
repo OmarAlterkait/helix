@@ -10,9 +10,11 @@ from jax import jit, vmap
 
 @partial(jit, static_argnums=(1,))
 def group_median(image: jnp.ndarray, group_size: int) -> jnp.ndarray:
+    # nanmedian so NaN-padded rows (the partial last group) are ignored -> median
+    # over the real wires only, matching the numpy backend. Full groups have no NaN.
     ng = image.shape[0] // group_size
     nt = image.shape[1]
-    return jnp.median(image.reshape(ng, group_size, nt), axis=1)
+    return jnp.nanmedian(image.reshape(ng, group_size, nt), axis=1)
 
 
 def broadcast_groups(group_arr: jnp.ndarray, n_wires: int, group_size: int) -> jnp.ndarray:
@@ -58,6 +60,17 @@ def pad_to_groups(image: jnp.ndarray, group_size: int) -> jnp.ndarray:
     pad = ng * group_size - nw
     if pad > 0:
         return jnp.concatenate([image, jnp.zeros((pad, nt), dtype=image.dtype)], axis=0)
+    return image
+
+
+def pad_to_groups_nan(image: jnp.ndarray, group_size: int) -> jnp.ndarray:
+    """Pad with NaN (not 0) so a group median over the padded block ignores the
+    padding via nanmedian — used for the partial last group's coherent estimate."""
+    nw, nt = image.shape
+    ng = (nw + group_size - 1) // group_size
+    pad = ng * group_size - nw
+    if pad > 0:
+        return jnp.concatenate([image, jnp.full((pad, nt), jnp.nan, dtype=image.dtype)], axis=0)
     return image
 
 

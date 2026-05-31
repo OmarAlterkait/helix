@@ -71,11 +71,12 @@ def _remove_jax_core(gs, nsigma, dilation, n_passes, have_sigma):
     import jax.numpy as jnp
     from helix.tpc.coherent_ops_jax import (
         group_median, broadcast_groups, signal_mask, temporal_dilate,
-        masked_group_mean, pad_to_groups, pad_mask_to_groups)
+        masked_group_mean, pad_to_groups, pad_to_groups_nan, pad_mask_to_groups)
 
     def core(image_j, sigma_in):
         nw, nt = image_j.shape
-        gm_full = broadcast_groups(group_median(pad_to_groups(image_j, gs), gs), nw, gs)
+        # NaN-pad for the median so the partial last group ignores padding (matches numpy)
+        gm_full = broadcast_groups(group_median(pad_to_groups_nan(image_j, gs), gs), nw, gs)
         residual = image_j - gm_full
         sigma = sigma_in if have_sigma else jnp.median(jnp.abs(residual), axis=1) / 0.6745
 
