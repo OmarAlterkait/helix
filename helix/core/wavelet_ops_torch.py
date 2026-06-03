@@ -4,11 +4,16 @@ DWT/IDWT via FFT-based circular convolution -> exact 'periodization' boundary,
 O(N log N), batched over signals, GPU-resident, and free of the N^2 dense-matrix
 blow-up that rules matmul out for long (~36k-sample) optical chunks.
 
-Recipe calibrated to machine-precision perfect reconstruction (see the project
-notes): analysis convolves with reversed dec filters + downsample [0::2];
-synthesis upsamples into [1::2], convolves with reversed rec filters, sums,
-rolls by -dec_len. It is a self-consistent DWT (PR exact) but NOT coefficient-
-identical to pywt's phase — compare sparsity within this backend.
+**Coefficient-identical to pywt** (== the numpy and jax backends). The
+periodization filter bank is matched to pywt's exact convention:
+  analysis:  cA = roll(circular_conv(x, dec_lo), -dec_len//2)[0::2]   (dec_hi → cD)
+  synthesis: upsample into [0::2], circular-correlate with the dec filters,
+             roll by +dec_len//2, sum lowpass+highpass.
+Verified against ``pywt.wavedec``/``pywt.waverec`` to ~1e-14 (float64) across
+coif/sym/db/haar and lengths up to 36864. Requires the signal length to be a
+multiple of 2^level (even at every level — the optical pipeline pads to this);
+that guarantee, plus pywt's ``dwt_max_level`` cap, keeps every sub-band even and
+>= filter length so the FFT conv reproduces pywt exactly.
 
 Coefficient representation: list ``[cA, cD_L, …, cD_1]`` of (n_signals, len_j)
 torch tensors (same layout as the numpy backend).
@@ -27,9 +32,11 @@ from helix.core.wavelet import SparseResult, ThresholdSpec
 
 @lru_cache(maxsize=32)
 def _filters(name: str, device: str, dtype: torch.dtype):
+    """pywt-exact periodization uses the (non-reversed) decomposition filters for
+    both analysis and synthesis (orthonormal: synthesis == adjoint of analysis)."""
     w = pywt.Wavelet(name)
-    rev = lambda a: torch.tensor(np.asarray(a, np.float64)[::-1].copy(), device=device, dtype=dtype)
-    return rev(w.dec_lo), rev(w.dec_hi), rev(w.rec_lo), rev(w.rec_hi), w.dec_len
+    t = lambda a: torch.tensor(np.asarray(a, np.float64), device=device, dtype=dtype)
+    return t(w.dec_lo), t(w.dec_hi), w.dec_len
 
 
 def _cfft(h, N):
@@ -38,51 +45,48 @@ def _cfft(h, N):
     return _fft.rfft(hp)
 
 
-def _dwt1(x, dlo, dhi):
+def _dwt1(x, dlo, dhi, L):
+    """pywt periodization: cA = roll(circ_conv(x, dec_lo), -L//2)[0::2] (cD ← dec_hi)."""
     N = x.shape[-1]
     Xf = _fft.rfft(x, dim=-1)
-    lo = _fft.irfft(Xf * _cfft(dlo, N), n=N, dim=-1)
-    hi = _fft.irfft(Xf * _cfft(dhi, N), n=N, dim=-1)
+    lo = torch.roll(_fft.irfft(Xf * _cfft(dlo, N), n=N, dim=-1), -(L // 2), dims=-1)
+    hi = torch.roll(_fft.irfft(Xf * _cfft(dhi, N), n=N, dim=-1), -(L // 2), dims=-1)
     return lo[..., 0::2], hi[..., 0::2]
 
 
-def _idwt1(cA, cD, rlo, rhi, L):
+def _idwt1(cA, cD, dlo, dhi, L):
+    """Adjoint of _dwt1: upsample into [0::2], circular-correlate (conj in freq)
+    with the dec filters, roll by +L//2, sum. Exact inverse for orthonormal."""
     M = cA.shape[-1]
     N = 2 * M
     shp = cA.shape[:-1] + (N,)
-    up_a = torch.zeros(shp, device=cA.device, dtype=cA.dtype); up_a[..., 1::2] = cA
-    up_d = torch.zeros(shp, device=cA.device, dtype=cA.dtype); up_d[..., 1::2] = cD
-    rec = _fft.irfft(_fft.rfft(up_a, dim=-1) * _cfft(rlo, N), n=N, dim=-1) \
-        + _fft.irfft(_fft.rfft(up_d, dim=-1) * _cfft(rhi, N), n=N, dim=-1)
-    return torch.roll(rec, -L, dims=-1)
-
-
-def _safe_level(n, filt_len, requested):
-    """Largest level <= requested where every sub-band stays >= filter length
-    (and lengths remain even) so the FFT conv never underflows the filter."""
-    lev, m = 0, n
-    while lev < requested and m >= filt_len and m % 2 == 0:
-        m //= 2
-        lev += 1
-    return max(lev, 1)
+    up_a = torch.zeros(shp, device=cA.device, dtype=cA.dtype); up_a[..., 0::2] = cA
+    up_d = torch.zeros(shp, device=cA.device, dtype=cA.dtype); up_d[..., 0::2] = cD
+    rec = _fft.irfft(_fft.rfft(up_a, dim=-1) * torch.conj(_cfft(dlo, N)), n=N, dim=-1) \
+        + _fft.irfft(_fft.rfft(up_d, dim=-1) * torch.conj(_cfft(dhi, N)), n=N, dim=-1)
+    return torch.roll(rec, L // 2, dims=-1)
 
 
 def _wavedec(x, name, level):
-    dlo, dhi, _, _, dec_len = _filters(name, str(x.device), x.dtype)
-    level = _safe_level(x.shape[-1], dec_len, level)
+    dlo, dhi, dec_len = _filters(name, str(x.device), x.dtype)
+    level = min(level, _max_level(x.shape[-1], name))      # same cap as pywt/numpy
     coeffs, a = [], x
     for _ in range(level):
-        a, d = _dwt1(a, dlo, dhi)
+        if a.shape[-1] % 2:
+            raise ValueError(
+                f"torch periodization DWT needs an even length at every level "
+                f"(got {a.shape[-1]}); pad the signal to a multiple of 2^level.")
+        a, d = _dwt1(a, dlo, dhi, dec_len)
         coeffs.append(d)
     coeffs.append(a)
     return coeffs[::-1]
 
 
 def _waverec(coeffs, name):
-    _, _, rlo, rhi, L = _filters(name, str(coeffs[0].device), coeffs[0].dtype)
+    dlo, dhi, L = _filters(name, str(coeffs[0].device), coeffs[0].dtype)
     a = coeffs[0]
     for d in coeffs[1:]:
-        a = _idwt1(a[..., : d.shape[-1]], d, rlo, rhi, L)
+        a = _idwt1(a[..., : d.shape[-1]], d, dlo, dhi, L)
     return a
 
 

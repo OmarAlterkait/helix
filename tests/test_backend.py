@@ -51,16 +51,40 @@ def test_backend_roundtrip(be):
     assert rel < 0.6   # loose: pulse retained, most noise dropped
 
 
-def test_numpy_torch_agree():
+def test_numpy_torch_coeffs_identical():
+    """torch FFT periodization DWT is now pywt-exact (== numpy/jax), not just
+    a self-consistent PR pair. Coeffs, n_kept and reconstruction all agree to
+    float32 precision."""
     torch = pytest.importorskip("torch")
     x = _signal()
+    spec = ThresholdSpec("universal", "hard", scale=1.2)
     backend.set_backend("numpy")
-    rn = reconstruct(sparsify(x, wavelet="coif3", level=6,
-                              threshold=ThresholdSpec("topk", keep=0.05)), 1024)
+    rn = sparsify(x, wavelet="coif3", level=6, mode="periodization", threshold=spec)
+    recn = np.asarray(reconstruct(rn, 1024))
     backend.set_backend("torch")
-    rt = np.asarray(reconstruct(sparsify(x, wavelet="coif3", level=6,
-                                         threshold=ThresholdSpec("topk", keep=0.05)), 1024))
-    # different DWT phase, but both reconstruct the same pulse to similar fidelity
-    en = np.linalg.norm(np.asarray(rn) - x) / np.linalg.norm(x)
-    et = np.linalg.norm(rt - x) / np.linalg.norm(x)
-    assert abs(en - et) < 0.1
+    rt = sparsify(x, wavelet="coif3", level=6, mode="periodization", threshold=spec)
+    rect = np.asarray(reconstruct(rt, 1024))
+    assert rt.n_kept == rn.n_kept                       # same survivors, not just similar
+    assert len(rt.coeffs) == len(rn.coeffs)
+    for a, b in zip(rn.coeffs, rt.coeffs):
+        a, b = np.asarray(a), np.asarray(b)
+        assert a.shape == b.shape
+        assert np.abs(a - b).max() < 1e-3               # float32 rounding only
+    assert np.abs(recn - rect).max() < 1e-3
+
+
+def test_torch_dwt_matches_pywt_long():
+    """Raw torch _wavedec reproduces pywt.wavedec on an optical-scale signal
+    (length a multiple of 2^level)."""
+    torch = pytest.importorskip("torch")
+    import pywt
+    from helix.core import wavelet_ops_torch as wt
+    n = 1 << 14                                         # 16384 = optical-scale, even at every level
+    level = pywt.dwt_max_level(n, pywt.Wavelet("coif3").dec_len)  # same cap helix applies
+    rng = np.random.default_rng(1)
+    x = rng.standard_normal((4, n)).astype(np.float32)
+    tc = wt._wavedec(torch.as_tensor(x), "coif3", level)
+    pc = pywt.wavedec(x, "coif3", level=level, mode="periodization", axis=-1)
+    assert len(tc) == len(pc)
+    for a, b in zip(tc, pc):
+        assert np.abs(a.numpy() - b).max() < 1e-3

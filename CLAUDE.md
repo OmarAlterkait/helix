@@ -53,7 +53,7 @@ Approximation band kept untouched when `include_approx`. **Validated finding (10
 Backend differences that callers must respect:
 - **numpy** = pywt (`per_wire DWT`, any length, exact). `coeffs` = list `[cA, cD_L, …, cD_1]`.
 - **jax** = matmul DWT via precomputed pywt-exact matrices (`core/dwt_matrix.py`). `coeffs` = flat `(n_sig, n_coeffs)` array. Only for SHORT signals (a 36k² matrix is ~5 GB — never use jax wavelet on optical chunks).
-- **torch** = FFT-based periodic DWT (`wavelet_ops_torch.py`), batched on GPU, scales to long signals, machine-precision perfect reconstruction. `coeffs` = list of torch tensors. It is *self-consistent* (PR exact) but **not coefficient-identical to pywt** (different DWT phase) — compare sparsity within-backend, not across.
+- **torch** = FFT-based periodization DWT (`wavelet_ops_torch.py`), batched on GPU, scales to long signals, machine-precision perfect reconstruction. `coeffs` = list of torch tensors. **Coefficient-identical to pywt** (== numpy/jax) — the filter bank is matched to pywt's exact periodization convention (`cA = roll(circ_conv(x, dec_lo), -dec_len//2)[0::2]`; synthesis = its adjoint), verified to ~1e-14 (float64) vs `pywt.wavedec`/`waverec` up to length 36864. **Requires the signal length to be a multiple of `2^level`** (even at every level — the optical pipeline pads to this; raises a clear error otherwise). Cross-backend comparison of coeffs/`n_kept` is now valid; differences are float32 rounding only.
 
 ### TPC pipeline (`helix.tpc`)
 
