@@ -13,7 +13,13 @@ from typing import Any
 @dataclass(frozen=True)
 class DetectorConfig:
     # ── coherent removal ──
+    # group_size MUST match the producer's coherent grouping (JAXTPC
+    # simulation.coherent_noise.group_size / the ChannelGroupMap used at
+    # injection) — it is the whole forward↔inverse "don't drift" contract.
     group_size: int = 64
+    # beta is the forward adjacent-group anti-correlation coefficient (a mirror
+    # of the injector's value, for provenance/assertion). It is NOT used by the
+    # per-group median removal — see xblock_kernel.
     beta: float = 0.15
     mask_threshold_nsigma: float = 3.0
     temporal_dilation_ticks: int = 11
@@ -39,14 +45,25 @@ class DetectorConfig:
     noise_enc_z: float = 0.22
 
     def wire_sigma_intrinsic(self, wire_lengths: Any) -> Any:
-        """Per-wire intrinsic noise sigma from wire lengths (cm):
-        σ = sqrt(x² + (y + z·L)²)."""
+        """Per-wire intrinsic noise sigma from wire lengths in METERS:
+        σ = sqrt(x² + (y + z·L)²).
+
+        Units match the forward model: noise_enc_z is ADC/m (MicroBooNE,
+        arXiv:1705.07341; the source spectrum is calibrated at L=2.330 m), so
+        ``wire_lengths`` must be in meters, not centimeters."""
         import numpy as np
         L = np.asarray(wire_lengths, dtype=np.float32)
         return np.sqrt(self.noise_enc_x**2 + (self.noise_enc_y + self.noise_enc_z * L)**2)
 
     @property
     def xblock_kernel(self) -> tuple[float, float, float]:
+        """Forward adjacent-group coupling operator (-β, 1, -β).
+
+        This is the *forward* coupling the injector applies to group waveforms,
+        NOT its inverse. The per-group median in ``remove_coherent`` subtracts
+        the shared waveform directly and is agnostic to how it was constructed,
+        so this kernel is deliberately unused by removal — kept as a documented
+        mirror of the forward model for provenance / model-based estimators."""
         return (-self.beta, 1.0, -self.beta)
 
     def threshold_spec(self):
