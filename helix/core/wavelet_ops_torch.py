@@ -129,12 +129,19 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
     else:
         nsig = coeffs[-1].abs().median(dim=-1).values / 0.6745
 
-    out = [coeffs[0]]
     if th.method == "universal":
-        for c in coeffs[1:]:
-            t = th.scale * nsig[..., None] * float(np.sqrt(2.0 * np.log(max(c.shape[-1], 2))))
+        out = []
+        for i, c in enumerate(coeffs):
+            if i == 0 and not th.threshold_approx:        # keep approx untouched (default / optical)
+                out.append(coeffs[0]); continue
+            lf = float(np.sqrt(2.0 * np.log(max(c.shape[-1], 2))))
+            if th.per_band_sigma:                          # per-band MAD sigma (TPC / original)
+                t = th.scale * band_sigma[i] * lf
+            else:                                          # single per-signal sigma (optical)
+                t = th.scale * nsig[..., None] * lf
             out.append(_apply(c, t, th.func, torch))
     else:
+        out = [coeffs[0]]
         tvec = _detail_threshold_per_signal(
             coeffs, th.keep if th.method == "topk" else None,
             th.energy if th.method == "energy" else None)[:, None]

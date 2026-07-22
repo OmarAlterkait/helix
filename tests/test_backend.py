@@ -88,3 +88,29 @@ def test_torch_dwt_matches_pywt_long():
     assert len(tc) == len(pc)
     for a, b in zip(tc, pc):
         assert np.abs(a.numpy() - b).max() < 1e-3
+
+
+def test_torch_tpc_threshold_spec_matches_numpy():
+    """The TPC production threshold options (per_band_sigma + threshold_approx,
+    what DetectorConfig.threshold_spec() sets) are honored on torch, matching
+    the numpy reference — previously torch silently ran the optical method
+    (per-signal sigma, approx band always kept), inflating kept coeffs on
+    colored TPC noise."""
+    torch = pytest.importorskip("torch")
+    x = _signal()
+    spec = ThresholdSpec("universal", "hard", scale=1.0,
+                         per_band_sigma=True, threshold_approx=True)
+    backend.set_backend("numpy")
+    rn = sparsify(x, wavelet="coif3", level=4, mode="periodization", threshold=spec)
+    backend.set_backend("torch")
+    rt = sparsify(x, wavelet="coif3", level=4, mode="periodization", threshold=spec)
+    assert rt.n_kept == rn.n_kept
+    for a, b in zip(rn.coeffs, rt.coeffs):
+        assert np.abs(np.asarray(a) - np.asarray(b)).max() < 1e-3
+    # The approx band must actually be thresholded (zeros appear) under
+    # threshold_approx=True; and per-band sigma must differ from the
+    # optical method's output on the same input.
+    assert int(np.count_nonzero(np.asarray(rt.coeffs[0]))) < rt.coeffs[0].numel()
+    optical = ThresholdSpec("universal", "hard", scale=1.0)
+    ro = sparsify(x, wavelet="coif3", level=4, mode="periodization", threshold=optical)
+    assert ro.n_kept != rt.n_kept
