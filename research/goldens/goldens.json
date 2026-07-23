@@ -31,7 +31,7 @@
  },
  "suite": {
   "exit": 0,
-  "summary": "28 passed, 1 warning"
+  "summary": "35 passed, 1 warning"
  },
  "tpc": {
   "ev2": {

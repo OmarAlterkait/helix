@@ -1,0 +1,168 @@
+"""Tests for helix.tpc.io against BOTH sensor schemas.
+
+Current schema (doraemon productions): /config group + tables,
+event_NNN/volume_V/<P> with delta-encoded COO + uint16 digitized values.
+Legacy flat schema: event_N/<plane>/{wire,time,values} raw COO.
+
+Fixtures are written uncompressed (the reader is agnostic to HDF5 filters;
+production files additionally need hdf5plugin, imported best-effort by io).
+"""
+import numpy as np
+import h5py
+import pytest
+
+from helix.tpc.io import (config_from_file, count_events, read_sensor_event,
+                          read_sensor_plane)
+
+N_TICKS = 64
+PLANES = ("U", "V", "Y")
+N_WIRES = {"U": 40, "V": 40, "Y": 30}
+PEDESTAL = {"U": 1843, "V": 1843, "Y": 410}
+
+
+def _synth_plane(rng, n_wires):
+    """Sparse synthetic plane: (wire, time, adc>0) with sorted-unique COO."""
+    n = 25
+    flat = rng.choice(n_wires * N_TICKS, size=n, replace=False)
+    flat.sort()
+    wire, time = np.divmod(flat, N_TICKS)
+    values = rng.integers(3, 300, size=n)
+    return wire.astype(np.int64), time.astype(np.int64), values.astype(np.int64)
+
+
+def _write_current(path, n_events=2, n_volumes=2, seed=0):
+    """Write the current volume-nested delta-encoded schema."""
+    rng = np.random.default_rng(seed)
+    truth = {}
+    with h5py.File(path, "w") as f:
+        cfg = f.create_group("config")
+        cfg.attrs["num_time_steps"] = N_TICKS
+        cfg.attrs["n_volumes"] = n_volumes
+        cfg.attrs["readout_type"] = "wire"
+        cfg["num_wires"] = np.array([[N_WIRES[p] for p in PLANES]] * n_volumes,
+                                    np.int32)
+        cfg["pedestals"] = np.array([[PEDESTAL[p] for p in PLANES]] * n_volumes,
+                                    np.int32)
+        for e in range(n_events):
+            evt = f.create_group(f"event_{e:03d}")
+            for v in range(n_volumes):
+                vol = evt.create_group(f"volume_{v}")
+                for p in PLANES:
+                    wire, time, values = _synth_plane(rng, N_WIRES[p])
+                    g = vol.create_group(p)
+                    # delta-encode exactly as the producer does
+                    g["delta_wire"] = np.diff(wire, prepend=wire[0]).astype(np.int16)
+                    g["delta_time"] = np.concatenate(
+                        [[0], np.diff(time)]).astype(np.int16)
+                    g["values"] = (values + PEDESTAL[p]).astype(np.uint16)
+                    g.attrs["wire_start"] = int(wire[0])
+                    g.attrs["time_start"] = int(time[0])
+                    g.attrs["pedestal"] = PEDESTAL[p]
+                    g.attrs["n_pixels"] = len(wire)
+                    dense = np.zeros((N_WIRES[p], N_TICKS), np.float32)
+                    dense[wire, time] = values          # pedestal-subtracted truth
+                    truth[(e, f"volume_{v}_{p}")] = dense
+    return truth
+
+
+def _write_legacy(path, n_events=2, seed=1):
+    rng = np.random.default_rng(seed)
+    truth = {}
+    with h5py.File(path, "w") as f:
+        for e in range(n_events):
+            evt = f.create_group(f"event_{e}")           # legacy: unpadded keys
+            evt.attrs["num_time_steps"] = N_TICKS
+            for p in PLANES:
+                wire, time, values = _synth_plane(rng, N_WIRES[p])
+                g = evt.create_group(p)
+                g["wire"] = wire.astype(np.int32)
+                g["time"] = time.astype(np.int32)
+                g["values"] = (values + PEDESTAL[p]).astype(np.float32)
+                g.attrs["n_wires"] = N_WIRES[p]
+                g.attrs["pedestal"] = PEDESTAL[p]
+                dense = np.zeros((N_WIRES[p], N_TICKS), np.float32)
+                dense[wire, time] = values
+                truth[(e, p)] = dense
+    return truth
+
+
+# ── current schema ──────────────────────────────────────────────────────────
+
+def test_current_config_from_file(tmp_path):
+    path = tmp_path / "cur.h5"
+    _write_current(path)
+    cfg = config_from_file(path)
+    assert cfg.num_time_steps == N_TICKS
+    assert cfg.plane_labels == tuple(
+        f"volume_{v}_{p}" for v in range(2) for p in PLANES)
+    assert cfg.pedestals == PEDESTAL
+
+
+def test_current_roundtrip_event(tmp_path):
+    path = tmp_path / "cur.h5"
+    truth = _write_current(path)
+    cfg = config_from_file(path)
+    for e in range(2):
+        planes = read_sensor_event(path, e, cfg)
+        assert set(planes) == set(cfg.plane_labels)
+        for label, img in planes.items():
+            ref = truth[(e, label)]
+            assert img.shape == ref.shape          # n_wires from /config/num_wires
+            np.testing.assert_array_equal(img, ref)
+
+
+def test_current_plane_n_wires_from_config(tmp_path):
+    """n_wires must come from /config, not max(wire)+1 (fixed grid contract)."""
+    path = tmp_path / "cur.h5"
+    _write_current(path)
+    img = read_sensor_plane(path, 0, "volume_0_Y")
+    assert img.shape == (N_WIRES["Y"], N_TICKS)
+
+
+def test_pixel_file_rejected(tmp_path):
+    path = tmp_path / "pix.h5"
+    with h5py.File(path, "w") as f:
+        f.create_group("config").attrs["readout_type"] = "pixel"
+        f.create_group("event_000")
+    with pytest.raises(ValueError, match="pixel"):
+        config_from_file(path)
+
+
+# ── legacy flat schema ──────────────────────────────────────────────────────
+
+def test_legacy_roundtrip(tmp_path):
+    path = tmp_path / "leg.h5"
+    truth = _write_legacy(path)
+    cfg = config_from_file(path)
+    assert cfg.num_time_steps == N_TICKS
+    assert set(cfg.plane_labels) == set(PLANES)
+    planes = read_sensor_event(path, 0, cfg)
+    for label, img in planes.items():
+        np.testing.assert_array_equal(img, truth[(0, label)])
+
+
+def test_count_events(tmp_path):
+    path = tmp_path / "cur.h5"
+    _write_current(path, n_events=3)
+    assert count_events(path) == 3
+
+
+# ── real production shard (site-gated) ──────────────────────────────────────
+
+REAL = ("/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor/"
+        "run_0027575715/sim_wire_sensor_0000.h5")
+
+
+@pytest.mark.skipif(not __import__("os").path.exists(REAL),
+                    reason="production shard not reachable")
+def test_real_shard_reads():
+    cfg = config_from_file(REAL)
+    assert cfg.num_time_steps == 4321
+    assert "volume_0_U" in cfg.plane_labels
+    img = read_sensor_plane(REAL, 0, "volume_0_U")
+    assert img.shape == (1969, 4321)               # /config/num_wires, not max+1
+    assert img.dtype == np.float32
+    assert (img != 0).sum() > 1000                 # sparse but populated
+    # digitized-with-2-ADC-threshold data: nonzero magnitudes start at >=2-ish
+    nz = img[img != 0]
+    assert np.abs(nz).min() >= 1.0
