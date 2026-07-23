@@ -88,3 +88,49 @@ white   Y  r2_k4      0.9570±0.0009    0.509   57679    0.998        0.83
   the faithful-injector test fixtures per the blast-radius report.
 
 Raw rows: `results.jsonl` (this dir). Harness: `qual.py`.
+
+---
+
+## RERUN (n=129, density-stratified, GPU) — 2026-07-23, supersedes the kgate call above
+
+The n=12 pass above was flagged by the completeness audit: the U@k3.5 "tie" was a
+regime average of an arbitrary ev0-11 sample, SEs were seed-clustered, and the
+RNG was non-reproducible. `qual3.py` re-runs with: density-STRATIFIED events
+(scan 200, sample evenly across U-activity 775..967,838 nonzero px + the densest
+20% = the parallel-track failure mode), **n=129 independent events** (1 seed
+each), reproducible seeds, both noise models. GPU-optimized (~50x): noise via
+`dense_ops` torch, R1 via helix jax backend (bit-matches numpy, 9.5e-7), threshold
+batched on GPU. Faithfulness: GPU noise is the statistical-parity port (same
+model, different RNG than the numpy pass) — a Monte-Carlo over 129 realizations,
+not bit-comparable to the n=12 numbers; the paired design is preserved.
+
+Win-rate vs R1 (frac. events R2 beats multipass on removal F0), all / dense (24):
+
+```
+             k3          k3.5        k4          kept/oracle (k3/k3.5/k4)
+U colored   0.73/0.54   0.39/0.04   0.19/0.00   1.13 / 1.02 / 0.98
+U white     0.74/0.46   0.50/0.08   0.28/0.00   1.09 / 1.02 / 1.00
+V colored   0.87/0.67   0.81/0.54   0.68/0.42   1.17 / 1.04 / 1.00
+V white     0.95/0.83   0.88/0.62   0.78/0.50   1.12 / 1.03 / 1.00
+Y colored   0.99/1.00   0.95/0.83   0.90/0.67   1.11 / 1.03 / 1.01
+Y white     1.00/1.00   0.99/0.96   0.97/0.88   1.07 / 1.02 / 1.00
+```
+
+**VERDICT: default kgate = 3.0**, not 3.5 (and not the FM-adopted 4.0). k3 is the
+ONLY value where R2 >= R1 on every plane, both noise models, AND the dense-track
+failure mode. Properly stratified, k3.5 *loses* to R1 on U (0.39/0.50 overall,
+0.04/0.08 dense) — the reverse of the n=12 hint; k4 loses badly on dense U (0.00).
+On the hardest dense-U events k3 F0 (0.8922) ties R1 (0.8923) while k3.5/k4 fall
+behind. Cost: k3 keeps +11-17% coeffs over the oracle ceiling (k3.5 ~= oracle,
+k4 ~= oracle) — a fidelity-first tradeoff, correct for a representation front-end.
+
+Also settled: **gate_soft is decisively worse** on every plane (n=6/n=8 smoke,
+qual2.py: U 0.839, V 0.869, Y 0.936) — catalog gap closed negatively.
+**de2_clamp does not beat R1 on U** (informational arm, qual2.py) — confirms the
+record's §6n disposition (opt-in only). Neither changes the default.
+
+Document as: removal default = gate (R2); kgate=3.0 (fidelity/win-rate optimal,
+qualified n=129 stratified); k3.5 = oracle-compression option; k4 = current FM
+corpus value (changing it is a corpus-rebuild decision — never mix k in a corpus).
+
+Rerun rows: `results3.jsonl`. Harness: `qual3.py` (decisive), `qual2.py` (+de2/soft).
