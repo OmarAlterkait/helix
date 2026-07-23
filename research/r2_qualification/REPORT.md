@@ -134,3 +134,37 @@ qualified n=129 stratified); k3.5 = oracle-compression option; k4 = current FM
 corpus value (changing it is a corpus-rebuild decision — never mix k in a corpus).
 
 Rerun rows: `results3.jsonl`. Harness: `qual3.py` (decisive), `qual2.py` (+de2/soft).
+
+---
+
+## MULTIPASS (2026-07-23, multipass.py) — corrects "single-pass" and the record's "no-op"
+
+Question: R1 iterates 3x; the smart gate is single-pass. Does multipass help it?
+The record (§8) said iterating smart is "bit-identical" — but that was F0-only.
+Multipass smart (R1-analog in coeff space: detect signal on the CLEANED bands ->
+accumulate signal mask -> re-estimate block common-mode from ORIGINAL bands
+excluding signal wires -> re-gate). 40 stratified events, k=3:
+
+  mean |signal_lost(1p)-signal_lost(2p)| = 0.00067   (F0: TRUE no-op, as recorded)
+
+But on the axes the record didn't check, 2-pass is strictly better:
+```
+pl arm       sig_lost%  coh_left  stripe   coeffs   (oracle)
+U  smart_1p    11.801    0.690    0.415    69216    1.11x
+U  smart_2p    11.793    0.643    0.324    62281    1.00x   (62110)
+V  smart_1p    11.233    0.558    0.420    58689    1.16x
+V  smart_2p    11.191    0.495    0.330    51777    1.02x   (50721)
+Y  smart_1p     4.474    0.604    0.428    54753    1.11x
+Y  smart_2p     4.454    0.544    0.333    50473    1.02x   (49549)
+```
+- coeffs drop ~10% to ~oracle; stripe ~-22%; coh_left ~-7%; F0 & ontrack unchanged.
+- 3p == 2p (converged). Mechanism: purer coherent estimate (signal excluded via
+  cleaned-band detection; coherent is rank-1 so few clean wires suffice) removes
+  more coherent -> fewer noise coeffs survive threshold -> oracle compression,
+  at NO signal cost (the gate already protects large=signal common-modes).
+
+VERDICT UPDATE: default = smart gate, kgate=3, **2 passes**. This resolves the
+1-pass k3-vs-k3.5 tradeoff — 2-pass k3 gives k3's signal preservation AND
+oracle-level compression simultaneously. The packaged gate should take npass
+(default 2). The record's "multipass no-op" holds only for F0; on the
+compression that feeds the model it is a real, free gain.
