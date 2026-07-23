@@ -28,3 +28,8 @@ research/**/*.png
 !report/figures/
 !report/figures/**
 *.done
+
+# Live-append run logs (churned by in-flight training; commit a final snapshot
+# when the run ends — see FREEZE_LIST.md). Static result jsonls stay tracked.
+research/coeff_foundation_model/fm/fm_curve.jsonl
+research/coeff_foundation_model/fm/probe_wsd.jsonl
