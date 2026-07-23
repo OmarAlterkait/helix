@@ -168,3 +168,32 @@ VERDICT UPDATE: default = smart gate, kgate=3, **2 passes**. This resolves the
 oracle-level compression simultaneously. The packaged gate should take npass
 (default 2). The record's "multipass no-op" holds only for F0; on the
 compression that feeds the model it is a real, free gain.
+
+---
+
+## (k1,k2) 2-pass GRID (2026-07-23, grid.py) — 5x5, 100 stratified events
+
+Different kgate for pass 1 vs pass 2. Full 5x5 in {2.5,3,3.5,4,4.5}. Confirms the
+two passes DECOUPLE: pass-1 k1 protects signal (its cleaned bands seed the
+signal detection); pass-2 k2 does coherent cleanup + compression on the purified
+(signal-excluded) estimate. So signal_lost tracks mainly k1 (low k1 = best),
+coeffs/oracle & stripe track mainly k2 (higher k2 = more removed, tighter
+compression). Best operating points at coeffs<=1.02:
+  U: (k1=2.5, k2=3.0)  V: (k1=2.5, k2=3.5)  Y: (k1=2.5, k2=3.5)
+
+Key cells (sig_lost% / coeffs-oracle / stripe, avg over U,V,Y):
+```
+  k1=3.0 k2=3.0 (2-pass k3)   8.890 / 1.017 / 0.335
+  k1=2.5 k2=3.0 (fidelity)    8.804 / 1.021 / 0.361
+  k1=2.5 k2=3.5               8.988 / 0.998 / 0.222
+  k1=3.0 k2=3.5 (oracle-comp) 9.063 / 0.995 / 0.187
+```
+- Asymmetric (k2>k1) beats the diagonal: **(k1=2.5, k2=3.5)** gives ~diagonal-k3
+  fidelity (8.99% vs 8.89%) at TRUE oracle compression (0.998 vs 1.017) and much
+  better coherent removal (stripe 0.222 vs 0.335). **(k1=2.5, k2=3.0)** is the
+  pure-fidelity corner (8.80%) at ~1.02 coeffs.
+- Recommended default: **k1=2.5, k2=3.5, 2 passes** — fidelity ≈ single/2-pass
+  k3, compression at oracle, coherent removal best of the fidelity-preserving
+  cells. (Or k1=2.5,k2=3.0 if a hair more fidelity is worth ~2% more coeffs.)
+  Grid is flat around k1∈{2.5,3}, k2∈{3,3.5} — all beat single-pass and R1.
+Heatmaps: grid_heatmap.png (3 planes x 3 metrics). Rows grid.jsonl.
