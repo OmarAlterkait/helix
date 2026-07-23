@@ -59,6 +59,19 @@ def gate_torch(noisy_t, kgate):
     return _waverec(gated, WAVELET)[..., :nt]
 
 
+def resid_cm(cleaned, signal):
+    """Off-signal residual coherent common-mode RMS: per (64-wire group, tick)
+    mean over wires, at ticks with NO signal in that group. Direct measure of
+    leftover block-stripes (0 = fully removed). Full groups only (summary stat)."""
+    W, T = cleaned.shape
+    nf = W // GS
+    if nf == 0:
+        return float("nan")
+    c = cleaned[:nf * GS].reshape(nf, GS, T).mean(dim=1)          # (nf, T) common-mode
+    off = ~(signal[:nf * GS].reshape(nf, GS, T).abs() > 0).any(dim=1)
+    return float((c[off] ** 2).mean().sqrt()) if bool(off.any()) else float("nan")
+
+
 def metrics_img(cleaned, signal, coherent, noisy):
     sig = signal.abs() > 0
     tc = signal.abs()[sig].sum().clamp_min(1e-9)
@@ -66,7 +79,8 @@ def metrics_img(cleaned, signal, coherent, noisy):
         signal_lost=float((cleaned - signal).abs()[sig].sum() / tc),
         noise_kept=float(((cleaned - signal)[~sig] ** 2).mean().sqrt()),
         ontrack_rms=float(((cleaned - signal)[sig] ** 2).mean().sqrt()),
-        coh_left=float(((noisy - cleaned - coherent) ** 2).mean().sqrt()))
+        coh_left=float(((noisy - cleaned - coherent) ** 2).mean().sqrt()),
+        resid_stripe=resid_cm(cleaned, signal))
 
 
 def threshold_metrics(cleaned_stack, signal):
@@ -166,14 +180,15 @@ def main():
     for nm in nmodels:
         print(f"\n===== {nm} noise =====")
         print(f"{'pl':2s} {'arm':6s} {'sig_lost%':>9s} {'sig_lost_w%':>11s} {'coeffs':>7s} "
-              f"{'c/oracle':>8s} {'noise_kept':>10s} {'coh_left':>8s} {'ontrk_rms':>9s}")
+              f"{'c/oracle':>8s} {'noise_kept':>10s} {'coh_left':>8s} {'ontrk_rms':>9s} {'stripe':>7s}")
         for pl in ("U", "V", "Y"):
             orc = agg(nm, pl, "oracle", "n_kept")
             for arm in ARMS:
                 print(f"{pl:2s} {arm:6s} {agg(nm,pl,arm,'signal_lost')*100:9.3f} "
                       f"{agg(nm,pl,arm,'signal_lost_w')*100:11.3f} {agg(nm,pl,arm,'n_kept'):7.0f} "
                       f"{agg(nm,pl,arm,'n_kept')/orc:8.3f} {agg(nm,pl,arm,'noise_kept'):10.3f} "
-                      f"{agg(nm,pl,arm,'coh_left'):8.3f} {agg(nm,pl,arm,'ontrack_rms'):9.3f}")
+                      f"{agg(nm,pl,arm,'coh_left'):8.3f} {agg(nm,pl,arm,'ontrack_rms'):9.3f} "
+                      f"{agg(nm,pl,arm,'resid_stripe'):7.3f}")
             print()
 
     # ── plot: metrics vs k, per plane (colored) ──
@@ -189,17 +204,19 @@ def main():
             ck = [agg(nm, pl, f"k{g:g}", "n_kept") / agg(nm, pl, "oracle", "n_kept") for g in KGRID]
             nk = [agg(nm, pl, f"k{g:g}", "noise_kept") for g in KGRID]
             cl = [agg(nm, pl, f"k{g:g}", "coh_left") for g in KGRID]
+            st = [agg(nm, pl, f"k{g:g}", "resid_stripe") for g in KGRID]
             r1sl = agg(nm, pl, "r1", "signal_lost") * 100
             ax[0, 0].plot(KGRID, sl, "o-", color=cols[pl], label=pl)
             ax[0, 0].axhline(r1sl, color=cols[pl], ls=":", lw=1)
             ax[0, 1].plot(KGRID, ck, "o-", color=cols[pl], label=pl)
             ax[1, 0].plot(KGRID, nk, "o-", color=cols[pl], label=pl)
             ax[1, 1].plot(KGRID, cl, "o-", color=cols[pl], label=pl)
+            ax[1, 1].plot(KGRID, st, "s--", color=cols[pl], alpha=0.6)
         ax[0, 0].set(title="signal lost % (1-F0)  [dotted = R1]", xlabel="kgate", ylabel="%")
         ax[0, 1].set(title="coeffs / oracle (compression headroom)", xlabel="kgate")
         ax[0, 1].axhline(1.0, color="k", ls="--", lw=0.8)
         ax[1, 0].set(title="noise kept (off-track RMS, ADC)", xlabel="kgate")
-        ax[1, 1].set(title="coh_left (residual coherent RMS, ADC)", xlabel="kgate")
+        ax[1, 1].set(title="coh_left (o-) & residual stripe (s--), ADC", xlabel="kgate")
         for a in ax.flat:
             a.legend(); a.grid(alpha=0.3); a.axvline(3.0, color="red", ls="--", lw=1, alpha=0.5)
         fig.suptitle(f"Smart-gate kgate sweep ({nm} noise, {len(events)} events) — red = k=3 default",
