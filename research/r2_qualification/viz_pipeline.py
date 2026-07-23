@@ -93,10 +93,14 @@ def panel(ev, label, cfg, reg, kgate=3.0):
     cleaned = smart_clean(noisy_t, kgate)
     after_w = wavelet_sparsify(cleaned)                       # cleaned -> wavelet sparsify -> recon
 
-    # signal-rich crop (same convention as fig10)
+    # signal-rich crop, SNAPPED to a 64-wire group boundary so the drawn group
+    # lines coincide with the true coherent-group boundaries (else the block
+    # stripes appear shifted from the lines — a display artifact, not a
+    # removal bug: the removal always groups from wire 0 on the full image).
     e = np.abs(clean).sum(1)
     wc = int(np.argmax(np.convolve(e, np.ones(5 * GS), "same")))
-    w0 = max(0, wc - 2 * GS); w1 = min(nw, w0 + 5 * GS); ws = slice(w0, w1)
+    w0 = max(0, (wc // GS - 2) * GS); w1 = min(nw, w0 + 5 * GS); ws = slice(w0, w1)
+    assert w0 % GS == 0
     tc = int(np.argmax(np.abs(clean[ws]).sum(0)))
     t0 = max(0, tc - 350); t1 = min(nt, t0 + 700); ts = slice(t0, t1)
     nblk = (w1 - w0) // GS + 1
