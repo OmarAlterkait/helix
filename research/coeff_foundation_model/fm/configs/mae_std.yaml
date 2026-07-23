@@ -1,0 +1,45 @@
+script: train.py
+hours: 13
+# STANDARDIZED MAE baseline (field-consensus recipe, 2026-07). Supersedes sc_obj_mse_num.
+# Changes from the old MAE recipe, all toward the boring proven default:
+#   - head_dim=64 (heads derived = d//64 -> 8 at d512) : standard ViT shape, flash-optimal,
+#     muP-clean across width (fixed head_dim). Was heads=4 (head_dim grows 128->192 with width).
+#   - weight_decay 1e-4 -> 0.05 (+ no-decay group on 1-D params, muP-decoupled) : old value
+#     regularized ~1000x weaker than every SSL reference (MAE 0.05, DINOv2/I-JEPA 0.04-0.4).
+#   - AdamW betas (0.9, 0.95) : modern long-run default (hardcoded in train.py).
+# KEPT (already field-standard): 12xd512 pre-LN ViT, MLP 4x, axial RoPE, FiLM, muP d_base=128,
+#   CrossMAE decoder (dec_mode=cross), mask 0.75 random, ~1.3% linear warmup, cosine-to-10%.
+# Numeric event sort + arch-metadata-in-ckpt are code-level (train.py), automatic.
+cache_dir: ../artifacts/fm_cache_tpc
+events: 21000
+val_n: 1000
+steps: 150000
+
+# --- architecture (ViT-B-class, plain pre-LN) ---
+d: 512
+blocks: 12
+dec_blocks: 4
+dec_mode: cross
+head_dim: 64          # -> heads = 512//64 = 8. Fix this; grows head count with width (768->12, 1024->16).
+ffn_mult: 4
+cond: film
+mup: 1
+d_base: 128
+
+# --- objective ---
+mask: 0.75
+mask_mode: random
+n_planes: 1
+
+# --- optimizer / schedule (field-standard SSL) ---
+lr: 4.0e-4            # MAE-class peak; muP transfers it across width. Coord-check before scaling d.
+wd: 0.05             # was 1e-4; no-decay group + muP-decoupling handled in train.py/model.py
+warmup: 2000         # ~1.3% of 150k, linear
+# betas (0.9,0.95) + cosine-to-10% are set in train.py
+
+# --- eval / io ---
+eval_every: 6000
+eval_n: 60
+workers: 8
+ckpt: ckpt_mae_std.pt
+tag: mae_std

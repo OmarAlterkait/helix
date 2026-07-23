@@ -1,0 +1,32 @@
+script: mae_ddp.py
+hours: 12
+gpus: 2
+cache_dir: ../artifacts/fm_cache_tpc
+events: 21000
+val_n: 1000
+steps: 150000
+d: 512
+blocks: 12
+dec_blocks: 4
+dec_mode: cross
+head_dim: 64
+ffn_mult: 4
+cond: film
+mup: 1
+d_base: 128
+nll: 1
+wire_rope: 1          # KEEP wire RoPE: ablation showed wire_rope=0 freezes recon (var_expl ~2%). Within-plane wire addressing is essential; cross-plane inconsistency deferred to two-tier attn.
+mask: 0.75
+mask_mode: random
+n_planes: 1
+seed: 0
+lr: 1.6e-3
+wd: 0.05
+compile: 1
+warmup: 2000
+eval_every: 6000
+eval_n: 60
+snap_every: 30000
+workers: 16           # 24 CPUs/GPU available -> overlap ~215ms/ev assembly with GPU step
+ckpt: ckpt_pf0_lr16.pt
+tag: pf0_lr16

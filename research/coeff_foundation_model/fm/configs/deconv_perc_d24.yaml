@@ -1,0 +1,19 @@
+# helix FM — direct-supervised Perceiver deconvolution, depth 24
+# Depth sweep {12,24,36,48} at fixed B=2/M=2048 to map depth-vs-task to convergence.
+script: deconv_perc_batch.py     # SLURM driver reads this to pick the entry point
+hours: 12                      # wall-clock ceiling; job ENDS when training completes (well before this)
+events: 20000
+steps: 50000                     # ~9-10h on one A100; B=2 -> 100k event-passes (5 epochs of 20k)
+batch: 2                         # B=2 no-ckpt = fast+safe (~28-33 GB depending on depth)
+no_ckpt: true
+depth: 24
+M: 2048
+d: 512
+heads: 8
+lr: 4.0e-4
+warmup: 2000
+flow_steps: 4
+samples: 16
+eval_every: 4000
+workers: 8
+ckpt: ckpt_pb_d24.pt

@@ -1,0 +1,38 @@
+script: mae_ddp.py
+hours: 13
+gpus: 2                       # DDP event-sharded (global batch = 2 events/step)
+cache_dir: ../artifacts/fm_cache_tpc
+events: 21000
+val_n: 1000
+steps: 150000
+
+# --- architecture (standardized ViT-B-class) ---
+d: 512
+blocks: 12
+dec_blocks: 4
+dec_mode: cross
+head_dim: 64                  # heads = 512//64 = 8 (fixed head_dim; muP-clean, flash-optimal)
+ffn_mult: 4
+cond: film
+mup: 1
+d_base: 128
+
+# --- objective ---
+nll: 0               # mse: plain MSE recon
+mask: 0.75
+mask_mode: random
+n_planes: 1
+seed: 0
+
+# --- optimizer / schedule (field-standard) ---
+lr: 4.0e-4
+wd: 0.05                      # + no-decay group + muP-decoupled + betas(0.9,0.95) in code
+warmup: 2000
+
+# --- eval / probe checkpoints ---
+eval_every: 6000
+eval_n: 60
+snap_every: 25000             # KEPT step-tagged snapshots for probe trajectory
+workers: 8
+ckpt: ckpt_mae_mse_s0.pt
+tag: mae_mse_s0

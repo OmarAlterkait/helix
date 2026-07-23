@@ -1,0 +1,13 @@
+script: mae_perc_batch.py
+hours: 1
+events: 3000
+steps: 2500
+batch: 4
+no_ckpt: true
+head: value
+mask_ratio: 0.75
+depth: 24
+M: 2048
+eval_every: 500
+workers: 4
+ckpt: ckpt_mae_smoke_value.pt

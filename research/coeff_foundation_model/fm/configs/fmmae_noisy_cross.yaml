@@ -1,0 +1,21 @@
+# CrossMAE decoder (--dec_mode cross): ~1.9x faster step. Compare quality to fmmae_noisy (self) = 64.1%.
+script: train.py
+hours: 13
+cache_dir: ../artifacts/fm_cache_tpc
+events: 20000
+steps: 300000   # extended (2x baseline) to confirm no LATE drop vs self-decoder (64.1% @150k)
+d: 512
+blocks: 12
+dec_blocks: 4
+dec_mode: cross
+mask: 0.75
+mask_mode: random
+n_planes: 1
+lr: 4.0e-4
+warmup: 2000
+eval_every: 6000
+eval_n: 60
+workers: 8
+noisy_target: true
+ckpt: ckpt_fmmae_noisy_cross.pt
+tag: fmmae_noisy_cross

@@ -1,0 +1,12 @@
+{"obj": "mse", "step": 25000, "heads": 8, "rankme": 164.9, "eff_dims": 512, "var_expl": 0.5714, "mse": 4.629, "val_nll": null, "per_band": {"b0": 3.702, "b1": 6.019, "b2": 5.529, "b3": 3.266}}
+{"obj": "mse", "step": 50000, "heads": 8, "rankme": 162.9, "eff_dims": 512, "var_expl": 0.6225, "mse": 4.078, "val_nll": null, "per_band": {"b0": 3.206, "b1": 5.317, "b2": 4.927, "b3": 2.862}}
+{"obj": "mse", "step": 75000, "heads": 8, "rankme": 134.9, "eff_dims": 498, "var_expl": 0.6472, "mse": 3.813, "val_nll": null, "per_band": {"b0": 2.978, "b1": 4.977, "b2": 4.63, "b3": 2.666}}
+{"obj": "mse", "step": 100000, "heads": 8, "rankme": 125.2, "eff_dims": 467, "var_expl": 0.6656, "mse": 3.616, "val_nll": null, "per_band": {"b0": 2.81, "b1": 4.726, "b2": 4.41, "b3": 2.518}}
+{"obj": "mse", "step": 125000, "heads": 8, "rankme": 120.2, "eff_dims": 467, "var_expl": 0.6787, "mse": 3.473, "val_nll": null, "per_band": {"b0": 2.684, "b1": 4.544, "b2": 4.246, "b3": 2.419}}
+{"obj": "mse", "step": 150000, "heads": 8, "rankme": 101.6, "eff_dims": 410, "var_expl": 0.6855, "mse": 3.401, "val_nll": null, "per_band": {"b0": 2.62, "b1": 4.457, "b2": 4.162, "b3": 2.364}}
+{"obj": "nll", "step": 25000, "heads": 8, "rankme": 158.6, "eff_dims": 512, "var_expl": 0.297, "mse": 7.67, "val_nll": 2.056, "per_band": {"b0": 6.281, "b1": 10.282, "b2": 8.991, "b3": 5.125}}
+{"obj": "nll", "step": 50000, "heads": 8, "rankme": 150.9, "eff_dims": 512, "var_expl": 0.4673, "mse": 5.775, "val_nll": 1.81, "per_band": {"b0": 4.57, "b1": 7.734, "b2": 6.797, "b3": 3.999}}
+{"obj": "nll", "step": 75000, "heads": 8, "rankme": 131.4, "eff_dims": 512, "var_expl": 0.5239, "mse": 5.156, "val_nll": 1.66, "per_band": {"b0": 4.01, "b1": 6.898, "b2": 6.135, "b3": 3.582}}
+{"obj": "nll", "step": 100000, "heads": 8, "rankme": 128.2, "eff_dims": 512, "var_expl": 0.554, "mse": 4.831, "val_nll": 1.556, "per_band": {"b0": 3.71, "b1": 6.478, "b2": 5.787, "b3": 3.348}}
+{"obj": "nll", "step": 125000, "heads": 8, "rankme": 108.4, "eff_dims": 512, "var_expl": 0.5713, "mse": 4.643, "val_nll": 1.504, "per_band": {"b0": 3.539, "b1": 6.232, "b2": 5.588, "b3": 3.214}}
+{"obj": "nll", "step": 150000, "heads": 8, "rankme": 96.5, "eff_dims": 512, "var_expl": 0.5788, "mse": 4.56, "val_nll": 1.481, "per_band": {"b0": 3.459, "b1": 6.121, "b2": 5.501, "b3": 3.159}}

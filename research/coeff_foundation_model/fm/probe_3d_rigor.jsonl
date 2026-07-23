@@ -1,0 +1,16 @@
+{"arm": "trained", "seed": 0, "layer": 12, "val_ep": 0.161, "eval_pooled": 0.419, "eval_per_event": 0.267}
+{"arm": "trained", "seed": 1, "layer": 12, "val_ep": 0.193, "eval_pooled": 0.43, "eval_per_event": 0.281}
+{"arm": "trained", "seed": 2, "layer": 12, "val_ep": 0.146, "eval_pooled": 0.36, "eval_per_event": 0.193}
+{"arm": "trained", "seed": 3, "layer": 12, "val_ep": 0.168, "eval_pooled": 0.391, "eval_per_event": 0.233}
+{"arm": "trained", "seed": 4, "layer": 12, "val_ep": 0.142, "eval_pooled": 0.388, "eval_per_event": 0.229}
+{"arm": "trained", "seed": 5, "layer": 12, "val_ep": 0.217, "eval_pooled": 0.446, "eval_per_event": 0.302}
+{"arm": "trained", "seed": 6, "layer": 12, "val_ep": 0.079, "eval_pooled": 0.377, "eval_per_event": 0.214}
+{"arm": "trained", "seed": 7, "layer": 12, "val_ep": 0.16, "eval_pooled": 0.391, "eval_per_event": 0.233}
+{"arm": "random", "seed": 0, "layer": 12, "val_ep": -0.449, "eval_pooled": -0.062, "eval_per_event": -0.339}
+{"arm": "random", "seed": 1, "layer": 12, "val_ep": -0.435, "eval_pooled": -0.071, "eval_per_event": -0.351}
+{"arm": "random", "seed": 2, "layer": 12, "val_ep": -0.43, "eval_pooled": -0.055, "eval_per_event": -0.33}
+{"arm": "random", "seed": 3, "layer": 12, "val_ep": -0.448, "eval_pooled": -0.061, "eval_per_event": -0.338}
+{"arm": "random", "seed": 4, "layer": 12, "val_ep": -0.443, "eval_pooled": -0.071, "eval_per_event": -0.351}
+{"arm": "random", "seed": 5, "layer": 12, "val_ep": -0.423, "eval_pooled": -0.07, "eval_per_event": -0.35}
+{"arm": "random", "seed": 6, "layer": 12, "val_ep": -0.452, "eval_pooled": -0.054, "eval_per_event": -0.329}
+{"arm": "random", "seed": 7, "layer": 12, "val_ep": -0.473, "eval_pooled": -0.095, "eval_per_event": -0.381}

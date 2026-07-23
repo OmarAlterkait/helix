@@ -7,3 +7,24 @@ build/
 figures/
 *.npz
 temp/
+
+# ── research/report tracking (2026-07-23): track the text/code record, not artifacts ──
+.pylibs/
+.claude/
+research/**/artifacts/
+research/coeff_foundation_model/fm/slurm_logs/
+research/coeff_foundation_model/fm/broken_wr0_backup/
+research/coeff_foundation_model/fm/undertuned_lr4e4_backup/
+*.pt
+*.pth
+*.npy
+*.h5
+*.zip
+*.out
+*.err
+*.log
+research/**/*.png
+# report figures ARE the record (small, referenced by the tex):
+!report/figures/
+!report/figures/**
+*.done

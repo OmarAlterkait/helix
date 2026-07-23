@@ -1,0 +1,2 @@
+{"tag": "base_fix", "probe": "select", "n": 320000, "cap": 4000, "solo": 0.0736, "solo_sd": 0.0064, "sel": 0.1077, "sel_sd": 0.0021, "selwire": 0.6244, "selwire_sd": 0.0003}
+{"tag": "nll_long", "probe": "select", "n": 320000, "cap": 4000, "solo": 0.1039, "solo_sd": 0.0056, "sel": 0.1335, "sel_sd": 0.0041, "selwire": 0.6244, "selwire_sd": 0.0003}

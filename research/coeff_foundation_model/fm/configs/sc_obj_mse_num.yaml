@@ -1,0 +1,26 @@
+script: train.py
+hours: 13
+# NUMERIC-MATCHED MAE-MSE comparator: identical to sc_obj_mse but re-run on the fixed
+# (numeric-sorted) train.py, so it trains on the SAME 21k events + same val split as the
+# JEPA arms (the old ckpt used the lexicographic-scrambled subset). This is the clean
+# MSE-reconstruction baseline for the MSE-vs-latent-prediction decision. Optimizer kept at
+# MAE's proven non-muP lr=4e-4 (muP is width-transfer only; irrelevant at fixed d512).
+cache_dir: ../artifacts/fm_cache_tpc
+events: 21000
+val_n: 1000
+steps: 150000
+d: 512
+blocks: 12
+dec_blocks: 4
+dec_mode: cross
+mask: 0.75
+mask_mode: random
+n_planes: 1
+lr: 4.0e-4
+wd: 1.0e-4
+warmup: 2000
+eval_every: 6000
+eval_n: 60
+workers: 8
+ckpt: ckpt_sc_obj_mse_num.pt
+tag: sc_obj_mse_num

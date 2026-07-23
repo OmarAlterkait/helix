@@ -1,0 +1,15 @@
+script: train_jepa.py
+cache_dir: ../artifacts/fm_cache_tpc
+events: 3000
+val_n: 200
+steps: 30
+d: 512
+heads: 4
+blocks: 12
+dec_blocks: 4
+mask: 0.75
+lr: 1.0e-3
+mup: 1
+eval_every: 20
+tag: jepa_smoke
+ckpt: ckpt_jepa_smoke.pt

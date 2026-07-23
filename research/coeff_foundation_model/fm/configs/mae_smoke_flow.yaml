@@ -1,0 +1,15 @@
+script: mae_perc_batch.py
+hours: 1
+events: 800
+steps: 120
+batch: 4
+no_ckpt: true
+head: flow
+mask_ratio: 0.75
+depth: 24
+M: 2048
+eval_every: 60
+flow_steps: 4
+samples: 8
+workers: 3
+ckpt: ckpt_mae_smoke_flow.pt

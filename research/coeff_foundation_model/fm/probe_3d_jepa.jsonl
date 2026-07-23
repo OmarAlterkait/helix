@@ -1,0 +1,16 @@
+{"tag": "jepa_plain@120k", "arm": "trained", "seed": 0, "layer": 12, "val_ep": -0.612, "eval_pooled": -0.18, "eval_per_event": -0.488}
+{"tag": "jepa_plain@120k", "arm": "trained", "seed": 1, "layer": 12, "val_ep": -0.573, "eval_pooled": -0.118, "eval_per_event": -0.409}
+{"tag": "jepa_plain@120k", "arm": "trained", "seed": 2, "layer": 12, "val_ep": -0.526, "eval_pooled": -0.164, "eval_per_event": -0.467}
+{"tag": "jepa_plain@120k", "arm": "trained", "seed": 3, "layer": 12, "val_ep": -0.58, "eval_pooled": -0.175, "eval_per_event": -0.481}
+{"tag": "jepa_plain@120k", "arm": "random", "seed": 0, "layer": 12, "val_ep": -0.473, "eval_pooled": -0.073, "eval_per_event": -0.353}
+{"tag": "jepa_plain@120k", "arm": "random", "seed": 1, "layer": 12, "val_ep": -0.481, "eval_pooled": -0.07, "eval_per_event": -0.349}
+{"tag": "jepa_plain@120k", "arm": "random", "seed": 2, "layer": 12, "val_ep": -0.455, "eval_pooled": -0.059, "eval_per_event": -0.335}
+{"tag": "jepa_plain@120k", "arm": "random", "seed": 3, "layer": 12, "val_ep": -0.423, "eval_pooled": -0.031, "eval_per_event": -0.3}
+{"tag": "jepa_sig@60k", "arm": "trained", "seed": 0, "layer": 12, "val_ep": -0.643, "eval_pooled": -0.201, "eval_per_event": -0.514}
+{"tag": "jepa_sig@60k", "arm": "trained", "seed": 1, "layer": 12, "val_ep": -0.628, "eval_pooled": -0.181, "eval_per_event": -0.489}
+{"tag": "jepa_sig@60k", "arm": "trained", "seed": 2, "layer": 12, "val_ep": -0.698, "eval_pooled": -0.241, "eval_per_event": -0.565}
+{"tag": "jepa_sig@60k", "arm": "trained", "seed": 3, "layer": 12, "val_ep": -0.637, "eval_pooled": -0.255, "eval_per_event": -0.583}
+{"tag": "jepa_sig@60k", "arm": "trained", "seed": 0, "layer": 12, "val_ep": -0.643, "eval_pooled": -0.201, "eval_per_event": -0.514}
+{"tag": "jepa_sig@60k", "arm": "trained", "seed": 1, "layer": 12, "val_ep": -0.628, "eval_pooled": -0.181, "eval_per_event": -0.489}
+{"tag": "jepa_sig@60k", "arm": "trained", "seed": 2, "layer": 12, "val_ep": -0.698, "eval_pooled": -0.241, "eval_per_event": -0.565}
+{"tag": "jepa_sig@60k", "arm": "trained", "seed": 3, "layer": 12, "val_ep": -0.637, "eval_pooled": -0.255, "eval_per_event": -0.583}

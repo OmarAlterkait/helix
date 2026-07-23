@@ -1,0 +1,2 @@
+{"tag": "base_fix", "layer": 12, "probe": "triangulate", "n": 480000, "cap": 6000, "solo": 0.0722, "solo_sd": 0.0037, "cross": 0.1342, "cross_sd": 0.006, "xwire": 0.6979, "xwire_sd": 0.0016}
+{"tag": "nll_long", "layer": 12, "probe": "triangulate", "n": 480000, "cap": 6000, "solo": 0.1158, "solo_sd": 0.0095, "cross": 0.1663, "cross_sd": 0.0081, "xwire": 0.6979, "xwire_sd": 0.0016}

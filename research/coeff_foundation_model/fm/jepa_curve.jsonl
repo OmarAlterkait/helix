@@ -1,0 +1,52 @@
+{"tag": "jepa_smoke", "step": 20, "val_loss": 0.042803882202133534}
+{"tag": "sc_jepa_d512", "step": 6000, "val_loss": 0.06312139732763171, "feat_std": 4.451051712036133, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 12000, "val_loss": 0.05859352853149176, "feat_std": 4.530581474304199, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 18000, "val_loss": 0.052599783334881065, "feat_std": 4.16632604598999, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 24000, "val_loss": 0.05046829571947455, "feat_std": 3.71515154838562, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 30000, "val_loss": 0.05007107937708497, "feat_std": 3.67226505279541, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 36000, "val_loss": 0.04731545839458704, "feat_std": 3.459531784057617, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 42000, "val_loss": 0.04365518456324935, "feat_std": 3.3534016609191895, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 48000, "val_loss": 0.03809351855888963, "feat_std": 3.3987269401550293, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 54000, "val_loss": 0.03525273185223341, "feat_std": 3.230288505554199, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 60000, "val_loss": 0.03231118530966341, "feat_std": 3.0033702850341797, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 66000, "val_loss": 0.030384832061827183, "feat_std": 2.9699172973632812, "eff_dims": 512.0}
+{"tag": "jepa_sig_smoke", "step": 30, "val_loss": 0.03934510475955903, "feat_std": 1.2307208776474, "rankme": 74.14330291748047, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 72000, "val_loss": 0.029168702475726605, "feat_std": 2.956369400024414, "rankme": 369.87994384765625, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 6000, "val_loss": 0.08029432510957121, "feat_std": 3.4229259490966797, "rankme": 260.9754943847656, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 6000, "val_loss": 0.07404387295246125, "feat_std": 4.185503005981445, "rankme": 238.26329040527344, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 78000, "val_loss": 0.02749631819315255, "feat_std": 2.8523664474487305, "rankme": 367.28021240234375, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 84000, "val_loss": 0.026056604366749524, "feat_std": 2.7361011505126953, "rankme": 367.0155334472656, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 12000, "val_loss": 0.06350313853472471, "feat_std": 2.6500444412231445, "rankme": 364.5163879394531, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 12000, "val_loss": 0.05404239119961858, "feat_std": 3.8018665313720703, "rankme": 320.36871337890625, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 90000, "val_loss": 0.02541808825917542, "feat_std": 2.6883983612060547, "rankme": 364.1961975097656, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 6000, "val_loss": 0.06000612555071712, "feat_std": 4.342935562133789, "rankme": 209.84231567382812, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 96000, "val_loss": 0.024760795896872877, "feat_std": 2.6507179737091064, "rankme": 361.47711181640625, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 12000, "val_loss": 0.05347648430615663, "feat_std": 4.510765075683594, "rankme": 301.80401611328125, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 18000, "val_loss": 0.04916447019204497, "feat_std": 3.2711446285247803, "rankme": 389.3204345703125, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 18000, "val_loss": 0.05723042525351048, "feat_std": 2.0992040634155273, "rankme": 406.03729248046875, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 102000, "val_loss": 0.024875521101057528, "feat_std": 2.631359338760376, "rankme": 358.6951904296875, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 18000, "val_loss": 0.0542064419016242, "feat_std": 4.13532018661499, "rankme": 360.219482421875, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 24000, "val_loss": 0.05197296179831028, "feat_std": 1.7496600151062012, "rankme": 391.293212890625, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 24000, "val_loss": 0.04902316415682435, "feat_std": 2.534646987915039, "rankme": 428.8483581542969, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 24000, "val_loss": 0.05191801618784666, "feat_std": 3.868684768676758, "rankme": 392.7359313964844, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 30000, "val_loss": 0.04279571454972029, "feat_std": 2.2048158645629883, "rankme": 430.0907897949219, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 30000, "val_loss": 0.044404085539281365, "feat_std": 1.6926244497299194, "rankme": 379.66094970703125, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 108000, "val_loss": 0.024001019820570946, "feat_std": 2.6013355255126953, "rankme": 358.28338623046875, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 30000, "val_loss": 0.04944572048261762, "feat_std": 3.706852436065674, "rankme": 402.6971130371094, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 36000, "val_loss": 0.034985260711982845, "feat_std": 2.0382027626037598, "rankme": 421.4902038574219, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 36000, "val_loss": 0.04040684932842851, "feat_std": 1.71242356300354, "rankme": 373.4466857910156, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 36000, "val_loss": 0.04700933182612062, "feat_std": 3.5315163135528564, "rankme": 407.1136474609375, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 114000, "val_loss": 0.023868168611079453, "feat_std": 2.5588011741638184, "rankme": 358.78448486328125, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 42000, "val_loss": 0.03728691725991666, "feat_std": 1.7643744945526123, "rankme": 373.93280029296875, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 42000, "val_loss": 0.031846106890589, "feat_std": 1.9605985879898071, "rankme": 414.8355407714844, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 42000, "val_loss": 0.04279587399214506, "feat_std": 3.431094169616699, "rankme": 399.0909118652344, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 48000, "val_loss": 0.03409349932335317, "feat_std": 1.8115379810333252, "rankme": 375.273193359375, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 48000, "val_loss": 0.029827301437035204, "feat_std": 1.9153351783752441, "rankme": 409.67559814453125, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 48000, "val_loss": 0.03885218361392617, "feat_std": 3.2365496158599854, "rankme": 391.9974670410156, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 54000, "val_loss": 0.031260171951726076, "feat_std": 1.8472225666046143, "rankme": 375.8767395019531, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 54000, "val_loss": 0.02819599467329681, "feat_std": 1.8887077569961548, "rankme": 408.625, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 54000, "val_loss": 0.03455760963261127, "feat_std": 3.0840883255004883, "rankme": 385.2768859863281, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512", "step": 120000, "val_loss": 0.023587999679148198, "feat_std": 2.534613609313965, "rankme": 358.1933898925781, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512_s1", "step": 60000, "val_loss": 0.029476823192089795, "feat_std": 1.8849990367889404, "rankme": 375.3057556152344, "eff_dims": 512.0}
+{"tag": "sc_jepa_sig_d512", "step": 60000, "val_loss": 0.02653925996273756, "feat_std": 1.8451416492462158, "rankme": 408.6466064453125, "eff_dims": 512.0}
+{"tag": "sc_jepa_d512_s1", "step": 60000, "val_loss": 0.03199022985063493, "feat_std": 2.9818272590637207, "rankme": 378.3990478515625, "eff_dims": 512.0}

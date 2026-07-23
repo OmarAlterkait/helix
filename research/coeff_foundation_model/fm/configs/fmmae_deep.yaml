@@ -1,0 +1,19 @@
+# CONTROL: prior full-attention FMModel MAE (clean-target, same data+metric as Perceiver) — deep
+script: train.py
+hours: 13
+cache_dir: ../artifacts/fm_cache_tpc
+events: 20000
+steps: 150000
+d: 512
+blocks: 24
+dec_blocks: 8
+mask: 0.75
+mask_mode: random
+n_planes: 1
+lr: 4.0e-4
+warmup: 2000
+eval_every: 6000
+eval_n: 60
+workers: 8
+ckpt: ckpt_fmmae_deep.pt
+tag: fmmae_deep

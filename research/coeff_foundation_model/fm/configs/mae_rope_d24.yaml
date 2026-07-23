@@ -1,0 +1,22 @@
+# TEST 2: parallel-decode + axial RoPE in cout2 (RELATIVE position). Clean-target d24.
+# Compare: parallel(no rope) 25.5%/D2=14 @24k; sequential baseline 29%/D2=17 @24k; FMModel D2=63.
+script: mae_perc_batch.py
+hours: 13
+events: 20000
+steps: 80000
+batch: 4
+no_ckpt: true
+parallel_decode: true
+rope_cout2: true
+head: value
+mask_ratio: 0.75
+depth: 24
+M: 2048
+d: 512
+heads: 8
+lr: 4.0e-4
+warmup: 2000
+eval_every: 4000
+ckpt_every: 1000
+workers: 8
+ckpt: ckpt_mae_rope_d24.pt

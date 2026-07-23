@@ -1,0 +1,20 @@
+script: train.py
+hours: 13
+cache_dir: ../artifacts/fm_cache_tpc
+events: 20000
+steps: 120000
+d: 512
+blocks: 12
+dec_blocks: 4
+dec_mode: cross
+mask: 0.55
+mask_mode: random
+n_planes: 1
+lr: 4.0e-4
+warmup: 2000
+eval_every: 6000
+eval_n: 60
+workers: 8
+
+ckpt: ckpt_test_mask055.pt
+tag: test_mask055

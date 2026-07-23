@@ -1,0 +1,21 @@
+# TEST: parallel-decode (clean-address) fix vs the sequential baseline. Clean-target d24.
+# Baseline (sequential) clean d24 was: ov=33.7%, A4=51 D4=31 D3=31 D2=21. FMModel clean D2=63%.
+script: mae_perc_batch.py
+hours: 13
+events: 20000
+steps: 80000
+batch: 4
+no_ckpt: true
+parallel_decode: true
+head: value
+mask_ratio: 0.75
+depth: 24
+M: 2048
+d: 512
+heads: 8
+lr: 4.0e-4
+warmup: 2000
+eval_every: 4000
+ckpt_every: 1000
+workers: 8
+ckpt: ckpt_mae_fixdec_d24.pt
