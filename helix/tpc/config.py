@@ -25,6 +25,15 @@ class DetectorConfig:
     temporal_dilation_ticks: int = 11
     n_passes: int = 3
 
+    # ── coherent removal selector (the qualified default = coeff-space smart gate) ──
+    #   'gate'      : R2 smart gate, coefficient-space (wavedec → gate → threshold)
+    #   'multipass' : R1 classic image-space remove_coherent (the legacy path)
+    #   'none'      : no coherent removal
+    removal: str = "gate"
+    gate_kgate: float = 3.0
+    gate_ksig: float = 3.0
+    gate_npass: int = 2
+
     # ── wavelet sparsification (shared helix.core) ──
     wavelet: str = "coif3"
     dwt_level: int = 4

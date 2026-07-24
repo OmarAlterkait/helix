@@ -83,3 +83,18 @@ def reconstruct(result: SparseResult, n_time: int) -> Any:
     """Inverse DWT from a :class:`SparseResult` (active backend)."""
     return _backend.ops(_OPS).reconstruct(
         result.coeffs, result.wavelet, result.level, result.mode, n_time)
+
+
+def wavedec(image: Any, *, wavelet: str = "coif3", level: int = 4,
+            mode: str = "periodization"):
+    """Forward DWT → ``([cA, cD_L, …, cD_1], effective_level)`` (active backend).
+
+    The transform half of the pipeline, exposed so a coefficient-space step (the
+    coherent gate) can run between the DWT and thresholding. Numpy backend.
+    """
+    return _backend.ops(_OPS).wavedec(image, wavelet, level, mode)
+
+
+def threshold_bands(coeffs, threshold: ThresholdSpec | None = None, sigma: Any = None):
+    """Threshold a band list → ``(out_bands, n_kept, n_total, band_sigma)`` (active backend)."""
+    return _backend.ops(_OPS).threshold_bands(coeffs, threshold or ThresholdSpec(), sigma)

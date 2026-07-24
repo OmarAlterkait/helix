@@ -47,10 +47,24 @@ def _detail_threshold_per_signal(coeffs, frac, energy):
     return np.take_along_axis(srt, kc[..., None], axis=-1)[..., 0]
 
 
-def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigma=None) -> SparseResult:
+def wavedec(image, wavelet: str, level: int, mode: str):
+    """Forward DWT of an image ``(n_signals, n_ticks)`` → ``([cA, cD_L, …, cD_1], lev)``.
+
+    ``lev`` is the effective level (clamped to the max the signal length allows) —
+    return it so callers can record it and reconstruct consistently.
+    """
     img = np.asarray(image, dtype=np.float32)
     lev = min(level, pywt.dwt_max_level(img.shape[-1], pywt.Wavelet(wavelet).dec_len))
-    coeffs = pywt.wavedec(img, wavelet, level=lev, mode=mode, axis=-1)
+    return pywt.wavedec(img, wavelet, level=lev, mode=mode, axis=-1), lev
+
+
+def threshold_bands(coeffs, th: ThresholdSpec, sigma=None):
+    """Threshold a band list → ``(out_bands, n_kept, n_total, band_sigma)``.
+
+    The seam between transform and sparsification: the coherent gate runs on the
+    raw ``coeffs`` before this call, so ``band_sigma`` (per-band MAD) is measured
+    on the *gated* coefficients — the threshold σ is computed AFTER removal.
+    """
     band_sigma = np.array([_mad_sigma(c) for c in coeffs], dtype=np.float32)   # per-band (reporting)
     nsig = _noise_sigma(coeffs, sigma)                                          # per-signal (thresholding)
 
@@ -75,6 +89,12 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
 
     n_kept = sum(int(np.count_nonzero(c)) for c in out)
     n_total = sum(c.size for c in out)
+    return out, n_kept, n_total, band_sigma
+
+
+def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigma=None) -> SparseResult:
+    coeffs, lev = wavedec(image, wavelet, level, mode)
+    out, n_kept, n_total, band_sigma = threshold_bands(coeffs, th, sigma)
     return SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
                         sigma_per_band=band_sigma, wavelet=wavelet, level=lev, mode=mode)
 
