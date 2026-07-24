@@ -93,12 +93,23 @@ edit + merge-at-boundary).
 | coeff-row cache as a first-class dataset (`CoeffTPCDataset`, `CoeffShardWriter`) | pimm-data (the earlier two-piece design) — the FM *loader*, distinct from the helix DSP consolidation. Raw values + versioned σ sidecar + stable identity. |
 | geometry (`load_plane_registry`) | STAY pimm-data — helix reads it via path insert; `helix.tpc.io` now also reads `/config/num_wires` itself. |
 
-### G. `pimm` (particle-imaging-models) — model & tokenizer
+### G. helix FM layers (tokenizer + model + training + eval) — IN HELIX, not pimm
 
-| item | disposition |
+(Correction 2026-07-24: helix is the full FM library, not DSP-only.)
+| item | → home |
 |---|---|
-| the FM MAE model + tokenizer (`fm_mae/`, `tokenize.py`) | pimm/models — patch layout, asinh norm, tree ops are training hyperparameters, not DSP. |
-| trainer integration (`BatchTransformLoader`, `FMTrainer`) | pimm/engines — the migrate-training-into-pimm track. |
+| tokenizer (`vit_tpc.assemble`, `rows_to_struct`, patch/asinh/tree) | **helix/tokenize/** |
+| FM MAE model (`SerialFMModel` + variants) | **helix/model/** |
+| training loop (`fm/train`, `mae_ddp`, muP, schedule, DDP) | **helix/train/** |
+| probes + eval harness + deconv head | **helix/eval/** |
+See `RESEARCH_EXTRACTION_MAP.md` §2b for the full helix package shape.
+
+### H. `pimm` (particle-imaging-models) — the SIBLING point-cloud framework
+
+pimm is NOT where the FM lives. It keeps its own model zoo (PT-v3, sonata,
+polarmae, voltmae) and trainers — the point-cloud + baseline/comparison side —
+and it consumes pimm-data too. The FM (helix) and pimm are siblings over one
+data layer. Nothing from the FM program moves into pimm.
 
 ---
 
