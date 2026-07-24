@@ -145,6 +145,15 @@ def basis_descriptor(**kw) -> dict ;  def descriptor_digest(d) -> str
 
 ## 3. CoeffSet & on-disk schema (the superset that makes the 3 modes interchangeable)
 
+> **SUPERSEDED (2026-07-24) by `COEFF_CORPUS_DESIGN.md`** — the authoritative spec.
+> Key changes vs the sketch below: `CoeffSet` → **`CoeffEvent`** (event-scoped, in
+> **`helix/core`**, not tpc); on-disk is **flat columnar** (shard-wide `/coord` +
+> `/value` + `event_offset`, `plane_gid` a column), **not** per-event groups;
+> **one modality per file** — noisy `coeff` + clean `coeff_clean` (now), `coeff_charge`
+> deferred — joined by identity, never mixed; raw values + `/config` `norm_sigma`
+> table; corpus under `/sdf/data/neutrino/omara/coeff_tpc/<run>/`. The paragraphs
+> below are retained only as the original superset rationale.
+
 `CoeffSet` must carry everything BOTH existing formats need (`write_processed`
 band-COO ∪ FM rows `band/gid/wire/idx/val`) so mode-1 output == mode-3 read:
 
