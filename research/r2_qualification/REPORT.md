@@ -197,3 +197,21 @@ Key cells (sig_lost% / coeffs-oracle / stripe, avg over U,V,Y):
   cells. (Or k1=2.5,k2=3.0 if a hair more fidelity is worth ~2% more coeffs.)
   Grid is flat around k1∈{2.5,3}, k2∈{3,3.5} — all beat single-pass and R1.
 Heatmaps: grid_heatmap.png (3 planes x 3 metrics). Rows grid.jsonl.
+
+---
+
+## DECISION (2026-07-24): default = smart gate, 2 passes, kgate = 3.0 (both passes)
+
+Chosen operating point: **k1 = k2 = 3.0, npass = 2.** A single kgate for both
+passes — simpler to configure/reason about than the marginally-better asymmetric
+(2.5, 3.5), and on the flat plateau. Grid numbers (avg U/V/Y): signal_lost 8.89%,
+coeffs/oracle 1.017, stripe 0.335 — beats single-pass k3 (coeffs 1.12) and R1
+on every axis. This is the qualified spec for the packaged front-end:
+
+    removal = 'gate' (default) | 'multipass' (classic R1) | None
+    DetectorConfig: gate_kgate = 3.0, gate_ksig = 3.0, gate_npass = 2, group_size = 64
+    (asymmetric per-pass kgate remains available for tuning; default is scalar 3.0)
+
+Package with A-parity statistics (quantile(0.5) for sigc). k=4 remains the value
+the existing FM cache was built at — any default change is a corpus-rebuild
+decision (never mix k within a corpus).
