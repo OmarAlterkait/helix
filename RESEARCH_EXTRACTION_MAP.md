@@ -6,35 +6,34 @@ model + training + eval with hardcoded paths and duplicated logic — into clean
 homes, so every concern has ONE source of truth and `research/` shrinks to
 experiment definitions + the record.
 
-## 0. The layering (corrected 2026-07-24)
+## 0. The layering (corrected 2026-07-24, rev 2)
 
-**helix is the COMPLETE foundation-model library** — wavelet DSP + coefficient
-representation AND the tokenizer, the FM model, training and eval. It is NOT
-"DSP only." helix and pimm are then SIBLING model frameworks over one data layer:
+**helix PROVIDES the model + representation** (DSP, tokenizer, model architecture,
+forward, everything to *define & run* the FM). **pimm TRAINS and EVALS it** (the
+loop, optimizer, schedule, DDP, checkpointing, probes). pimm-data is the shared
+DATA layer. The goal of this map: define helix's model interface and enumerate
+**what pimm needs to add** to train/eval it (§5).
 
 ```
   pimm-data    DATA layer (shared): readers, datasets (JAXTPC/LUCiD/Optical),
    ▲    ▲      noise injection, coeff-cache + identity, labels (edepsim),
    │    │      geometry, collate, NormalizationTable.   (may import helix for DSP)
-   │    └──────────────────────────────┐
-  helix                              pimm  (particle-imaging-models)
-  the wavelet-coefficient FM:         the point-cloud framework:
-   core/     wavelet DSP, CoeffSet      models/  PT-v3, sonata, polarmae, voltmae
-   tpc/ optical/  removal, pipeline     engines/ trainers, hooks
-   tokenize/ coeff rows → tokens        configs/, launch/
-   model/    the FM MAE (SerialFM…)     (the SPINE/PoLAr-MAE baseline side)
-   train/    the training loop
-   eval/     probes, eval harness
+   │    └───────────────────────────────────────┐
+  helix                                        pimm  (particle-imaging-models)
+  PROVIDES the model + representation:          TRAINS + EVALS + baselines:
+   core/     wavelet DSP, CoeffSet               engines/  trainers incl. FMTrainer
+   tpc/ optical/  removal, pipeline              eval/     probes, harness, deconv
+   tokenize/ coeff rows → tokens                 models/   point-cloud zoo (baselines)
+   model/    the FM MAE (nn.Module, forward,     configs/, launch/
+             loss, param_groups, encode, mask)   └── imports helix (model) + pimm-data
+   NO train/ NO eval/  (those are pimm's job)
    ▲
-   │  composes helix + pimm-data
-  research/  experiment CONFIGS + corpus builder + design record + frozen
-             studies + qualification. Thin: no load-bearing code.
+   │  imports pimm-data (data)
 ```
 
-The rule: **the entire FM program's load-bearing code → helix; data → pimm-data;
-research keeps only composition + the record.** pimm stays the separate
-point-cloud framework (it consumes pimm-data too; it is the baseline/comparison
-side, not where the FM lives).
+Dependencies: **pimm → helix (model) + pimm-data (data); helix → pimm-data (data)**;
+helix has NO dependency on pimm. The rule: **model + representation code → helix;
+training + eval → pimm; data → pimm-data; research keeps configs + record.**
 
 ## 1. Per-concern placement (the whole tree)
 
@@ -75,25 +74,28 @@ inseparable from the model it feeds.
 | charge cache | pimm-data (co-located `val_charge`) | kills the dual-directory pairing |
 
 ### C4. FM model — `model.py`, `model_serial.py` (production `SerialFMModel`), `vit_model.py`, `perceiver_*`
-→ **helix/model/**. Production arch + variants; the FM MAE lives in helix.
-`vit_model`/`perceiver` = variants. (pimm keeps its OWN point-cloud models — PT-v3,
-polarmae — for the baseline comparison; those are unrelated to the helix FM.)
+→ **helix/model/**. helix provides the model: the `nn.Module`, its `forward`, the
+loss, `param_groups` (muP), `encode`/`encode_layers` (for probes), and the mask
+generator. Variants (`vit_model`, `perceiver`) too. helix defines the model; pimm
+runs it (§5). `losses`/`SIGMA`/`DEV` (`star_model`) → helix.model / helix norm.
 
-### C5. Training — `fm/train.py`, `fm/mae_ddp.py`, `fm/slurm/*`
-→ **helix/train/**. The FM training loop lives in helix: muP param groups,
-warmup-cosine-floor scheduler, DDP, `batch_size=None` loader over the coeff-token
-dataset. It CONSUMES pimm-data (the coeff dataset) but is a helix component. Drop
-`_rank` from the noise seed. The launch/slurm layer stays research-side config.
+### C5. Training — `fm/train.py`, `fm/mae_ddp.py`, `fm/slurm/*`  →  **pimm**
+The training LOOP is pimm's: `pimm/engines` FMTrainer builds the helix model and
+runs optimizer / muP param-group / warmup-cosine-floor schedule / DDP /
+checkpoint / logging over the coeff-token DataLoader (`batch_size=None`). Drop
+`_rank` from the noise seed. helix supplies the model + its param_groups + loss;
+pimm supplies the loop. launch/slurm → research/pimm run config. See §5 for the
+exact list of what pimm must add.
 
 ### C6. Labels & eval — `fm/pb_labels.py`, `pb_probe.py`, `probe_3d_*`, `eval_harness.py`, `deconv_*`
 | piece | → home | note |
 |---|---|---|
-| label build (`hits.group_to_track ⨝ edepsim` PDG/KE) | **pimm-data** edepsim reader + label decoration | the MISSING loader; JAXTPC `make_labl.py` is the seed — DATA, so pimm-data |
-| probe harness (frozen encoder → ridge/MLP, controls, CV) | **helix/eval/** | `probe_3d_rigor` pattern; part of the FM library |
-| deconv fine-tune program | **helix/eval/** (downstream head) | the value-prop result |
-| eval_harness (mask-gen curve, NLL, var-explained) | **helix/eval/** | |
-Note: the SPINE/PoLAr-MAE BASELINE side lives in **pimm** (its point-cloud models);
-the FM's own eval is helix.
+| label build (`hits.group_to_track ⨝ edepsim` PDG/KE) | **pimm-data** edepsim reader + label decoration | the MISSING loader; JAXTPC `make_labl.py` is the seed — DATA |
+| probe harness (frozen `model.encode` → ridge/MLP, controls, CV) | **pimm/eval** (hooks) | calls helix `model.encode`; `probe_3d_rigor` pattern |
+| deconv fine-tune program | **pimm/eval** (downstream) | fine-tunes the helix model; the value-prop result |
+| eval_harness (mask-gen curve, NLL, var-explained) | **pimm/eval** (`FMReconEvaluator`) | |
+EVAL is pimm's job; it consumes helix's `model.encode`/forward. The SPINE/PoLAr-MAE
+baselines are pimm's point-cloud models.
 
 ### C7. Optical — `doraemon_optical.py`, `onfly_optical.py`, optical tokenizer studies
 | piece | → home |
@@ -133,7 +135,7 @@ as the packaged gate's qualification suite.
 | `.pylibs` sys.path hacks ×~15 | pip-installed env (or one `_paths.py` helper) |
 | fm/data.py throwaway shim | pimm-data CoeffTPCDataset |
 
-## 2b. The new helix package shape (full FM library)
+## 2b. The new helix package shape (model + representation, NOT training)
 
 ```
 helix/
@@ -141,12 +143,58 @@ helix/
   tpc/        wire removal (gate/multipass) + pipeline + io
   optical/    PMT chunk pipeline
   tokenize/   coeff rows → tokens (patchify, tree, asinh)   [from vit_tpc, rows_to_struct]
-  model/      the FM MAE (SerialFMModel + variants)         [from fm/model*, vit_model]
-  train/      the FM training loop (DDP, muP, schedule)     [from fm/train, mae_ddp]
-  eval/       probes + eval harness + deconv head           [from fm/pb_probe, probe_3d, eval_harness]
+  model/      the FM MAE: nn.Module + forward + loss +      [from fm/model*, vit_model,
+              param_groups + encode + mask generator         star_model losses/SIGMA]
+  (NO train/  — pimm owns the loop)
+  (NO eval/   — pimm owns probes/harness)
 ```
-helix imports **pimm-data** for data (the coeff-token dataset, geometry, noise).
-No dependency on pimm. New extras: `helix[torch]` for model/train/eval.
+helix imports **pimm-data** for data (geometry, and the coeff-token dataset type it
+tokenizes). No dependency on pimm. Extra: `helix[torch]` for tokenize+model.
+
+## 5. THE INTERFACE — what pimm needs to train & eval the helix model
+
+This is the deliverable. helix EXPOSES a stable model API; pimm ADDS the loop/eval.
+
+### 5a. What helix.model must expose (the contract pimm consumes)
+```python
+helix.build_fm(config) -> nn.Module                 # construct the FM (arch from config)
+model.forward(batch) -> dict(loss=…, **aux)         # masked-recon loss computed inside
+model.param_groups(lr, wd) -> list[dict]            # muP buckets (hidden lr/m + wd·m; nodecay)
+model.encode(batch) -> Tensor                       # frozen features (for probes)
+model.encode_layers(batch) -> list[Tensor]          # per-layer (probe sweep)
+helix.tokenize(coeff_rows, cfg) -> token_dict       # coeff rows -> the model's input dict
+helix.make_mask(batch, ratio, mode) -> mask         # MAE masking (or model owns it)
+# token_dict fields: inp/occ/valid/target/cell/slot/band_id/plane_id/t_phys/wire_pos/…
+# checkpoint: state_dict keys stable (subclass current SerialFMModel) so existing ckpts load.
+```
+
+### 5b. What pimm must ADD (the training + eval integration — the "what's needed")
+1. **FMTrainer** (`pimm/engines`, register in TRAINERS): builds `helix.build_fm`,
+   runs the loop, calls `model.forward → loss`. No new model code — pimm calls helix.
+2. **`batch_size=None` DataLoader** over pimm-data's coeff-token dataset (one event =
+   one token set; ~215 ms CPU assembly in workers via `helix.tokenize`). pimm's
+   `build_train_loader` currently hardcodes `batch_size` + role-collate → needs the
+   `batch_size=None` variant.
+3. **muP optimizer support**: `param_dicts="model"` branch in `pimm/utils/optimizer`
+   so it takes `model.param_groups()` (pimm's keyword-matching can't express muP).
+4. **Warmup-cosine-floor scheduler** in `pimm/utils/scheduler` (10%-floor cosine).
+5. **BatchTransformLoader** + drop `_rank` from the noise seed (the dense-tail runner;
+   needed for the on-the-fly training path, and it fixes the never-run
+   `dataset.batch_transform` gap). DDP via pimm's wrapper, `set_epoch` stamping.
+6. **Checkpoint compat**: pimm CheckpointSaver/Loader ↔ helix model state_dict
+   (key-for-key by subclassing; a `tools/convert_fm_ckpt.py` for the existing
+   `ckpt_dscale600b4_*`).
+7. **Eval hooks** (`pimm/eval`): `FMReconEvaluator` (mask-gen curve, NLL,
+   var-explained via `model.encode`/forward) + the frozen-probe harness
+   (`model.encode` → ridge/MLP → metric, with random-init/raw/geo controls) +
+   the deconv fine-tune. Ported from `fm/pb_probe`/`probe_3d_*`/`eval_harness`.
+8. **Data contract**: pimm-data provides the coeff-token dataset (`CoeffTPCDataset`
+   yielding coeff rows; `helix.tokenize` applied in `__getitem__` or a transform),
+   labels for probes (edepsim join), and holdout/identity.
+
+Open interface question: does `helix.tokenize` run in the DataLoader worker (CPU,
+current ~215 ms/event) or inside `model.forward` (GPU)? Affects where the seam sits
+between pimm-data (rows) and helix (tokens→model). Decide with the perf envelope.
 
 ## 3. The end state — research becomes thin
 
@@ -161,7 +209,7 @@ No dependency on pimm. New extras: `helix[torch]` for model/train/eval.
 No load-bearing DSP, data, model, tokenizer, training, or eval code remains — it
 all moved into helix (FM code) or pimm-data (data).
 
-## 4. Sequencing (respecting the freeze; data layer first)
+## 6. Sequencing (respecting the freeze)
 
 1. **helix DSP** (this worktree): CoeffSet+io, public wavedec/threshold_bands,
    coherent_gate, process_plane, CLI. (CONSOLIDATION_PLAN §5.)
@@ -169,11 +217,14 @@ all moved into helix (FM code) or pimm-data (data).
    + `CoeffTPCDataset` + reader; edepsim label reader. Kill `load_geom`/`build_batch` dups.
 3. **corpus builder** (research, thin): compose #1+#2 → new coeff format; validate
    vs old cache. Replaces cache/cache_ext/star_tpc extraction.
-4. **helix tokenize/model/train/eval**: promote the FM stack into helix (from fm/,
-   vit_tpc, star_model). This is the big lift and the FREEZE-sensitive one (the live
-   training imports these) — do in this worktree, merge at the freeze boundary.
-5. **research slim-down**: delete extracted code (→ thin re-exports first, then
-   remove once callers move); write RESULTS.md + research/README map; STATUS banners.
+4. **helix tokenize/model**: promote the tokenizer + FM model into helix (from fm/model*,
+   vit_tpc, vit_model, star_model). Expose the §5a API. FREEZE-sensitive (live training
+   imports these) — worktree, merge at boundary.
+5. **pimm training + eval** (§5b): FMTrainer, batch_size=None loader,
+   BatchTransformLoader, muP optimizer, scheduler, checkpoint compat, eval hooks.
+   pimm consumes helix.build_fm + pimm-data dataset. Validate A/B vs the standalone loop.
+6. **research slim-down**: delete extracted code (thin re-exports first); write
+   RESULTS.md + research/README map; STATUS banners.
 
-Each library is independently testable; research composes helix + pimm-data.
-Nothing moves out of a live-training import path except at the freeze boundary.
+helix defines/runs the model; pimm trains/evals it; pimm-data feeds both. Nothing
+moves out of a live-training import path except at the freeze boundary.

@@ -93,23 +93,24 @@ edit + merge-at-boundary).
 | coeff-row cache as a first-class dataset (`CoeffTPCDataset`, `CoeffShardWriter`) | pimm-data (the earlier two-piece design) — the FM *loader*, distinct from the helix DSP consolidation. Raw values + versioned σ sidecar + stable identity. |
 | geometry (`load_plane_registry`) | STAY pimm-data — helix reads it via path insert; `helix.tpc.io` now also reads `/config/num_wires` itself. |
 
-### G. helix FM layers (tokenizer + model + training + eval) — IN HELIX, not pimm
+### G. helix FM layers (tokenizer + model) — IN HELIX; training/eval → pimm
 
-(Correction 2026-07-24: helix is the full FM library, not DSP-only.)
+(Correction 2026-07-24 rev2: helix PROVIDES the model + representation; pimm
+TRAINS + EVALS it.)
 | item | → home |
 |---|---|
 | tokenizer (`vit_tpc.assemble`, `rows_to_struct`, patch/asinh/tree) | **helix/tokenize/** |
-| FM MAE model (`SerialFMModel` + variants) | **helix/model/** |
-| training loop (`fm/train`, `mae_ddp`, muP, schedule, DDP) | **helix/train/** |
-| probes + eval harness + deconv head | **helix/eval/** |
-See `RESEARCH_EXTRACTION_MAP.md` §2b for the full helix package shape.
+| FM MAE model + forward + loss + param_groups + encode + mask | **helix/model/** |
+| training loop (`fm/train`, `mae_ddp`, muP, schedule, DDP) | **pimm/engines** (FMTrainer) |
+| probes + eval harness + deconv | **pimm/eval** (consume helix `model.encode`) |
+See `RESEARCH_EXTRACTION_MAP.md` §2b (helix shape) and §5 (the helix↔pimm interface:
+what helix exposes and what pimm must add to train/eval).
 
-### H. `pimm` (particle-imaging-models) — the SIBLING point-cloud framework
+### H. `pimm` (particle-imaging-models) — trains/evals the helix model + baselines
 
-pimm is NOT where the FM lives. It keeps its own model zoo (PT-v3, sonata,
-polarmae, voltmae) and trainers — the point-cloud + baseline/comparison side —
-and it consumes pimm-data too. The FM (helix) and pimm are siblings over one
-data layer. Nothing from the FM program moves into pimm.
+pimm owns the TRAINING LOOP and EVAL for the helix FM (FMTrainer, eval hooks — §5b)
+AND keeps its own point-cloud model zoo (PT-v3, sonata, polarmae) as the
+SPINE/PoLAr-MAE baseline side. pimm imports helix (the model) + pimm-data (data).
 
 ---
 
