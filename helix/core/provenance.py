@@ -34,6 +34,19 @@ def derive_band_lengths(wavelet: str, level: int, mode: str, padded_length: int)
     return tuple(int(c.shape[-1]) for c in coeffs)
 
 
+def padded_length_of(band_lengths, wavelet: str, level: int, mode: str) -> int:
+    """Effective DWT input length that produced ``band_lengths`` (via inverse).
+
+    Mode-agnostic: recovers the padded length even when periodization pads
+    internally, so the basis records a padded length consistent with the actual
+    coefficients rather than assuming a specific pad convention.
+    """
+    import pywt
+
+    z = [np.zeros((1, int(L)), dtype=np.float32) for L in band_lengths]
+    return int(pywt.waverec(z, wavelet, mode=mode, axis=-1).shape[-1])
+
+
 def _json_default(o: Any):
     if isinstance(o, (np.integer,)):
         return int(o)
