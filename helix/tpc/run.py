@@ -1,57 +1,80 @@
-"""CLI entry point for TPC batch processing (`helix-tpc`)."""
+"""CLI entry point for TPC batch processing (`helix-tpc`).
+
+Two output modes:
+  default        — legacy per-plane band-COO (`write_processed`), one group/event.
+  --to-coeffs    — the coeff corpus: one flat-columnar shard of CoeffEvents
+                   (`write_coeff_shard`), the input for the FM.
+
+Coherent removal is selected by --removal (default: the config's, i.e. the
+qualified smart gate).
+"""
 from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
+
+
+def _event_range(spec, n):
+    if not spec:
+        return range(n)
+    if "-" in spec:
+        lo, hi = spec.split("-")
+        return range(int(lo), int(hi) + 1)
+    return range(int(spec), int(spec) + 1)
 
 
 def main():
-    parser = argparse.ArgumentParser(
+    p = argparse.ArgumentParser(
         prog="helix-tpc",
-        description="HELIX TPC — coherent noise removal + wavelet sparsification for LArTPC wire data")
-    parser.add_argument("--input", required=True, help="Input sensor HDF5 file")
-    parser.add_argument("--output", required=True, help="Output processed HDF5 file")
-    parser.add_argument("--events", default=None, help="Event range, e.g. '0-19' or '5' (default: all)")
-    parser.add_argument("--coh-only", action="store_true", help="Skip wavelet step")
-    parser.add_argument("--backend", choices=["numpy", "jax", "torch"], default="numpy")
-    args = parser.parse_args()
+        description="HELIX TPC — coherent removal + wavelet sparsification for LArTPC wire data")
+    p.add_argument("--input", required=True, help="Input sensor HDF5 file")
+    p.add_argument("--output", required=True, help="Output HDF5 file")
+    p.add_argument("--events", default=None, help="Event range '0-19' or '5' (default: all)")
+    p.add_argument("--removal", choices=["gate", "multipass", "none"], default=None,
+                   help="Coherent removal mode (default: config = smart gate)")
+    p.add_argument("--to-coeffs", action="store_true",
+                   help="Write the coeff corpus shard (CoeffEvents) instead of legacy per-plane output")
+    p.add_argument("--backend", choices=["numpy", "jax", "torch"], default="numpy")
+    args = p.parse_args()
 
     from helix.core import backend
     backend.set_backend(args.backend)
-
     from helix.tpc.io import config_from_file, count_events, read_sensor_event, write_processed
-    from helix.tpc.coherent import remove_coherent
-    from helix.core.wavelet import sparsify
+    from helix.tpc.pipeline import process_event, event_coeff_event, canonical_plane_gid
+    from helix.core.coeff_io import write_coeff_shard
 
-    print(f"HELIX TPC | backend: {backend.get_backend()}")
     config = config_from_file(args.input)
-    n_events = count_events(args.input)
-    if args.events:
-        if "-" in args.events:
-            lo, hi = args.events.split("-")
-            event_range = range(int(lo), int(hi) + 1)
-        else:
-            event_range = range(int(args.events), int(args.events) + 1)
-    else:
-        event_range = range(n_events)
-
-    print(f"Input:  {args.input} ({n_events} events)")
-    print(f"Config: group_size={config.group_size}, wavelet={config.wavelet} L={config.dwt_level}\n")
+    n = count_events(args.input)
+    events = _event_range(args.events, n)
+    removal = args.removal or config.removal
+    src = Path(args.input)
+    print(f"HELIX TPC | backend={backend.get_backend()} | removal={removal} | "
+          f"{'coeffs' if args.to_coeffs else 'legacy'}")
+    print(f"Input:  {args.input} ({n} events); group_size={config.group_size}, "
+          f"wavelet={config.wavelet} L{config.dwt_level}\n")
 
     t0 = time.perf_counter()
-    for idx in event_range:
-        t_evt = time.perf_counter()
+    coeff_events = []
+    for idx in events:
+        t = time.perf_counter()
         planes = read_sensor_event(args.input, idx, config)
-        results = {}
-        for label, image in planes.items():
-            cleaned = remove_coherent(image, config)
-            if not args.coh_only:
-                results[label] = sparsify(cleaned, wavelet=config.wavelet, level=config.dwt_level,
-                                          mode=config.dwt_mode, threshold=config.threshold_spec())
-        if not args.coh_only:
-            write_processed(args.output, idx, results, config)
-        print(f"  event {idx:>4d}: {len(planes)} planes, {(time.perf_counter()-t_evt)*1000:.0f} ms")
-    print(f"\nDone. {len(event_range)} events in {time.perf_counter()-t0:.1f}s")
+        results = process_event(planes, config, removal=removal)
+        if args.to_coeffs:
+            by_gid = {canonical_plane_gid(lbl): pp for lbl, pp in results.items()}
+            coeff_events.append(event_coeff_event(
+                by_gid, config, run=src.parent.name, source_file=src.name, event=idx))
+        else:
+            write_processed(args.output, idx, {lbl: pp.sparse for lbl, pp in results.items()}, config)
+        kept = sum(pp.sparse.n_kept for pp in results.values())
+        print(f"  event {idx:>4d}: {len(planes)} planes, {kept:>7d} coeffs, "
+              f"{(time.perf_counter()-t)*1000:.0f} ms")
+
+    if args.to_coeffs:
+        write_coeff_shard(args.output, coeff_events, dataset_name=src.stem,
+                          file_index=0, global_event_offset=0)
+        print(f"\nWrote {len(coeff_events)} events → {args.output}")
+    print(f"Done. {len(list(events))} events in {time.perf_counter()-t0:.1f}s")
 
 
 if __name__ == "__main__":

@@ -83,6 +83,15 @@ def process_event(planes: dict[str, Any], config: DetectorConfig,
     return results
 
 
+_PLANE_IDX = {"U": 0, "V": 1, "Y": 2}
+
+
+def canonical_plane_gid(label: str) -> int:
+    """``'volume_{v}_{U|V|Y}'`` → ``v*3 + {U:0,V:1,Y:2}`` (matches pimm-data)."""
+    vol, p = label.rsplit("_", 1)
+    return int(vol.split("_")[1]) * 3 + _PLANE_IDX[p]
+
+
 def basis_from_config(config: DetectorConfig, *, band_lengths, level: int) -> BasisDescriptor:
     """Build the BasisDescriptor stamped into a CoeffEvent / shard /config.
 
