@@ -62,35 +62,36 @@ now detector-neutral. `tpc/io.py` keeps only *sensor* reading.)
 ## 2. `CoeffEvent` — the in-memory object (helix/core, detector-neutral)
 
 Event-scoped, supersedes/absorbs `SparseResult` (already shared by tpc+optical).
-Detector-neutral: TPC uses the grid-COO coordinate spec; optical uses the
-offset-packed chunk spec (§5). Sketch:
+**Flat columnar** — mirrors the on-disk shard and the model's flat-row consumption
+(`plane_gid` a column, no per-plane sub-objects). Detector-neutral: TPC uses the
+grid `(band,wire,tau)` coords; optical (later) uses an offset-packed chunk variant
+(§5). As built (`helix/core/coeff_event.py`):
 
 ```python
 @dataclass
-class CoeffEvent:                       # one EVENT, all planes/channels
-    # --- coefficients (the payload) ---
-    planes: dict[str, PlaneCoeffs]    # key = 'volume_{v}_{U|V|Y}'  (TPC)
-                                      #   or  channel/side           (optical, later)
-    # --- decode metadata (what read/reconstruct need) ---
-    band_lengths: np.ndarray          # PADDED per-band lengths (load-bearing)
-    n_ticks_raw: int; pad: int; wavelet: str; level: int; mode: str
-    # --- provenance (basis + removal + threshold), by value + digest ---
-    basis: BasisDescriptor            # wavelet/level/mode/pad/removal/threshold
-    basis_digest: str                 # sha256(basis) — the join key to /config
-    # --- identity ---
+class CoeffEvent:                       # one EVENT, all planes — flat sparse rows
+    # --- flat coeff rows (n = total kept coeffs) ---
+    band: np.ndarray            # uint8   (n,)  index into [cA, cD_L, …, cD_1]
+    plane_gid: np.ndarray       # uint8   (n,)  canonical plane id (v*3 + {U,V,Y})
+    wire: np.ndarray            # int32   (n,)  signal/row index within the plane
+    tau: np.ndarray             # int32   (n,)  within-band coeff index
+    value: np.ndarray           # float32 (n,)  RAW coeff (un-normalized)
+    # --- per-plane bookkeeping (indexed by position in `gids`) ---
+    gids: np.ndarray            # int32   (G,)  plane set (shard-uniform)
+    n_wires: np.ndarray         # int32   (G,)  signals per plane (for reconstruct)
+    sigma_threshold: np.ndarray  # float32 (G, n_bands)  per-(gid,band) threshold σ
+    # --- provenance + identity ---
+    basis: BasisDescriptor      # wavelet/level/mode/pad/band_lengths/removal/threshold/sigma_norm
     run: str; source_file: str; event: int
-
-@dataclass
-class PlaneCoeffs:                     # one plane's sparse coeffs (band,wire,tau)
-    band: np.ndarray                  # uint8   (n,)
-    wire: np.ndarray                  # int32   (n,)
-    tau:  np.ndarray                  # int32   within-band coeff index
-    value: np.ndarray                 # float32 RAW coeff (un-normalized)
-    sigma_threshold: np.ndarray       # float32 (n_bands,) per-event per-band σ
-    # targets are NOT fields — clean/charge are their own CoeffEvents → separate
-    # modality files, joined by identity at read (§4b). compute returns e.g.
-    #   process_event(raw, clean_image=…) -> {'coeff': cs_noisy, 'coeff_clean': cs_clean}
+    # constructors: CoeffEvent.from_sparse_results({gid: SparseResult}, basis=…)
+    #               ce.reconstruct_images(n_time) -> {gid: image}
+    # targets (clean/charge) are NOT fields — separate modality files (§4b); compute
+    # returns e.g. process_event(raw, clean_image=…) -> {'coeff': ce, 'coeff_clean': ce_clean}
 ```
+
+`BasisDescriptor` (`helix/core/provenance.py`) carries `band_lengths` + the basis
+that generates them; `.validate()` fails loudly on drift, `.digest()` is the
+`/config` join key.
 
 Key points from the audit, baked in:
 - **RAW values** (decision: rebuild). Normalization (`SIGMA/σ_tab`) applied at
