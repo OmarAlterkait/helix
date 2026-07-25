@@ -27,6 +27,19 @@ from helix.tpc.config import DetectorConfig
 from helix.tpc.coherent import remove_coherent
 from helix.tpc.coherent_gate import coherent_gate
 
+import numpy as np
+
+
+def _pad_time(image, level: int):
+    """Pad the last (time) axis up to a multiple of ``2**level`` (the padded-4336
+    convention: ``(-4321) % 16 = 15`` → 4336). Matches the old build's
+    ``pad(g, (0, (-nt) % 16))`` so coefficients are basis-consistent."""
+    x = np.asarray(image, dtype=np.float32)
+    npad = (-x.shape[-1]) % (1 << level)
+    if npad:
+        x = np.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, npad)])
+    return x
+
 
 @dataclass
 class ProcessedPlane:
@@ -50,7 +63,8 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
         sparse = sparsify(cleaned, wavelet=config.wavelet, level=config.dwt_level,
                           mode=config.dwt_mode, threshold=config.threshold_spec())
     elif mode == "gate":
-        coeffs, lev = wavedec(image, wavelet=config.wavelet, level=config.dwt_level,
+        xin = _pad_time(image, config.dwt_level)             # pad to 2**level multiple (4336)
+        coeffs, lev = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
                               mode=config.dwt_mode)
         gated = coherent_gate(coeffs, group_size=config.group_size, kgate=config.gate_kgate,
                               ksig=config.gate_ksig, npass=config.gate_npass, gate_approx=True)
@@ -63,8 +77,13 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
                               n_time)                        # coherent-removed image (for inspection)
     elif mode in ("none", "off"):
         cleaned = image
-        sparse = sparsify(image, wavelet=config.wavelet, level=config.dwt_level,
-                          mode=config.dwt_mode, threshold=config.threshold_spec())
+        xin = _pad_time(image, config.dwt_level)
+        coeffs, lev = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
+                              mode=config.dwt_mode)
+        out, n_kept, n_total, band_sigma = threshold_bands(coeffs, config.threshold_spec())
+        sparse = SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
+                              sigma_per_band=band_sigma, wavelet=config.wavelet,
+                              level=lev, mode=config.dwt_mode)
     else:
         raise ValueError(f"unknown removal mode {mode!r} (gate|multipass|none)")
 
