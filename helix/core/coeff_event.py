@@ -29,7 +29,7 @@ from helix.core.wavelet import SparseResult, reconstruct
 class CoeffEvent:
     # flat sparse coeff rows (one event, all planes) — n = total kept coeffs
     band: np.ndarray            # uint8   (n,)   band index into [cA, cD_L, …, cD_1]
-    plane_gid: np.ndarray       # uint8   (n,)   canonical plane id (v*3 + {U,V,Y})
+    plane_gid: np.ndarray       # int32   (n,)   canonical plane id (v*3 + {U,V,Y})
     wire: np.ndarray            # int32   (n,)   signal/row index within the plane
     tau: np.ndarray             # int32   (n,)   within-band coeff index
     value: np.ndarray           # float32 (n,)   RAW coeff (un-normalized)
@@ -74,19 +74,28 @@ class CoeffEvent:
             if len(coeffs) != n_bands:
                 raise ValueError(
                     f"gid {gid}: {len(coeffs)} bands but basis has {n_bands}")
-            n_wires[gi] = coeffs[0].shape[0]
-            spb = np.asarray(res.sigma_per_band, dtype=np.float32)
-            sigma[gi, : spb.shape[0]] = spb
+            nw = coeffs[0].shape[0]
+            n_wires[gi] = nw
+            if res.sigma_per_band is None:
+                raise ValueError(f"gid {gid}: sigma_per_band is None (needed for sigma_threshold)")
+            spb = np.asarray(res.sigma_per_band, dtype=np.float32).ravel()
+            if spb.shape[0] != n_bands:
+                raise ValueError(
+                    f"gid {gid}: sigma_per_band has {spb.shape[0]} entries, expected {n_bands}")
+            sigma[gi, :] = spb
             for b, cband in enumerate(coeffs):
                 if cband.shape[-1] != basis.band_lengths[b]:
                     raise ValueError(
                         f"gid {gid} band {b}: length {cband.shape[-1]} != "
                         f"band_lengths[{b}]={basis.band_lengths[b]}")
+                if cband.shape[0] != nw:
+                    raise ValueError(
+                        f"gid {gid} band {b}: {cband.shape[0]} wires != band-0 count {nw}")
                 wi, ti = np.nonzero(cband)
                 if wi.size == 0:
                     continue
                 b_l.append(np.full(wi.size, b, dtype=np.uint8))
-                p_l.append(np.full(wi.size, gid, dtype=np.uint8))
+                p_l.append(np.full(wi.size, gid, dtype=np.int32))    # int32: gid can exceed 255
                 w_l.append(wi.astype(np.int32))
                 t_l.append(ti.astype(np.int32))
                 v_l.append(cband[wi, ti].astype(np.float32))
@@ -95,7 +104,7 @@ class CoeffEvent:
             return np.concatenate(parts).astype(dt) if parts else np.empty(0, dtype=dt)
 
         return cls(
-            band=_cat(b_l, np.uint8), plane_gid=_cat(p_l, np.uint8),
+            band=_cat(b_l, np.uint8), plane_gid=_cat(p_l, np.int32),
             wire=_cat(w_l, np.int32), tau=_cat(t_l, np.int32),
             value=_cat(v_l, np.float32),
             gids=gids, n_wires=n_wires, sigma_threshold=sigma,

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from helix.core.wavelet import (
-    sparsify, reconstruct, wavedec, threshold_bands, SparseResult,
+    reconstruct, wavedec, threshold_bands, SparseResult,
 )
 from helix.core.provenance import BasisDescriptor, padded_length_of
 from helix.core.coeff_event import CoeffEvent
@@ -60,8 +60,13 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
 
     if mode == "multipass":
         cleaned = remove_coherent(image, config, sigma_per_wire)
-        sparse = sparsify(cleaned, wavelet=config.wavelet, level=config.dwt_level,
-                          mode=config.dwt_mode, threshold=config.threshold_spec())
+        xin = _pad_time(cleaned, config.dwt_level)           # same padded-4336 basis as gate/none
+        coeffs, lev = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
+                              mode=config.dwt_mode)
+        out, n_kept, n_total, band_sigma = threshold_bands(coeffs, config.threshold_spec())
+        sparse = SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
+                              sigma_per_band=band_sigma, wavelet=config.wavelet,
+                              level=lev, mode=config.dwt_mode)
     elif mode == "gate":
         xin = _pad_time(image, config.dwt_level)             # pad to 2**level multiple (4336)
         coeffs, lev = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
@@ -122,6 +127,7 @@ def basis_from_config(config: DetectorConfig, *, band_lengths, level: int) -> Ba
     return BasisDescriptor(
         wavelet=config.wavelet, level=level, mode=config.dwt_mode,
         n_ticks_raw=config.num_time_steps, pad=npad, band_lengths=tuple(band_lengths),
+        sigma_norm=config.sigma_norm,
         removal=dict(kind=config.removal, kgate=config.gate_kgate, ksig=config.gate_ksig,
                      npass=config.gate_npass, group_size=config.group_size),
         threshold=dict(method="universal", func=config.threshold_mode,

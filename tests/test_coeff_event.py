@@ -152,3 +152,62 @@ def test_band_length_drift_raises():
                           band_lengths=tuple(x + 1 for x in basis.band_lengths))
     with pytest.raises(ValueError, match="band_lengths"):
         bad.validate()
+
+
+# ---- regression: audit fixes ----------------------------------------------
+
+def _one_coeff_result(basis, gid, nw=8):
+    coeffs = [np.zeros((nw, L), np.float32) for L in basis.band_lengths]
+    coeffs[1][2, 3] = 1.5
+    return {gid: SparseResult(coeffs=coeffs, n_kept=1, n_total=0,
+                              sigma_per_band=np.ones(len(basis.band_lengths), np.float32),
+                              wavelet=WAVELET, level=LEVEL, mode=MODE)}
+
+
+def test_plane_gid_beyond_255_no_wrap(tmp_path):
+    basis = _basis()
+    ce = CoeffEvent.from_sparse_results(_one_coeff_result(basis, 300), basis=basis, event=0)
+    assert ce.plane_gid.dtype == np.int32 and int(ce.plane_gid[0]) == 300
+    path = tmp_path / "s_coeff_0000.h5"
+    write_coeff_shard(path, [ce])
+    ce2 = read_coeff_event(path, 0)
+    assert int(ce2.plane_gid[0]) == 300                 # was uint8-wrapped to 44
+    assert 300 in ce2.reconstruct_images(NT)            # to_band_lists keyed by 300, no KeyError
+
+
+def test_sigma_none_and_wrong_length_raise():
+    basis = _basis()
+    coeffs = [np.zeros((4, L), np.float32) for L in basis.band_lengths]
+    none_res = {0: SparseResult(coeffs=coeffs, n_kept=0, n_total=0, sigma_per_band=None,
+                                wavelet=WAVELET, level=LEVEL, mode=MODE)}
+    with pytest.raises(ValueError, match="sigma_per_band is None"):
+        CoeffEvent.from_sparse_results(none_res, basis=basis)
+    short_res = {0: SparseResult(coeffs=coeffs, n_kept=0, n_total=0,
+                                 sigma_per_band=np.ones(1, np.float32),
+                                 wavelet=WAVELET, level=LEVEL, mode=MODE)}
+    with pytest.raises(ValueError, match="sigma_per_band has"):
+        CoeffEvent.from_sparse_results(short_res, basis=basis)
+
+
+def test_cross_band_wire_mismatch_raises():
+    basis = _basis()
+    coeffs = [np.zeros((4, L), np.float32) for L in basis.band_lengths]
+    coeffs[1] = np.zeros((6, basis.band_lengths[1]), np.float32)   # different wire count
+    coeffs[1][5, 0] = 1.0
+    res = {0: SparseResult(coeffs=coeffs, n_kept=1, n_total=0,
+                           sigma_per_band=np.ones(len(basis.band_lengths), np.float32),
+                           wavelet=WAVELET, level=LEVEL, mode=MODE)}
+    with pytest.raises(ValueError, match="wires"):
+        CoeffEvent.from_sparse_results(res, basis=basis)
+
+
+def test_basis_digest_mismatch_raises(tmp_path):
+    import h5py
+    basis = _basis()
+    ce = CoeffEvent.from_sparse_results(_one_coeff_result(basis, 0), basis=basis, event=0)
+    path = tmp_path / "s_coeff_0000.h5"
+    write_coeff_shard(path, [ce])
+    with h5py.File(path, "a") as f:
+        f["config"].attrs["basis_digest"] = "wrongdigest"
+    with pytest.raises(ValueError, match="basis_digest mismatch"):
+        read_coeff_event(path, 0)
