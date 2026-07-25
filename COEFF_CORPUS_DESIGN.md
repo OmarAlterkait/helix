@@ -46,8 +46,8 @@ Naming (adopted from pimm-data house style):
 | pure (de)serialization | `coeff_event_to_arrays` / `arrays_to_coeff_event` | `helix/core/coeff_io.py` |
 | reference shard codec + gate | `write_coeff_shard` / `read_coeff_event` | `helix/core/coeff_io.py` |
 | basis/provenance | `basis_descriptor` / `descriptor_digest` | `helix/core/provenance.py` |
-| production corpus writer | `CoeffShardWriter` | pimm-data |
-| corpus readers (h5→flat dict) | `CoeffTPCReader` (`_MODALITY='coeff'`), `CoeffCleanReader` (`'coeff_clean'`), later `CoeffChargeReader` (`'coeff_charge'`) | pimm-data `readers/coeff_*.py` |
+| production corpus writer | `write_coeff_shard` (function) | pimm-data `readers/coeff_tpc.py` |
+| corpus reader (h5→flat dict) | `CoeffTPCReader(modality=…)` — one class, `modality` selects `'coeff'`/`'coeff_clean'`/(future) `'coeff_charge'` | pimm-data `readers/coeff_tpc.py` |
 | corpus Dataset | `CoeffTPCDataset` (`type='CoeffTPCDataset'`, `modalities=('coeff','coeff_clean'?)`) | pimm-data `coeff.py` |
 
 Corpus root: **`/sdf/data/neutrino/omara/coeff_tpc/<run>/`**. Flat-columnar shards,
@@ -141,9 +141,10 @@ events/shard (a builder knob).
 │       basis_digest='<sha256>'                      # provenance.descriptor_digest
 │       production_version, run_id, batch_timestamp, git_*   # house provenance (NO schema_version)
 │     datasets (shared tables):
-│       band_lengths   (n_bands,)          int32     # PADDED lengths [271,271,542,1084]
-│       num_wires      (n_volumes,n_planes) int32    # geometry (mirror sensor /config)
-│       norm_sigma     (n_gid, n_bands)    float32   # the NormalizationTable (frozen)
+│       band_lengths   (n_bands,)          int32     # PADDED lengths [271,271,542,1084,2168]
+│       gids           (G,)                int32     # the plane set (row order of norm_sigma)
+│       n_wires        (G,)                int32     # signals per plane, indexed by gid position
+│       norm_sigma     (G, n_bands)        float32   # the NormalizationTable (frozen; row = gid POSITION)
 │
 ├── /coord                                   ← shard-wide concatenated coords (M = Σ n_coeff)
 │     band        (M,) uint8                 # 0..n_bands-1
@@ -228,7 +229,9 @@ the noisy shards.
   no fragile positional coupling.
 - **Objective selects modalities:** MAE pretraining = `modalities=('coeff',)`;
   denoising = `('coeff','coeff_clean')`; deconvolution (future) adds `coeff_charge`.
-- **Role tag** `('target', <name>)` on the joined modality's value distinguishes
+- **Role tag** `('target', <name>)` — DEFERRED to the tokenizer stage (not yet in
+  `CoeffTPCDataset`, which currently returns plain rows). Intended so it
+  distinguishes
   targets from the input in `_roles` so tokenize/loss select correctly.
 - **Extensible:** a new target = a new modality file. No schema change, no rewrite of
   existing shards.
@@ -317,3 +320,17 @@ green acceptance gate from step 1.
   Noisy and clean are never in the same h5.
 - **Corpus root** → `/sdf/data/neutrino/omara/coeff_tpc/<run>/`.
 - **Charge** → deferred (future), alongside optical.
+- **O5. Bands → KEEP ALL `level+1`** (incl. D1), unlike the old build which dropped
+  D1 at the cache level. Rationale (audit-quantified): after per-band VisuShrink only
+  ~0.009% of D1's noise slots survive, so D1 adds only ~1–2k kept coeffs/event
+  (~1–3%) — the "D1 = 50% of padded slots" figure is a red herring (storage counts
+  *kept sparse* coeffs, not slots). Keeping D1 is nearly free AND makes the corpus
+  reconstructable (the old 4-band cache could not `waverec`). The model/tokenizer
+  selects which bands to use.
+
+**Audit (5+5 agents, 2026-07-24):** all confirmed defects fixed + regression-tested
+(plane_gid uint8→int32; coeff glob no longer matches coeff_clean; coeff↔coeff_clean
+join by identity not position; multipass padding; cal_events guard; clean-gather +
+sigma + digest + writer validation). Confirmed-correct: numpy≡torch DWT, gate port,
+byte-parity, freeze-safety. Intentional-and-correct: k3/2pass (qualified), A-parity
+quantile, raw+norm_sigma.
