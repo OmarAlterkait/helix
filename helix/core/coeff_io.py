@@ -54,6 +54,11 @@ def _basis_from_config(cfg) -> BasisDescriptor:
         sigma_norm=float(cfg.attrs["sigma_norm"]),
     )
     b.validate()                         # fail loudly if band_lengths drifted from the basis
+    stored = cfg.attrs.get("basis_digest")
+    if stored and str(stored) != b.digest():
+        raise ValueError(
+            f"basis_digest mismatch: /config says {stored!r} but the basis attrs "
+            f"hash to {b.digest()!r} — the shard's declared identity disagrees with its basis.")
     return b
 
 
@@ -71,7 +76,7 @@ def coeff_event_to_arrays(ce: CoeffEvent) -> dict:
 def arrays_to_coeff_event(d: dict, basis: BasisDescriptor) -> CoeffEvent:
     """Flat dict + basis → CoeffEvent (inverse of `coeff_event_to_arrays`)."""
     return CoeffEvent(
-        band=np.asarray(d["band"], np.uint8), plane_gid=np.asarray(d["plane_gid"], np.uint8),
+        band=np.asarray(d["band"], np.uint8), plane_gid=np.asarray(d["plane_gid"], np.int32),
         wire=np.asarray(d["wire"], np.int32), tau=np.asarray(d["tau"], np.int32),
         value=np.asarray(d["value"], np.float32),
         gids=np.asarray(d["gids"], np.int32), n_wires=np.asarray(d["n_wires"], np.int32),

@@ -44,6 +44,17 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
                            mode=config.dwt_mode)
         clean_bands[int(gid)] = bands
 
+    # the clean planes must cover the noisy support with matching geometry — else the
+    # gather at (gid, wire, tau) silently misaligns or crashes.
+    for gi, gid in enumerate(ce_noisy.gids):
+        g = int(gid)
+        if g not in clean_bands:
+            raise ValueError(f"clean_planes missing gid {g} present in the noisy event")
+        if clean_bands[g][0].shape[0] != int(ce_noisy.n_wires[gi]):
+            raise ValueError(
+                f"gid {g}: clean has {clean_bands[g][0].shape[0]} wires, "
+                f"noisy has {int(ce_noisy.n_wires[gi])} — geometry must match")
+
     values = np.zeros(ce_noisy.n_coeff, np.float32)
     sigma = np.zeros_like(ce_noisy.sigma_threshold)
     n_bands = ce_noisy.basis.n_bands
@@ -94,7 +105,14 @@ def build_corpus(events, plane_fn, config: DetectorConfig, out_dir, *,
             clean_ces.append(clean_coeff_event(ce, clean_planes, config,
                                                run=run, source_file=src, event=int(ev)))
 
-    norm = normalization_table([noisy_ces[i] for i in cal_events]) if cal_events else None
+    if cal_events:
+        if max(cal_events) >= len(noisy_ces):
+            raise ValueError(
+                f"cal_events {tuple(cal_events)} out of range for {len(noisy_ces)} built "
+                f"events; pass cal_events=range(min(2, n)) or () to skip normalization")
+        norm = normalization_table([noisy_ces[i] for i in cal_events])
+    else:
+        norm = None
 
     if write:
         out_dir.mkdir(parents=True, exist_ok=True)

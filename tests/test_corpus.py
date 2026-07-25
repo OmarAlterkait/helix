@@ -93,3 +93,43 @@ def test_build_corpus_no_clean(tmp_path):
     assert clean == []
     assert not (tmp_path / "cx_coeff_clean_0000.h5").exists()
     assert (tmp_path / "cx_coeff_0000.h5").exists()
+
+
+# ---- regression: audit fixes ----------------------------------------------
+
+def test_cal_events_out_of_range_raises(tmp_path):
+    set_backend("numpy")
+    import pytest
+    with pytest.raises(ValueError, match="cal_events"):        # 1 event, default cal (0,1)
+        build_corpus(range(1), _plane_fn, _config(), tmp_path, dataset_name="cx")
+    # a 1-event build works with cal_events matched to what's available
+    n, c, norm = build_corpus(range(1), _plane_fn, _config(), tmp_path,
+                              dataset_name="cx", cal_events=(0,))
+    assert norm.shape[0] == len(GIDS)
+
+
+def test_clean_geometry_mismatch_raises():
+    import pytest
+    from helix.tpc.pipeline import process_plane, event_coeff_event
+    from helix.tpc.corpus import clean_coeff_event
+    set_backend("numpy")
+    cfg = _config()
+    noisy, clean = _plane_fn(0)
+    results = {g: process_plane(img, cfg, removal="gate") for g, img in noisy.items()}
+    ce = event_coeff_event(results, cfg)
+    bad_clean = {g: v[: v.shape[0] // 2] for g, v in clean.items()}    # half the wires
+    with pytest.raises(ValueError, match="wires"):
+        clean_coeff_event(ce, bad_clean, cfg)
+    missing = {GIDS[0]: clean[GIDS[0]]}                                 # drop a gid
+    with pytest.raises(ValueError, match="missing gid"):
+        clean_coeff_event(ce, missing, cfg)
+
+
+def test_multipass_now_padded():
+    from helix.tpc.pipeline import process_plane
+    set_backend("numpy")
+    cfg = _config()                                          # NT=102 -> pad to 104
+    img = np.random.default_rng(0).standard_normal((8, NT)).astype(np.float32)
+    gate = process_plane(img, cfg, removal="gate").sparse
+    mp = process_plane(img, cfg, removal="multipass").sparse
+    assert [c.shape[-1] for c in gate.coeffs] == [c.shape[-1] for c in mp.coeffs]

@@ -1,7 +1,9 @@
 """Tests for the qualified coherent gate (R2).
 
-- parity: the 1-pass core (median sigc) reproduces the research reference
-  `measure_coeffs.smart_gate_bands`, transcribed inline (numpy).
+- parity: the 1-pass core reproduces the R2 algorithm transcribed inline (numpy
+  self-consistency). NOTE both sides use np.median, so this is NOT a cross-backend
+  check against the old torch.median reference (they differ by the even-n tie-break
+  ~1e-4); the shipped default is 'quantile' (A-parity) by deliberate choice.
 - behavioral: the gate removes block common-mode coherent noise while preserving
   signal, and the 2-pass estimate removes at least as much as 1-pass.
 - guards: gate_approx=False leaves the approx band untouched; non-finite fails open.

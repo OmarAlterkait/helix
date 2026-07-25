@@ -41,6 +41,9 @@ class DetectorConfig:
     threshold_kappa: float = 1.0
     threshold_mode: str = "hard"
     threshold_include_approx: bool = True
+    # tokenize normalization scalar (asinh(value / (norm_sigma/sigma_norm))); recorded
+    # in the shard basis so the corpus tracks the model's SIGMA. Default = the FM's 2.6.
+    sigma_norm: float = 2.6
 
     # ── readout geometry (populated from input file) ──
     num_time_steps: int = 2701

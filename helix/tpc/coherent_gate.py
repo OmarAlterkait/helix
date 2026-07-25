@@ -91,7 +91,12 @@ def _detect_signal(cleaned_band: np.ndarray, ksig: float, group_size: int) -> np
 
 
 def _sigc(M: np.ndarray, mode: str) -> float:
-    if mode == "median":                 # research reference (torch.median = lower-middle)
+    # NB: 'median' uses np.median (average of the two middles) — it does NOT reproduce
+    # the old torch.median (lower of the two middles); the two differ by the even-n
+    # tie-break (~1e-4 rel), which flips a handful of gate decisions on some events.
+    # The shipped default is 'quantile' (A-parity, quantile(0.5)) — the deliberate
+    # canonical, not the reference's accidental torch.median. See COEFF_CORPUS_DESIGN.
+    if mode == "median":
         return max(float(np.median(np.abs(M))) / 0.6745, _EPS)
     return max(float(np.quantile(np.abs(M), 0.5)) / 0.6745, _EPS)   # A-parity (default)
 
