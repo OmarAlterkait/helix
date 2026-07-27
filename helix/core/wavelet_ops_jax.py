@@ -207,6 +207,7 @@ def threshold_bands(coeffs, th: ThresholdSpec, sigma=None):
             tvec = jnp.take_along_axis(srt, kc[..., None], axis=-1)
         out = [bands[0]] + [jnp.where(jnp.abs(c) >= tvec, c, 0.0) for c in bands[1:]]
 
-    n_kept = int(sum(int(jnp.count_nonzero(c)) for c in out))
-    n_total = int(sum(int(c.size) for c in out))
+    # ONE device->host sync for the whole band list, not one per band.
+    n_kept = int(jnp.sum(jnp.stack([jnp.count_nonzero(c) for c in out])))
+    n_total = int(sum(int(c.size) for c in out))       # shapes only, no sync
     return out, n_kept, n_total, np.asarray(band_sigma)

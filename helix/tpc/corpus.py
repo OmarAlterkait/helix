@@ -77,12 +77,14 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
             xp.stack([xp.median(xp.abs(c)) for c in bands_g]) / 0.6745, np.float32)
         if not gmask.any():
             continue
-        # ONE gather per plane over the band-concatenated array (was n_bands
-        # gathers, each a separate host->device->host round trip)
-        cat = xp.concatenate(list(bands_g), axis=1)          # (n_wires, sum(band_lengths))
+        # Gather on the HOST. The index arrays have a per-event length, and a
+        # device gather on a varying shape recompiles EVERY event — the same trap
+        # as the compaction and the densify input. One dense transfer per plane
+        # (measured ~0.2 ms) plus a numpy fancy-index is strictly cheaper than a
+        # recompile, and keeps the shape ladder empty.
+        cat = np.asarray(xp.concatenate(list(bands_g), axis=1), np.float32)
         cols = col_off[ce_noisy.band[gmask]] + ce_noisy.tau[gmask]
-        gv = cat[xp.asarray(ce_noisy.wire[gmask]), xp.asarray(cols)]
-        values[gmask] = np.asarray(gv, np.float32)
+        values[gmask] = cat[ce_noisy.wire[gmask], cols]
     return CoeffEvent(
         band=ce_noisy.band.copy(), plane_gid=ce_noisy.plane_gid.copy(),
         wire=ce_noisy.wire.copy(), tau=ce_noisy.tau.copy(), value=values,

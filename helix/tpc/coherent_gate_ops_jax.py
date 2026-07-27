@@ -19,7 +19,6 @@ Measured ~42x over numpy for the 2-pass gate on an RTX 2080 Ti.
 from __future__ import annotations
 
 import functools
-import warnings
 
 import jax
 import jax.numpy as jnp
@@ -68,7 +67,9 @@ def _gate_band(b, gs, kgate, ksig, npass):
             csg = jnp.maximum(
                 jnp.nanquantile(jnp.abs(cb).reshape(nb, -1), 0.5, axis=1) / 0.6745, _EPS)
             sm = jnp.abs(cb) > ksig * csg[:, None, None]
-    return cleaned[:W]
+    # fail open on non-finite input, decided ON DEVICE: a host-side
+    # `bool(isfinite(...))` per band cost 30 device stalls per event.
+    return jnp.where(jnp.isfinite(b).all(), cleaned[:W], b)
 
 
 def gate_bands(bands, *, group_size=64, kgate=3.0, ksig=3.0, npass=2,
@@ -91,10 +92,6 @@ def gate_bands(bands, *, group_size=64, kgate=3.0, ksig=3.0, npass=2,
     out = []
     for i, b in enumerate(bands):
         bj = jnp.asarray(b, dtype=jnp.float32)
-        if not bool(jnp.isfinite(bj).all()):
-            warnings.warn(f"coherent_gate: non-finite band {i}; failing open (no removal)")
-            out.append(bj)
-            continue
         if i == 0 and not gate_approx:
             out.append(bj)
             continue

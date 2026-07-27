@@ -62,7 +62,7 @@ def _compact_fn():
     return _COMPACT
 
 
-def nonzero_rows(cband):
+def nonzero_rows(cband, n=None):
     """``(wire_idx, tau_idx, value)`` of the nonzeros of one band.
 
     On a device (jax) array the extraction runs ON DEVICE and only the sparse rows
@@ -77,7 +77,8 @@ def nonzero_rows(cband):
         return wi.astype(np.int32), ti.astype(np.int32), cband[wi, ti].astype(np.float32)
 
     import jax.numpy as jnp
-    n = int(jnp.count_nonzero(cband))                   # one cheap device reduction
+    if n is None:                                       # caller may batch this sync
+        n = int(jnp.count_nonzero(cband))
     if n == 0:
         z = np.empty(0, np.int32)
         return z, z.copy(), np.empty(0, np.float32)
@@ -150,6 +151,13 @@ class CoeffEvent:
                 raise ValueError(
                     f"gid {gid}: sigma_per_band has {spb.shape[0]} entries, expected {n_bands}")
             sigma[gi, :] = spb
+            # one stacked count for the whole plane (was one sync per band)
+            if _is_device(coeffs[0]):
+                import jax.numpy as _jnp
+                nnz = [int(x) for x in np.asarray(
+                    _jnp.stack([_jnp.count_nonzero(c) for c in coeffs]))]
+            else:
+                nnz = [None] * len(coeffs)
             for b, cband in enumerate(coeffs):
                 if cband.shape[-1] != basis.band_lengths[b]:
                     raise ValueError(
@@ -158,7 +166,7 @@ class CoeffEvent:
                 if cband.shape[0] != nw:
                     raise ValueError(
                         f"gid {gid} band {b}: {cband.shape[0]} wires != band-0 count {nw}")
-                wi, ti, vals = nonzero_rows(cband)     # on device when cband is jax
+                wi, ti, vals = nonzero_rows(cband, nnz[b])   # device-side when jax
                 if wi.size == 0:
                     continue
                 b_l.append(np.full(wi.size, b, dtype=np.uint8))
