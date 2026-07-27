@@ -73,3 +73,115 @@ def denormalize_values(tok, plane_gid, band, gids, norm_sigma, *, eps=1e-6):
     """Inverse of :func:`normalize_values` (for reconstruction / debugging)."""
     sig = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), eps)
     return (np.sinh(np.asarray(tok, np.float32)) * sig).astype(np.float32)
+
+
+# ---- the patch tokenizer (port of research vit_tpc.assemble_tpc_band) ------
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PatchConfig:
+    """Patch geometry + time-coordinate constants of the FM tokenizer.
+
+    Defaults reproduce ``research/coeff_foundation_model/vit_tpc.py`` exactly:
+    PW=16 wires x PT=8 band-ticks -> 128 slots, over the first 4 bands
+    (A4, D4, D3, D2 — the FM dropped D1). ``FM_PW``/``FM_PT`` env-var mutation of
+    module globals is replaced by explicit fields.
+    """
+    pw: int = 16
+    pt: int = 8
+    n_bands: int = 4                                  # A4,D4,D3,D2 (D1 dropped)
+    lev: tuple = (4, 4, 3, 2)                         # DWT level per band
+    delta: tuple = (-2.38, 0.62, 0.75, 0.50)          # per-band tick offset
+    toff: tuple = (-17.4, 2.6, 5.5)                   # U,V,Y sensor->drift (pb_labels.TOFF)
+
+    @property
+    def n_slot(self) -> int:
+        return self.pw * self.pt
+
+
+def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
+             norm_sigma, cfg=PatchConfig(), value_clean=None, dead_frac=0.0,
+             rng=None):
+    """Coefficient rows -> per-band 2-D patch tokens (stateless, pure numpy).
+
+    Faithful port of ``vit_tpc.assemble_tpc_band``. The one substantive change is
+    normalisation: the old cache stored ``val = raw * SIGMA/sigma_tab`` and the
+    tokenizer took ``arcsinh(val/SIGMA)``, so SIGMA cancelled and the result was
+    ``arcsinh(raw/sigma_tab)``. The corpus now stores RAW values, so we compute
+    ``arcsinh(raw/norm_sigma)`` directly — identical output, one less place for a
+    baked-in constant to drift.
+
+    Returns numpy arrays; converting to tensors is the caller's job (the pimm
+    transform), keeping this importable without torch.
+    """
+    band = np.asarray(band, np.int64); plane_gid = np.asarray(plane_gid, np.int64)
+    wire = np.asarray(wire, np.int64); tau = np.asarray(tau, np.int64)
+    value = np.asarray(value, np.float32)
+    bl = np.asarray(band_lengths, np.int64)
+    pw, pt, nslot = cfg.pw, cfg.pt, cfg.n_slot
+
+    keep = band < cfg.n_bands                        # D1 (and beyond) dropped
+    band, plane_gid, wire, tau = band[keep], plane_gid[keep], wire[keep], tau[keep]
+    value = value[keep]
+    clean = None if value_clean is None else np.asarray(value_clean, np.float32)[keep]
+
+    val = normalize_values(value, plane_gid, band, gids, norm_sigma)
+    target = (normalize_values(clean, plane_gid, band, gids, norm_sigma)
+              if clean is not None else np.zeros_like(val))
+
+    wb, tb = wire // pw, tau // pt
+    key = (plane_gid << 40) | (band << 36) | (wb << 18) | tb
+    uniq, cell = np.unique(key, return_inverse=True)
+    n_cells = len(uniq)
+    slot = (wire % pw) * pt + (tau % pt)
+    cell_band = ((uniq >> 36) & 0xF).astype(np.int64)
+    cell_gid = (uniq >> 40).astype(np.int64)
+    cell_wb = ((uniq >> 18) & 0x3FFFF).astype(np.int64)
+    cell_tb = (uniq & 0x3FFFF).astype(np.int64)
+
+    occ = np.zeros((n_cells, nslot), bool)
+    inp = np.zeros((n_cells, nslot), np.float32)
+    tgt = np.zeros((n_cells, nslot), np.float32)
+    occ[cell, slot] = True
+    inp[cell, slot] = val
+    tgt[cell, slot] = target
+
+    # valid slots: wire-in-block < plane n_wires, tick-in-block < band length.
+    # n_wires is resolved through gid_rows, NOT n_wires[gid] — they coincide only
+    # for contiguous gids (the old code assumed that).
+    nw = np.asarray(n_wires, np.int64)[gid_rows(cell_gid, gids)]
+    Lb = bl[cell_band]
+    wi = np.arange(pw)[None, :]
+    ti = np.arange(pt)[None, :]
+    wok = (cell_wb[:, None] * pw + wi) < nw[:, None]
+    tok = (cell_tb[:, None] * pt + ti) < Lb[:, None]
+    valid = (wok[:, :, None] & tok[:, None, :]).reshape(n_cells, nslot)
+
+    dead = np.zeros((n_cells, pw), bool)
+    if dead_frac > 0:                                 # wire-kill augmentation
+        rng = np.random.default_rng() if rng is None else rng
+        kill = rng.random((n_cells, pw)) < dead_frac
+        dead = kill & ((cell_wb[:, None] * pw + wi) < nw[:, None])
+        ks = np.repeat(dead, pt, axis=1)
+        inp[ks] = 0.0
+        occ[ks] = False                               # killed -> not active input
+        # targets/valid unchanged: the model must still predict a dead wire
+
+    # RoPE time coord: grid-CENTER drift time per (tick-block, band), minus the
+    # per-plane sensor->drift offset. Center (not survivor-max) so it is
+    # band-aligned and occupancy-independent; TOFF so planes share a zero.
+    dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float32)
+    toff = np.asarray(cfg.toff, np.float32)
+    center_tau = cell_tb.astype(np.float32) * pt + pt / 2.0
+    cell_t = ((center_tau + np.asarray(cfg.delta, np.float32)[cell_band]) * dec[cell_band]
+              - toff[cell_gid % 3]).astype(np.float32)
+
+    return dict(
+        band=band, val=val, target=target, cell=cell.astype(np.int64),
+        slot=slot.astype(np.int64), n_cells=n_cells,
+        occ=occ.astype(np.float32), inp=inp, tgt=tgt, valid=valid,
+        dead=dead.astype(np.float32), cell_band=cell_band, cell_gid=cell_gid,
+        cell_t=cell_t, cell_wire=(cell_wb * pw).astype(np.float32),
+    )
