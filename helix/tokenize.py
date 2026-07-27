@@ -185,3 +185,81 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
         dead=dead.astype(np.float32), cell_band=cell_band, cell_gid=cell_gid,
         cell_t=cell_t, cell_wire=(cell_wb * pw).astype(np.float32),
     )
+
+
+# ---- transform wrapper (helix owns the whole tokenizer) --------------------
+
+class CoeffTokenize:
+    """Coeff rows -> patch tokens, as a pimm-data-compatible transform.
+
+    Lives in helix, not pimm: helix owns the tokenizer's semantics (patch
+    geometry, band selection, RoPE time coords, normalisation), so the class and
+    its config belong with the logic — a change to the token layout should touch
+    ONE repo. This needs no pimm-data import, because the transform protocol is
+    duck-typed: any ``fn(data_dict) -> data_dict`` with a ``scope`` works.
+
+    Registration is the consumer's business — pimm (or a recipe) does::
+
+        from pimm_data.transform import TRANSFORMS
+        from helix.tokenize import CoeffTokenize
+        TRANSFORMS.register_module(module=CoeffTokenize)
+
+    so ``dict(type='CoeffTokenize', ...)`` resolves in a config, while helix
+    itself stays dependency-free.
+
+    Runs per event in a DataLoader worker (``scope='sample'``), i.e. in the HEAD
+    of the transform list before the terminal ``Collect``. That spends CPU, which
+    is idle during training, rather than GPU, which is not — and the shard
+    metadata it needs travels with the sample.
+    """
+
+    scope = "sample"
+
+    def __init__(self, part="coeff", clean_part="coeff_clean", out_part=None,
+                 cfg=None, dead_frac=0.0, seed=None, gids=None, n_wires=None,
+                 band_lengths=None, norm_sigma=None):
+        self.part = part
+        self.clean_part = clean_part
+        self.out_part = out_part or part
+        self.cfg = cfg if isinstance(cfg, PatchConfig) else PatchConfig(**(cfg or {}))
+        self.dead_frac = float(dead_frac)
+        self.seed = seed
+        self._override = dict(gids=gids, n_wires=n_wires,
+                              band_lengths=band_lengths, norm_sigma=norm_sigma)
+
+    def _meta(self, sub):
+        """Shard metadata: explicit constructor args win, else the sample's
+        ``_meta`` (surfaced by the dataset from the shard ``/config``)."""
+        meta = dict(sub.get("_meta") or {})
+        for k, v in self._override.items():
+            if v is not None:
+                meta[k] = v
+        missing = [k for k in ("gids", "n_wires", "band_lengths", "norm_sigma")
+                   if meta.get(k) is None]
+        if missing:
+            raise KeyError(
+                f"CoeffTokenize needs {missing} — pass them to the constructor or "
+                "have the dataset put them in sample['{}']['_meta']".format(self.part))
+        return meta
+
+    def __call__(self, data):
+        sub = data[self.part]
+        m = self._meta(sub)
+        clean = data.get(self.clean_part)
+        rng = None if self.seed is None else np.random.default_rng(
+            self.seed ^ (hash(data.get("name", "")) & 0xFFFFFFFF))
+        tok = assemble(
+            sub["band"], sub["plane_gid"], sub["wire"], sub["tau"],
+            np.asarray(sub["value"]).reshape(-1),
+            gids=m["gids"], n_wires=m["n_wires"], band_lengths=m["band_lengths"],
+            norm_sigma=m["norm_sigma"], cfg=self.cfg,
+            value_clean=(None if clean is None
+                         else np.asarray(clean["value"]).reshape(-1)),
+            dead_frac=self.dead_frac, rng=rng)
+        n_cells = tok.pop("n_cells")
+        out = dict(tok)
+        out["_meta"] = dict(n_cells=n_cells, n_slot=self.cfg.n_slot)
+        data[self.out_part] = out
+        if self.clean_part in data and self.clean_part != self.out_part:
+            del data[self.clean_part]        # its values are folded into tgt
+        return data
