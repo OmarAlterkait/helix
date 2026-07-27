@@ -10,6 +10,8 @@ up as a failed array comparison.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -169,3 +171,57 @@ def test_non_contiguous_gids_use_row_lookup():
         wb = int(out["cell_wire"][c])
         occ_w = np.where(out["occ"][c].reshape(PW, PT).any(1))[0]
         assert all(wb + int(w) < limit for w in occ_w), f"cell {c} gid {g} exceeds n_wires"
+
+
+def test_transform_is_pimm_data_compatible_without_importing_it():
+    """helix owns the whole tokenizer: the transform protocol is duck-typed
+    (callable(data)->data with a `scope`), so no pimm-data import is needed and
+    registration is the consumer's one-liner."""
+    # the real property: importing helix must not pull pimm-data in (a source
+    # grep would false-positive on the registration example in the docstring)
+    import subprocess, sys as _s
+    r = subprocess.run(
+        [_s.executable, "-c",
+         "import sys, helix.tokenize; "
+         "print('pimm_data' in sys.modules or 'torch' in sys.modules)"],
+        capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(__file__)))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "False", "helix.tokenize pulled in pimm-data or torch"
+    from helix.tokenize import CoeffTokenize
+    assert CoeffTokenize.scope == "sample"
+
+    gids = np.array([0, 1])
+    bl = np.array([271, 271, 542, 1084])
+    rng = np.random.default_rng(2)
+    n = 800
+    band = rng.integers(0, 4, n); gid = rng.choice(gids, n)
+    wire = rng.integers(0, 64, n)
+    tau = np.array([rng.integers(0, bl[b]) for b in band])
+    meta = dict(gids=gids, n_wires=np.array([64, 64]), band_lengths=bl,
+                norm_sigma=np.ones((2, 4), np.float32))
+    sample = {
+        "name": "evt0",
+        "coeff": dict(band=band, plane_gid=gid, wire=wire, tau=tau,
+                      value=rng.standard_normal((n, 1)).astype(np.float32), _meta=meta),
+        "coeff_clean": dict(band=band, plane_gid=gid, wire=wire, tau=tau,
+                            value=rng.standard_normal((n, 1)).astype(np.float32)),
+    }
+    out = CoeffTokenize()(dict(sample))
+    cfg = PatchConfig()
+    assert out["coeff"]["inp"].shape[1] == cfg.n_slot
+    assert out["coeff"]["_meta"]["n_slot"] == cfg.n_slot
+    assert "coeff_clean" not in out          # folded into tgt
+    assert out["coeff"]["tgt"].any()
+    # constructor overrides win over the sample's _meta
+    o2 = CoeffTokenize(cfg=dict(pw=8, pt=4), gids=gids, n_wires=np.array([64, 64]),
+                       band_lengths=bl, norm_sigma=np.ones((2, 4), np.float32))(dict(sample))
+    assert o2["coeff"]["inp"].shape[1] == 32
+
+
+def test_transform_reports_missing_metadata_clearly():
+    from helix.tokenize import CoeffTokenize
+    sample = {"coeff": dict(band=np.array([0]), plane_gid=np.array([0]),
+                            wire=np.array([0]), tau=np.array([0]),
+                            value=np.zeros((1, 1), np.float32))}
+    with pytest.raises(KeyError, match="gids"):
+        CoeffTokenize()(sample)
