@@ -115,5 +115,98 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
 
 
 def reconstruct(coeffs, wavelet: str, level: int, mode: str, n_time: int):
-    Wi = _matrices(wavelet, n_time, level, mode)[1]
-    return coeffs @ Wi
+    """Inverse matmul DWT. Accepts a band list (the ``wavedec`` seam) or the flat
+    ``sparsify`` layout.
+
+    The inverse matrix must be built for the length the coefficients actually
+    describe — which is the PADDED signal length, not ``n_time``. (For
+    periodization ``sum(band_lengths) != n_input`` in general: coif3 L4 on 4321
+    ticks yields 4325 coefficients, on 4336 yields 4336.) We recover it the same
+    way ``provenance.padded_length_of`` does — via a zero ``waverec`` — then crop
+    to ``n_time``, matching the numpy backend's ``waverec(...)[..., :n_time]``.
+    """
+    if isinstance(coeffs, (list, tuple)):
+        import pywt
+        band_lengths = [int(np.asarray(c).shape[-1]) for c in coeffs]
+        rec_len = int(pywt.waverec([np.zeros(L, np.float32) for L in band_lengths],
+                                   wavelet, mode=mode).shape[-1])
+        flat = jnp.concatenate([jnp.asarray(c) for c in coeffs], axis=-1)
+    else:                                          # legacy flat layout from sparsify
+        flat = jnp.asarray(coeffs)
+        rec_len = n_time
+    Wi = _matrices(wavelet, rec_len, level, mode)[1]
+    return (flat @ Wi)[..., :n_time]
+
+
+# ---- the transform/threshold seam (mirrors wavelet_ops_numpy) --------------
+#
+# ``sparsify`` above is the fused fast path. These two expose the seam a
+# coefficient-space step (the coherent gate) needs to sit in, and return a BAND
+# LIST so the contract matches the numpy backend (CoeffEvent.from_sparse_results
+# and coherent_gate both consume band lists).
+
+def _eff_level(n_ticks: int, wavelet: str, level: int) -> int:
+    import pywt
+    return min(level, pywt.dwt_max_level(n_ticks, pywt.Wavelet(wavelet).dec_len))
+
+
+def wavedec(image, wavelet: str, level: int, mode: str):
+    """Forward matmul DWT -> ``([cA, cD_L, …, cD_1], effective_level)`` (GPU)."""
+    x = jnp.asarray(image, dtype=jnp.float32)
+    lev = _eff_level(x.shape[-1], wavelet, level)
+    Wf, _, slices, _, _ = _matrices(wavelet, x.shape[-1], lev, mode)
+    flat = x @ Wf
+    return [flat[..., s] for s in slices], lev
+
+
+def _mad_sigma_j(c):
+    return jnp.median(jnp.abs(c)) / 0.6745
+
+
+def threshold_bands(coeffs, th: ThresholdSpec, sigma=None):
+    """Threshold a band list -> ``(out_bands, n_kept, n_total, band_sigma)`` (GPU).
+
+    Same estimator as the numpy backend: per-band MAD sigma measured on the
+    (already gated) coefficients, universal threshold ``scale*sigma*sqrt(2 ln N)``.
+    """
+    bands = [jnp.asarray(c, dtype=jnp.float32) for c in coeffs]
+    band_sigma = jnp.stack([_mad_sigma_j(c) for c in bands])
+
+    if th.method == "universal":
+        if sigma is None:
+            nsig = jnp.median(jnp.abs(bands[-1]), axis=-1) / 0.6745
+        else:
+            nsig = jnp.asarray(sigma, dtype=jnp.float32)
+        out = []
+        for i, c in enumerate(bands):
+            if i == 0 and not th.threshold_approx:
+                out.append(c)
+                continue
+            lf = float(np.sqrt(2.0 * np.log(max(c.shape[-1], 2))))
+            t = (th.scale * band_sigma[i] * lf) if th.per_band_sigma \
+                else (th.scale * nsig[..., None] * lf)
+            a = jnp.abs(c)
+            if th.func == "soft":
+                out.append(jnp.sign(c) * jnp.maximum(a - t, 0.0))
+            elif th.func == "garrote":
+                out.append(jnp.where(a >= t, c - t * t / jnp.where(c == 0, 1.0, c), 0.0))
+            else:
+                out.append(jnp.where(a >= t, c, 0.0))
+    else:                                           # topk / energy (approx kept)
+        det = jnp.concatenate(bands[1:], axis=-1)
+        a = jnp.abs(det)
+        D = a.shape[-1]
+        if th.method == "topk":
+            k = max(1, int(th.keep * D))
+            tvec = jax.lax.top_k(a, k)[0][..., -1:]
+        else:
+            srt = jnp.sort(a, axis=-1)[..., ::-1]
+            csum = jnp.cumsum(srt ** 2, axis=-1)
+            tot = jnp.maximum(csum[..., -1:], 1e-30)
+            kc = jnp.clip((csum < th.energy * tot).sum(axis=-1), 0, D - 1)
+            tvec = jnp.take_along_axis(srt, kc[..., None], axis=-1)
+        out = [bands[0]] + [jnp.where(jnp.abs(c) >= tvec, c, 0.0) for c in bands[1:]]
+
+    n_kept = int(sum(int(jnp.count_nonzero(c)) for c in out))
+    n_total = int(sum(int(c.size) for c in out))
+    return out, n_kept, n_total, np.asarray(band_sigma)
