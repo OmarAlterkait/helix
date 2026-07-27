@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -35,8 +36,7 @@ def _pad_wires(b, gs):
     return b, W
 
 
-@functools.partial(jax.jit, static_argnames=("gs", "npass"))
-def _gate_band(b, gs, kgate, ksig, npass):
+def _gate_band_core(b, gs, kgate, ksig, npass):
     """Gate one band ``(W, Lb)`` -> cleaned band ``(W, Lb)``.
 
     ``kgate`` is a per-pass vector (length ``npass``) so the pass loop unrolls
@@ -72,6 +72,24 @@ def _gate_band(b, gs, kgate, ksig, npass):
     return jnp.where(jnp.isfinite(b).all(), cleaned[:W], b)
 
 
+@functools.partial(jax.jit, static_argnames=("gs", "npass", "lens", "skip_first"))
+def _gate_all(flat, gs, kgate, ksig, npass, lens, skip_first):
+    """Gate EVERY band of a plane in ONE compiled kernel.
+
+    ``flat`` is the band-concatenated plane ``(W, sum(lens))``. The band loop runs
+    inside the trace, so it unrolls into a single kernel instead of dispatching
+    one op sequence per band — a Python loop outside jit costs 5 dispatches per
+    plane (30 per event) and serialises them.
+    """
+    out, off = [], 0
+    for i, L in enumerate(lens):
+        seg = flat[:, off:off + L]
+        out.append(seg if (i == 0 and skip_first)
+                   else _gate_band_core(seg, gs, kgate, ksig, npass))
+        off += L
+    return jnp.concatenate(out, axis=1)
+
+
 def gate_bands(bands, *, group_size=64, kgate=3.0, ksig=3.0, npass=2,
                gate_approx=True, sigc_mode="quantile"):
     """Coherent-gate a plane's DWT bands ``[cA, cD_L, …, cD_1]`` (list in, list out).
@@ -89,11 +107,12 @@ def gate_bands(bands, *, group_size=64, kgate=3.0, ksig=3.0, npass=2,
         kg = kg + [kg[-1]] * (npass - len(kg))
     kvec = jnp.asarray(kg[:npass], dtype=jnp.float32)
 
-    out = []
-    for i, b in enumerate(bands):
-        bj = jnp.asarray(b, dtype=jnp.float32)
-        if i == 0 and not gate_approx:
-            out.append(bj)
-            continue
-        out.append(_gate_band(bj, int(group_size), kvec, float(ksig), int(npass)))
-    return out
+    from helix.core.wavelet import FlatBands
+    if isinstance(bands, FlatBands):             # already flat: zero copies
+        lens, flat = bands.lens, bands.flat
+    else:
+        lens = tuple(int(np.asarray(b).shape[-1]) for b in bands)
+        flat = jnp.concatenate([jnp.asarray(b, jnp.float32) for b in bands], axis=1)
+    gated = _gate_all(flat, int(group_size), kvec, float(ksig), int(npass),
+                      lens, not gate_approx)
+    return FlatBands(gated, lens)

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from helix.core.provenance import BasisDescriptor
-from helix.core.wavelet import SparseResult, reconstruct
+from helix.core.wavelet import SparseResult, reconstruct, FlatBands
 
 
 def _is_device(a) -> bool:
@@ -105,6 +105,32 @@ def nonzero_rows(cband, n=None):
         np.asarray(val[:cap], np.float32)[:n]
 
 
+def _flat_rows(fb, band_lengths, gid):
+    """Sparse rows of a whole plane from ONE flat compaction.
+
+    ``fb.flat`` is ``(n_wires, sum(band_lengths))``; a flat position p maps to
+    ``wire = p // C``, ``col = p % C``, then band/tau come from the static column
+    offsets. One kernel per plane instead of one per band.
+    """
+    import jax.numpy as jnp
+    flat = fb.flat
+    C = int(flat.shape[-1])
+    n = int(jnp.count_nonzero(flat))
+    if n == 0:
+        z = np.empty(0, np.int32)
+        return np.empty(0, np.uint8), z, z.copy(), np.empty(0, np.float32)
+    idx, val = _compact_fn()(flat.ravel())
+    cap = _xfer_cap(n)
+    pos = np.asarray(idx[:cap], np.int64)[:n]
+    vals = np.asarray(val[:cap], np.float32)[:n]
+    wire = (pos // C).astype(np.int32)
+    col = (pos % C).astype(np.int64)
+    offs = np.concatenate([[0], np.cumsum(np.asarray(band_lengths, np.int64))])
+    band = (np.searchsorted(offs, col, side="right") - 1).astype(np.uint8)
+    tau = (col - offs[band]).astype(np.int32)
+    return band, wire, tau, vals
+
+
 @dataclass
 class CoeffEvent:
     # flat sparse coeff rows (one event, all planes) — n = total kept coeffs
@@ -149,13 +175,21 @@ class CoeffEvent:
         for gi, gid in enumerate(gids):
             res = results[int(gid)]
             coeffs = res.coeffs
-            if not isinstance(coeffs, list):
-                raise TypeError("from_sparse_results expects numpy band-list coeffs")
+            if not isinstance(coeffs, (list, FlatBands)):
+                raise TypeError("from_sparse_results expects a band list or FlatBands")
             if len(coeffs) != n_bands:
                 raise ValueError(
                     f"gid {gid}: {len(coeffs)} bands but basis has {n_bands}")
             nw = coeffs[0].shape[0]
             n_wires[gi] = nw
+            if isinstance(coeffs, FlatBands):
+                # ONE compaction for the whole plane instead of one per band, and
+                # band/tau are derived from the flat column on the host.
+                bb, ww, tt, vv = _flat_rows(coeffs, basis.band_lengths, gid)
+                if bb.size:
+                    b_l.append(bb); p_l.append(np.full(bb.size, gid, np.int32))
+                    w_l.append(ww); t_l.append(tt); v_l.append(vv)
+                continue
             if res.sigma_per_band is None:
                 raise ValueError(f"gid {gid}: sigma_per_band is None (needed for sigma_threshold)")
             spb = np.asarray(res.sigma_per_band, dtype=np.float32).ravel()
