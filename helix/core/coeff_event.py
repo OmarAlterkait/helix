@@ -187,6 +187,19 @@ class CoeffEvent:
                     f"gid {gid}: {len(coeffs)} bands but basis has {n_bands}")
             nw = coeffs[0].shape[0]
             n_wires[gi] = nw
+            # sigma_threshold FIRST — BOTH paths need it. (It used to sit after
+            # the FlatBands branch, whose `continue` skipped it, so every jax-built
+            # shard carried sigma_threshold == 0 and therefore norm_sigma == 0 —
+            # silently destroying the normalization table the tokenizer needs.)
+            if res.sigma_per_band is None:
+                raise ValueError(f"gid {gid}: sigma_per_band is None (needed for sigma_threshold)")
+            spb = np.asarray(res.sigma_per_band, dtype=np.float32).ravel()
+            if spb.shape[0] != n_bands:
+                raise ValueError(
+                    f"gid {gid}: sigma_per_band has {spb.shape[0]} entries, expected {n_bands}")
+            if not np.all(np.isfinite(spb)):
+                raise ValueError(f"gid {gid}: sigma_per_band is non-finite ({spb})")
+            sigma[gi, :] = spb
             if isinstance(coeffs, FlatBands):
                 # ONE compaction for the whole plane instead of one per band, and
                 # band/tau are derived from the flat column on the host.
@@ -195,13 +208,6 @@ class CoeffEvent:
                     b_l.append(bb); p_l.append(np.full(bb.size, gid, np.int32))
                     w_l.append(ww); t_l.append(tt); v_l.append(vv)
                 continue
-            if res.sigma_per_band is None:
-                raise ValueError(f"gid {gid}: sigma_per_band is None (needed for sigma_threshold)")
-            spb = np.asarray(res.sigma_per_band, dtype=np.float32).ravel()
-            if spb.shape[0] != n_bands:
-                raise ValueError(
-                    f"gid {gid}: sigma_per_band has {spb.shape[0]} entries, expected {n_bands}")
-            sigma[gi, :] = spb
             # one stacked count for the whole plane (was one sync per band)
             if _is_device(coeffs[0]):
                 import jax.numpy as _jnp

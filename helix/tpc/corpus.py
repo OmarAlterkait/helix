@@ -110,23 +110,53 @@ def normalization_table(events) -> np.ndarray:
     """``norm_sigma`` (n_gid, n_bands) = mean over ``events`` of per-event
     ``sigma_threshold`` (= mean ``median(|gated band|)/0.6745`` over cal events —
     the old ``sigma_tab``)."""
-    return np.stack([e.sigma_threshold for e in events]).mean(axis=0).astype(np.float32)
+    tab = np.stack([e.sigma_threshold for e in events]).mean(axis=0).astype(np.float32)
+    if tab.size and float(np.nanmax(tab)) <= 0.0:
+        raise ValueError(
+            "norm_sigma is all zero — the per-event threshold sigma never reached "
+            "CoeffEvent.sigma_threshold, so the tokenizer's normalization table "
+            "would be meaningless. (This exact loss happened once: the flat/jax "
+            "branch of from_sparse_results skipped the sigma assignment.)")
+    return tab
 
 
 def build_corpus(events, plane_fn, config: DetectorConfig, out_dir, *,
                  dataset_name="coeff_tpc", run="", file_index=0, global_event_offset=0,
-                 cal_events=(0, 1), with_clean=True, write=True):
+                 cal_events=range(16), with_clean=True, write=True):
     """Build coeff (+ coeff_clean) shards from ``events`` via ``plane_fn``.
 
     ``plane_fn(event) -> (noisy_planes, clean_planes)`` with ``{gid: (nw, nt) image}``
     (clean_planes may be ``{}`` when ``with_clean=False``). Returns
     ``(noisy_events, clean_events, norm_sigma)``. Cal events index into ``events``.
+
+    ``cal_events`` defaults to the first 16, not 2. Measured on 150 real events,
+    the error of the calibration mean against the all-event mean is:
+    2 -> median 0.39% / max 10.2% ; 8 -> 0.20% / 3.3% ; 16 -> 0.13% / 2.2%.
+    The old 2-event table (inherited from star_tpc) is fine on average but an
+    unlucky pair can be 10% off, and the events are already built, so widening
+    the window is nearly free.
+    """
+    stream = ((ev,) + plane_fn(ev) for ev in events)
+    return build_corpus_stream(stream, config, out_dir, dataset_name=dataset_name,
+                               run=run, file_index=file_index,
+                               global_event_offset=global_event_offset,
+                               cal_events=cal_events, with_clean=with_clean, write=write)
+
+
+def build_corpus_stream(stream, config: DetectorConfig, out_dir, *,
+                        dataset_name="coeff_tpc", run="", file_index=0,
+                        global_event_offset=0, cal_events=range(16), with_clean=True,
+                        write=True, progress=None):
+    """Build shards from a STREAM of ``(event_id, noisy_planes, clean_planes)``.
+
+    The stream form is what a DataLoader gives (sequential, prefetched in worker
+    processes); :func:`build_corpus` is the random-access wrapper over it. Planes
+    may be numpy or device arrays — ``process_plane`` dispatches on the backend.
     """
     out_dir = Path(out_dir)
     noisy_ces, clean_ces = [], []
     src = f"{dataset_name}_sensor_{file_index:04d}.h5"
-    for ev in events:
-        noisy_planes, clean_planes = plane_fn(ev)
+    for i, (ev, noisy_planes, clean_planes) in enumerate(stream):
         results = {int(gid): process_plane(img, config, removal="gate", with_images=False)
                    for gid, img in noisy_planes.items()}
         ce = event_coeff_event(results, config, run=run, source_file=src, event=int(ev))
@@ -134,6 +164,8 @@ def build_corpus(events, plane_fn, config: DetectorConfig, out_dir, *,
         if with_clean:
             clean_ces.append(clean_coeff_event(ce, clean_planes, config,
                                                run=run, source_file=src, event=int(ev)))
+        if progress is not None:
+            progress(i, ce)
 
     if cal_events:
         if max(cal_events) >= len(noisy_ces):

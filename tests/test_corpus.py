@@ -133,3 +133,22 @@ def test_multipass_now_padded():
     gate = process_plane(img, cfg, removal="gate").sparse
     mp = process_plane(img, cfg, removal="multipass").sparse
     assert [c.shape[-1] for c in gate.coeffs] == [c.shape[-1] for c in mp.coeffs]
+
+
+def test_sigma_threshold_and_norm_are_populated(tmp_path):
+    """A shard whose sigma_threshold is zero has a meaningless norm_sigma — the
+    tokenizer's normalization table. This regression guards the path where the
+    flat (jax) branch skipped the sigma assignment entirely.
+    """
+    import h5py
+    set_backend("numpy")
+    noisy, clean, norm = build_corpus(range(3), _plane_fn, _config(), tmp_path,
+                                      dataset_name="cx", cal_events=(0, 1))
+    for ce in noisy:
+        assert ce.sigma_threshold.shape[0] == len(GIDS)
+        assert np.isfinite(ce.sigma_threshold).all()
+        assert ce.sigma_threshold.max() > 0, "sigma_threshold is all zero"
+    assert norm.max() > 0, "norm_sigma is all zero"
+    with h5py.File(tmp_path / "cx_coeff_0000.h5", "r") as f:
+        assert f["config"]["norm_sigma"][:].max() > 0
+        assert f["coord"]["sigma_threshold"][:].max() > 0
