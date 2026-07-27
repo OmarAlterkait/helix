@@ -90,7 +90,8 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
             if cap > nsel:
                 rows = np.concatenate([rows, np.zeros(cap - nsel, rows.dtype)])
                 cols = np.concatenate([cols, np.zeros(cap - nsel, cols.dtype)])
-            cat = xp.concatenate(list(bands_g), axis=1)   # stays on device
+            cat = bands_g.flat if hasattr(bands_g, "flat") else \
+                xp.concatenate(list(bands_g), axis=1)      # already flat: no copy
             gv = cat[xp.asarray(rows), xp.asarray(cols)]
             values[gmask] = np.asarray(gv, np.float32)[:nsel]
         else:

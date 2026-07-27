@@ -36,6 +36,45 @@ class ThresholdSpec:
     threshold_approx: bool = False  # universal: also threshold the approx band (else keep it)
 
 
+class FlatBands:
+    """A band list backed by ONE flat ``(..., sum(lens))`` array.
+
+    The jax path keeps coefficients flat end to end: ``wavedec`` produces one
+    array, the gate and threshold consume and return it untouched, and only the
+    final sparse extraction leaves the device. Indexing yields cheap slice views,
+    so anything written against the band-list contract still works — but the jax
+    ops detect this type and operate on ``.flat`` directly, avoiding the
+    concatenate/split round trip that a real list forces (four full-array copies
+    per plane, which cost more than the dispatches it saved).
+    """
+    __slots__ = ("flat", "lens", "offs")
+
+    def __init__(self, flat, lens):
+        self.flat = flat
+        self.lens = tuple(int(x) for x in lens)
+        o, acc = [0], 0
+        for L in self.lens:
+            acc += L; o.append(acc)
+        self.offs = tuple(o)
+
+    def __len__(self):
+        return len(self.lens)
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[k] for k in range(*i.indices(len(self)))]
+        if i < 0:
+            i += len(self)
+        return self.flat[..., self.offs[i]:self.offs[i + 1]]
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
+    def like(self, flat):
+        return FlatBands(flat, self.lens)
+
+
 @dataclass
 class SparseResult:
     """Thresholded DWT coefficients + bookkeeping.

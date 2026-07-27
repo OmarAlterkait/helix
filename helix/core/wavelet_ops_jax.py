@@ -16,7 +16,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from helix.core.wavelet import SparseResult, ThresholdSpec
+from helix.core.wavelet import SparseResult, ThresholdSpec, FlatBands
 from helix.core.dwt_matrix import build_dwt_matrices
 
 _cache: dict = {}
@@ -125,12 +125,14 @@ def reconstruct(coeffs, wavelet: str, level: int, mode: str, n_time: int):
     way ``provenance.padded_length_of`` does — via a zero ``waverec`` — then crop
     to ``n_time``, matching the numpy backend's ``waverec(...)[..., :n_time]``.
     """
-    if isinstance(coeffs, (list, tuple)):
+    if isinstance(coeffs, (list, tuple, FlatBands)):
         import pywt
-        band_lengths = [int(np.asarray(c).shape[-1]) for c in coeffs]
+        band_lengths = (list(coeffs.lens) if isinstance(coeffs, FlatBands)
+                        else [int(np.asarray(c).shape[-1]) for c in coeffs])
         rec_len = int(pywt.waverec([np.zeros(L, np.float32) for L in band_lengths],
                                    wavelet, mode=mode).shape[-1])
-        flat = jnp.concatenate([jnp.asarray(c) for c in coeffs], axis=-1)
+        flat = (coeffs.flat if isinstance(coeffs, FlatBands)
+                else jnp.concatenate([jnp.asarray(c) for c in coeffs], axis=-1))
     else:                                          # legacy flat layout from sparsify
         flat = jnp.asarray(coeffs)
         rec_len = n_time
@@ -156,7 +158,7 @@ def wavedec(image, wavelet: str, level: int, mode: str):
     lev = _eff_level(x.shape[-1], wavelet, level)
     Wf, _, slices, _, _ = _matrices(wavelet, x.shape[-1], lev, mode)
     flat = x @ Wf
-    return [flat[..., s] for s in slices], lev
+    return FlatBands(flat, [s.stop - s.start for s in slices]), lev
 
 
 def _mad_sigma_j(c):
@@ -169,6 +171,44 @@ def threshold_bands(coeffs, th: ThresholdSpec, sigma=None):
     Same estimator as the numpy backend: per-band MAD sigma measured on the
     (already gated) coefficients, universal threshold ``scale*sigma*sqrt(2 ln N)``.
     """
+    if isinstance(coeffs, FlatBands):            # already flat: no concat
+        lens, flat = coeffs.lens, coeffs.flat
+    else:
+        lens = tuple(int(np.asarray(c).shape[-1]) for c in coeffs)
+        flat = jnp.concatenate([jnp.asarray(c, jnp.float32) for c in coeffs], axis=-1)
+    flat_out, band_sigma, nkept = _threshold_all(
+        flat, lens, float(th.scale), th.func, bool(th.per_band_sigma),
+        bool(th.threshold_approx))
+    n_total = int(flat_out.shape[0] * flat_out.shape[-1])
+    return FlatBands(flat_out, lens), int(nkept), n_total, np.asarray(band_sigma)
+
+
+@functools.partial(jax.jit, static_argnames=("lens", "func", "per_band", "thr_approx"))
+def _threshold_all(flat, lens, scale, func, per_band, thr_approx):
+    """Threshold EVERY band in ONE kernel (band loop inside the trace)."""
+    segs, off = [], 0
+    for L in lens:
+        segs.append(flat[..., off:off + L]); off += L
+    band_sigma = jnp.stack([jnp.median(jnp.abs(sg)) / 0.6745 for sg in segs])
+    nsig = jnp.median(jnp.abs(segs[-1]), axis=-1) / 0.6745
+    out = []
+    for i, sg in enumerate(segs):
+        if i == 0 and not thr_approx:
+            out.append(sg); continue
+        lf = float(np.sqrt(2.0 * np.log(max(lens[i], 2))))
+        t = (scale * band_sigma[i] * lf) if per_band else (scale * nsig[..., None] * lf)
+        a = jnp.abs(sg)
+        if func == "soft":
+            out.append(jnp.sign(sg) * jnp.maximum(a - t, 0.0))
+        elif func == "garrote":
+            out.append(jnp.where(a >= t, sg - t * t / jnp.where(sg == 0, 1.0, sg), 0.0))
+        else:
+            out.append(jnp.where(a >= t, sg, 0.0))
+    res = jnp.concatenate(out, axis=-1)
+    return res, band_sigma, jnp.count_nonzero(res)
+
+
+def _threshold_bands_legacy(coeffs, th: ThresholdSpec, sigma=None):
     bands = [jnp.asarray(c, dtype=jnp.float32) for c in coeffs]
     band_sigma = jnp.stack([_mad_sigma_j(c) for c in bands])
 
