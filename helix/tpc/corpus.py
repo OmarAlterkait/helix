@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from helix.core.wavelet import wavedec
-from helix.core.coeff_event import CoeffEvent
+from helix.core.coeff_event import CoeffEvent, _is_device
 from helix.core.coeff_io import write_coeff_shard
 from helix.tpc.config import DetectorConfig
 from helix.tpc.pipeline import process_plane, event_coeff_event, _pad_time
@@ -42,9 +42,10 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
         xin = _pad_time(img, config.dwt_level)
         bands, _ = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
                            mode=config.dwt_mode)
-        # host-materialise once: the gather below is numpy fancy-indexing, which
-        # would otherwise re-cross PCIe per (gid, band) on the jax backend
-        clean_bands[int(gid)] = [np.asarray(c) for c in bands]
+        # kept in backend-native form: on the jax backend both the per-band MAD
+        # and the gather below run ON DEVICE (host np.median over the dense bands
+        # costs ~363 ms/event, np.median on GPU ~16 ms).
+        clean_bands[int(gid)] = bands
 
     # the clean planes must cover the noisy support with matching geometry — else the
     # gather at (gid, wire, tau) silently misaligns or crashes.
@@ -60,15 +61,28 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
     values = np.zeros(ce_noisy.n_coeff, np.float32)
     sigma = np.zeros_like(ce_noisy.sigma_threshold)
     n_bands = ce_noisy.basis.n_bands
+    device = _is_device(next(iter(clean_bands.values()))[0])
+    xp = np
+    if device:
+        import jax.numpy as jnp
+        xp = jnp
+    bl = np.asarray(ce_noisy.basis.band_lengths, np.int64)
+    col_off = np.concatenate([[0], np.cumsum(bl)])[:-1]      # band -> column offset
     for gi, gid in enumerate(ce_noisy.gids):
         gid = int(gid)
         gmask = ce_noisy.plane_gid == gid
-        for b in range(n_bands):
-            cb = clean_bands[gid][b]
-            sigma[gi, b] = np.median(np.abs(cb)) / 0.6745
-            m = gmask & (ce_noisy.band == b)
-            if m.any():
-                values[m] = cb[ce_noisy.wire[m], ce_noisy.tau[m]]
+        bands_g = clean_bands[gid]
+        # all per-band MADs in ONE device call + one transfer (was n_bands syncs)
+        sigma[gi, :] = np.asarray(
+            xp.stack([xp.median(xp.abs(c)) for c in bands_g]) / 0.6745, np.float32)
+        if not gmask.any():
+            continue
+        # ONE gather per plane over the band-concatenated array (was n_bands
+        # gathers, each a separate host->device->host round trip)
+        cat = xp.concatenate(list(bands_g), axis=1)          # (n_wires, sum(band_lengths))
+        cols = col_off[ce_noisy.band[gmask]] + ce_noisy.tau[gmask]
+        gv = cat[xp.asarray(ce_noisy.wire[gmask]), xp.asarray(cols)]
+        values[gmask] = np.asarray(gv, np.float32)
     return CoeffEvent(
         band=ce_noisy.band.copy(), plane_gid=ce_noisy.plane_gid.copy(),
         wire=ce_noisy.wire.copy(), tau=ce_noisy.tau.copy(), value=values,

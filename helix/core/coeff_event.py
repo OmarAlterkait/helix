@@ -25,6 +25,73 @@ from helix.core.provenance import BasisDescriptor
 from helix.core.wavelet import SparseResult, reconstruct
 
 
+def _is_device(a) -> bool:
+    return type(a).__module__.startswith("jax")
+
+
+_COMPACT = None
+
+
+def _compact_fn():
+    """Jitted O(N) stream compaction: cumsum → scatter.
+
+    The output is sized to the FULL band (not the nonzero count), so the jit
+    specializes on the band SHAPE alone — ~10 compiles for a TPC event and never
+    any more. Sizing it to the count instead (even rounded to a power of two)
+    makes the shape vary per band *per event*, which recompiles constantly: that
+    cost 9.8 s/event in a real 36-event build while a repeated-event profile
+    showed 0.6 s and hid it entirely.
+    """
+    global _COMPACT
+    if _COMPACT is None:
+        import jax
+        import jax.numpy as jnp
+
+        @jax.jit
+        def _c(flat):
+            n = flat.size
+            m = flat != 0
+            pos = jnp.cumsum(m) - 1
+            tgt = jnp.where(m, pos, n)                   # zeros scatter out of range
+            idx = jnp.zeros(n, jnp.int32).at[tgt].set(
+                jnp.arange(n, dtype=jnp.int32), mode="drop")
+            val = jnp.zeros(n, jnp.float32).at[tgt].set(flat, mode="drop")
+            return idx, val
+
+        _COMPACT = _c
+    return _COMPACT
+
+
+def nonzero_rows(cband):
+    """``(wire_idx, tau_idx, value)`` of the nonzeros of one band.
+
+    On a device (jax) array the extraction runs ON DEVICE and only the sparse rows
+    (~1% of the band) come back. Pulling the dense band to the host and running
+    ``np.nonzero`` costs ~740 ms/event over the 51M dense coefficients and
+    dominated the GPU build; ``jnp.nonzero`` is sort-based and still costs
+    ~236 ms. This uses an O(N) cumsum+scatter compaction (verified identical to
+    ``np.nonzero``), sized by band SHAPE so the jit never recompiles per event.
+    """
+    if not _is_device(cband):
+        wi, ti = np.nonzero(cband)
+        return wi.astype(np.int32), ti.astype(np.int32), cband[wi, ti].astype(np.float32)
+
+    import jax.numpy as jnp
+    n = int(jnp.count_nonzero(cband))                   # one cheap device reduction
+    if n == 0:
+        z = np.empty(0, np.int32)
+        return z, z.copy(), np.empty(0, np.float32)
+    idx, val = _compact_fn()(cband.ravel())
+    # Slice on the HOST, never on device: ``idx[:n]`` with a per-event n is a
+    # dynamic shape, and eager jax dispatch compiles a kernel per distinct size —
+    # with n varying by band and event that recompiles continuously (~4.5 s/event,
+    # invisible to a repeated-event profile because the sizes repeat there).
+    flat = np.asarray(idx, np.int32)[:n]
+    Lb = cband.shape[1]
+    return (flat // Lb).astype(np.int32), (flat % Lb).astype(np.int32), \
+        np.asarray(val, np.float32)[:n]
+
+
 @dataclass
 class CoeffEvent:
     # flat sparse coeff rows (one event, all planes) — n = total kept coeffs
@@ -74,10 +141,6 @@ class CoeffEvent:
             if len(coeffs) != n_bands:
                 raise ValueError(
                     f"gid {gid}: {len(coeffs)} bands but basis has {n_bands}")
-            # Materialise device (jax) arrays to host ONCE per band. The
-            # extraction below is numpy-side (np.nonzero + fancy indexing); left
-            # on-device each of those pulls the whole band across PCIe again.
-            coeffs = [np.asarray(c) for c in coeffs]
             nw = coeffs[0].shape[0]
             n_wires[gi] = nw
             if res.sigma_per_band is None:
@@ -95,14 +158,14 @@ class CoeffEvent:
                 if cband.shape[0] != nw:
                     raise ValueError(
                         f"gid {gid} band {b}: {cband.shape[0]} wires != band-0 count {nw}")
-                wi, ti = np.nonzero(cband)
+                wi, ti, vals = nonzero_rows(cband)     # on device when cband is jax
                 if wi.size == 0:
                     continue
                 b_l.append(np.full(wi.size, b, dtype=np.uint8))
                 p_l.append(np.full(wi.size, gid, dtype=np.int32))    # int32: gid can exceed 255
-                w_l.append(wi.astype(np.int32))
-                t_l.append(ti.astype(np.int32))
-                v_l.append(cband[wi, ti].astype(np.float32))
+                w_l.append(wi)
+                t_l.append(ti)
+                v_l.append(vals)
 
         def _cat(parts, dt):
             return np.concatenate(parts).astype(dt) if parts else np.empty(0, dtype=dt)
