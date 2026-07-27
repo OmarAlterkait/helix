@@ -181,3 +181,50 @@ def test_f0_on_a_real_built_shard(tmp_path):
     assert f0s, "no signal support found"
     assert min(f0s) > 0.80, f"F0 per plane too low: {[round(v,3) for v in f0s]}"
     assert np.mean(f0s) > 0.85, f"mean F0 {np.mean(f0s):.3f} below acceptance"
+
+
+# ---- Tier 3: normalization indexing + token sanity -------------------------
+
+def test_norm_sigma_is_row_indexed_not_gid_indexed():
+    """norm_sigma rows follow POSITION in gids, not gid value. With a dead plane
+    the two disagree, and the naive norm_sigma[gid] silently mis-normalises."""
+    from helix.tokenize import gid_rows, sigma_for_rows
+    gids = np.array([0, 1, 2, 4, 5])                     # plane 3 dead/absent
+    ns = np.arange(len(gids) * 4, dtype=np.float32).reshape(len(gids), 4) + 1.0
+    pg = np.array([0, 4, 5, 1])
+    band = np.array([0, 1, 2, 3])
+    rows = gid_rows(pg, gids)
+    np.testing.assert_array_equal(rows, [0, 3, 4, 1])    # position, not value
+    got = sigma_for_rows(pg, band, gids, ns)
+    np.testing.assert_array_equal(got, [ns[0, 0], ns[3, 1], ns[4, 2], ns[1, 3]])
+    # The naive norm_sigma[gid] is not merely different — with a dead plane the
+    # highest gid indexes past the end of the table.
+    with pytest.raises(IndexError):
+        _ = ns[pg, band]
+    # and where it does NOT overrun, it silently selects the wrong plane's sigma
+    pg2, band2 = np.array([4]), np.array([1])
+    assert sigma_for_rows(pg2, band2, gids, ns)[0] == ns[3, 1]     # correct: row 3
+    assert ns[pg2, band2][0] == ns[4, 1]                            # naive: row 4
+    assert ns[3, 1] != ns[4, 1]
+    # and a gid absent from the table must raise, never wrap
+    with pytest.raises(ValueError, match="absent"):
+        gid_rows(np.array([3]), gids)
+
+
+def test_normalization_roundtrips_and_is_sane():
+    from helix.tokenize import normalize_values, denormalize_values
+    rng = np.random.default_rng(0)
+    gids = np.array([0, 1, 2])
+    ns = np.array([[3.0, 2.0], [3.5, 2.5], [4.0, 3.0]], np.float32)
+    n = 5000
+    pg = rng.choice(gids, n); band = rng.integers(0, 2, n)
+    sig = ns[np.searchsorted(gids, pg), band]
+    val = (rng.standard_normal(n) * sig).astype(np.float32)   # ~1 sigma coefficients
+    tok = normalize_values(val, pg, band, gids, ns)
+    np.testing.assert_allclose(denormalize_values(tok, pg, band, gids, ns), val,
+                               rtol=1e-4, atol=1e-4)
+    # arcsinh(v/sigma) on ~1-sigma data must be O(1) and roughly symmetric —
+    # a wrong sigma shows up here as a grossly mis-scaled distribution.
+    assert 0.3 < np.std(tok) < 3.0, f"token std {np.std(tok):.3f} out of range"
+    assert abs(np.mean(tok)) < 0.2, f"token mean {np.mean(tok):.3f} not centred"
+    assert np.abs(tok).max() < 12.0
