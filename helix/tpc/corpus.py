@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from helix.core.wavelet import wavedec
-from helix.core.coeff_event import CoeffEvent, _is_device
+from helix.core.coeff_event import CoeffEvent, _is_device, _xfer_cap
 from helix.core.coeff_io import write_coeff_shard
 from helix.tpc.config import DetectorConfig
 from helix.tpc.pipeline import process_plane, event_coeff_event, _pad_time
@@ -77,14 +77,25 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
             xp.stack([xp.median(xp.abs(c)) for c in bands_g]) / 0.6745, np.float32)
         if not gmask.any():
             continue
-        # Gather on the HOST. The index arrays have a per-event length, and a
-        # device gather on a varying shape recompiles EVERY event — the same trap
-        # as the compaction and the densify input. One dense transfer per plane
-        # (measured ~0.2 ms) plus a numpy fancy-index is strictly cheaper than a
-        # recompile, and keeps the shape ladder empty.
-        cat = np.asarray(xp.concatenate(list(bands_g), axis=1), np.float32)
+        # Gather ON DEVICE with PADDED indices. Two constraints collide here: a
+        # device gather on a per-event index length retraces, but transferring the
+        # dense band to gather on the host moves ~205 MB/event. Padding the index
+        # arrays to a monotonic static cap satisfies both — one shape, and only
+        # cap values come back instead of the whole band.
         cols = col_off[ce_noisy.band[gmask]] + ce_noisy.tau[gmask]
-        values[gmask] = cat[ce_noisy.wire[gmask], cols]
+        rows = ce_noisy.wire[gmask]
+        nsel = rows.shape[0]
+        if device:
+            cap = _xfer_cap(nsel)
+            if cap > nsel:
+                rows = np.concatenate([rows, np.zeros(cap - nsel, rows.dtype)])
+                cols = np.concatenate([cols, np.zeros(cap - nsel, cols.dtype)])
+            cat = xp.concatenate(list(bands_g), axis=1)   # stays on device
+            gv = cat[xp.asarray(rows), xp.asarray(cols)]
+            values[gmask] = np.asarray(gv, np.float32)[:nsel]
+        else:
+            cat = np.concatenate(list(bands_g), axis=1)
+            values[gmask] = cat[rows, cols]
     return CoeffEvent(
         band=ce_noisy.band.copy(), plane_gid=ce_noisy.plane_gid.copy(),
         wire=ce_noisy.wire.copy(), tau=ce_noisy.tau.copy(), value=values,
