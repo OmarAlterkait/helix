@@ -30,7 +30,12 @@ def _is_device(a) -> bool:
 
 
 _COMPACT = None
-_XFER_CAP = 1 << 19          # static transfer prefix; only ever grows
+_XFER_CAP = 1 << 16          # static transfer prefix; only ever grows
+# Sized to the REAL kept-coefficient count (~55k/plane at 0.65% occupancy), not a
+# guess. The prefix must be static so the slice never retraces, but an oversized
+# one is paid on every transfer: at 1<<19 we shipped 524288 elements to recover
+# ~55k (2.61 ms/plane); at 1<<16 the transfer is ~9x smaller. It grows
+# monotonically, so a denser detector simply settles one or two rungs higher.
 
 
 def _xfer_cap(n):
