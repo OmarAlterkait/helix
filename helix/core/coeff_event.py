@@ -74,6 +74,10 @@ class CoeffEvent:
             if len(coeffs) != n_bands:
                 raise ValueError(
                     f"gid {gid}: {len(coeffs)} bands but basis has {n_bands}")
+            # Materialise device (jax) arrays to host ONCE per band. The
+            # extraction below is numpy-side (np.nonzero + fancy indexing); left
+            # on-device each of those pulls the whole band across PCIe again.
+            coeffs = [np.asarray(c) for c in coeffs]
             nw = coeffs[0].shape[0]
             n_wires[gi] = nw
             if res.sigma_per_band is None:

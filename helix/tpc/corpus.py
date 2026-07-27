@@ -42,7 +42,9 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
         xin = _pad_time(img, config.dwt_level)
         bands, _ = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
                            mode=config.dwt_mode)
-        clean_bands[int(gid)] = bands
+        # host-materialise once: the gather below is numpy fancy-indexing, which
+        # would otherwise re-cross PCIe per (gid, band) on the jax backend
+        clean_bands[int(gid)] = [np.asarray(c) for c in bands]
 
     # the clean planes must cover the noisy support with matching geometry — else the
     # gather at (gid, wire, tau) silently misaligns or crashes.
@@ -97,7 +99,7 @@ def build_corpus(events, plane_fn, config: DetectorConfig, out_dir, *,
     src = f"{dataset_name}_sensor_{file_index:04d}.h5"
     for ev in events:
         noisy_planes, clean_planes = plane_fn(ev)
-        results = {int(gid): process_plane(img, config, removal="gate")
+        results = {int(gid): process_plane(img, config, removal="gate", with_images=False)
                    for gid, img in noisy_planes.items()}
         ce = event_coeff_event(results, config, run=run, source_file=src, event=int(ev))
         noisy_ces.append(ce)
