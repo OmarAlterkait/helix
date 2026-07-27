@@ -30,6 +30,16 @@ def _is_device(a) -> bool:
 
 
 _COMPACT = None
+_XFER_CAP = 1 << 19          # static transfer prefix; only ever grows
+
+
+def _xfer_cap(n):
+    """Static prefix length for the compacted transfer (monotonic, so the slice
+    shape is stable and never retraces)."""
+    global _XFER_CAP
+    while n > _XFER_CAP:
+        _XFER_CAP <<= 1
+    return _XFER_CAP
 
 
 def _compact_fn():
@@ -83,14 +93,16 @@ def nonzero_rows(cband, n=None):
         z = np.empty(0, np.int32)
         return z, z.copy(), np.empty(0, np.float32)
     idx, val = _compact_fn()(cband.ravel())
-    # Slice on the HOST, never on device: ``idx[:n]`` with a per-event n is a
-    # dynamic shape, and eager jax dispatch compiles a kernel per distinct size —
-    # with n varying by band and event that recompiles continuously (~4.5 s/event,
-    # invisible to a repeated-event profile because the sizes repeat there).
-    flat = np.asarray(idx, np.int32)[:n]
+    # Transfer only a STATIC prefix, not the full band. The compaction output is
+    # band-sized (that keeps its own shape static), but shipping all of it back
+    # moves ~410 MB/event to recover ~6 MB of sparse rows. A monotonic cap keeps
+    # the slice shape stable — `idx[:n]` with a per-event n would retrace, which
+    # is the trap this whole path already hit twice.
+    cap = _xfer_cap(n)
+    flat = np.asarray(idx[:cap], np.int32)[:n]
     Lb = cband.shape[1]
     return (flat // Lb).astype(np.int32), (flat % Lb).astype(np.int32), \
-        np.asarray(val, np.float32)[:n]
+        np.asarray(val[:cap], np.float32)[:n]
 
 
 @dataclass
