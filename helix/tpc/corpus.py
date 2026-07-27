@@ -122,31 +122,31 @@ def normalization_table(events) -> np.ndarray:
 
 def build_corpus(events, plane_fn, config: DetectorConfig, out_dir, *,
                  dataset_name="coeff_tpc", run="", file_index=0, global_event_offset=0,
-                 cal_events=range(16), with_clean=True, write=True):
+                 cal_events=None, norm_sigma=None, with_clean=True, write=True):
     """Build coeff (+ coeff_clean) shards from ``events`` via ``plane_fn``.
 
     ``plane_fn(event) -> (noisy_planes, clean_planes)`` with ``{gid: (nw, nt) image}``
     (clean_planes may be ``{}`` when ``with_clean=False``). Returns
     ``(noisy_events, clean_events, norm_sigma)``. Cal events index into ``events``.
 
-    ``cal_events`` defaults to the first 16, not 2. Measured on 150 real events,
-    the error of the calibration mean against the all-event mean is:
-    2 -> median 0.39% / max 10.2% ; 8 -> 0.20% / 3.3% ; 16 -> 0.13% / 2.2%.
-    The old 2-event table (inherited from star_tpc) is fine on average but an
-    unlucky pair can be 10% off, and the events are already built, so widening
-    the window is nearly free.
+    Normalization: pass ``norm_sigma`` to freeze ONE table across every shard of
+    a corpus (the correct production setting). Otherwise ``cal_events=None``
+    (default) averages EVERY event in this shard, which has no sampling error but
+    still differs from other shards. The old 2-event window inherited from
+    star_tpc is the worst option: an unlucky pair is 10% off the shard mean.
     """
     stream = ((ev,) + plane_fn(ev) for ev in events)
     return build_corpus_stream(stream, config, out_dir, dataset_name=dataset_name,
                                run=run, file_index=file_index,
                                global_event_offset=global_event_offset,
-                               cal_events=cal_events, with_clean=with_clean, write=write)
+                               cal_events=cal_events, norm_sigma=norm_sigma,
+                               with_clean=with_clean, write=write)
 
 
 def build_corpus_stream(stream, config: DetectorConfig, out_dir, *,
                         dataset_name="coeff_tpc", run="", file_index=0,
-                        global_event_offset=0, cal_events=range(16), with_clean=True,
-                        write=True, progress=None):
+                        global_event_offset=0, cal_events=None, norm_sigma=None,
+                        with_clean=True, write=True, progress=None):
     """Build shards from a STREAM of ``(event_id, noisy_planes, clean_planes)``.
 
     The stream form is what a DataLoader gives (sequential, prefetched in worker
@@ -167,14 +167,31 @@ def build_corpus_stream(stream, config: DetectorConfig, out_dir, *,
         if progress is not None:
             progress(i, ce)
 
-    if cal_events:
+    # --- normalization table ---------------------------------------------
+    # Priority: an externally supplied GLOBAL table > all events > a subset.
+    #
+    # norm_sigma must be the SAME for every shard of a corpus. If each shard
+    # derives its own, the identical physical coefficient is normalised
+    # differently depending on which shard it landed in — measured shard-to-shard
+    # disagreement is 0.28% median / 0.94% max at 50 events/shard, 0.78% / 2.7% at
+    # 16 — and the model cannot tell that apart from real signal. So a production
+    # build computes the table ONCE and passes it to every shard.
+    n_bands = config_n_bands = noisy_ces[0].sigma_threshold.shape[1]
+    if norm_sigma is not None:
+        norm = np.asarray(norm_sigma, np.float32)
+        want = (len(noisy_ces[0].gids), n_bands)
+        if norm.shape != want:
+            raise ValueError(f"norm_sigma shape {norm.shape} != expected {want}")
+        if float(np.nanmax(norm)) <= 0.0:
+            raise ValueError("supplied norm_sigma is all zero")
+    elif cal_events is None:
+        norm = normalization_table(noisy_ces)        # ALL events: no sampling error
+    else:
         if max(cal_events) >= len(noisy_ces):
             raise ValueError(
                 f"cal_events {tuple(cal_events)} out of range for {len(noisy_ces)} built "
-                f"events; pass cal_events=range(min(2, n)) or () to skip normalization")
+                f"events; pass cal_events=None to use every event")
         norm = normalization_table([noisy_ces[i] for i in cal_events])
-    else:
-        norm = None
 
     if write:
         out_dir.mkdir(parents=True, exist_ok=True)
