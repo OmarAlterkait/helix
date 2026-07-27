@@ -33,11 +33,19 @@ import numpy as np
 def _pad_time(image, level: int):
     """Pad the last (time) axis up to a multiple of ``2**level`` (the padded-4336
     convention: ``(-4321) % 16 = 15`` → 4336). Matches the old build's
-    ``pad(g, (0, (-nt) % 16))`` so coefficients are basis-consistent."""
-    x = np.asarray(image, dtype=np.float32)
+    ``pad(g, (0, (-nt) % 16))`` so coefficients are basis-consistent.
+
+    Backend-aware: a device array (jax) is padded ON DEVICE, so the GPU path does
+    not round-trip through the host between noise and the DWT.
+    """
+    xp = np
+    if type(image).__module__.startswith("jax"):
+        import jax.numpy as jnp
+        xp = jnp
+    x = xp.asarray(image, dtype=xp.float32)
     npad = (-x.shape[-1]) % (1 << level)
     if npad:
-        x = np.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, npad)])
+        x = xp.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, npad)])
     return x
 
 
@@ -50,10 +58,14 @@ class ProcessedPlane:
 
 
 def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None = None,
-                  *, removal: str | None = None) -> ProcessedPlane:
+                  *, removal: str | None = None, with_images: bool = True) -> ProcessedPlane:
     """One plane: (n_wires, n_ticks) → cleaned + sparse coeffs + reconstruction.
 
-    `removal` defaults to ``config.removal``.
+    `removal` defaults to ``config.removal``. ``with_images=False`` skips the two
+    inverse transforms that produce ``cleaned``/``reconstructed`` — the corpus
+    builder only consumes ``sparse``, and each inverse is a full
+    (n_wires x n_coeffs) @ (n_coeffs x n_ticks) matmul, so skipping them is the
+    single biggest saving on the build path.
     """
     mode = (removal or config.removal).lower()
     n_time = image.shape[1]
@@ -77,9 +89,11 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
         sparse = SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
                               sigma_per_band=band_sigma, wavelet=config.wavelet,
                               level=lev, mode=config.dwt_mode)
-        cleaned = reconstruct(SparseResult(coeffs=gated, n_kept=0, n_total=0, sigma_per_band=None,
-                                           wavelet=config.wavelet, level=lev, mode=config.dwt_mode),
-                              n_time)                        # coherent-removed image (for inspection)
+        cleaned = None
+        if with_images:                                      # coherent-removed image (inspection only)
+            cleaned = reconstruct(
+                SparseResult(coeffs=gated, n_kept=0, n_total=0, sigma_per_band=None,
+                             wavelet=config.wavelet, level=lev, mode=config.dwt_mode), n_time)
     elif mode in ("none", "off"):
         cleaned = image
         xin = _pad_time(image, config.dwt_level)
@@ -92,7 +106,7 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
     else:
         raise ValueError(f"unknown removal mode {mode!r} (gate|multipass|none)")
 
-    recon = reconstruct(sparse, n_time)
+    recon = reconstruct(sparse, n_time) if with_images else None
     return ProcessedPlane(cleaned=cleaned, sparse=sparse, reconstructed=recon, config=config)
 
 

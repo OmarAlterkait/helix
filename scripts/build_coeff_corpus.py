@@ -19,6 +19,7 @@ co-supported, reads back through pimm_data.CoeffTPCDataset.
 """
 import argparse
 import hashlib
+import os
 import sys
 import time
 
@@ -46,13 +47,17 @@ def main():
     ap.add_argument("--event-start", type=int, default=0)
     ap.add_argument("--cal-events", type=int, nargs="*", default=[0, 1])
     ap.add_argument("--white", action="store_true", help="use white incoherent noise (old bug)")
+    ap.add_argument("--backend", choices=["numpy", "jax"], default="numpy",
+                    help="jax runs noise + DWT + gate + threshold on GPU (~30x)")
     ap.add_argument("--helix-root", default="/sdf/group/neutrino/omara/helix-consolidate")
     ap.add_argument("--pimm-src", default="/sdf/group/neutrino/omara/pimm-data/src")
     args = ap.parse_args()
 
+    if args.backend == "jax":                    # keep XLA from grabbing the whole card
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     _add_repo_paths(args.helix_root, args.pimm_src)
     from helix.core import backend
-    backend.set_backend("numpy")
+    backend.set_backend(args.backend)
     from helix.tpc.io import config_from_file, read_sensor_event, count_events
     from helix.tpc.config import DetectorConfig
     from helix.tpc.pipeline import canonical_plane_gid
@@ -72,24 +77,47 @@ def main():
           f"wavelet={cfg.wavelet} L{cfg.dwt_level} removal={cfg.removal} "
           f"k{cfg.gate_kgate}/np{cfg.gate_npass} noise={'white' if args.white else 'colored'}")
 
+    use_jax = args.backend == "jax"
+    if use_jax:
+        import jax
+        import jax.numpy as jnp
+        from pimm_data.noise_jax import generate_noise_jax
+
+    def _seed(ev):
+        return int.from_bytes(hashlib.blake2b(f"ev{ev}".encode(), digest_size=8).digest(),
+                              "little") & 0xFFFFFFFF
+
+    def _digitize_jax(x, ped, n_bits=12):
+        """On-device twin of pimm_data.noise.digitize (round -> clip -> unpedestal)."""
+        adc_max = (1 << n_bits) - 1
+        return jnp.clip(jnp.round(x + ped), 0, adc_max) - ped
+
     def plane_fn(ev):
         planes = read_sensor_event(args.shard, ev, cfg)
-        seed = int.from_bytes(hashlib.blake2b(f"ev{ev}".encode(), digest_size=8).digest(),
-                              "little") & 0xFFFFFFFF
-        rng = np.random.default_rng(seed)
+        seed = _seed(ev)
+        rng = None if use_jax else np.random.default_rng(seed)
+        key = jax.random.PRNGKey(seed) if use_jax else None
         noisy, clean = {}, {}
-        for label, img in planes.items():
+        for i, (label, img) in enumerate(planes.items()):
             gid = canonical_plane_gid(label)
             nw = img.shape[0]
             wl = np.asarray(reg.get(gid, {}).get("wire_lengths", []), np.float64)
             if wl.size != nw:
                 wl = np.full(nw, 2.33, np.float64)
             ped = cfg.pedestals.get(label.split("_")[-1], 0)
-            noise = generate_noise(img.shape, rng=rng, wire_lengths_m=wl,
-                                   incoherent=True, coherent=True,
-                                   series_spectrum=spec, group_size=cfg.group_size)
-            noisy[gid] = digitize(img + noise, ped)
-            clean[gid] = img.astype(np.float32)
+            if use_jax:                                   # noise + digitize on GPU
+                k = jax.random.fold_in(key, i)            # per-plane substream
+                noise = generate_noise_jax(
+                    k, img.shape, wire_lengths_m=wl, incoherent=True, coherent=True,
+                    series_spectrum=spec, group_size=cfg.group_size)
+                noisy[gid] = _digitize_jax(jnp.asarray(img) + noise, ped)
+                clean[gid] = jnp.asarray(img, jnp.float32)
+            else:
+                noise = generate_noise(img.shape, rng=rng, wire_lengths_m=wl,
+                                       incoherent=True, coherent=True,
+                                       series_spectrum=spec, group_size=cfg.group_size)
+                noisy[gid] = digitize(img + noise, ped)
+                clean[gid] = img.astype(np.float32)
         return noisy, clean
 
     n = count_events(args.shard)
