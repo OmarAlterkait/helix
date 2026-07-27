@@ -188,3 +188,82 @@ def read_coeff_event(path: str | Path, i: int) -> CoeffEvent:
 def read_coeff_shard(path: str | Path) -> list[CoeffEvent]:
     """Read all events from a shard."""
     return [read_coeff_event(path, i) for i in range(n_events(path))]
+
+
+# ---- shard audit -----------------------------------------------------------
+
+def audit_shard(path, *, strict=True):
+    """Check a coeff shard for the signatures that SILENT bugs produce.
+
+    Structural tests (round-trip, identity, digest) all passed on a shard whose
+    ``sigma_threshold`` — and therefore ``norm_sigma`` — was entirely zero,
+    because nothing asserted that a field must actually *vary*. This audits for
+    degenerate content: all-zero, constant-across-events, non-finite, and
+    out-of-range coordinates.
+
+    Returns a list of problem strings (empty == clean).
+    """
+    probs = []
+    with h5py.File(path, "r") as f:
+        cfg = f["config"]
+        n_ev = int(cfg.attrs["n_events"])
+        bl = cfg["band_lengths"][:].astype(np.int64)
+        gids = cfg["gids"][:].astype(np.int64)
+        nw = cfg["n_wires"][:].astype(np.int64)
+        coord, val = f["coord"], f["value"][:]
+        band = coord["band"][:]; pgid = coord["plane_gid"][:]
+        wire = coord["wire"][:]; tau = coord["tau"][:]
+        off = coord["event_offset"][:]
+        sig = coord["sigma_threshold"][:]
+
+        def bad(name, cond, msg):
+            if cond:
+                probs.append(f"{name}: {msg}")
+
+        # --- degenerate content ---
+        bad("value", not np.isfinite(val).all(), "non-finite entries")
+        bad("value", val.size and not np.any(val != 0), "ALL ZERO")
+        bad("sigma_threshold", not np.isfinite(sig).all(), "non-finite entries")
+        bad("sigma_threshold", float(np.nanmax(sig)) <= 0, "ALL ZERO (norm_sigma is meaningless)")
+        if n_ev > 1 and sig.size:
+            bad("sigma_threshold", bool(np.all(sig == sig[0])),
+                "bit-identical for every event — it is not being recomputed")
+        if "norm_sigma" in cfg:
+            ns = cfg["norm_sigma"][:]
+            bad("norm_sigma", not np.isfinite(ns).all(), "non-finite")
+            bad("norm_sigma", float(np.nanmax(ns)) <= 0, "ALL ZERO")
+            bad("norm_sigma", ns.shape != (len(gids), len(bl)),
+                f"shape {ns.shape} != (n_gid, n_bands) {(len(gids), len(bl))}")
+
+        # --- offsets ---
+        bad("event_offset", off.shape[0] != n_ev + 1, f"len {off.shape[0]} != n_events+1 {n_ev+1}")
+        bad("event_offset", off[0] != 0, "does not start at 0")
+        bad("event_offset", bool(np.any(np.diff(off) < 0)), "not monotonic")
+        bad("event_offset", int(off[-1]) != val.shape[0],
+            f"last {int(off[-1])} != n_values {val.shape[0]}")
+
+        # --- coordinate ranges ---
+        bad("band", band.size and (int(band.max()) >= len(bl)),
+            f"max {int(band.max()) if band.size else -1} >= n_bands {len(bl)}")
+        bad("plane_gid", bool(np.setdiff1d(np.unique(pgid), gids).size),
+            "contains gids absent from /config/gids")
+        if tau.size:
+            bad("tau", bool(np.any(tau >= bl[band])), "tau >= band_lengths[band] for some row")
+            bad("tau", int(tau.min()) < 0, "negative")
+        if wire.size:
+            g2n = {int(g): int(n) for g, n in zip(gids, nw)}
+            lim = np.array([g2n[int(g)] for g in pgid], np.int64)
+            bad("wire", bool(np.any(wire >= lim)), "wire >= n_wires for its plane")
+            bad("wire", int(wire.min()) < 0, "negative")
+
+        # --- identity ---
+        if "ident" in f:
+            evs = f["ident"]["event"][:]
+            bad("ident/event", evs.shape[0] != n_ev, f"len {evs.shape[0]} != n_events {n_ev}")
+            bad("ident/event", n_ev > 1 and bool(np.all(evs == evs[0])), "constant")
+        else:
+            probs.append("ident: missing (no event identity)")
+
+    if strict and probs:
+        raise ValueError(f"shard audit failed for {path}:\n  " + "\n  ".join(probs))
+    return probs

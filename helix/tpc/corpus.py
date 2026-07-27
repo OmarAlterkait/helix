@@ -22,7 +22,7 @@ import numpy as np
 
 from helix.core.wavelet import wavedec
 from helix.core.coeff_event import CoeffEvent, _is_device, _xfer_cap
-from helix.core.coeff_io import write_coeff_shard
+from helix.core.coeff_io import write_coeff_shard, audit_shard
 from helix.tpc.config import DetectorConfig
 from helix.tpc.pipeline import process_plane, event_coeff_event, _pad_time
 
@@ -34,8 +34,7 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
     The clean image is DWT'd (no removal, no threshold) and its coefficients are
     gathered at the noisy event's ``(gid, band, wire, tau)`` — identical coords,
     clean values (the old ``clean[gid][b][mask]``). ``sigma_threshold`` records the
-    clean bands' MAD (informational; the target is normalized with the shared
-    ``norm_sigma`` at tokenize).
+    ``sigma_threshold`` is copied from the noisy event (see below).
     """
     clean_bands = {}
     for gid, img in clean_planes.items():
@@ -59,7 +58,13 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
                 f"noisy has {int(ce_noisy.n_wires[gi])} — geometry must match")
 
     values = np.zeros(ce_noisy.n_coeff, np.float32)
-    sigma = np.zeros_like(ce_noisy.sigma_threshold)
+    # The clean target carries the NOISY event's sigma_threshold, not its own.
+    # A noise-free image's DWT bands are >50% exact zeros, so their MAD sigma is
+    # identically 0 — carrying that would write an all-zero field indistinguishable
+    # from the bug where sigma was silently lost, while conveying nothing. The
+    # sigma that actually applies to this target is the one its normalisation uses,
+    # which is shared with the noisy input.
+    sigma = ce_noisy.sigma_threshold.copy()
     n_bands = ce_noisy.basis.n_bands
     device = _is_device(next(iter(clean_bands.values()))[0])
     xp = np
@@ -72,9 +77,6 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
         gid = int(gid)
         gmask = ce_noisy.plane_gid == gid
         bands_g = clean_bands[gid]
-        # all per-band MADs in ONE device call + one transfer (was n_bands syncs)
-        sigma[gi, :] = np.asarray(
-            xp.stack([xp.median(xp.abs(c)) for c in bands_g]) / 0.6745, np.float32)
         if not gmask.any():
             continue
         # Gather ON DEVICE with PADDED indices. Two constraints collide here: a
@@ -197,8 +199,11 @@ def build_corpus_stream(stream, config: DetectorConfig, out_dir, *,
         out_dir.mkdir(parents=True, exist_ok=True)
         kw = dict(dataset_name=dataset_name, file_index=file_index,
                   global_event_offset=global_event_offset, norm_sigma=norm)
-        write_coeff_shard(out_dir / f"{dataset_name}_coeff_{file_index:04d}.h5", noisy_ces, **kw)
+        p_noisy = out_dir / f"{dataset_name}_coeff_{file_index:04d}.h5"
+        write_coeff_shard(p_noisy, noisy_ces, **kw)
+        audit_shard(p_noisy)                 # refuse to ship a degenerate shard
         if with_clean:
-            write_coeff_shard(out_dir / f"{dataset_name}_coeff_clean_{file_index:04d}.h5",
-                              clean_ces, **kw)
+            p_clean = out_dir / f"{dataset_name}_coeff_clean_{file_index:04d}.h5"
+            write_coeff_shard(p_clean, clean_ces, **kw)
+            audit_shard(p_clean)
     return noisy_ces, clean_ces, norm
