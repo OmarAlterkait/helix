@@ -100,12 +100,36 @@ def test_build_corpus_no_clean(tmp_path):
 def test_cal_events_out_of_range_raises(tmp_path):
     set_backend("numpy")
     import pytest
-    with pytest.raises(ValueError, match="cal_events"):        # 1 event, default cal (0,1)
-        build_corpus(range(1), _plane_fn, _config(), tmp_path, dataset_name="cx")
-    # a 1-event build works with cal_events matched to what's available
-    n, c, norm = build_corpus(range(1), _plane_fn, _config(), tmp_path,
-                              dataset_name="cx", cal_events=(0,))
-    assert norm.shape[0] == len(GIDS)
+    # explicit cal_events beyond what was built still raises
+    with pytest.raises(ValueError, match="cal_events"):
+        build_corpus(range(2), _plane_fn, _config(), tmp_path, dataset_name="cx",
+                     cal_events=(0, 5))
+    # the DEFAULT (None) averages every event, so a 1-event build is fine
+    n, c, norm = build_corpus(range(1), _plane_fn, _config(), tmp_path, dataset_name="cx")
+    assert norm.shape[0] == len(GIDS) and norm.max() > 0
+
+
+def test_global_norm_sigma_is_frozen_across_shards(tmp_path):
+    """A supplied norm_sigma must be written verbatim to EVERY shard, so the same
+    coefficient normalises identically no matter which shard it landed in."""
+    import pytest, h5py
+    set_backend("numpy")
+    cfg = _config()
+    # shard A derives its own table; shard B is built from different events but
+    # must reuse A's table when it is passed in.
+    a, _, norm_a = build_corpus(range(3), _plane_fn, cfg, tmp_path / "a", dataset_name="cx")
+    b, _, norm_b = build_corpus(range(3, 6), _plane_fn, cfg, tmp_path / "b",
+                                dataset_name="cx", norm_sigma=norm_a)
+    np.testing.assert_array_equal(norm_b, norm_a)
+    with h5py.File(tmp_path / "b" / "cx_coeff_0000.h5") as f:
+        np.testing.assert_allclose(f["config"]["norm_sigma"][:], norm_a)
+    # a self-derived table for different events would NOT have matched
+    _, _, norm_own = build_corpus(range(3, 6), _plane_fn, cfg, tmp_path / "c",
+                                  dataset_name="cx")
+    assert not np.array_equal(norm_own, norm_a)
+    with pytest.raises(ValueError, match="norm_sigma shape"):
+        build_corpus(range(2), _plane_fn, cfg, tmp_path / "d", dataset_name="cx",
+                     norm_sigma=np.ones((99, 3), np.float32))
 
 
 def test_clean_geometry_mismatch_raises():

@@ -97,7 +97,14 @@ def main():
     ap.add_argument("--file-index", type=int, default=0)
     ap.add_argument("--events", type=int, default=100)
     ap.add_argument("--event-start", type=int, default=0)
-    ap.add_argument("--cal-events", type=int, nargs="*", default=list(range(16)))
+    ap.add_argument("--cal-events", type=int, nargs="*", default=None,
+                    help="event indices for the normalization table; default = ALL events")
+    ap.add_argument("--norm-sigma", default=None,
+                    help="load a FROZEN global norm_sigma .npy — use this for every shard "
+                         "of a corpus so normalization is identical across shards")
+    ap.add_argument("--save-norm-sigma", default=None,
+                    help="write the computed norm_sigma to .npy (build shard 0 with this, "
+                         "then pass it as --norm-sigma to every other shard)")
     ap.add_argument("--white", action="store_true", help="use white incoherent noise (old bug)")
     ap.add_argument("--backend", choices=["numpy", "jax"], default="numpy",
                     help="jax runs noise + DWT + gate + threshold on GPU (~30x)")
@@ -189,24 +196,33 @@ def main():
                 clean[gid] = img.astype(np.float32)
         return noisy, clean
 
+    norm_in = np.load(args.norm_sigma) if args.norm_sigma else None
+    if norm_in is not None:
+        print(f"norm_sigma: FROZEN from {args.norm_sigma} {norm_in.shape}")
     t0 = time.perf_counter()
     if args.mode == "loader":
         from helix.tpc.corpus import build_corpus_stream
         stream = _loader_stream(args, cfg, reg, noise_spec)
         noisy, clean, norm = build_corpus_stream(
             stream, cfg, args.out, dataset_name=args.dataset_name, run=args.run,
-            file_index=args.file_index, cal_events=tuple(args.cal_events))
+            file_index=args.file_index, norm_sigma=norm_in,
+            cal_events=tuple(args.cal_events) if args.cal_events else None)
     else:
         n = count_events(args.shard)
         events = list(range(args.event_start, min(args.event_start + args.events, n)))
         noisy, clean, norm = build_corpus(events, plane_fn, cfg, args.out,
                                           dataset_name=args.dataset_name, run=args.run,
-                                          file_index=args.file_index,
-                                          cal_events=tuple(args.cal_events))
+                                          file_index=args.file_index, norm_sigma=norm_in,
+                                          cal_events=tuple(args.cal_events) if args.cal_events else None)
     dt = time.perf_counter() - t0
     print(f"built {len(noisy)} events in {dt:.1f}s ({dt/max(len(noisy),1):.1f}s/ev); "
           f"coeffs/event={[ce.n_coeff for ce in noisy]}")
-    print(f"norm_sigma {None if norm is None else norm.shape}; wrote -> {args.out}")
+    if args.save_norm_sigma and norm is not None:
+        np.save(args.save_norm_sigma, norm)
+        print(f"saved norm_sigma -> {args.save_norm_sigma}")
+    print(f"norm_sigma {None if norm is None else norm.shape}"
+          f"{' (frozen/global)' if norm_in is not None else ' (derived from this shard)'}"
+          f"; wrote -> {args.out}")
 
 
 if __name__ == "__main__":
