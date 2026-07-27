@@ -115,6 +115,69 @@ def config_from_file(path: str | Path, **overrides) -> DetectorConfig:
     return DetectorConfig(**kwargs)
 
 
+def read_sensor_plane_coo(path, event_idx, plane_label, num_time_steps=None,
+                          pedestal=0):
+    """Read one plane as SPARSE COO → ``(wire, time, value, n_wires, n_ticks)``.
+
+    The decode half of :func:`read_sensor_plane` without the dense scatter, so a
+    GPU pipeline can densify on-device (``pimm_data.dense_ops_jax`` /
+    ``dense_ops``) instead of building the dense image on the CPU and copying it
+    across. ``value`` is pedestal-subtracted, matching the dense reader.
+    """
+    with h5py.File(path, "r") as f:
+        evt = f[_event_key(f, event_idx)]
+        grp = _resolve_plane(evt, plane_label)
+
+        if "delta_wire" in grp:                        # ── current schema ──
+            wire = np.cumsum(grp["delta_wire"][:], dtype=np.int32)
+            wire += int(grp.attrs["wire_start"])
+            time = np.cumsum(grp["delta_time"][:], dtype=np.int32)
+            time += int(grp.attrs["time_start"])
+            raw = grp["values"][:]
+            values = raw.astype(np.float32)
+            ped = int(grp.attrs.get("pedestal", pedestal))
+            if raw.dtype == np.uint16:                 # digitized → subtract pedestal
+                values -= ped
+            if num_time_steps is None:
+                num_time_steps = int(f["config"].attrs["num_time_steps"]) \
+                    if "config" in f else int(time.max(initial=0)) + 1
+            n_wires = None
+            if "config" in f and "num_wires" in f["config"]:
+                v, col = _plane_column(evt, plane_label)
+                n_wires = int(f["config"]["num_wires"][v, col])
+            if n_wires is None or n_wires <= int(wire.max(initial=0)):
+                n_wires = int(wire.max(initial=0)) + 1
+            return wire, time, values, n_wires, int(num_time_steps)
+
+        # ── legacy flat schema ──
+        wire = grp["wire"][:].astype(np.int32)
+        time = grp["time"][:].astype(np.int32)
+        values = grp["values"][:].astype(np.float32) - pedestal
+        n_wires = int(grp.attrs.get("n_wires", wire.max(initial=0) + 1))
+        nt = 2701 if num_time_steps is None else int(num_time_steps)
+    return wire, time, values, n_wires, nt
+
+
+def read_sensor_event_coo(path, event_idx, config: DetectorConfig):
+    """All planes of one event as sparse COO → ``{label: (wire,time,value,nw,nt)}``."""
+    out = {}
+    with h5py.File(path, "r") as f:
+        evt = f[_event_key(f, event_idx)]
+        available = set()
+        for k in evt.keys():
+            if k.startswith("volume_") and isinstance(evt[k], h5py.Group):
+                available.update(f"{k}_{p}" for p in evt[k].keys())
+            elif isinstance(evt[k], h5py.Group):
+                available.add(k)
+    for label in config.plane_labels:
+        if label in available:
+            pt = label.split("_")[-1] if "_" in label else label
+            out[label] = read_sensor_plane_coo(path, event_idx, label,
+                                               config.num_time_steps,
+                                               config.pedestals.get(pt, 0))
+    return out
+
+
 def read_sensor_plane(path, event_idx, plane_label, num_time_steps=None,
                       pedestal=0) -> np.ndarray:
     """Read one plane → (n_wires, n_ticks) float32 pedestal-subtracted image.

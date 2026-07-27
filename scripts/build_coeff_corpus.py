@@ -58,17 +58,18 @@ def main():
     _add_repo_paths(args.helix_root, args.pimm_src)
     from helix.core import backend
     backend.set_backend(args.backend)
-    from helix.tpc.io import config_from_file, read_sensor_event, count_events
+    from helix.tpc.io import (config_from_file, read_sensor_event,
+                              read_sensor_event_coo, count_events)
     from helix.tpc.config import DetectorConfig
     from helix.tpc.pipeline import canonical_plane_gid
     from helix.tpc.corpus import build_corpus
     from pimm_data.geometry import load_plane_registry
     from pimm_data.noise import generate_noise, digitize
 
-    spec = None
+    noise_spec = None
     if not args.white:
         npz = np.load(args.npz, allow_pickle=True)
-        spec = (npz["spectrum_freqs_hz"], npz["spectrum_shape"])
+        noise_spec = (npz["spectrum_freqs_hz"], npz["spectrum_shape"])
     reg = load_plane_registry(args.geom)
     base = config_from_file(args.shard)
     cfg = DetectorConfig(num_time_steps=base.num_time_steps,
@@ -82,6 +83,7 @@ def main():
         import jax
         import jax.numpy as jnp
         from pimm_data.noise_jax import generate_noise_jax
+        from pimm_data.dense_ops_jax import densify_plane_jax
 
     def _seed(ev):
         return int.from_bytes(hashlib.blake2b(f"ev{ev}".encode(), digest_size=8).digest(),
@@ -93,14 +95,22 @@ def main():
         return jnp.clip(jnp.round(x + ped), 0, adc_max) - ped
 
     def plane_fn(ev):
-        planes = read_sensor_event(args.shard, ev, cfg)
+        # jax path reads SPARSE COO and densifies ON DEVICE — building the dense
+        # image on the CPU and copying it across was pure overhead.
+        planes = (read_sensor_event_coo(args.shard, ev, cfg) if use_jax
+                  else read_sensor_event(args.shard, ev, cfg))
         seed = _seed(ev)
         rng = None if use_jax else np.random.default_rng(seed)
         key = jax.random.PRNGKey(seed) if use_jax else None
         noisy, clean = {}, {}
-        for i, (label, img) in enumerate(planes.items()):
+        for i, (label, spec) in enumerate(planes.items()):
             gid = canonical_plane_gid(label)
-            nw = img.shape[0]
+            if use_jax:
+                w, t, v, nw, nt = spec
+                img = densify_plane_jax(w, t, v, nw, nt)      # on GPU
+            else:
+                img = spec
+                nw = img.shape[0]
             wl = np.asarray(reg.get(gid, {}).get("wire_lengths", []), np.float64)
             if wl.size != nw:
                 wl = np.full(nw, 2.33, np.float64)
@@ -109,13 +119,13 @@ def main():
                 k = jax.random.fold_in(key, i)            # per-plane substream
                 noise = generate_noise_jax(
                     k, img.shape, wire_lengths_m=wl, incoherent=True, coherent=True,
-                    series_spectrum=spec, group_size=cfg.group_size)
-                noisy[gid] = _digitize_jax(jnp.asarray(img) + noise, ped)
-                clean[gid] = jnp.asarray(img, jnp.float32)
+                    series_spectrum=noise_spec, group_size=cfg.group_size)
+                noisy[gid] = _digitize_jax(img + noise, ped)
+                clean[gid] = img
             else:
                 noise = generate_noise(img.shape, rng=rng, wire_lengths_m=wl,
                                        incoherent=True, coherent=True,
-                                       series_spectrum=spec, group_size=cfg.group_size)
+                                       series_spectrum=noise_spec, group_size=cfg.group_size)
                 noisy[gid] = digitize(img + noise, ped)
                 clean[gid] = img.astype(np.float32)
         return noisy, clean
