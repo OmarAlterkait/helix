@@ -95,10 +95,19 @@ class PatchConfig:
     lev: tuple = (4, 4, 3, 2)                         # DWT level per band
     delta: tuple = (-2.38, 0.62, 0.75, 0.50)          # per-band tick offset
     toff: tuple = (-17.4, 2.6, 5.5)                   # U,V,Y sensor->drift (pb_labels.TOFF)
+    cell_t: str = "centroid"                          # 'centroid' | 'grid_center'
+    sigma_norm: float = 2.6                           # research SIGMA; only the
+    # centroid weight sees it, and only through its 1e-6 floor (it cancels in the
+    # weighted mean). Kept so the weight matches vit_tpc bit for bit.
 
     @property
     def n_slot(self) -> int:
         return self.pw * self.pt
+
+    def __post_init__(self):
+        if self.cell_t not in ("centroid", "grid_center"):
+            raise ValueError(
+                f"cell_t must be 'centroid' or 'grid_center', got {self.cell_t!r}")
 
 
 def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
@@ -127,8 +136,15 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     value = value[keep]
     clean = None if value_clean is None else np.asarray(value_clean, np.float32)[keep]
 
-    val = normalize_values(value, plane_gid, band, gids, norm_sigma)
-    target = (normalize_values(clean, plane_gid, band, gids, norm_sigma)
+    # One sigma gather serves both the token value and the centroid weight. The
+    # weight must be the PRE-arcsinh ratio: vit_tpc weighted by |val| where its
+    # val was `raw * SIGMA/sigma` (the cache stored the scaled value and arcsinh'd
+    # it later), so weighting by the arcsinh'd token instead would compress large
+    # amplitudes and shift every centroid.
+    sig_row = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), 1e-6)
+    ratio = (np.asarray(value, np.float32) / sig_row).astype(np.float32)
+    val = np.arcsinh(ratio).astype(np.float32)          # == normalize_values(...)
+    target = (np.arcsinh(np.asarray(clean, np.float32) / sig_row).astype(np.float32)
               if clean is not None else np.zeros_like(val))
 
     wb, tb = wire // pw, tau // pt
@@ -145,6 +161,18 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     inp = np.zeros((n_cells, nslot), np.float32)
     tgt = np.zeros((n_cells, nslot), np.float32)
     occ[cell, slot] = True
+    # (cell, slot) is a bijection with (plane_gid, band, wire, tau), so two rows
+    # landing in one slot means the event carries DUPLICATE coordinates. The
+    # scatter below is last-write-wins, so that coefficient would vanish with no
+    # error and `inp[cell, slot] == val` would quietly stop holding — the exact
+    # invariant the FM's loss gathers on. occ.sum() detects it exactly, for the
+    # cost of one bool reduction over a grid we just allocated.
+    n_written = int(occ.sum())
+    if n_written != cell.shape[0]:
+        raise ValueError(
+            f"duplicate coefficient coordinates: {cell.shape[0] - n_written} of "
+            f"{cell.shape[0]} rows share a (plane_gid, band, wire, tau) with another "
+            f"row, so they would be silently overwritten in the token grid.")
     inp[cell, slot] = val
     tgt[cell, slot] = target
 
@@ -169,14 +197,32 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
         occ[ks] = False                               # killed -> not active input
         # targets/valid unchanged: the model must still predict a dead wire
 
-    # RoPE time coord: grid-CENTER drift time per (tick-block, band), minus the
-    # per-plane sensor->drift offset. Center (not survivor-max) so it is
-    # band-aligned and occupancy-independent; TOFF so planes share a zero.
+    # RoPE time coord, TOFF-corrected so planes share a zero. Two modes:
+    #
+    # 'grid_center' — geometric centre of the patch's tick range. Depends only on
+    #   WHICH cell it is, never on its contents. This replaced the original
+    #   survivor-MAX, which was band-width biased (coarse patches span 128 ticks
+    #   vs 32, so max pushed them ~100 ticks late), occupancy-dependent, and
+    #   zero-clamped negative A4 times.
+    # 'centroid'   — amplitude-weighted MEAN of the surviving coefficients' drift
+    #   times. Debiased survivor-max: it keeps the sub-patch timing that
+    #   cross-plane triangulation uses, without the band-width bias (the max was
+    #   the biased part, not the use of survivors). Measurably better — the
+    #   research probe scores 3D 0.60 vs 0.42 for grid-centre — and it is what the
+    #   production runs train on (fm/configs/cent_*.yaml set cellt: centroid).
     dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float32)
     toff = np.asarray(cfg.toff, np.float32)
-    center_tau = cell_tb.astype(np.float32) * pt + pt / 2.0
-    cell_t = ((center_tau + np.asarray(cfg.delta, np.float32)[cell_band]) * dec[cell_band]
-              - toff[cell_gid % 3]).astype(np.float32)
+    if cfg.cell_t == "centroid":
+        tp = ((tau.astype(np.float32) + np.asarray(cfg.delta, np.float32)[band]) * dec[band]
+              - toff[plane_gid % 3])
+        w = (np.float32(cfg.sigma_norm) * np.abs(ratio)).astype(np.float32) + 1e-6
+        ws = np.zeros(n_cells, np.float32); ts = np.zeros(n_cells, np.float32)
+        np.add.at(ws, cell, w); np.add.at(ts, cell, w * tp)
+        cell_t = (ts / np.maximum(ws, 1e-6)).astype(np.float32)
+    else:
+        center_tau = cell_tb.astype(np.float32) * pt + pt / 2.0
+        cell_t = ((center_tau + np.asarray(cfg.delta, np.float32)[cell_band]) * dec[cell_band]
+                  - toff[cell_gid % 3]).astype(np.float32)
 
     return dict(
         band=band, val=val, target=target, cell=cell.astype(np.int64),
@@ -185,6 +231,37 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
         dead=dead.astype(np.float32), cell_band=cell_band, cell_gid=cell_gid,
         cell_t=cell_t, cell_wire=(cell_wb * pw).astype(np.float32),
     )
+
+
+# ---- model-side key contract ----------------------------------------------
+
+#: ``wire_pos`` normaliser used by the trained FM (research ``fm/data.py``). The
+#: value is the max wire count over the production wire planes, so it is
+#: derivable from a shard (``_meta['n_wires'].max()``) — but a model trained
+#: against 1969 must keep seeing 1969, or every FiLM wire feature shifts.
+NW_MAX = 1969.0
+
+#: ``assemble`` output name -> the name ``fm/model.py`` gathers from its batch.
+FM_RENAME = {"cell_band": "band_id", "cell_gid": "plane_id",
+             "cell_t": "t_phys", "cell_wire": "wire_pos"}
+
+
+def to_fm(tok: dict, *, nw_max: float = NW_MAX) -> dict:
+    """Tokenizer output -> the key names ``fm/model.py`` consumes.
+
+    The tokenizer mirrors ``vit_tpc.assemble_tpc_band``'s vocabulary
+    (``cell_*``); the model gathers ``band_id``/``plane_id``/``t_phys``/
+    ``wire_pos`` plus a ``wirefeat`` that exists in neither. The research
+    pipeline bridged that in ``fm/data.py::_to_fm``; without an equivalent,
+    ``FMModel.forward`` raises ``KeyError: 'band_id'`` on its first access.
+
+    Pass ``nw_max=meta['n_wires'].max()`` to derive the normaliser from the
+    corpus instead of the trained-model constant.
+    """
+    out = {FM_RENAME.get(k, k): v for k, v in tok.items() if k != "_meta"}
+    wp = np.asarray(out["wire_pos"], np.float32)
+    out["wirefeat"] = (wp / np.float32(nw_max))[:, None].astype(np.float32)
+    return out
 
 
 # ---- transform wrapper (helix owns the whole tokenizer) --------------------
@@ -217,13 +294,14 @@ class CoeffTokenize:
 
     def __init__(self, part="coeff", clean_part="coeff_clean", out_part=None,
                  cfg=None, dead_frac=0.0, seed=None, gids=None, n_wires=None,
-                 band_lengths=None, norm_sigma=None):
+                 band_lengths=None, norm_sigma=None, fm_names=True):
         self.part = part
         self.clean_part = clean_part
         self.out_part = out_part or part
         self.cfg = cfg if isinstance(cfg, PatchConfig) else PatchConfig(**(cfg or {}))
         self.dead_frac = float(dead_frac)
         self.seed = seed
+        self.fm_names = bool(fm_names)
         self._override = dict(gids=gids, n_wires=n_wires,
                               band_lengths=band_lengths, norm_sigma=norm_sigma)
 
@@ -257,7 +335,17 @@ class CoeffTokenize:
                          else np.asarray(clean["value"]).reshape(-1)),
             dead_frac=self.dead_frac, rng=rng)
         n_cells = tok.pop("n_cells")
-        out = dict(tok)
+        # Emit the names fm/model.py gathers, not assemble()'s cell_* vocabulary.
+        # Without this the first batch dies on B["band_id"] (model.py:266), and
+        # `to_fm` sat unused. It must run HERE, before the terminal Collect —
+        # Collect selects by exact key name and (in its multi-part `parts=` form)
+        # prefixes to `<part>_<key>`, so it can neither rename nor be renamed
+        # after. The recipe must therefore use the single-part `Collect(part=...)`
+        # form, which leaves these keys unprefixed and matching the model.
+        out = to_fm(tok) if self.fm_names else dict(tok)
+        # n_cells stays OUT of the batch on purpose: post-collate it is exactly
+        # `B["plane_id"].shape[0]` (the cell row-space length), and a python int
+        # would not survive collate as a per-event value anyway.
         out["_meta"] = dict(n_cells=n_cells, n_slot=self.cfg.n_slot)
         data[self.out_part] = out
         if self.clean_part in data and self.clean_part != self.out_part:

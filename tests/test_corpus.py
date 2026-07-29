@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import h5py
 
 from helix.core.backend import set_backend
@@ -80,10 +81,19 @@ def test_build_corpus_matches_old_semantics(tmp_path):
             np.testing.assert_array_equal(getattr(ce, k), getattr(noisy[i], k))
     with h5py.File(tmp_path / "cx_coeff_0000.h5", "r") as f:
         np.testing.assert_allclose(f["config"]["norm_sigma"][:], norm)
-    # coeff_clean shard exists and is co-supported with coeff
-    cc = read_coeff_event(tmp_path / "cx_coeff_clean_0000.h5", 0)
+    # coeff_clean is a VALUES-ONLY shard: co-supported, so it stores no coords and
+    # inherits the noisy shard's through the coord_digest-checked join.
+    p_noisy = tmp_path / "cx_coeff_0000.h5"
+    p_clean = tmp_path / "cx_coeff_clean_0000.h5"
+    with h5py.File(p_clean, "r") as f:
+        assert not bool(f["config"].attrs["has_coords"])
+        assert not any(k in f["coord"] for k in ("band", "plane_gid", "wire", "tau"))
+    cc = read_coeff_event(p_clean, 0, coords_from=p_noisy)
     np.testing.assert_array_equal(cc.band, noisy[0].band)
     np.testing.assert_array_equal(cc.value, clean[0].value)
+    # reading it standalone must fail loudly, not yield coord-less garbage
+    with pytest.raises(ValueError, match="values-only"):
+        read_coeff_event(p_clean, 0)
 
 
 def test_build_corpus_no_clean(tmp_path):

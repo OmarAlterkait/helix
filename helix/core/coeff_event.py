@@ -201,6 +201,18 @@ class CoeffEvent:
                 raise ValueError(f"gid {gid}: sigma_per_band is non-finite ({spb})")
             sigma[gi, :] = spb
             if isinstance(coeffs, FlatBands):
+                # The SAME per-band length check the list path does below. It is
+                # load-bearing here, not redundant: _flat_rows derives band and
+                # tau purely from basis.band_lengths and ignores fb.lens, so a
+                # FlatBands whose lens disagree gets its coefficients silently
+                # re-tagged (a marker at band 4 tau 0 was recorded as tau 8).
+                # Reachable because event_coeff_event derives the event-wide basis
+                # from ONE arbitrary plane and applies it to all of them.
+                if tuple(int(x) for x in coeffs.lens) != tuple(int(x) for x in basis.band_lengths):
+                    raise ValueError(
+                        f"gid {gid}: FlatBands lens {tuple(int(x) for x in coeffs.lens)} != "
+                        f"basis.band_lengths {tuple(int(x) for x in basis.band_lengths)} — "
+                        f"band/tau would be mis-derived for every coefficient of this plane.")
                 # ONE compaction for the whole plane instead of one per band, and
                 # band/tau are derived from the flat column on the host.
                 bb, ww, tt, vv = _flat_rows(coeffs, basis.band_lengths, gid)

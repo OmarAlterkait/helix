@@ -72,7 +72,7 @@ grid `(band,wire,tau)` coords; optical (later) uses an offset-packed chunk varia
 class CoeffEvent:                       # one EVENT, all planes — flat sparse rows
     # --- flat coeff rows (n = total kept coeffs) ---
     band: np.ndarray            # uint8   (n,)  index into [cA, cD_L, …, cD_1]
-    plane_gid: np.ndarray       # uint8   (n,)  canonical plane id (v*3 + {U,V,Y})
+    plane_gid: np.ndarray       # int32   (n,)  canonical plane id (v*3 + {U,V,Y})
     wire: np.ndarray            # int32   (n,)  signal/row index within the plane
     tau: np.ndarray             # int32   (n,)  within-band coeff index
     value: np.ndarray           # float32 (n,)  RAW coeff (un-normalized)
@@ -139,6 +139,10 @@ events/shard (a builder knob).
 │       threshold_func='visushrink', threshold_kappa=1.0, per_band_sigma=True, threshold_approx=False
 │       sigma_norm=2.6                               # SIGMA (tokenize normalization)
 │       basis_digest='<sha256>'                      # provenance.descriptor_digest
+│       has_coords=True                              # False on a values-only target
+│       noise_json='{"kind":"colored",...}'          # HOW the input was noised
+│       provenance_json='{"geom_sha256":...,"spectrum_sha256":...,
+│                         "seed_formula":...}'       # EXTERNAL inputs, pinned
 │       production_version, run_id, batch_timestamp, git_*   # house provenance (NO schema_version)
 │     datasets (shared tables):
 │       band_lengths   (n_bands,)          int32     # PADDED lengths [271,271,542,1084,2168]
@@ -148,14 +152,26 @@ events/shard (a builder knob).
 │
 ├── /coord                                   ← shard-wide concatenated coords (M = Σ n_coeff)
 │     band        (M,) uint8                 # 0..n_bands-1
-│     plane_gid   (M,) uint8                 # v*3 + {U:0,V:1,Y:2}  (a COLUMN now)
+│     plane_gid   (M,) int32                 # v*3 + {U:0,V:1,Y:2}  (a COLUMN now)
 │     wire        (M,) int32
 │     tau         (M,) int32                 # within-band coeff index
 │     event_offset (n_events+1,) int64       # event boundaries; slice [off[i]:off[i+1]]
+│     coord_digest (n_events,) uint64        # blake2b of this event's 4 coord columns
 │     sigma_threshold (n_events, n_gid, n_bands) float32   # per-event per-(gid,band)
 │
-└── /value        (M,) float32               ← RAW noisy coeff
+├── /value        (M,) float32               ← RAW coeff
+│
+└── /ident                                   ← per-event identity (the join key)
+      run          (n_events,) str
+      source_file  (n_events,) str           # the sensor shard actually read
+      event        (n_events,) int64         # its event id within that file
+      noise_seed   (n_events,) int64         # the ONE realisation this event bakes in
 ```
+
+On a **values-only** shard (`has_coords=False` — the co-supported clean target)
+the four coordinate columns are absent; everything else is unchanged. Its coords
+come from the paired `coeff` shard, and `coord_digest` — present in BOTH — is
+compared before the join so a mispairing raises instead of misaligning.
 
 Coords stored as plain int columns (blosc-zstd handles the redundancy; sorted
 `(event, plane_gid, band, wire, tau)` for compression). `idx = wire*band_lengths[band]
@@ -164,13 +180,15 @@ Coords stored as plain int columns (blosc-zstd handles the redundancy; sorted
 ### `coeff_clean` modality — the clean target (`{dataset}_coeff_clean_{NNNN}.h5`)
 
 **Separate file** (built in the same `process_event(clean_image=…)` pass, written to
-its own shard). Self-describing — its own `/config` + `/coord` + `/value` — so it is
-independently valid and may carry the **clean signal's own support** (the coeffs the
-noisy pass missed), not just the noisy support. Joined onto `coeff` at read by
-identity `(run, tag, event)`; the tokenizer aligns clean↔noisy by the `(band,
-plane_gid, wire, tau)` key (gather clean at each noisy coord, 0 if absent) — robust,
-positional-coupling-free. `CoeffTPCDataset(modalities=('coeff','coeff_clean'))` opts
-it in; MAE-only pretraining uses just `('coeff',)`.
+its own shard) — but **values-only**: it carries `/config`, `/value`, `/ident`,
+`event_offset`, `sigma_threshold` and `coord_digest`, and NOT the four coordinate
+columns. The target is co-supported by construction, so those columns would be a
+byte-for-byte copy of the noisy shard's. The *shards* are joined by identity
+(`/ident` `(run, source_file, event)`); within a joined event the rows align
+**positionally**, guarded by `coord_digest`.
+`CoeffTPCDataset(modalities=('coeff','coeff_clean'))` opts it in; MAE-only
+pretraining uses just `('coeff',)`. A clean-only `modalities=('coeff_clean',)` is
+rejected — a values-only shard has no coords of its own to return.
 
 ### `coeff_charge` modality — DEFERRED (future)
 
@@ -198,8 +216,10 @@ Notes:
   band)`, frozen for the corpus. **Embedded in `/config`** as a dataset (it's
   shared-per-shard, like `num_wires`). Written by `CoeffShardWriter`, computed once
   by the corpus builder. `SIGMA=2.6` is a `/config` attr and also pinned in helix
-  `PatchConfig`. Tokenize does `arcsinh(value * (SIGMA/norm_sigma[gid,band]) / SIGMA)`
-  = `arcsinh(value / norm_sigma[gid,band])` — normalization lives entirely at
+  `PatchConfig`. Tokenize does `arcsinh(value / norm_sigma[row_of(gid), band])`,
+  where `row_of(gid) = gids.index(gid)` (`helix.tokenize.gid_rows`). Rows follow
+  POSITION in `gids`, never the gid VALUE — with a dead plane the two differ and
+  `norm_sigma[gid]` silently selects another plane's sigma. Normalization lives at
   tokenize, corpus stores raw.
 
 This is the answer to "who owns NormalizationTable": **embedded in the shard
@@ -222,11 +242,26 @@ the noisy shards.
 | `coeff_clean` | `{ds}_coeff_clean_{NNNN}.h5` | clean-only pass, same `process_event(clean_image=)` | **now** — denoising target |
 | `coeff_charge` | `{ds}_coeff_charge_{NNNN}.h5` | `hits` truth via pywt DWT | **deferred** (future) |
 
-- **Alignment at read** is by the `(band, plane_gid, wire, tau)` **key**, not by
-  position: the tokenizer gathers each target's value at every noisy coord (0 if
-  absent). So a target may have its **own support** (e.g. clean coeffs the noisy
-  pass missed) — the separate self-describing file makes that natural, and there is
-  no fragile positional coupling.
+- **Alignment at read is POSITIONAL, and deliberately so.** `clean_coeff_event`
+  evaluates the clean DWT *at the noisy support* and copies the noisy coords
+  verbatim, so the two shards are **co-supported** and align row-for-row. This is
+  what the FM's loss needs (`mu[B["cell"], B["slot"]]` compares input and target
+  at the same slot), and it is why `coeff_clean` is written **values-only**
+  (`has_coords=False`): its coordinate columns would duplicate the noisy shard's
+  byte for byte. A target with its own independent support is NOT supported —
+  earlier drafts of this section described that design, but it was never built.
+  What makes the positional join safe is `coord_digest`, written to both shards:
+  the reader compares one uint64 per event and raises on a mispairing rather than
+  silently misaligning every target row.
+- **What the pair CANNOT answer: missed signal.** Because the clean target is
+  sampled only at the noisy support, any true coefficient the noisy gate or
+  threshold discarded is absent from the corpus entirely — there is no clean-side
+  support and no clean-side sigma to compare against. So a consumer can measure
+  how faithfully the pipeline reconstructs what it *kept* (that is what F0 does),
+  but never its RECALL. This is inherent to co-support, not an oversight: storing
+  the clean signal's own support would double the corpus and break the row-for-row
+  alignment the FM's loss depends on. If recall ever needs measuring, it needs a
+  separate diagnostic pass over a small sample, not a schema change.
 - **Objective selects modalities:** MAE pretraining = `modalities=('coeff',)`;
   denoising = `('coeff','coeff_clean')`; deconvolution (future) adds `coeff_charge`.
 - **Role tag** `('target', <name>)` — DEFERRED to the tokenizer stage (not yet in

@@ -18,6 +18,17 @@ GS = 64
 jax = pytest.importorskip("jax", reason="jax not installed")
 
 
+@pytest.fixture(autouse=True)
+def _restore_backend():
+    """``set_backend`` writes a module global, and every test here flips it. A
+    bare reset on the last line is SKIPPED when the test fails, leaking 'jax'
+    into everything that runs after (demonstrated: inject a failure before the
+    reset and the next test observes backend='jax'). test_backend.py already
+    guards this way; this file was the outlier."""
+    yield
+    backend.set_backend("numpy")
+
+
 def _bands(rng, W=200, lbs=(24, 24, 48)):
     """Coherent (rank-1 per block) + sparse signal + incoherent, per band."""
     out = []
@@ -79,3 +90,42 @@ def test_jax_rejects_legacy_median_sigc():
     with pytest.raises(ValueError, match="quantile"):
         coherent_gate(bands, sigc_mode="median")
     backend.set_backend("numpy")
+
+
+# ---- the shared wavelet seam: jax must match numpy for EVERY method ---------
+
+def test_threshold_bands_honours_method_and_sigma_across_backends():
+    """`helix.core.wavelet.threshold_bands` is the DETECTOR-AGNOSTIC seam — the
+    two-step (wavedec, then gate, then threshold) entry point. The jax backend
+    dispatched every call to a universal-only fused kernel, so `method='topk'`
+    silently returned universal-thresholded coefficients and an explicit
+    `sigma=` was ignored outright. Nothing raised, and no test covered it: the
+    suite exercised topk/sigma only through `sparsify()`, the correct twin.
+    """
+    from helix.core.wavelet import threshold_bands, ThresholdSpec
+
+    rng = np.random.default_rng(0)
+    bands = [rng.standard_normal((16, L)).astype(np.float32) for L in (64, 64, 128, 256)]
+
+    def run(bk, th, sigma=None):
+        backend.set_backend(bk)
+        out, n_kept, _, _ = threshold_bands(bands, th, sigma=sigma)
+        arrs = [np.asarray(c) for c in (out.to_list() if hasattr(out, "to_list") else out)]
+        return np.concatenate(arrs, axis=-1), int(n_kept)
+
+    for th in (ThresholdSpec(method="universal"),
+               ThresholdSpec(method="topk", keep=0.02),
+               ThresholdSpec(method="energy", energy=0.99)):
+        a, ka = run("numpy", th)
+        b, kb = run("jax", th)
+        assert ka == kb, f"{th.method}: n_kept numpy {ka} vs jax {kb}"
+        np.testing.assert_allclose(b, a, rtol=1e-4, atol=1e-4, err_msg=th.method)
+
+    # an explicit sigma must actually be used, not silently recomputed
+    th = ThresholdSpec(method="universal")
+    a, ka = run("numpy", th, sigma=5.0)
+    b, kb = run("jax", th, sigma=5.0)
+    assert ka == kb, f"explicit sigma: n_kept numpy {ka} vs jax {kb}"
+    np.testing.assert_allclose(b, a, rtol=1e-4, atol=1e-4)
+    _, k_free = run("jax", th)
+    assert kb != k_free, "sigma= made no difference — it is being ignored"

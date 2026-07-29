@@ -11,11 +11,29 @@ co-support checks. Nothing asserted that a value must be *populated*, must
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 
 import numpy as np
 import pytest
 import h5py
+
+# find_spec, NOT pytest.importorskip: importorskip raises Skipped at DECORATION
+# time, which aborts collection of the WHOLE module. Used in a decorator it
+# silently dropped all 8 non-jax tests here — the audit_shard corruption sweep,
+# the real-data F0 acceptance, and both normalisation tests — in any environment
+# without jax, which includes a bare `pip install -e .` (jax is an extra).
+def _jax_available():
+    # find_spec, not import: importing jax here would initialise CUDA at
+    # COLLECTION time, which turns a bad driver into a collection error instead
+    # of a skip. try/except because find_spec itself raises on a broken install.
+    try:
+        return importlib.util.find_spec("jax") is not None
+    except Exception:
+        return False
+
+
+_HAS_JAX = _jax_available()
 
 from helix.core.backend import set_backend
 from helix.core.coeff_io import audit_shard, read_coeff_event
@@ -61,6 +79,10 @@ def test_audit_passes_a_good_shard(tmp_path):
     ("norm_zero", "norm_sigma"),
     ("tau_oob", "tau"),
     ("offset_break", "event_offset"),
+    ("one_plane_sigma_zero", "plane gid 1 is ALL ZERO"),
+    ("gids_unsorted", "strictly increasing"),
+    ("gids_duplicate", "strictly increasing"),
+    ("digest_break", "coord_digest"),
 ])
 def test_audit_catches_corruption(tmp_path, corrupt, expect):
     """Each of these is a shape the codec would happily write and every
@@ -82,16 +104,77 @@ def test_audit_catches_corruption(tmp_path, corrupt, expect):
         elif corrupt == "offset_break":
             o = f["coord/event_offset"][:]; o[-1] += 7
             f["coord/event_offset"][...] = o
+        elif corrupt == "one_plane_sigma_zero":
+            # ONE dead plane in an otherwise healthy table: the old global
+            # nanmax check passed this happily.
+            s = f["coord/sigma_threshold"][:]; s[:, 1, :] = 0.0
+            f["coord/sigma_threshold"][...] = s
+        elif corrupt == "gids_unsorted":
+            f["config/gids"][...] = np.array([1, 0], np.int32)
+        elif corrupt == "gids_duplicate":
+            f["config/gids"][...] = np.array([0, 0], np.int32)
+        elif corrupt == "digest_break":
+            d = f["coord/coord_digest"][:]; d[0] ^= np.uint64(0xDEADBEEF)
+            f["coord/coord_digest"][...] = d
     probs = audit_shard(p, strict=False)
     assert any(expect in s for s in probs), f"audit missed {corrupt}: {probs}"
     with pytest.raises(ValueError, match="shard audit failed"):
         audit_shard(p)
 
 
+def test_clean_shard_is_values_only_and_pairs_by_digest(tmp_path):
+    """The clean target is co-supported, so it stores no coords (13 of every 34
+    bytes in a pair). What makes that safe is the digest: a MISPAIRED clean shard
+    must raise, because silent misalignment of every target row is precisely the
+    failure this codebase has already shipped twice."""
+    from helix.core.coeff_io import coord_digest, write_coeff_shard
+    set_backend("numpy")
+    build_corpus(range(4), _plane_fn, _config(), tmp_path, dataset_name="cx")
+    p_noisy = tmp_path / "cx_coeff_0000.h5"
+    p_clean = tmp_path / "cx_coeff_clean_0000.h5"
+
+    # values-only really is smaller, and really has no coords
+    with h5py.File(p_clean, "r") as f:
+        assert not bool(f["config"].attrs["has_coords"])
+        assert set(f["coord"]) == {"event_offset", "coord_digest", "sigma_threshold"}
+    assert p_clean.stat().st_size < p_noisy.stat().st_size
+
+    # correct pairing round-trips
+    ce = read_coeff_event(p_clean, 0, coords_from=p_noisy)
+    noisy0 = read_coeff_event(p_noisy, 0)
+    np.testing.assert_array_equal(ce.band, noisy0.band)
+    np.testing.assert_array_equal(ce.tau, noisy0.tau)
+
+    # a shard from a DIFFERENT build has the same shapes but different coords:
+    # the digest is what catches it. Positional length checks would not.
+    other = tmp_path / "other"
+    build_corpus(range(4, 8), _plane_fn, _config(), other, dataset_name="cx")
+    p_other = other / "cx_coeff_0000.h5"
+    with pytest.raises(ValueError, match="coord_digest mismatch|not co-supported"):
+        read_coeff_event(p_clean, 0, coords_from=p_other)
+
+    # and the digest is genuinely order-sensitive (a permutation is not a no-op)
+    b = np.array([0, 1], np.uint8); g = np.array([0, 1], np.int32)
+    w = np.array([2, 3], np.int32); t = np.array([4, 5], np.int32)
+    assert coord_digest(b, g, w, t) != coord_digest(b[::-1], g[::-1], w[::-1], t[::-1])
+
+
+def test_noise_mode_is_recorded_on_disk(tmp_path):
+    """Two shards built with different noise are otherwise indistinguishable —
+    a silently mixed-noise corpus. /config/noise_json pins it."""
+    import json as _json
+    set_backend("numpy")
+    build_corpus(range(2), _plane_fn, _config(), tmp_path, dataset_name="cx",
+                 noise=dict(kind="white", coherent=True, incoherent=True))
+    with h5py.File(tmp_path / "cx_coeff_0000.h5", "r") as f:
+        assert _json.loads(f["config"].attrs["noise_json"])["kind"] == "white"
+    with h5py.File(tmp_path / "cx_coeff_clean_0000.h5", "r") as f:
+        assert _json.loads(f["config"].attrs["noise_json"])["kind"] == "white"
+
+
 # ---- 2. backend equivalence (same noisy input, numpy vs jax) --------------
 
-@pytest.mark.skipif(not pytest.importorskip("jax", reason="jax not installed"),
-                    reason="jax not installed")
+@pytest.mark.skipif(not _HAS_JAX, reason="jax not installed")
 def test_numpy_jax_equivalent_on_same_input(tmp_path):
     """Noise RNG differs per backend, so noise is fixed and only the DSP +
     extraction + assembly are compared. Measured on real planes: support
@@ -135,10 +218,29 @@ REAL = ("/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor/"
 def test_f0_on_a_real_built_shard(tmp_path):
     """Reconstruct a built shard and compare to the clean truth.
 
-    F0 = 1 - sum|recon-clean|/sum|clean| over the true-signal support. Measured
-    0.905 overall (Y planes 0.948, induction 0.88) against the old pipeline's
-    0.91-0.96 — one number that exercises band/tau mapping, padding, sigma, gate,
-    threshold and codec together.
+    F0 = 1 - sum|recon-clean|/sum|clean| over the true-signal support — one number
+    that exercises band/tau mapping, padding, sigma, gate, threshold and codec
+    together.
+
+    Thresholds derive from a MATCHED measurement (8 events x 6 planes, one run,
+    noise held fixed between arms), not from the achieved value:
+
+        shipped   gate k=3.0 npass=2   mean F0 0.9259   min 0.8772
+        research  gate k=4.0 npass=1   mean F0 0.9208   min 0.8627
+        legacy    R1 classic multipass mean F0 0.9192   min 0.8712
+
+    The shipped defaults win 47 of 48 event x plane rows, so the gate re-tune
+    IMPROVED fidelity. An earlier version of this docstring compared 0.905 to "the
+    old pipeline's 0.91-0.96" and set the bar beneath it; that figure came from
+    research/wire_denoise/RESULTS.md P10, which used a different remover (R1), a
+    different per-plane kappa, a different noise injector and different events —
+    it was never a like-for-like number.
+
+    F0 is measured ON the signal support, so it is structurally blind to junk left
+    OFF it — and that is exactly where the re-tune costs: a less aggressive gate
+    keeps more residual coherent noise (off-support RMS 0.477 vs 0.341 ADC for
+    k=4). test_off_support_residual pins that axis so a future re-tune cannot
+    trade it away invisibly.
     """
     pytest.importorskip("pimm_data")
     from pimm_data.geometry import load_plane_registry
@@ -171,16 +273,27 @@ def test_f0_on_a_real_built_shard(tmp_path):
     ce = read_coeff_event(tmp_path / "cx_coeff_0000.h5", 0)
     recon = ce.reconstruct_images(cfg.num_time_steps)
     _, clean = plane_fn(0)
-    f0s = []
+    f0s, off_rms = [], []
     for gid, r in recon.items():
         c = np.asarray(clean[gid])
+        rr = np.asarray(r)[:, :cfg.num_time_steps]
         sig = np.abs(c) > 0
         if sig.any():
-            f0s.append(1.0 - np.abs(np.asarray(r)[:, :cfg.num_time_steps][sig] - c[sig]).sum()
-                       / np.abs(c[sig]).sum())
+            f0s.append(1.0 - np.abs(rr[sig] - c[sig]).sum() / np.abs(c[sig]).sum())
+        if (~sig).any():
+            # energy left where there is no true signal — F0 cannot see this
+            off_rms.append(float(np.sqrt((rr[~sig] ** 2).mean())))
     assert f0s, "no signal support found"
-    assert min(f0s) > 0.80, f"F0 per plane too low: {[round(v,3) for v in f0s]}"
-    assert np.mean(f0s) > 0.85, f"mean F0 {np.mean(f0s):.3f} below acceptance"
+    # matched-measurement floors (worst observed: min 0.877, per-event mean 0.912)
+    assert min(f0s) > 0.85, f"F0 per plane too low: {[round(v,3) for v in f0s]}"
+    assert np.mean(f0s) > 0.90, f"mean F0 {np.mean(f0s):.3f} below acceptance"
+    # F0's blind spot: a less aggressive gate keeps more residual coherent noise
+    # while F0 IMPROVES, so fidelity and cleanliness must be pinned separately.
+    assert off_rms, "no off-support region found"
+    assert np.mean(off_rms) < 0.6, \
+        f"off-support RMS {np.mean(off_rms):.3f} ADC too high: {[round(v,3) for v in off_rms]}"
+    assert max(off_rms) < 0.85, \
+        f"a plane leaks off-support: {[round(v,3) for v in off_rms]}"
 
 
 # ---- Tier 3: normalization indexing + token sanity -------------------------
@@ -228,3 +341,38 @@ def test_normalization_roundtrips_and_is_sane():
     assert 0.3 < np.std(tok) < 3.0, f"token std {np.std(tok):.3f} out of range"
     assert abs(np.mean(tok)) < 0.2, f"token mean {np.mean(tok):.3f} not centred"
     assert np.abs(tok).max() < 12.0
+
+
+def test_noise_seed_and_external_inputs_are_recorded(tmp_path):
+    """The corpus stores ONE fixed noise realisation per event by design, so the
+    seed is the only thing that makes that realisation reproducible — and it is
+    not derivable from the shard, because the two build modes use different seed
+    formulas. Likewise basis_digest covers the wavelet/gate/threshold but says
+    nothing about the plane geometry or noise spectrum the DSP consumed, so a
+    change to either would make old and new shards silently incomparable.
+    """
+    import json as _json
+    set_backend("numpy")
+    prov = dict(geom_sha256="a" * 64, spectrum_sha256="b" * 64,
+                seed_formula="test:fixed")
+    seeds = [111, 222, 333, 444]
+    build_corpus([(f"src_{e:04d}.h5", e, seeds[e]) for e in range(4)],
+                 _plane_fn, _config(), tmp_path, dataset_name="cx",
+                 noise=dict(kind="colored"), provenance=prov)
+
+    for name in ("cx_coeff_0000.h5", "cx_coeff_clean_0000.h5"):
+        with h5py.File(tmp_path / name, "r") as f:
+            got = _json.loads(f["config"].attrs["provenance_json"])
+            assert got == prov, f"{name}: provenance not round-tripped"
+            np.testing.assert_array_equal(f["ident"]["noise_seed"][:], seeds)
+            # the identity tuple's source_file must reach /ident too, not a
+            # fabricated f"{dataset}_sensor_{file_index:04d}.h5"
+            assert [s.decode() for s in f["ident"]["source_file"][:]] == \
+                [f"src_{e:04d}.h5" for e in range(4)]
+
+    # a build that supplies no seeds must not invent one
+    plain = tmp_path / "plain"
+    build_corpus(range(2), _plane_fn, _config(), plain, dataset_name="cx")
+    with h5py.File(plain / "cx_coeff_0000.h5", "r") as f:
+        assert "noise_seed" not in f["ident"]
+        assert _json.loads(f["config"].attrs["provenance_json"]) == {}
