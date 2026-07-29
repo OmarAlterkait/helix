@@ -133,6 +133,12 @@ def main():
                     help="write the computed norm_sigma to .npy (build shard 0 with this, "
                          "then pass it as --norm-sigma to every other shard)")
     ap.add_argument("--white", action="store_true", help="use white incoherent noise (old bug)")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="compute norm_sigma from these events and write it to "
+                         "--save-norm-sigma WITHOUT writing shards. A corpus needs ONE "
+                         "frozen table shared by every shard of every run, so calibrate "
+                         "across a sample spanning the runs, average, then pass the "
+                         "result as --norm-sigma to every build job.")
     ap.add_argument("--allow-index-mismatch", action="store_true",
                     help="serial mode: permit --file-index to disagree with --shard's "
                          "numeric suffix (mislabels provenance; use only deliberately)")
@@ -300,7 +306,8 @@ def main():
         noisy, clean, norm = build_corpus_stream(
             stream, cfg, args.out, dataset_name=args.dataset_name, run=args.run,
             file_index=args.file_index, norm_sigma=norm_in, noise=noise_meta,
-            provenance=provenance_meta,
+            provenance=provenance_meta, write=not args.calibrate,
+            with_clean=not args.calibrate,
             cal_events=tuple(args.cal_events) if args.cal_events else None)
     else:
         n = count_events(args.shard)
@@ -313,11 +320,14 @@ def main():
                                           file_index=args.file_index, norm_sigma=norm_in,
                                           noise=noise_meta,
                                           provenance=provenance_meta,
+                                          write=not args.calibrate,
+                                          with_clean=not args.calibrate,
                                           cal_events=tuple(args.cal_events) if args.cal_events else None)
     dt = time.perf_counter() - t0
     print(f"built {len(noisy)} events in {dt:.1f}s ({dt/max(len(noisy),1):.1f}s/ev); "
           f"coeffs/event={[ce.n_coeff for ce in noisy]}")
     if args.save_norm_sigma and norm is not None:
+        Path(args.save_norm_sigma).parent.mkdir(parents=True, exist_ok=True)
         np.save(args.save_norm_sigma, norm)
         print(f"saved norm_sigma -> {args.save_norm_sigma}")
     print(f"norm_sigma {None if norm is None else norm.shape}"
