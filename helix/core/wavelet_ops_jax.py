@@ -168,14 +168,33 @@ def _mad_sigma_j(c):
 def threshold_bands(coeffs, th: ThresholdSpec, sigma=None):
     """Threshold a band list -> ``(out_bands, n_kept, n_total, band_sigma)`` (GPU).
 
-    Same estimator as the numpy backend: per-band MAD sigma measured on the
-    (already gated) coefficients, universal threshold ``scale*sigma*sqrt(2 ln N)``.
+    Matches the numpy backend across all of ``th.method``: per-band MAD sigma on
+    the (already gated) coefficients and the universal threshold
+    ``scale*sigma*sqrt(2 ln N)``, or the topk/energy quantile rules.
+
+    ``_threshold_all`` fuses the whole band loop into ONE kernel but implements
+    only the universal rule with sigma measured from the finest detail band —
+    exactly the TPC production configuration. Everything else takes the general
+    path. Dispatching *everything* to the fused kernel silently returned
+    universal-thresholded coefficients for topk/energy (measured n_kept 54372 vs
+    numpy's 70400 on a 16x4096 probe) and ignored a caller-supplied ``sigma``
+    outright, with nothing raised. This is the detector-AGNOSTIC seam: TPC pins
+    universal and never passes sigma, but optical and any future caller reach it.
     """
     if isinstance(coeffs, FlatBands):            # already flat: no concat
         lens, flat = coeffs.lens, coeffs.flat
     else:
         lens = tuple(int(np.asarray(c).shape[-1]) for c in coeffs)
         flat = jnp.concatenate([jnp.asarray(c, jnp.float32) for c in coeffs], axis=-1)
+
+    if th.method != "universal" or sigma is not None:
+        segs, off = [], 0
+        for L in lens:
+            segs.append(flat[..., off:off + L]); off += L
+        out, n_kept, n_total, band_sigma = _threshold_bands_general(segs, th, sigma)
+        return (FlatBands(jnp.concatenate(out, axis=-1), lens),
+                n_kept, n_total, band_sigma)
+
     flat_out, band_sigma, nkept = _threshold_all(
         flat, lens, float(th.scale), th.func, bool(th.per_band_sigma),
         bool(th.threshold_approx))
@@ -208,7 +227,12 @@ def _threshold_all(flat, lens, scale, func, per_band, thr_approx):
     return res, band_sigma, jnp.count_nonzero(res)
 
 
-def _threshold_bands_legacy(coeffs, th: ThresholdSpec, sigma=None):
+def _threshold_bands_general(coeffs, th: ThresholdSpec, sigma=None):
+    """Unfused reference: honours every ``th.method`` and a caller ``sigma``.
+
+    Slower than ``_threshold_all`` (one kernel per band, no fusion), so it serves
+    the cases the fused path cannot express rather than the TPC hot loop.
+    """
     bands = [jnp.asarray(c, dtype=jnp.float32) for c in coeffs]
     band_sigma = jnp.stack([_mad_sigma_j(c) for c in bands])
 

@@ -46,11 +46,15 @@ def _loader_stream(args, cfg, reg, noise_spec):
     """
     import jax
     import torch
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, Subset
     from pimm_data import JAXTPCDataset
     from pimm_data.collate import collate_fn
+    from pimm_data.batch_transforms import content_seed
     from pimm_data.transform import Compose
 
+    # --shard locates the RUN here, not a file: the sensor reader globs every
+    # shard of the run and builds ONE joint index over all of them. Naming a
+    # different shard of the same run therefore reads exactly the same events.
     root = args.data_root or str(Path(args.shard).parents[2])
     split = args.split or Path(args.shard).parent.name
     head = [dict(type="Collect", parts={"sensor": dict(
@@ -63,6 +67,18 @@ def _loader_stream(args, cfg, reg, noise_spec):
                      dict(type="Digitize", geom=reg, modality="sensor", n_bits=12)])
     ds = JAXTPCDataset(data_root=root, split=split, dataset_name=args.dataset_name,
                        modalities=("sensor",), transform=head)
+    # Slice the joint index HERE. --event-start used to be ignored in this mode,
+    # so every invocation re-read the front of the run: a per-shard build loop
+    # produced byte-identical duplicate events in every output shard (noise is
+    # seeded from the event NAME, so even the noise repeated).
+    n_total = len(ds)
+    sel = list(range(min(args.event_start, n_total),
+                     min(args.event_start + args.events, n_total)))
+    if not sel:
+        raise SystemExit(
+            f"--event-start {args.event_start} is past the end of the joint index "
+            f"({n_total} events in {root}/{split}); nothing to build.")
+    ds = Subset(ds, sel)
     # spawn, NOT fork: DataLoader workers fork while jax is initialised in the
     # parent, and jax warns that fork + its threads "will likely lead to a
     # deadlock". spawn re-imports cleanly in each worker.
@@ -70,10 +86,7 @@ def _loader_stream(args, cfg, reg, noise_spec):
                     persistent_workers=args.workers > 0,
                     multiprocessing_context="spawn" if args.workers > 0 else None,
                     prefetch_factor=2 if args.workers > 0 else None)
-    n_want = args.events
-    for i, b in enumerate(dl):
-        if i >= n_want:
-            break
+    for b in dl:
         b = dense(b)
         grids = b["sensor_dense"]
         clean = {int(g): jax.dlpack.from_dlpack(t[0].clone().contiguous())
@@ -81,12 +94,26 @@ def _loader_stream(args, cfg, reg, noise_spec):
         b = noise(b)
         noisy = {int(g): jax.dlpack.from_dlpack(t[0].contiguous())
                  for g, t in b["sensor_dense"].items()}
-        yield i, noisy, clean
+        # Carry the TRUE identity ("<file>_evt<NNN>"), which the batch already
+        # holds. The builder used to fabricate provenance from --file-index, so a
+        # shard recorded source_file="..._0001.h5" over bytes read from _0000.h5.
+        nm = b["name"]
+        nm = nm[0] if isinstance(nm, (list, tuple)) else str(nm)
+        src, sep, ev = str(nm).rpartition("_evt")
+        # Resolve the SAME seed AddNoise derived internally, so the one baked-in
+        # noise realisation is recorded and reproducible. AddNoise seeds from
+        # batch['name'] via content_seed with base_seed/epoch/rank all 0 here.
+        seed = content_seed(str(nm), 0, 0, 0)
+        yield (((src, int(ev), seed) if sep and ev.isdigit() else (str(nm), -1, seed)),
+               noisy, clean)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--shard", required=True, help="sensor HDF5 shard")
+    ap.add_argument("--shard", required=True,
+                    help="sensor HDF5 shard. serial mode reads exactly this file; "
+                         "loader mode uses it only to locate the RUN (it reads the "
+                         "run-wide joint index) -- use --event-start to select within it")
     ap.add_argument("--out", required=True, help="output corpus dir (<root>/coeff_tpc/<run>/)")
     ap.add_argument("--npz", default="/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz",
                     help="colored incoherent series spectrum (freqs_hz, shape)")
@@ -106,6 +133,9 @@ def main():
                     help="write the computed norm_sigma to .npy (build shard 0 with this, "
                          "then pass it as --norm-sigma to every other shard)")
     ap.add_argument("--white", action="store_true", help="use white incoherent noise (old bug)")
+    ap.add_argument("--allow-index-mismatch", action="store_true",
+                    help="serial mode: permit --file-index to disagree with --shard's "
+                         "numeric suffix (mislabels provenance; use only deliberately)")
     ap.add_argument("--backend", choices=["numpy", "jax"], default="numpy",
                     help="jax runs noise + DWT + gate + threshold on GPU (~30x)")
     ap.add_argument("--mode", choices=["serial", "loader"], default="serial",
@@ -151,9 +181,23 @@ def main():
         from pimm_data.noise_jax import generate_noise_jax
         from pimm_data.dense_ops_jax import densify_plane_jax
 
+    _src_name = Path(args.shard).name
+
     def _seed(ev):
-        return int.from_bytes(hashlib.blake2b(f"ev{ev}".encode(), digest_size=8).digest(),
-                              "little") & 0xFFFFFFFF
+        """Noise seed for event ``ev`` of THIS shard.
+
+        The shard name is load-bearing. Seeding on the event index alone means
+        every per-file job — each of which starts at event 0 — draws the SAME
+        noise realisations, so a 500-shard corpus would contain 500 copies of
+        each of 200 noise patterns. That is a learnable artefact for a denoising
+        or MAE model, and every check we have is blind to it: the corpus is
+        deterministic and internally consistent, sigma varies healthily, and the
+        coord_digest pairing is correct. Loader mode never had this (it seeds
+        from the event NAME, which carries the file); serial mode did.
+        """
+        return int.from_bytes(
+            hashlib.blake2b(f"{args.run}/{_src_name}/ev{ev}".encode(),
+                            digest_size=8).digest(), "little") & 0xFFFFFFFF
 
     def _digitize_jax(x, ped, n_bits=12):
         """On-device twin of pimm_data.noise.digitize (round -> clip -> unpedestal)."""
@@ -199,20 +243,76 @@ def main():
     norm_in = np.load(args.norm_sigma) if args.norm_sigma else None
     if norm_in is not None:
         print(f"norm_sigma: FROZEN from {args.norm_sigma} {norm_in.shape}")
+    # Recorded into /config/noise_json. Without it, a shard built with --white is
+    # indistinguishable on disk from a colored one, so a corpus accidentally mixed
+    # across invocations is undetectable after the fact.
+    # Serial mode names its output and its /ident/source_file from --file-index
+    # alone, never from --shard. Omitting --file-index in a per-file job loop
+    # therefore mislabels provenance AND collides on the output filename, both
+    # silently. Require the two to agree when --shard carries a numeric suffix.
+    if args.mode == "serial":
+        _stem = Path(args.shard).stem
+        _suf = _stem.rsplit("_", 1)[-1]
+        if _suf.isdigit() and int(_suf) != args.file_index and not args.allow_index_mismatch:
+            raise SystemExit(
+                f"--shard {Path(args.shard).name} is shard {int(_suf)} but --file-index is "
+                f"{args.file_index}. Serial mode derives BOTH /ident/source_file and the "
+                f"output filename from --file-index, so this would label the data as shard "
+                f"{args.file_index} and overwrite that shard's output. Pass "
+                f"--file-index {int(_suf)} (or override deliberately with --allow-index-mismatch).")
+
+    def _sha256(path):
+        try:
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return None
+
+    # Pin the EXTERNAL inputs the DSP consumed but does not contain. basis_digest
+    # covers the wavelet/gate/threshold; it says nothing about the plane geometry
+    # or the noise spectrum, so without these a change to either makes old and new
+    # shards silently incomparable.
+    from pimm_data.geometry import _resolve as _resolve_geom
+    try:
+        _geom_path = str(_resolve_geom(args.geom))   # registry resolves a bare name
+    except Exception:
+        _geom_path = args.geom
+    provenance_meta = dict(
+        geom=os.path.basename(str(_geom_path)), geom_sha256=_sha256(_geom_path),
+        spectrum=os.path.basename(args.npz),
+        spectrum_sha256=None if args.white else _sha256(args.npz),
+        seed_formula=("loader:content_seed(name|0|0|0)" if args.mode == "loader"
+                      else "serial:blake2b(run/source_file/ev{n})"),
+        builder="build_coeff_corpus.py")
+
+    noise_meta = dict(kind="white" if args.white else "colored",
+                      incoherent=True, coherent=True,
+                      group_size=int(cfg.group_size),
+                      spectrum=None if args.white else os.path.basename(args.npz),
+                      mode=args.mode, backend=args.backend)
     t0 = time.perf_counter()
     if args.mode == "loader":
         from helix.tpc.corpus import build_corpus_stream
         stream = _loader_stream(args, cfg, reg, noise_spec)
         noisy, clean, norm = build_corpus_stream(
             stream, cfg, args.out, dataset_name=args.dataset_name, run=args.run,
-            file_index=args.file_index, norm_sigma=norm_in,
+            file_index=args.file_index, norm_sigma=norm_in, noise=noise_meta,
+            provenance=provenance_meta,
             cal_events=tuple(args.cal_events) if args.cal_events else None)
     else:
         n = count_events(args.shard)
-        events = list(range(args.event_start, min(args.event_start + args.events, n)))
+        _evs = range(args.event_start, min(args.event_start + args.events, n))
+        # carry (source_file, event, resolved_seed) so /ident records the true
+        # origin AND the one noise realisation this shard bakes in
+        events = [(_src_name, e, _seed(e)) for e in _evs]
         noisy, clean, norm = build_corpus(events, plane_fn, cfg, args.out,
                                           dataset_name=args.dataset_name, run=args.run,
                                           file_index=args.file_index, norm_sigma=norm_in,
+                                          noise=noise_meta,
+                                          provenance=provenance_meta,
                                           cal_events=tuple(args.cal_events) if args.cal_events else None)
     dt = time.perf_counter() - t0
     print(f"built {len(noisy)} events in {dt:.1f}s ({dt/max(len(noisy),1):.1f}s/ev); "
