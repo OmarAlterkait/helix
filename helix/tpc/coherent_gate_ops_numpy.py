@@ -138,8 +138,17 @@ def gate_bands(
     """Coherent-remove a plane's DWT bands ``[cA, cD_L, …, cD_1]`` (list in, list out).
 
     `gate_approx=False` leaves the approx band (index 0) untouched. `kgate` may be a
-    scalar or a per-pass sequence. NaN/inf in a band fails open (band returned
-    unchanged) so a bad event never propagates corrupted coefficients.
+    scalar or a per-pass sequence.
+
+    NaN/inf in a band FAILS OPEN — the band is returned unchanged. Note what that
+    means downstream: the band is then un-gated (coherent noise still in it), and
+    thresholding it yields a NaN sigma, so `|c| >= NaN` is all-False and the band
+    is silently ZEROED. `audit_shard` checks for non-finite VALUES and a zeroed
+    band has none, so such an event ships looking plausible. No NaN has ever been
+    observed here (source shards and the 1000-event pilot are both clean, and the
+    frozen research gate carries no such guard), so this is defensive only — but
+    if one ever appears, raising would be strictly more informative than the
+    quiet zero this produces.
     """
     out = []
     for i, b in enumerate(bands):
