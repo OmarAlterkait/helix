@@ -27,6 +27,7 @@ import pywt
 import torch
 import torch.fft as _fft
 
+from helix.core.backend import torch_q50 as _q50
 from helix.core.wavelet import SparseResult, ThresholdSpec
 
 
@@ -116,18 +117,51 @@ def _apply(c, t, func, torch):
     return c * (a >= t)        # hard
 
 
-def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigma=None) -> SparseResult:
+def wavedec(image, wavelet: str, level: int, mode: str):
+    """Forward DWT of ``(n_signals, n_ticks)`` → ``([cA, cD_L, …, cD_1], lev)``.
+
+    The public half of the two-step seam (the other is :func:`threshold_bands`),
+    so a coefficient-space step — the TPC coherent gate — can run BETWEEN the
+    transform and thresholding. ``lev`` is the effective level, clamped to what
+    the signal length allows, exactly as numpy/jax clamp it.
+
+    ``mode`` must be ``'periodization'``: this backend's filter bank is built on
+    FFT circular convolution, which IS periodization. Accepting another mode
+    silently would return coefficients that disagree with numpy for the same
+    arguments — the one thing the three backends must never do.
+    """
+    if mode != "periodization":
+        raise ValueError(
+            f"the torch backend implements 'periodization' only (got {mode!r}); "
+            f"its DWT is FFT circular convolution. Use the numpy backend for "
+            f"other boundary modes.")
     x = image if isinstance(image, torch.Tensor) else torch.as_tensor(np.asarray(image, np.float32))
     if x.dtype not in (torch.float32, torch.float64):
         x = x.float()
     lev = min(level, _max_level(x.shape[-1], wavelet))
-    coeffs = _wavedec(x, wavelet, lev)
-    band_sigma = torch.stack([c.abs().median() / 0.6745 for c in coeffs])   # per-band (reporting)
+    return _wavedec(x, wavelet, lev), lev
+
+
+def threshold_bands(coeffs, th: ThresholdSpec, sigma=None):
+    """Threshold a band list → ``(out_bands, n_kept, n_total, band_sigma)``.
+
+    Mirrors the numpy backend branch for branch, including which σ each method
+    uses: ``per_band_sigma`` takes the per-band MAD (TPC), otherwise a single
+    per-signal σ (optical). The gate runs on the raw bands before this call, so
+    ``band_sigma`` is measured on the GATED coefficients — the threshold σ is
+    computed after removal, which is the whole reason this seam exists.
+    """
+    # q50, NOT torch.median: numpy uses np.median (average of the two middles),
+    # torch.median returns the LOWER one. Every sigma here is a MAD, and a MAD
+    # feeds a threshold — a discontinuous function — so the tie-break decides
+    # which coefficients survive. See backend.torch_q50.
+    band_sigma = torch.stack([_q50(c.abs().reshape(-1), 0) / 0.6745 for c in coeffs])
     if sigma is not None:                                                    # per-signal (thresholding)
-        nsig = sigma if isinstance(sigma, torch.Tensor) else torch.as_tensor(np.asarray(sigma, np.float32),
-                                                                             device=x.device)
+        ref = coeffs[0]
+        nsig = sigma if isinstance(sigma, torch.Tensor) else torch.as_tensor(
+            np.asarray(sigma, np.float32), device=ref.device)
     else:
-        nsig = coeffs[-1].abs().median(dim=-1).values / 0.6745
+        nsig = _q50(coeffs[-1].abs(), -1) / 0.6745
 
     if th.method == "universal":
         out = []
@@ -140,7 +174,7 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
             else:                                          # single per-signal sigma (optical)
                 t = th.scale * nsig[..., None] * lf
             out.append(_apply(c, t, th.func, torch))
-    else:
+    else:                                                  # topk / energy (approx kept untouched)
         out = [coeffs[0]]
         tvec = _detail_threshold_per_signal(
             coeffs, th.keep if th.method == "topk" else None,
@@ -150,8 +184,14 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
 
     n_kept = int(sum(int(torch.count_nonzero(c)) for c in out))
     n_total = int(sum(c.numel() for c in out))
+    return out, n_kept, n_total, band_sigma.cpu().numpy()
+
+
+def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigma=None) -> SparseResult:
+    coeffs, lev = wavedec(image, wavelet, level, mode)
+    out, n_kept, n_total, band_sigma = threshold_bands(coeffs, th, sigma)
     return SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
-                        sigma_per_band=band_sigma.cpu().numpy(),
+                        sigma_per_band=band_sigma,
                         wavelet=wavelet, level=lev, mode=mode)
 
 

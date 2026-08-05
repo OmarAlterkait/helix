@@ -26,7 +26,14 @@ from helix.core.wavelet import SparseResult, reconstruct, FlatBands
 
 
 def _is_device(a) -> bool:
-    return type(a).__module__.startswith("jax")
+    """Deprecated alias — use :func:`helix.core.backend.is_device`.
+
+    Kept because ``helix.tpc.corpus`` imports it. It used to mean "is a jax
+    array", which silently sent every torch CUDA tensor down the host path and
+    straight into ``np.nonzero`` on a CUDA tensor.
+    """
+    from helix.core.backend import is_device
+    return is_device(a)
 
 
 _COMPACT = None
@@ -87,7 +94,22 @@ def nonzero_rows(cband, n=None):
     ~236 ms. This uses an O(N) cumsum+scatter compaction (verified identical to
     ``np.nonzero``), sized by band SHAPE so the jit never recompiles per event.
     """
-    if not _is_device(cband):
+    from helix.core.backend import kind_of
+    knd = kind_of(cband)
+
+    if knd == "torch":
+        # torch is EAGER: none of the jax machinery below (jitted cumsum+scatter,
+        # a static transfer cap) has any purpose here. That machinery exists to
+        # stop jax retracing on a per-event shape; torch has no trace to
+        # invalidate, so the direct nonzero is both simpler and correct.
+        import torch
+        nz = torch.nonzero(cband, as_tuple=True)
+        vals = cband[nz]
+        return (nz[0].to(torch.int32).cpu().numpy(),
+                nz[1].to(torch.int32).cpu().numpy(),
+                vals.to(torch.float32).cpu().numpy())
+
+    if knd != "jax":
         wi, ti = np.nonzero(cband)
         return wi.astype(np.int32), ti.astype(np.int32), cband[wi, ti].astype(np.float32)
 
@@ -220,8 +242,14 @@ class CoeffEvent:
                     b_l.append(bb); p_l.append(np.full(bb.size, gid, np.int32))
                     w_l.append(ww); t_l.append(tt); v_l.append(vv)
                 continue
-            # one stacked count for the whole plane (was one sync per band)
-            if _is_device(coeffs[0]):
+            # One stacked count for the whole plane (was one sync per band). This
+            # is a JAX-specific optimisation — it batches what would otherwise be
+            # one device->host sync per band. torch needs no such batching (eager,
+            # and `nonzero_rows` does not consume `n` on that path), so dispatch on
+            # the FRAMEWORK, not merely on "is it on a device": widening the latter
+            # to include torch sent CUDA tensors into `jnp.count_nonzero`.
+            from helix.core.backend import kind_of
+            if kind_of(coeffs[0]) == "jax":
                 import jax.numpy as _jnp
                 nnz = [int(x) for x in np.asarray(
                     _jnp.stack([_jnp.count_nonzero(c) for c in coeffs]))]
