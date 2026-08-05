@@ -152,12 +152,17 @@ def torch_q50(x, dim: int):
     n = x.shape[dim]
     if n <= _Q50_SORT_ABOVE:                      # short axis: selection is cheaper
         lo = torch.kthvalue(x, (n + 1) // 2, dim=dim).values
-        if n % 2:
-            return lo
-        hi = torch.kthvalue(x, n // 2 + 1, dim=dim).values
-        return (lo + hi) * 0.5
-    s, _ = torch.sort(x, dim=dim)
-    m = n // 2
-    if n % 2:
-        return s.select(dim, m)
-    return (s.select(dim, m - 1) + s.select(dim, m)) * 0.5
+        out = lo if n % 2 else (lo + torch.kthvalue(x, n // 2 + 1, dim=dim).values) * 0.5
+    else:
+        s, _ = torch.sort(x, dim=dim)
+        m = n // 2
+        out = s.select(dim, m) if n % 2 else (s.select(dim, m - 1) + s.select(dim, m)) * 0.5
+    # PROPAGATE NaN, as np.median does. Neither torch primitive here does it for
+    # free: sort pushes NaN to the end and kthvalue selects around it, so both
+    # return a finite value from the surviving entries. That matters because the
+    # gate fails OPEN on a non-finite band — it hands the band through unchanged —
+    # so the NaN reaches threshold_bands, where numpy's nan sigma poisons the
+    # threshold and drops the band while torch would quietly threshold it
+    # normally. Same input, different corpus. One extra device pass, no sync.
+    nan = torch.isnan(x).any(dim=dim)
+    return torch.where(nan, torch.full_like(out, float("nan")), out)
