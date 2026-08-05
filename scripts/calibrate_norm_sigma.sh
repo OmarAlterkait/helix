@@ -7,6 +7,9 @@
 # corpus, not run 0's first shard. Each run contributes an equal sample; the
 # grand mean is their average.
 #
+# torch backend: no JIT warmup, so a short 100-event calibration pass does not
+# pay jax's ~35 s compile eight times over.
+#
 # SERIAL mode, not loader: loader globs the whole run and indexes all 100 shard
 # files before the first event. On a COLD run that measured 6433 ms/file -> ~11
 # minutes of stalling per invocation (4 ms/file once warm, a 1600x difference).
@@ -40,7 +43,7 @@ for r in $RUNS; do
   python scripts/build_coeff_corpus.py \
     --shard "$SRC/$r/sim_wire_sensor_0000.h5" --out "$CALIB/$r" \
     --dataset-name sim_wire --run "$r" --file-index 0 \
-    --event-start 0 --events "$N" --mode serial --backend jax \
+    --event-start 0 --events "$N" --mode serial --backend torch \
     --calibrate --save-norm-sigma "$CALIB/$r.npy" 2>&1 | tail -2
 done
 

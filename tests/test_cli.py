@@ -70,3 +70,33 @@ def test_cli_legacy_path(tmp_path, monkeypatch):
     R.main()
     with h5py.File(out, "r") as f:
         assert "event_000" in f                          # legacy per-event group written
+
+
+def test_production_scripts_use_the_intended_backend():
+    """The shipped scripts must not silently override the build default.
+
+    This is a real failure that happened: --backend was defaulted to torch in
+    build_coeff_corpus.py, but submit_coeff_corpus.sh and calibrate_norm_sigma.sh
+    each passed `--backend jax` EXPLICITLY, so the 800-job production build would
+    still have run jax. A default is not a decision if every caller overrides it.
+    """
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+
+    # the builder's own default
+    src = (root / "scripts" / "build_coeff_corpus.py").read_text()
+    m = re.search(r'"--backend",\s*choices=\[[^\]]*\],\s*default="([a-z]+)"', src)
+    assert m, "could not find the --backend default in build_coeff_corpus.py"
+    default = m.group(1)
+    assert default == "torch", f"build default is {default!r}, expected 'torch'"
+
+    # and every shipped script must agree with it on its EXECUTABLE lines
+    for name in ("submit_coeff_corpus.sh", "calibrate_norm_sigma.sh"):
+        text = (root / "scripts" / name).read_text()
+        used = [ln.strip() for ln in text.splitlines()
+                if "--backend" in ln and not ln.strip().startswith("#")]
+        assert used, f"{name}: no explicit --backend line found"
+        for ln in used:
+            got = re.search(r"--backend\s+(\S+)", ln).group(1)
+            assert got == default, f"{name} passes --backend {got}, default is {default}"

@@ -89,13 +89,18 @@ def _detect_signal(cleaned_band: torch.Tensor, ksig: float, group_size: int) -> 
 
 
 def _sigc(M: torch.Tensor, mode: str) -> torch.Tensor:
-    """Coherent scale. 'quantile' is A-parity (the shipped default); 'median'
-    reproduces the reference's accidental torch.median tie-break and is kept only
-    so the legacy comparison remains expressible."""
-    a = M.abs().reshape(-1)
-    if mode == "median":
-        return torch.clamp_min(torch.median(a) / 0.6745, _EPS)
-    return torch.clamp_min(_q50(a, dim=0) / 0.6745, _EPS)
+    """Coherent scale — q50 for BOTH modes, exactly as the numpy backend does.
+
+    ``'median'`` is an alias, not a second algorithm: numpy implements it with
+    ``np.median``, which is bit-identical to ``np.quantile(..., 0.5)``. The
+    distinction its docstring draws is against the OLD torch.median (lower of two
+    middles), which no backend reproduces any more — jax rejects the mode
+    outright, and nothing in production sets it (``sigc_mode`` is not even a
+    DetectorConfig field). Implementing it here with ``torch.median`` would make
+    the same mode name mean different arithmetic on different backends, in a
+    branch nothing exercises — a silent divergence with no upside.
+    """
+    return torch.clamp_min(_q50(M.abs().reshape(-1), dim=0) / 0.6745, _EPS)
 
 
 def gate_band(b: torch.Tensor, *, group_size: int, kgate, ksig: float,

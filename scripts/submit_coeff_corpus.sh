@@ -26,7 +26,12 @@
 #                        the writer concatenates a copy, audit_shard reads it back.
 #                        1000 events needed ~19 GB and was OOM-killed at 16.
 #   --mem 12G          : ~5 GB measured at 250 events, linear, plus headroom.
-#   ~2.5 min/job       : ~40 s JIT compile + 200 x 0.54 s.
+#   ~2.2 min/job       : ~2 s warmup + 200 x 0.66 s. TORCH, not jax: torch has
+#                        essentially no warmup where jax pays ~35 s of JIT per
+#                        process, so at 200 events/job torch wins outright
+#                        (134 s vs 149 s). jax leads only in steady state, by
+#                        1.16x, which does not repay its warmup until ~361
+#                        events. Pass --backend jax to override.
 #   800 jobs           : 8 runs x 100 files x 200 events = 160,000 events.
 #
 #SBATCH --job-name=coeff_corpus
@@ -65,7 +70,7 @@ python scripts/build_coeff_corpus.py \
   --out   "$OUT/$RUN" \
   --dataset-name sim_wire --run "$RUN" \
   --file-index "$K" --event-start 0 --events "$EVENTS_PER_SHARD" \
-  --mode serial --backend jax \
+  --mode serial --backend torch \
   --norm-sigma "$NORM"
 
 # --file-index MUST match --shard's numeric suffix: serial mode derives both the
