@@ -174,18 +174,53 @@ def test_noise_mode_is_recorded_on_disk(tmp_path):
 
 # ---- 2. backend equivalence (same noisy input, numpy vs jax) --------------
 
-@pytest.mark.skipif(not _HAS_JAX, reason="jax not installed")
-def test_numpy_jax_equivalent_on_same_input(tmp_path):
-    """Noise RNG differs per backend, so noise is fixed and only the DSP +
-    extraction + assembly are compared. Measured on real planes: support
-    99.9996-100%, values and sigma at float32 epsilon."""
+def _has(bk):
+    try:
+        return importlib.util.find_spec(bk) is not None
+    except Exception:
+        return False
+
+
+@pytest.mark.parametrize("bk", ["jax", "torch"])
+def test_backend_equivalent_on_same_input(tmp_path, bk):
+    """Every backend must produce the SAME corpus from the same input.
+
+    Noise is fixed (the RNG streams differ per backend), so this compares the DSP
+    + extraction + assembly only. It also compares the CLEAN target and
+    sigma_threshold, which an earlier version did not — it looked at the noisy
+    events alone, so a clean-side or sigma-side divergence would have passed.
+
+    torch caught a real one that way: its band sigma used ``torch.median`` (the
+    LOWER of two middles) where numpy uses ``np.median`` (their average). A MAD
+    feeds a threshold, and a threshold is discontinuous, so torch kept 1-2 extra
+    coefficients per event — always more, never fewer. See backend.torch_q50.
+    """
+    if not _has(bk):
+        pytest.skip(f"{bk} not installed")
+    if bk == "torch":
+        import torch
+        if not torch.cuda.is_available():
+            pytest.skip("torch has no CUDA device")
+
+    def to_dev(fn):
+        def f(ev):
+            n, c = fn(ev)
+            if bk == "torch":
+                import torch
+                return ({k: torch.as_tensor(v).cuda() for k, v in n.items()},
+                        {k: torch.as_tensor(v).cuda() for k, v in c.items()})
+            import jax.numpy as jnp
+            return ({k: jnp.asarray(v) for k, v in n.items()},
+                    {k: jnp.asarray(v) for k, v in c.items()})
+        return f
+
     cfg = _config()
     out = {}
-    for bk in ("numpy", "jax"):
-        set_backend(bk)
-        ces, _, norm = build_corpus(range(3), _plane_fn, cfg, tmp_path / bk,
-                                    dataset_name="cx", write=False)
-        out[bk] = (ces, norm)
+    for name, pf in (("numpy", _plane_fn), (bk, to_dev(_plane_fn))):
+        set_backend(name)
+        ces, cls, norm = build_corpus(range(3), pf, cfg, tmp_path / name,
+                                      dataset_name="cx", write=False)
+        out[name] = (ces, norm, cls)
     set_backend("numpy")
 
     def canon(ce):
@@ -196,8 +231,8 @@ def test_numpy_jax_equivalent_on_same_input(tmp_path):
         o = np.lexsort((ce.tau, ce.wire, ce.band, ce.plane_gid))
         return (ce.band[o], ce.plane_gid[o], ce.wire[o], ce.tau[o], ce.value[o])
 
-    for a, b in zip(out["numpy"][0], out["jax"][0]):
-        assert a.n_coeff == b.n_coeff
+    for i, (a, b) in enumerate(zip(out["numpy"][0], out[bk][0])):
+        assert a.n_coeff == b.n_coeff, f"event {i}: {a.n_coeff} vs {b.n_coeff} coeffs"
         ca, cb = canon(a), canon(b)
         for k, x, y in zip(("band", "plane_gid", "wire", "tau"), ca[:4], cb[:4]):
             np.testing.assert_array_equal(x, y, err_msg=k)
@@ -205,7 +240,13 @@ def test_numpy_jax_equivalent_on_same_input(tmp_path):
         # the sigma field is the one that silently diverged before the fix
         np.testing.assert_allclose(b.sigma_threshold, a.sigma_threshold,
                                    rtol=1e-4, atol=1e-6)
-    np.testing.assert_allclose(out["jax"][1], out["numpy"][1], rtol=1e-4, atol=1e-6)
+        # ...and the CLEAN target, which shares the noisy support so it sorts the
+        # same way. Comparing only the noisy events hid a backend divergence once.
+        oa = np.lexsort((a.tau, a.wire, a.band, a.plane_gid))
+        ob = np.lexsort((b.tau, b.wire, b.band, b.plane_gid))
+        np.testing.assert_allclose(out[bk][2][i].value[ob], out["numpy"][2][i].value[oa],
+                                   rtol=1e-4, atol=1e-4, err_msg=f"clean target, event {i}")
+    np.testing.assert_allclose(out[bk][1], out["numpy"][1], rtol=1e-4, atol=1e-6)
 
 
 # ---- 3. physics acceptance (F0) on real data ------------------------------

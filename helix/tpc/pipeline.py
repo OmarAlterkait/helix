@@ -35,11 +35,21 @@ def _pad_time(image, level: int):
     convention: ``(-4321) % 16 = 15`` → 4336). Matches the old build's
     ``pad(g, (0, (-nt) % 16))`` so coefficients are basis-consistent.
 
-    Backend-aware: a device array (jax) is padded ON DEVICE, so the GPU path does
-    not round-trip through the host between noise and the DWT.
+    Backend-aware: a device array (jax OR torch) is padded ON DEVICE, so the GPU
+    path does not round-trip through the host between noise and the DWT. For
+    torch this is not merely an optimisation — ``np.asarray`` on a CUDA tensor
+    RAISES, which is what kept the torch backend out of ``process_plane``.
     """
+    from helix.core.backend import kind_of
+    knd = kind_of(image)
+    if knd == "torch":
+        import torch
+        x = image if image.dtype in (torch.float32, torch.float64) else image.float()
+        npad = (-x.shape[-1]) % (1 << level)
+        # F.pad describes the LAST axis first, as (left, right)
+        return torch.nn.functional.pad(x, (0, npad)) if npad else x
     xp = np
-    if type(image).__module__.startswith("jax"):
+    if knd == "jax":
         import jax.numpy as jnp
         xp = jnp
     x = xp.asarray(image, dtype=xp.float32)

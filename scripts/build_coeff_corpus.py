@@ -142,8 +142,13 @@ def main():
     ap.add_argument("--allow-index-mismatch", action="store_true",
                     help="serial mode: permit --file-index to disagree with --shard's "
                          "numeric suffix (mislabels provenance; use only deliberately)")
-    ap.add_argument("--backend", choices=["numpy", "jax"], default="numpy",
-                    help="jax runs noise + DWT + gate + threshold on GPU (~30x)")
+    ap.add_argument("--backend", choices=["numpy", "torch", "jax"], default="torch",
+                    help="GPU DSP backend. torch is the DEFAULT: it measured 10.6 ms "
+                         "vs jax 8.5 ms for DWT+threshold on a real plane (jax is 1.25x "
+                         "faster), which does not pay for a second GPU runtime in the "
+                         "same process — jax alongside torch forces "
+                         "XLA_PYTHON_CLIENT_PREALLOCATE, spawn-only DataLoader workers, "
+                         "and a dlpack bridge. jax stays selectable for that 25%.")
     ap.add_argument("--mode", choices=["serial", "loader"], default="serial",
                     help="loader: pimm-data DataLoader workers + the torch dense tail "
                          "(ToDevice/Densify/AddNoise/Digitize) handed to jax via dlpack. "
@@ -181,6 +186,10 @@ def main():
           f"k{cfg.gate_kgate}/np{cfg.gate_npass} noise={'white' if args.white else 'colored'}")
 
     use_jax = args.backend == "jax"
+    use_torch = args.backend == "torch"
+    if use_torch:
+        import torch
+        from pimm_data import dense_ops as _dops
     if use_jax:
         import jax
         import jax.numpy as jnp
@@ -210,7 +219,42 @@ def main():
         adc_max = (1 << n_bits) - 1
         return jnp.clip(jnp.round(x + ped), 0, adc_max) - ped
 
+    def _plane_fn_torch(ev):
+        """Torch: densify + noise + digitize ON DEVICE, same ops as loader mode.
+
+        Without this the torch backend read a dense NUMPY image and noised it on
+        the host before handing it to the GPU DSP — 19.6 s/event against jax's
+        9.1, which made torch look slow when what was slow was the host prologue.
+        Uses pimm-data's batched dense ops with B=1; those are the same
+        implementations the loader tail runs, and the bounds-guarded ones.
+        """
+        spec = read_sensor_event_coo(args.shard, ev, cfg)
+        seed = _seed(ev)
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        w_l, t_l, v_l, p_l = [], [], [], []
+        gmap = {}
+        for label, (w, t, v, nw, nt) in spec.items():
+            gid = canonical_plane_gid(label)
+            gmap[gid] = label
+            w_l.append(torch.as_tensor(np.asarray(w), dtype=torch.long, device=dev))
+            t_l.append(torch.as_tensor(np.asarray(t), dtype=torch.long, device=dev))
+            v_l.append(torch.as_tensor(np.asarray(v), dtype=torch.float32, device=dev))
+            p_l.append(torch.full((len(w),), gid, dtype=torch.long, device=dev))
+        wire = torch.cat(w_l); time_ = torch.cat(t_l)
+        val = torch.cat(v_l); pid = torch.cat(p_l)
+        offset = torch.tensor([wire.numel()], dtype=torch.long, device=dev)
+        grids = _dops.densify(wire, time_, val, pid, offset, reg)
+        clean = {int(g): x[0].clone() for g, x in grids.items()}   # BEFORE noise
+        grids = _dops.add_intrinsic_noise(
+            grids, reg, seeds=[seed], incoherent=True, coherent=True,
+            series_spectrum=noise_spec, group_size=cfg.group_size)
+        peds = {int(g): cfg.pedestals.get(gmap[int(g)].split("_")[-1], 0) for g in grids}
+        grids = _dops.digitize(grids, peds, n_bits=12)
+        return {int(g): x[0] for g, x in grids.items()}, clean
+
     def plane_fn(ev):
+        if use_torch:
+            return _plane_fn_torch(ev)
         # jax path reads SPARSE COO and densifies ON DEVICE — building the dense
         # image on the CPU and copying it across was pure overhead.
         planes = (read_sensor_event_coo(args.shard, ev, cfg) if use_jax

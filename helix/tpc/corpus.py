@@ -66,11 +66,16 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
     # which is shared with the noisy input.
     sigma = ce_noisy.sigma_threshold.copy()
     n_bands = ce_noisy.basis.n_bands
-    device = _is_device(next(iter(clean_bands.values()))[0])
+    from helix.core.backend import kind_of
+    _first = next(iter(clean_bands.values()))[0]
+    knd = kind_of(_first)
+    device = _is_device(_first)
     xp = np
-    if device:
+    if knd == "jax":
         import jax.numpy as jnp
         xp = jnp
+    elif knd == "torch":
+        import torch as xp
     bl = np.asarray(ce_noisy.basis.band_lengths, np.int64)
     col_off = np.concatenate([[0], np.cumsum(bl)])[:-1]      # band -> column offset
     for gi, gid in enumerate(ce_noisy.gids):
@@ -87,7 +92,15 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
         cols = col_off[ce_noisy.band[gmask]] + ce_noisy.tau[gmask]
         rows = ce_noisy.wire[gmask]
         nsel = rows.shape[0]
-        if device:
+        if knd == "torch":
+            # eager: index directly on device, no static cap needed (that exists
+            # only to keep a jax jit from retracing on a per-event length)
+            cat = (bands_g.flat if hasattr(bands_g, "flat")
+                   else xp.cat([b for b in bands_g], dim=1))
+            gv = cat[xp.as_tensor(rows, device=cat.device),
+                     xp.as_tensor(cols, device=cat.device)]
+            values[gmask] = gv.detach().float().cpu().numpy()
+        elif device:
             cap = _xfer_cap(nsel)
             if cap > nsel:
                 rows = np.concatenate([rows, np.zeros(cap - nsel, rows.dtype)])
