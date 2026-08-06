@@ -166,3 +166,80 @@ def test_real_shard_reads():
     # digitized-with-2-ADC-threshold data: nonzero magnitudes start at >=2-ish
     nz = img[img != 0]
     assert np.abs(nz).min() >= 1.0
+
+
+# ---- empty plane groups (no charge in a volume) ---------------------------
+
+def _write_with_empty_volume(path, empty_event=1, empty_vol=0, n_events=3,
+                             n_volumes=2, seed=7):
+    """The current schema, but one event has one volume written as three EMPTY
+    plane groups — no datasets, no attrs.
+
+    This is what the doraemon producer emits when an event deposits no charge in
+    that TPC volume, and it occurs in real production data: 12 of 100 source
+    files in run_0027575715 contain exactly one such event, which is why 12
+    corpus shards failed to build."""
+    rng = np.random.default_rng(seed)
+    with h5py.File(path, "w") as f:
+        cfg = f.create_group("config")
+        cfg.attrs["num_time_steps"] = N_TICKS
+        cfg.attrs["n_volumes"] = n_volumes
+        cfg.attrs["readout_type"] = "wire"
+        cfg["num_wires"] = np.array([[N_WIRES[p] for p in PLANES]] * n_volumes,
+                                    np.int32)
+        cfg["pedestals"] = np.array([[PEDESTAL[p] for p in PLANES]] * n_volumes,
+                                    np.int32)
+        for e in range(n_events):
+            evt = f.create_group(f"event_{e:03d}")
+            for v in range(n_volumes):
+                vol = evt.create_group(f"volume_{v}")
+                for p in PLANES:
+                    g = vol.create_group(p)
+                    if e == empty_event and v == empty_vol:
+                        continue                        # empty: no charge here
+                    wire, time, values = _synth_plane(rng, N_WIRES[p])
+                    g["delta_wire"] = np.diff(wire, prepend=wire[0]).astype(np.int16)
+                    g["delta_time"] = np.concatenate([[0], np.diff(time)]).astype(np.int16)
+                    g["values"] = (values + PEDESTAL[p]).astype(np.uint16)
+                    g.attrs["wire_start"] = int(wire[0])
+                    g.attrs["time_start"] = int(time[0])
+                    g.attrs["pedestal"] = PEDESTAL[p]
+
+
+def test_empty_plane_reads_as_zero_hits(tmp_path):
+    """An empty plane group must decode as zero hits at the config's shape, not
+    raise. It previously fell through to the legacy branch and died with
+    KeyError: 'wire'."""
+    from helix.tpc.io import read_sensor_plane_coo
+    p = str(tmp_path / "empty_vol.h5")
+    _write_with_empty_volume(p)
+
+    for pl in PLANES:
+        wire, time, values, nw, nt = read_sensor_plane_coo(p, 1, f"volume_0_{pl}")
+        assert wire.size == time.size == values.size == 0
+        assert (nw, nt) == (N_WIRES[pl], N_TICKS)       # shape from config
+        img = read_sensor_plane(p, 1, f"volume_0_{pl}")
+        assert img.shape == (N_WIRES[pl], N_TICKS) and not img.any()
+
+
+def test_empty_volume_does_not_affect_its_neighbour(tmp_path):
+    """The OTHER volume of the same event still carries its charge — an empty
+    volume must not be read as an empty event."""
+    from helix.tpc.io import read_sensor_plane_coo
+    p = str(tmp_path / "empty_vol.h5")
+    _write_with_empty_volume(p)
+    wire, _, values, _, _ = read_sensor_plane_coo(p, 1, "volume_1_U")
+    assert wire.size > 0 and values.any()
+
+
+def test_empty_plane_survives_whole_event_read(tmp_path):
+    """read_sensor_event_coo over the affected event must return every plane,
+    the empty ones included, so downstream plane bookkeeping stays aligned."""
+    from helix.tpc.io import read_sensor_event_coo, config_from_file
+    p = str(tmp_path / "empty_vol.h5")
+    _write_with_empty_volume(p)
+    cfg = config_from_file(p)
+    out = read_sensor_event_coo(p, 1, cfg)
+    assert set(out) == set(cfg.plane_labels)
+    assert all(out[f"volume_0_{pl}"][0].size == 0 for pl in PLANES)
+    assert any(out[f"volume_1_{pl}"][0].size > 0 for pl in PLANES)

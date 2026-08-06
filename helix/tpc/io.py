@@ -115,6 +115,25 @@ def config_from_file(path: str | Path, **overrides) -> DetectorConfig:
     return DetectorConfig(**kwargs)
 
 
+def _empty_plane_shape(f, evt, plane_label, num_time_steps):
+    """``(n_wires, n_ticks)`` for a plane group that holds no hits.
+
+    An event depositing no charge in one TPC volume is written as three EMPTY
+    plane groups — no datasets, no attrs. That is ordinary physics (the
+    interaction happened wholly in the other volume), not a damaged file, so it
+    must decode as zero hits rather than raise. The shape cannot come from the
+    data, so it comes from the file's config.
+    """
+    n_wires = 1
+    if "config" in f and "num_wires" in f["config"]:
+        v, col = _plane_column(evt, plane_label)
+        n_wires = int(f["config"]["num_wires"][v, col])
+    if num_time_steps is None:
+        num_time_steps = int(f["config"].attrs["num_time_steps"]) \
+            if "config" in f else 1
+    return n_wires, int(num_time_steps)
+
+
 def read_sensor_plane_coo(path, event_idx, plane_label, num_time_steps=None,
                           pedestal=0):
     """Read one plane as SPARSE COO → ``(wire, time, value, n_wires, n_ticks)``.
@@ -127,6 +146,11 @@ def read_sensor_plane_coo(path, event_idx, plane_label, num_time_steps=None,
     with h5py.File(path, "r") as f:
         evt = f[_event_key(f, event_idx)]
         grp = _resolve_plane(evt, plane_label)
+
+        if len(grp.keys()) == 0:                       # ── empty: no charge ──
+            nw, nt = _empty_plane_shape(f, evt, plane_label, num_time_steps)
+            z = np.zeros(0, dtype=np.int32)
+            return z, z.copy(), np.zeros(0, dtype=np.float32), nw, nt
 
         if "delta_wire" in grp:                        # ── current schema ──
             wire = np.cumsum(grp["delta_wire"][:], dtype=np.int32)
@@ -188,6 +212,10 @@ def read_sensor_plane(path, event_idx, plane_label, num_time_steps=None,
     with h5py.File(path, "r") as f:
         evt = f[_event_key(f, event_idx)]
         grp = _resolve_plane(evt, plane_label)
+
+        if len(grp.keys()) == 0:                       # ── empty: no charge ──
+            nw, nt = _empty_plane_shape(f, evt, plane_label, num_time_steps)
+            return np.zeros((nw, nt), dtype=np.float32)
 
         if "delta_wire" in grp:                        # ── current schema ──
             wire = np.cumsum(grp["delta_wire"][:], dtype=np.int32)
