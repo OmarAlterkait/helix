@@ -131,44 +131,37 @@ def test_build_fm_ignores_unknown_keys():
 # extraction fidelity — the whole point of the line-slice extraction
 # --------------------------------------------------------------------------
 
-@pytest.mark.skipif(not os.path.exists(CKPT), reason=f"research checkpoint absent: {CKPT}")
-def test_matches_research_bit_exactly():
-    """Load real trained weights into both implementations and demand identical
-    outputs. This is the acceptance criterion for the extraction."""
+GOLDEN = os.path.join(os.path.dirname(__file__), "goldens_fm.json")
+
+
+@pytest.mark.skipif(not os.path.exists(GOLDEN), reason="no golden captured")
+@pytest.mark.skipif(not os.path.exists(CKPT), reason=f"checkpoint absent: {CKPT}")
+def test_matches_frozen_golden():
+    """helix.model must still reproduce the m113 outputs frozen in
+    tests/goldens_fm.json.
+
+    That file was captured by tools/capture_fm_golden.py while the research tree
+    still existed, and only after the two implementations were verified equal
+    one final time — so this check inherits the bit-exact parity WITHOUT
+    importing research/, which is what lets research/ be deleted."""
+    import subprocess
     import sys
-    ck = torch.load(CKPT, map_location="cpu", weights_only=False)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, "tools/capture_fm_golden.py", "--check"],
+                       cwd=root, capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": root})
+    assert r.returncode == 0, r.stdout + r.stderr
 
-    sys.path.insert(0, RESEARCH)
-    from model_serial import SerialFMModel as ResearchModel
 
-    from tools.convert_fm_ckpt import convert
-    blob = convert(CKPT, None)
-    cfg, sd = blob["config"], blob["state_dict"]
-
-    new = build_fm(cfg, serial=True)
-    new.load_state_dict(sd, strict=True)            # strict: no key may differ
-
-    ref_kw = {k: ck[k] for k in ("d", "blocks", "dec_blocks", "heads", "nll", "cond",
-                                 "dec_mode", "mup", "d_base", "ffn_mult", "wire_rope",
-                                 "n_slot", "n_bins") if k in ck}
-    ref_kw.update(n_band=cfg["n_band"], n_plane=cfg["n_plane"],
-                  film=tuple(ck["film"].split(",")))
-    ref = ResearchModel(**ref_kw)
-    ref.load_state_dict(sd, strict=True)
-
-    B = make_batch(n_cells=300, n_slot=cfg["n_slot"], n_band=cfg["n_band"],
-                   n_plane=cfg["n_plane"])
-    mask = torch.zeros(300, dtype=torch.bool)
-    mask[::2] = True
-    new.eval(); ref.eval()
-    with torch.no_grad():
-        got, want = new.raw_heads(B, mask), ref(B, mask)
-        assert torch.equal(new.encode(B), ref.encode(B))
-    for a, b in zip(got, want):
-        if a is None or b is None:
-            assert a is None and b is None
-        else:
-            assert torch.equal(a, b)
+def test_golden_was_witnessed():
+    """A golden captured with --no-verify would enshrine whatever helix happened
+    to produce. Only a research-verified capture is a real guarantee."""
+    import json
+    with open(GOLDEN) as f:
+        g = json.load(f)
+    assert g.get("verified_against_research") is True, \
+        "golden was not cross-checked against the research implementation"
+    assert "tokenizer" in g, "golden does not pin the token layout"
 
 
 @pytest.mark.skipif(not os.path.exists(CKPT), reason=f"research checkpoint absent: {CKPT}")

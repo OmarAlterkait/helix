@@ -1,0 +1,72 @@
+{
+ "batch_seed": 20260806,
+ "ckpt_digest": "98826e1de6de1e8987f582cb0fc9db69",
+ "config": {
+  "blocks": 12,
+  "cond": "film",
+  "d": 512,
+  "d_base": 128,
+  "dec_blocks": 4,
+  "dec_mode": "cross",
+  "ffn_mult": 4,
+  "film": [
+   "band",
+   "plane",
+   "wire"
+  ],
+  "heads": 8,
+  "mup": true,
+  "n_band": 4,
+  "n_bins": 128,
+  "n_plane": 6,
+  "n_slot": 128,
+  "n_wirefeat": 1,
+  "nll": false,
+  "wire_rope": true
+ },
+ "model": {
+  "encode": "float32|(300, 512)|7892630cceef7cf9",
+  "logvar": "None",
+  "occ_logit": "float32|(300, 128)|da45b5e005e9b72f",
+  "val": "float32|(300, 128, 128)|3cc171f2b299fb1d"
+ },
+ "tokenizer": {
+  "ev0": {
+   "band": "int64|(231536,)|fd11035f945c4b55",
+   "band_id": "int64|(30976,)|5ebf24e419dc2e6b",
+   "cell": "int64|(231536,)|bce83c0694b7f369",
+   "dead": "float32|(30976, 16)|b3c2bab1e1d0af7f",
+   "inp": "float32|(30976, 128)|e292a9570836b032",
+   "n_cells": 30976,
+   "occ": "float32|(30976, 128)|b66e0fea1e6c860c",
+   "plane_id": "int64|(30976,)|9a6127b1e6944e94",
+   "slot": "int64|(231536,)|408b0a3227db1c63",
+   "t_phys": "float32|(30976,)|90ebd77a80de3f38",
+   "target": "float32|(231536,)|15edec531a141d15",
+   "tgt": "float32|(30976, 128)|9c321d1b650c4cb1",
+   "val": "float32|(231536,)|94cf4706d63f11a9",
+   "valid": "bool|(30976, 128)|312ae0f423b4a7b3",
+   "wire_pos": "float32|(30976,)|b2347e4f8bc984ac",
+   "wirefeat": "float32|(30976, 1)|d8d1a75d8bd1a9ba"
+  },
+  "ev1": {
+   "band": "int64|(503327,)|c529c50c0290618e",
+   "band_id": "int64|(39689,)|20d2b58394ecfa04",
+   "cell": "int64|(503327,)|4b2ffd49efd7a241",
+   "dead": "float32|(39689, 16)|5457cf9f32dea26b",
+   "inp": "float32|(39689, 128)|4c6c8ec0b0d86d7c",
+   "n_cells": 39689,
+   "occ": "float32|(39689, 128)|e61a91b90c06449b",
+   "plane_id": "int64|(39689,)|f5601344cbb6dfd2",
+   "slot": "int64|(503327,)|44a343713a9fe915",
+   "t_phys": "float32|(39689,)|35c7562dac1d194f",
+   "target": "float32|(503327,)|e15008c50561528e",
+   "tgt": "float32|(39689, 128)|40d5ee5cb438af78",
+   "val": "float32|(503327,)|4e9b0153c5ae3117",
+   "valid": "bool|(39689, 128)|3aaa270ddda203cd",
+   "wire_pos": "float32|(39689,)|e627130aae535e14",
+   "wirefeat": "float32|(39689, 1)|d2084352639c6ba7"
+  }
+ },
+ "verified_against_research": true
+}
