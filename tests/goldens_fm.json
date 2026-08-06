@@ -1,4 +1,5 @@
 {
+ "anchor": "fm_m113_converted.pt",
  "batch_seed": 20260806,
  "ckpt_digest": "98826e1de6de1e8987f582cb0fc9db69",
  "config": {
@@ -24,6 +25,7 @@
   "nll": false,
   "wire_rope": true
  },
+ "device": "cpu",
  "model": {
   "encode": "float32|(300, 512)|7892630cceef7cf9",
   "logvar": "None",
@@ -68,5 +70,6 @@
    "wirefeat": "float32|(39689, 1)|d2084352639c6ba7"
   }
  },
+ "torch": "2.5.1+cu121",
  "verified_against_research": true
 }

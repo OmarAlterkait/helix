@@ -43,6 +43,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GOLDEN = os.path.join(HERE, os.pardir, "tests", "goldens_fm.json")
 RESEARCH = "/sdf/group/neutrino/omara/helix/research/coeff_foundation_model/fm"
 CKPT = os.path.join(RESEARCH, "ckpt_clean160cat_m113_snap1000000.pt")
+# The DURABLE anchor: a self-contained converted checkpoint (config + weights +
+# inlined bin edges) outside git and outside research/. `--check` reads this and
+# nothing else, so the guarantee outlives the research tree. The raw research
+# checkpoint is only consulted when capturing.
+ARCHIVE = "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt"
 CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
 
 BATCH_SEED = 20260806          # regenerate the input batch, don't store it
@@ -128,23 +133,56 @@ def tokenizer_outputs():
     return out
 
 
+def load_anchor():
+    """The converted checkpoint the golden is anchored to.
+
+    Prefers the archived self-contained artifact; falls back to converting the
+    research checkpoint (capture-time only). Raises rather than returning None —
+    a missing anchor must be loud, since the whole point is that the guarantee
+    cannot evaporate quietly."""
+    import torch
+    if os.path.exists(ARCHIVE):
+        b = torch.load(ARCHIVE, map_location="cpu", weights_only=False)
+        return b, ARCHIVE
+    if os.path.exists(CKPT):
+        from tools.convert_fm_ckpt import convert
+        return convert(CKPT, None), CKPT
+    raise SystemExit(
+        f"no anchor checkpoint found.\n"
+        f"  looked for: {ARCHIVE}\n"
+        f"          and: {CKPT}\n"
+        f"The golden verifies helix.model against real trained weights; without "
+        f"them there is nothing to verify. Restore the archived converted "
+        f"checkpoint (tools/convert_fm_ckpt.py writes it).")
+
+
 def build(verify_against_research):
     """Compute both goldens. When `verify_against_research`, assert the helix
     model still matches the research implementation before freezing."""
     import torch
+    # CPU only: bit-exact digests are device-dependent, and pinning the device
+    # makes the golden portable across the nodes here instead of silently
+    # skipping on a mismatch. The torch version is recorded because a torch
+    # upgrade that changes numerics should read as a version change, not a
+    # mystery.
+    torch.set_grad_enabled(False)
     sys.path.insert(0, os.path.join(HERE, os.pardir))
     from helix.model import build_fm
-    from tools.convert_fm_ckpt import convert
 
-    blob = convert(CKPT, None)
+    blob, src = load_anchor()
     cfg, sd = blob["config"], blob["state_dict"]
-    model = build_fm(cfg, serial=True)
+    if isinstance(cfg.get("film"), list):
+        cfg = dict(cfg, film=tuple(cfg["film"]))
+    model = build_fm(cfg, serial=True).cpu()
     model.load_state_dict(sd, strict=True)
 
     got = {"model": model_outputs(model, cfg),
            "config": {k: list(v) if isinstance(v, tuple) else v
                       for k, v in sorted(cfg.items())},
            "ckpt_digest": blob["provenance"]["state_digest"],
+           "anchor": os.path.basename(src),
+           "device": "cpu",
+           "torch": torch.__version__,
            "batch_seed": BATCH_SEED}
 
     if verify_against_research:
@@ -211,6 +249,12 @@ def main(argv=None):
     with open(GOLDEN) as f:
         want = json.load(f)
     diffs = []
+    for env in ("device", "torch"):
+        if want.get(env) != got.get(env):
+            diffs.append(f"{env}: {got.get(env)!r} != golden {want.get(env)!r}"
+                         + ("  (bit-exact digests are device-dependent)"
+                            if env == "device" else
+                            "  (a torch upgrade can change numerics)"))
     for section in ("model", "tokenizer"):
         if section not in want:
             continue

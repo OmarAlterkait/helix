@@ -135,7 +135,6 @@ GOLDEN = os.path.join(os.path.dirname(__file__), "goldens_fm.json")
 
 
 @pytest.mark.skipif(not os.path.exists(GOLDEN), reason="no golden captured")
-@pytest.mark.skipif(not os.path.exists(CKPT), reason=f"checkpoint absent: {CKPT}")
 def test_matches_frozen_golden():
     """helix.model must still reproduce the m113 outputs frozen in
     tests/goldens_fm.json.
@@ -143,7 +142,12 @@ def test_matches_frozen_golden():
     That file was captured by tools/capture_fm_golden.py while the research tree
     still existed, and only after the two implementations were verified equal
     one final time — so this check inherits the bit-exact parity WITHOUT
-    importing research/, which is what lets research/ be deleted."""
+    importing research/, which is what lets research/ be deleted.
+
+    Deliberately NOT skipped when the anchor checkpoint is missing. An earlier
+    version skipped, which meant deleting research/ would have made the whole
+    guarantee vanish silently — the exact failure this golden exists to
+    prevent. A missing anchor is a hard failure telling you to restore it."""
     import subprocess
     import sys
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
