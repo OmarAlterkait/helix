@@ -1,5 +1,11 @@
 # MAE training-pipeline profiling + scaling (2026-06-16, 2× A100-40GB)
 
+> **Note (research thinning).** The scripts named below (bench_batch.py, profile_mae.py) were removed from this
+> branch; the measurements they produced stand. Recover any of them with
+> `git show main:research/coeff_foundation_model/fm/<name>` — `main` keeps the
+> full research tree.
+
+
 Measured on the REAL pipeline. Tools: torch 2.5, flash_attn 2.7.3, flex_attention, DDP.
 Scripts: bench_batch.py (batching), profile_mae.py (MAE step + kernels), deconv_ddp.py (multi-GPU).
 

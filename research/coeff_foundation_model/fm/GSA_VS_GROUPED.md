@@ -1,5 +1,11 @@
 # Random-Sparse Attention vs. our Grouped-Serial scheme
 
+> **Note (research thinning).** The scripts named below (prof_gsa.py, prof_scale.py, slurm/gsa.sh) were removed from this
+> branch; the measurements they produced stand. Recover any of them with
+> `git show main:research/coeff_foundation_model/fm/<name>` — `main` keeps the
+> full research tree.
+
+
 Profiling head-to-head of **"Google's random sparse attention"** against our PTv3/FlatFormer-style
 grouped-serial scheme, on our LArTPC wavelet-coeff token setup, at scale (N = 16k → 256k).
 

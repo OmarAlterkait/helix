@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -112,6 +113,32 @@ def arrays_to_coeff_event(d: dict, basis: BasisDescriptor) -> CoeffEvent:
 
 
 # ---- shard codec ----------------------------------------------------------
+
+def _code_version():
+    """Which helix produced this shard.
+
+    ``geom_sha256``/``spectrum_sha256`` pin the DSP's external INPUTS, and
+    ``basis_digest`` pins the declared basis — but nothing recorded the CODE, so
+    two shards built by different trees compared as identical. That is not
+    hypothetical: run_0027575715 was built by two working trees a few commits
+    apart, and no field in the corpus could show it.
+    """
+    import subprocess
+    import helix
+    out = {"version": getattr(helix, "__version__", "unknown")}
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(helix.__file__)))
+        r = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            out["git"] = r.stdout.strip()
+            d = subprocess.run(["git", "-C", root, "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=5)
+            out["git_dirty"] = bool(d.stdout.strip())
+    except Exception:                       # not a checkout, no git, timeout
+        pass
+    return out
+
 
 def write_coeff_shard(
     path: str | Path,
@@ -192,7 +219,9 @@ def write_coeff_shard(
         cfg.attrs["threshold_json"] = json.dumps(basis.threshold, sort_keys=True)
         cfg.attrs["has_coords"] = bool(coords)
         cfg.attrs["noise_json"] = json.dumps(noise or {}, sort_keys=True)
-        cfg.attrs["provenance_json"] = json.dumps(provenance or {}, sort_keys=True)
+        _prov = dict(provenance or {})
+        _prov.setdefault("code", _code_version())     # stamped here, not by callers
+        cfg.attrs["provenance_json"] = json.dumps(_prov, sort_keys=True)
         cfg.create_dataset("band_lengths", data=np.asarray(basis.band_lengths, np.int32))
         cfg.create_dataset("gids", data=e0.gids.astype(np.int32))
         cfg.create_dataset("n_wires", data=e0.n_wires.astype(np.int32))

@@ -404,7 +404,17 @@ def test_noise_seed_and_external_inputs_are_recorded(tmp_path):
     for name in ("cx_coeff_0000.h5", "cx_coeff_clean_0000.h5"):
         with h5py.File(tmp_path / name, "r") as f:
             got = _json.loads(f["config"].attrs["provenance_json"])
-            assert got == prov, f"{name}: provenance not round-tripped"
+            # The caller's fields must survive verbatim...
+            assert {k: got.get(k) for k in prov} == prov, \
+                f"{name}: caller provenance not round-tripped"
+            # ...and the writer stamps exactly ONE field of its own: which helix
+            # ran. Callers cannot be relied on to record it — none did, and a
+            # corpus was duly built by two different working trees with no field
+            # able to show it — so write_coeff_shard adds it rather than
+            # accepting it from the caller.
+            assert set(got) - set(prov) == {"code"}, \
+                f"{name}: unexpected writer-added provenance {set(got) - set(prov)}"
+            assert "version" in got["code"], f"{name}: code block lacks a version"
             np.testing.assert_array_equal(f["ident"]["noise_seed"][:], seeds)
             # the identity tuple's source_file must reach /ident too, not a
             # fabricated f"{dataset}_sensor_{file_index:04d}.h5"
@@ -416,4 +426,7 @@ def test_noise_seed_and_external_inputs_are_recorded(tmp_path):
     build_corpus(range(2), _plane_fn, _config(), plain, dataset_name="cx")
     with h5py.File(plain / "cx_coeff_0000.h5", "r") as f:
         assert "noise_seed" not in f["ident"]
-        assert _json.loads(f["config"].attrs["provenance_json"]) == {}
+        # No caller provenance -> only the writer's own code stamp. It is
+        # unconditional on purpose: a shard that cannot say which helix built it
+        # is exactly the gap this closes, so there is no opt-out.
+        assert set(_json.loads(f["config"].attrs["provenance_json"])) == {"code"}

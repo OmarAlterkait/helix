@@ -1,5 +1,11 @@
 # Deconvolution probe — FUTURE plan (not active)
 
+> **Note (research thinning).** The scripts named below (fm/probe.py) were removed from this
+> branch; the measurements they produced stand. Recover any of them with
+> `git show main:research/coeff_foundation_model/fm/<name>` — `main` keeps the
+> full research tree.
+
+
 **Status: PARKED.** We continue with the **classic masked-MAE methodology** (predict clean
 *wire* coeffs at masked/visible slots; metric = per-band asinh-MSE / var-explained). This
 document records the deconvolution evaluation we will build *later*, once the MAE program is
