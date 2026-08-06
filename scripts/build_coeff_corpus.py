@@ -156,7 +156,12 @@ def main():
     ap.add_argument("--workers", type=int, default=4, help="DataLoader workers (loader mode)")
     ap.add_argument("--split", default=None, help="run dir under data_root (loader mode)")
     ap.add_argument("--data-root", default=None, help="dataset root (loader mode)")
-    ap.add_argument("--helix-root", default="/sdf/group/neutrino/omara/helix-consolidate")
+    # Default to the tree THIS script lives in, not a hardcoded worktree. The
+    # old default (/sdf/group/neutrino/omara/helix-consolidate) was inserted at
+    # sys.path[0], so running the builder from any other checkout silently used
+    # helix-consolidate's code instead — including over PYTHONPATH.
+    ap.add_argument("--helix-root",
+                    default=str(Path(__file__).resolve().parent.parent))
     ap.add_argument("--pimm-src", default="/sdf/group/neutrino/omara/pimm-data/src")
     args = ap.parse_args()
 
@@ -170,8 +175,8 @@ def main():
     from helix.tpc.config import DetectorConfig
     from helix.tpc.pipeline import canonical_plane_gid
     from helix.tpc.corpus import build_corpus
-    from pimm_data.geometry import load_plane_registry
-    from pimm_data.noise import generate_noise, digitize
+    from helix.tpc.geometry import load_plane_registry
+    from helix.tpc.noise import generate_noise, digitize
 
     noise_spec = None
     if not args.white:
@@ -189,7 +194,7 @@ def main():
     use_torch = args.backend == "torch"
     if use_torch:
         import torch
-        from pimm_data import dense_ops as _dops
+        from helix.tpc import dense_ops as _dops
     if use_jax:
         import jax
         import jax.numpy as jnp
@@ -325,7 +330,7 @@ def main():
     # covers the wavelet/gate/threshold; it says nothing about the plane geometry
     # or the noise spectrum, so without these a change to either makes old and new
     # shards silently incomparable.
-    from pimm_data.geometry import _resolve as _resolve_geom
+    from helix.tpc.geometry import _resolve as _resolve_geom
     try:
         _geom_path = str(_resolve_geom(args.geom))   # registry resolves a bare name
     except Exception:
