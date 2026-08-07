@@ -23,8 +23,7 @@ import numpy as np
 
 from helix.tpc.pipeline import canonical_plane_gid
 
-# helix/data/, one level up from helix/tpc/
-_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+_DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 
 
 def _resolve(path):
