@@ -160,12 +160,15 @@ def build(verify_against_research):
     """Compute both goldens. When `verify_against_research`, assert the helix
     model still matches the research implementation before freezing."""
     import torch
-    # CPU only: bit-exact digests are device-dependent, and pinning the device
-    # makes the golden portable across the nodes here instead of silently
-    # skipping on a mismatch. The torch version is recorded because a torch
-    # upgrade that changes numerics should read as a version change, not a
-    # mystery.
+    # CPU only, SINGLE THREADED. Pinning the device is not enough: CPU float
+    # reductions are split across intra-op threads, so the sum order — and the
+    # last bits of the result — depend on how many threads torch chose, which
+    # depends on machine load. Measured on this model: 1 thread, 2 threads and
+    # 4+ threads each give a DIFFERENT digest. An unpinned golden therefore
+    # "fails" whenever the node is busy, which is exactly the intermittent
+    # mismatch this had before. One thread is reproducible anywhere.
     torch.set_grad_enabled(False)
+    torch.set_num_threads(1)
     sys.path.insert(0, os.path.join(HERE, os.pardir))
     from helix.model import build_fm
 
@@ -182,6 +185,7 @@ def build(verify_against_research):
            "ckpt_digest": blob["provenance"]["state_digest"],
            "anchor": os.path.basename(src),
            "device": "cpu",
+           "threads": 1,
            "torch": torch.__version__,
            "batch_seed": BATCH_SEED}
 
@@ -249,12 +253,13 @@ def main(argv=None):
     with open(GOLDEN) as f:
         want = json.load(f)
     diffs = []
-    for env in ("device", "torch"):
+    for env in ("device", "threads", "torch"):
         if want.get(env) != got.get(env):
+            _why = {"device": "  (bit-exact digests are device-dependent)",
+                    "threads": "  (CPU reduction order depends on thread count)",
+                    "torch": "  (a torch upgrade can change numerics)"}
             diffs.append(f"{env}: {got.get(env)!r} != golden {want.get(env)!r}"
-                         + ("  (bit-exact digests are device-dependent)"
-                            if env == "device" else
-                            "  (a torch upgrade can change numerics)"))
+                         + _why.get(env, ""))
     for section in ("model", "tokenizer"):
         if section not in want:
             continue

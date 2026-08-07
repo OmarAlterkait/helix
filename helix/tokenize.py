@@ -230,7 +230,79 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
         occ=occ.astype(np.float32), inp=inp, tgt=tgt, valid=valid,
         dead=dead.astype(np.float32), cell_band=cell_band, cell_gid=cell_gid,
         cell_t=cell_t, cell_wire=(cell_wb * pw).astype(np.float32),
+        # Integer block indices. cell_wire carries wb*pw already, but as float32
+        # for RoPE; cell_tb has no float twin at all, because `cell_t` is a
+        # physical time that in the default 'centroid' mode is a WEIGHTED MEAN
+        # and therefore not invertible. Without these two the token grid cannot
+        # be mapped back to (wire, tau) — see `detokenize`.
+        cell_wb=cell_wb, cell_tb=cell_tb,
     )
+
+
+# ---- the inverse: tokens -> coefficient rows -------------------------------
+
+def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *,
+                    gids, norm_sigma, cfg):
+    """Shared core: an occupancy mask over the (cell, slot) grid -> coeff rows.
+
+    ``(cell, slot)`` is a bijection with ``(plane_gid, band, wire, tau)`` given
+    the per-cell block indices, so this inverts the scatter exactly. What differs
+    between the two public entry points is only WHERE the mask comes from: known
+    occupancy (``detokenize``) or predicted occupancy (``decode_prediction``).
+    """
+    pw, pt = cfg.pw, cfg.pt
+    cell, slot = np.nonzero(np.asarray(occ_mask))
+    band = np.asarray(cell_band, np.int64)[cell]
+    plane_gid = np.asarray(cell_gid, np.int64)[cell]
+    wire = np.asarray(cell_wb, np.int64)[cell] * pw + slot // pt
+    tau = np.asarray(cell_tb, np.int64)[cell] * pt + slot % pt
+    # undo arcsinh(raw / sigma): the token value is normalised per (plane, band)
+    sig = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), 1e-6)
+    value = (np.sinh(np.asarray(values, np.float32)[cell, slot]) * sig).astype(np.float32)
+    return dict(band=band.astype(np.uint8), plane_gid=plane_gid.astype(np.int32),
+                wire=wire.astype(np.int32), tau=tau.astype(np.int32), value=value)
+
+
+def detokenize(tok, *, gids, norm_sigma, cfg=PatchConfig(), values_key="inp"):
+    """Exact inverse of :func:`assemble` — tokens back to coefficient rows.
+
+    Returns ``{band, plane_gid, wire, tau, value}``, the same columns a
+    ``CoeffEvent`` carries, so a round trip is directly comparable against the
+    rows that went in (up to ordering, and minus the bands ``assemble`` drops:
+    it keeps only ``band < cfg.n_bands``).
+
+    This is the verifiable half of the inverse. ``decode_prediction`` handles
+    model output, where occupancy is predicted rather than known; that one cannot
+    be checked against ground truth, so it is built on this.
+
+    Exact only for ``dead_frac == 0``: the wire-kill augmentation zeroes ``inp``
+    and clears ``occ``, which is deliberately destructive.
+    """
+    return _rows_from_grid(np.asarray(tok["occ"]).astype(bool), tok[values_key],
+                           tok["cell_band"], tok["cell_gid"],
+                           tok["cell_wb"], tok["cell_tb"],
+                           gids=gids, norm_sigma=norm_sigma, cfg=cfg)
+
+
+def decode_prediction(occ_logit, values, tok, *, gids, norm_sigma,
+                      cfg=PatchConfig(), threshold=0.0, respect_valid=True):
+    """Model output -> coefficient rows.
+
+    ``occ_logit`` and ``values`` are the FM's two heads over the ``(cell, slot)``
+    grid. A coefficient is emitted where the occupancy logit exceeds
+    ``threshold`` (0.0 == probability 0.5) and, unless ``respect_valid=False``,
+    where the slot is geometrically real — a slot past the plane's wire count or
+    the band's length cannot hold a coefficient no matter what the head says.
+
+    For a categorical value head, pass the decoded bin centres as ``values``;
+    this function does not know how a head parameterises its value.
+    """
+    occ = np.asarray(occ_logit) > threshold
+    if respect_valid and "valid" in tok:
+        occ = occ & np.asarray(tok["valid"]).astype(bool)
+    return _rows_from_grid(occ, values, tok["cell_band"], tok["cell_gid"],
+                           tok["cell_wb"], tok["cell_tb"],
+                           gids=gids, norm_sigma=norm_sigma, cfg=cfg)
 
 
 # ---- model-side key contract ----------------------------------------------

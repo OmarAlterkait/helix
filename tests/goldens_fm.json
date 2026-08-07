@@ -29,14 +29,17 @@
  "model": {
   "encode": "float32|(300, 512)|7892630cceef7cf9",
   "logvar": "None",
-  "occ_logit": "float32|(300, 128)|da45b5e005e9b72f",
-  "val": "float32|(300, 128, 128)|3cc171f2b299fb1d"
+  "occ_logit": "float32|(300, 128)|ebdba918b95ca531",
+  "val": "float32|(300, 128, 128)|3ccfac1f1b94de51"
  },
+ "threads": 1,
  "tokenizer": {
   "ev0": {
    "band": "int64|(231536,)|fd11035f945c4b55",
    "band_id": "int64|(30976,)|5ebf24e419dc2e6b",
    "cell": "int64|(231536,)|bce83c0694b7f369",
+   "cell_tb": "int64|(30976,)|9e526c4ef71edac7",
+   "cell_wb": "int64|(30976,)|175a33675de09b1a",
    "dead": "float32|(30976, 16)|b3c2bab1e1d0af7f",
    "inp": "float32|(30976, 128)|e292a9570836b032",
    "n_cells": 30976,
@@ -55,6 +58,8 @@
    "band": "int64|(503327,)|c529c50c0290618e",
    "band_id": "int64|(39689,)|20d2b58394ecfa04",
    "cell": "int64|(503327,)|4b2ffd49efd7a241",
+   "cell_tb": "int64|(39689,)|4c63381205d72f15",
+   "cell_wb": "int64|(39689,)|7d3310366e21bd20",
    "dead": "float32|(39689, 16)|5457cf9f32dea26b",
    "inp": "float32|(39689, 128)|4c6c8ec0b0d86d7c",
    "n_cells": 39689,
