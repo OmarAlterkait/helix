@@ -217,7 +217,7 @@ Notes:
   shared-per-shard, like `num_wires`). Written by `CoeffShardWriter`, computed once
   by the corpus builder. `SIGMA=2.6` is a `/config` attr and also pinned in helix
   `PatchConfig`. Tokenize does `arcsinh(value / norm_sigma[row_of(gid), band])`,
-  where `row_of(gid) = gids.index(gid)` (`helix.tokenize.gid_rows`). Rows follow
+  where `row_of(gid) = gids.index(gid)` (`helix.model.tokenize.gid_rows`). Rows follow
   POSITION in `gids`, never the gid VALUE — with a dead plane the two differ and
   `norm_sigma[gid]` silently selects another plane's sigma. Normalization lives at
   tokenize, corpus stores raw.

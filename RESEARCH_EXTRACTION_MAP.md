@@ -18,9 +18,9 @@ model interface and enumerate **what pimm needs to add** to train/eval it (§5).
 The word "tokenizer" hid two separable things — split them:
 - **assemble** (stateless numpy: patchify / asinh / occupancy / valid-mask / coords,
   **zero `nn.Parameter`**) — the analog of pimm-data's `GridSample`. Its *logic*
-  lives in **helix** (`helix.tokenize.assemble`, a pure function — "helix owns the
+  lives in **helix** (`helix.model.tokenize.assemble`, a pure function — "helix owns the
   tokenizer"); the *transform wrapper* that runs it in the DataLoader worker is an
-  **FM-exclusive transform in pimm**, registered into pimm-data's shared registry
+  **FM-exclusive transform in pimm**, registered into pimm's registry, via `helix.integrations.pimm` + `custom_imports`
   (the `HierarchicalMaskGenerator` precedent). pimm-data never imports helix at
   read time → no dependency cycle.
 - **embed** (learnable `patch_embed` / `band_emb` / RoPE / FiLM / `mask_tok`) — a
@@ -71,7 +71,7 @@ gate → threshold → rows + σ-table. Split by concern:
 | `load_geom` | **pimm-data** (`geometry.load_plane_registry`) | DELETE `measure_coeffs.load_geom` (dup) |
 | `build_batch` (hand-rolled collate) | **pimm-data** (`collate`) | DELETE the hand copy |
 | σ-table (2-cal-event normalization) | **pimm-data** `NormalizationTable` (versioned sidecar) | dataset-level artifact, NOT DSP, NOT in CoeffSet |
-| `rows_to_struct` (rows→struct assembly) | **helix.tokenize.assemble** (pure fn) + **pimm** `CoeffTokenize` wrapper | stateless; logic in helix, wrapper in pimm (§C2) |
+| `rows_to_struct` (rows→struct assembly) | **helix.model.tokenize.assemble** (pure fn) + **pimm** `CoeffTokenize` wrapper | stateless; logic in helix, wrapper in pimm (§C2) |
 | the ORCHESTRATION (compose the above) | **the corpus builder** (research, thin) | imports helix + pimm-data; no algorithm of its own |
 
 Result: `star_tpc`/`measure_coeffs` become ~empty — a thin builder that loops
@@ -81,7 +81,7 @@ pimm-data grids → helix CoeffSet → pimm-data writer. (FREEZE until training 
 "Tokenizer" = **assemble** (stateless, DATA) + **embed** (learnable, MODEL). Split it:
 | piece | → home | why |
 |---|---|---|
-| **assemble**: patchify (PW×PT, N_SLOT), tree parent/ancestor, cell/slot grids, asinh norm, occupancy/valid masks, dead-wire aug, `cell_t`/`wire_pos` coords | **helix.tokenize.assemble** (pure numpy fn) + **pimm `CoeffTokenize`** transform that calls it | zero `nn.Parameter` → data-shaping; analog of pimm-data `GridSample`. Logic in helix ("helix owns the tokenizer"); the worker-run transform is FM-exclusive → pimm, registered into pimm-data's registry. **helix ⇏ Dataset/transform machinery; pimm-data ⇏ helix import at read time (no cycle).** |
+| **assemble**: patchify (PW×PT, N_SLOT), tree parent/ancestor, cell/slot grids, asinh norm, occupancy/valid masks, dead-wire aug, `cell_t`/`wire_pos` coords | **helix.model.tokenize.assemble** (pure numpy fn) + **pimm `CoeffTokenize`** transform that calls it | zero `nn.Parameter` → data-shaping; analog of pimm-data `GridSample`. Logic in helix ("helix owns the tokenizer"); the worker-run transform is FM-exclusive → pimm, registered into PIMM's registry by `helix.integrations.pimm` (pulled in via a config's `custom_imports`), so pimm needs no change. **helix ⇏ Dataset/transform machinery; pimm-data ⇏ helix import at read time (no cycle).** |
 | **embed**: `patch_embed`/`band_emb`/`plane_emb`/FiLM/RoPE-angles/`mask_tok` | **helix.model.forward** | learnable → model, per pimm's own `self.tokenizer`-in-`forward` precedent (voltmae spconv, PTv3 serialize) |
 | `FM_PW`/`FM_PT`/`FM_CELLT` env-global mutation | KILL → explicit `PatchConfig` args | verified as the ONLY coupling to remove; passed to `CoeffTokenize` ctor + read by helix model for `patch_embed` dim |
 | `LENS_T`/pad-4336 (hardcoded ×3) | DERIVE once from helix `wavedec` band_lengths | stamped into the coeff-shard schema at build time → read-time transform needs no helix import |
@@ -131,7 +131,7 @@ baselines are pimm's point-cloud models.
 |---|---|
 | optical DSP (chunk sparsify, quant) | **helix.optical** (already there) |
 | optical data loader | **pimm-data** `OpticalDataset` (already there; re-validate new nested layout) |
-| optical tokenizer (hybrid, D-16) | **helix.tokenize.assemble** (optical branch, pure fn) + pimm `CoeffTokenize` optical variant |
+| optical tokenizer (hybrid, D-16) | **helix.model.tokenize.assemble** (optical branch, pure fn) + pimm `CoeffTokenize` optical variant |
 | optical FM fusion (cross-modal MAE) | **helix/model/** (multi-modal trunk) |
 | `doraemon_optical` hardcoded path/loader | DELETE → `OpticalDataset` |
 
@@ -179,7 +179,7 @@ helix/
   (NO train/ NO eval/  — pimm owns the loop + probes)
   (NO Dataset / DataLoader / collate / transform-registry  — that seam never enters helix)
 ```
-`helix.tokenize.assemble` is a **pure function** (rows + PatchConfig → arrays), not a
+`helix.model.tokenize.assemble` is a **pure function** (rows + PatchConfig → arrays), not a
 transform — pimm's `CoeffTokenize` imports and calls it. helix imports **pimm-data**
 only at corpus-BUILD time (DSP); it is **torch-free-importable at read time** and has
 NO dependency on pimm. Extra: `helix[torch]` for the model only (assemble stays numpy).
@@ -191,7 +191,7 @@ This is the deliverable. helix EXPOSES a stable model API; pimm ADDS the loop/ev
 ### 5a. What helix must expose (the contract pimm consumes)
 ```python
 # --- representation logic (stateless, numpy; called by pimm's CoeffTokenize) ---
-helix.tokenize.assemble(coeff_rows, patch_cfg) -> arrays  # PURE fn: rows -> token arrays
+helix.model.tokenize.assemble(coeff_rows, patch_cfg) -> arrays  # PURE fn: rows -> token arrays
 helix.config.PatchConfig                                  # PW/PT/N_SLOT/SIGMA + band_lengths (SoT)
 # --- the model (nn.Module) ---
 helix.build_fm(config) -> nn.Module                 # construct the FM (arch from config)
@@ -215,7 +215,7 @@ both, but only the model is an `nn.Module`.
    (Contract already matches pimm-private: flat dict in, `output_dict["loss"]` out,
    `train.py:386-388`.)
 2. **`CoeffTokenize` transform** (`pimm/transforms`, FM-exclusive, registered into
-   pimm-data's shared registry): calls `helix.tokenize.assemble` in the DataLoader
+   pimm's registry, via `helix.integrations.pimm` + `custom_imports`): calls `helix.model.tokenize.assemble` in the DataLoader
    worker (CPU, ~215 ms/event) → token arrays. **Batching = pimm's offset-packed
    collate** (variable token count packs via `offset`, like points) — **NOT
    `batch_size=None`**: pimm-private has no such path (every loader is integer-batched
