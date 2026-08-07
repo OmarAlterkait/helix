@@ -55,3 +55,53 @@ def test_sigma_estimation_fallback(config, synthetic_plane):
     """When sigma is not provided, it should be estimated from data."""
     cleaned = remove_coherent(synthetic_plane["dig"], config, sigma_per_wire=None)
     assert cleaned.shape == synthetic_plane["dig"].shape
+
+
+# ---- backend parity: the torch backend completes the matrix ----------------
+
+import pytest                                                    # noqa: E402
+from helix.core import backend as _backend                       # noqa: E402
+
+
+@pytest.mark.parametrize("nw,nt,gs,dil,passes", [
+    (128, 256, 64, 5, 2),      # exact groups, odd dilation
+    (70, 200, 64, 4, 3),       # PARTIAL last group, EVEN dilation
+    (65, 128, 32, 1, 1),       # partial group, no dilation, single pass
+])
+def test_torch_matches_numpy(nw, nt, gs, dil, passes):
+    """`removal='multipass'` had no torch backend, so the legacy R1 path was
+    unreachable on what is now the DEFAULT backend.
+
+    The two hazards this pins: np.median averages the two middle elements while
+    torch.median takes the lower (the tie-break that previously changed which
+    coefficients survived thresholding), and scipy's maximum_filter1d centres an
+    even-size window asymmetrically while max_pool1d pads symmetrically. Both
+    show up only for even group sizes / even dilation and a partial last group —
+    hence the parametrisation."""
+    torch = pytest.importorskip("torch")
+    rng = np.random.default_rng(0)
+    cfg = DetectorConfig(num_time_steps=nt, group_size=gs,
+                         temporal_dilation_ticks=dil, n_passes=passes)
+    img = (rng.standard_normal((nw, nt)).astype(np.float32) * 2.0)
+    img[10:14, 50:60] += 40.0                       # a signal to preserve
+
+    try:
+        _backend.set_backend("numpy")
+        ref = remove_coherent(img.copy(), cfg)
+        _backend.set_backend("torch")
+        got = remove_coherent(torch.from_numpy(img.copy()), cfg).numpy()
+    finally:
+        _backend.set_backend("numpy")
+    np.testing.assert_allclose(got, ref, rtol=0, atol=1e-5)
+
+
+def test_torch_median_tiebreak_matches_numpy():
+    """An even group size is where torch.median would diverge from np.median."""
+    torch = pytest.importorskip("torch")
+    from helix.tpc.coherent_ops_numpy import group_median as gm_np
+    from helix.tpc.coherent_ops_torch import group_median as gm_t
+    rng = np.random.default_rng(1)
+    img = rng.standard_normal((64, 32)).astype(np.float32)
+    for gs in (2, 4, 8, 16):                        # all even: two middles
+        np.testing.assert_allclose(gm_t(torch.from_numpy(img), gs).numpy(),
+                                   gm_np(img, gs), rtol=0, atol=1e-6)

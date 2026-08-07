@@ -342,7 +342,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
 def test_norm_sigma_is_row_indexed_not_gid_indexed():
     """norm_sigma rows follow POSITION in gids, not gid value. With a dead plane
     the two disagree, and the naive norm_sigma[gid] silently mis-normalises."""
-    from helix.tokenize import gid_rows, sigma_for_rows
+    from helix.model.tokenize import gid_rows, sigma_for_rows
     gids = np.array([0, 1, 2, 4, 5])                     # plane 3 dead/absent
     ns = np.arange(len(gids) * 4, dtype=np.float32).reshape(len(gids), 4) + 1.0
     pg = np.array([0, 4, 5, 1])
@@ -366,7 +366,7 @@ def test_norm_sigma_is_row_indexed_not_gid_indexed():
 
 
 def test_normalization_roundtrips_and_is_sane():
-    from helix.tokenize import normalize_values, denormalize_values
+    from helix.model.tokenize import normalize_values, denormalize_values
     rng = np.random.default_rng(0)
     gids = np.array([0, 1, 2])
     ns = np.array([[3.0, 2.0], [3.5, 2.5], [4.0, 3.0]], np.float32)

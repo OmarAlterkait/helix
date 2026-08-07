@@ -17,7 +17,7 @@ Two entry points, deliberately separate:
 import numpy as np
 import pytest
 
-from helix.tokenize import (assemble, detokenize, decode_prediction,
+from helix.model.tokenize import (assemble, detokenize, decode_prediction,
                             PatchConfig, sigma_for_rows)
 
 GIDS = np.array([0, 1, 2, 4, 5], np.int32)          # deliberately NON-contiguous

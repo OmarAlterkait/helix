@@ -27,7 +27,7 @@ SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1, heads=
 
 
 def make_batch(n_cells=32, n_slot=8, n_band=4, n_plane=6, seed=0):
-    """A batch with the same key contract helix.tokenize.to_fm() emits: the
+    """A batch with the same key contract helix.model.tokenize.to_fm() emits: the
     dense (n_cells, n_slot) grid AND the sparse active-row view of it, since
     losses() gathers rows while losses_fused()/losses_cat() read the grid."""
     g = torch.Generator().manual_seed(seed)

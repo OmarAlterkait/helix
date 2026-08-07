@@ -15,7 +15,7 @@ Two goldens, matching what pimm will depend on:
   model      m113's head outputs (occ_logit / val / logvar) and encode(), on a
              seeded input batch. The batch is regenerated from its seed rather
              than stored, so the file stays small.
-  tokenizer  helix.tokenize.assemble + to_fm on pinned REAL coeff events from
+  tokenizer  helix.model.tokenize.assemble + to_fm on pinned REAL coeff events from
              the corpus. Nothing pins the token layout today (patch geometry,
              centroid cell_t, arcsinh normalisation), and pimm's CoeffTokenize
              will consume exactly this.
@@ -100,10 +100,10 @@ def model_outputs(model, cfg):
 
 
 def tokenizer_outputs():
-    """helix.tokenize on pinned REAL corpus events."""
+    """helix.model.tokenize on pinned REAL corpus events."""
     import glob
     from helix.core.coeff_io import read_coeff_event
-    from helix.tokenize import assemble, to_fm, PatchConfig
+    from helix.model.tokenize import assemble, to_fm, PatchConfig
     import h5py
 
     shard = sorted(glob.glob(os.path.join(CORPUS, "sim_wire_coeff_0000.h5")))
