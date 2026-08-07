@@ -7,27 +7,50 @@ Larger deferred designs get their own file: see `MULTI_EVENT_BATCHING.md`.
 
 ---
 
-## 1. `losses_cat` memory — chunk or `bucketize`
+## 1. `losses_cat` memory — an efficiency win, NOT a blocker
 
-**Status:** deferred. Cap `--n-cells` to work around it.
+**Status:** deferred. Not blocking anything; cap `--n-cells` on a small card.
 
-`helix/model/loss.py::losses_cat` computes the true bin per slot as
+Correction to an earlier reading of this: full-event training with the
+categorical head **was already done**. `fm/data.py::get_cached` accepts a `cap`
+argument and never applies it —
+
+```python
+return _to_fm(B)     # full token count (~25-37k, fits)
+```
+
+— so m113 trained on whole events on the research hardware. Nothing here blocks
+that.
+
+What it is: `helix/model/loss.py::losses_cat` finds the true bin per slot with
 
 ```python
 binid = (tgt.unsqueeze(-1) >= ec[:, None, 1:-1]).sum(-1).clamp(0, K - 1)
 ```
 
-which materialises an `(n_cells, n_slot, K-1)` intermediate — **~4 GiB at a full
-31-40k-cell event** with K=128. That OOMs an 11 GB card *before the model itself
-is the constraint*, and it is why `scripts/smoke_train_fm.py` has `--n-cells`.
+The comparison is bool, but `.sum(-1)` accumulates in **int64**, so the
+intermediate materialises at 8 bytes/element:
 
-`torch.bucketize(tgt, ec[b])` computes the same thing in O(N log K) with no
-intermediate. It should be bit-identical (both are "count edges below the value"),
-but `losses_cat` is extracted-verbatim research code, so the swap wants a test
-asserting identical `binid` AND identical loss on real data before it lands.
+```
+30976 x 128 x 127 = 503,545,856 elements  x 8 B = 3.75 GiB
+```
 
-Not urgent on an A100/H100, where a full event fits. Urgent before training at
-full event size on anything smaller.
+That is a transient spike on top of the backward activations. It has headroom on
+an A100/H100 and tips over an 11 GB card, which is why
+`scripts/smoke_train_fm.py` has `--n-cells`.
+
+Two independent improvements, either of which helps:
+
+* `.sum(-1, dtype=torch.int16)` keeps the shape but drops the intermediate ~8x
+  (3.75 GiB -> ~470 MB). One-word change, same algorithm.
+* `torch.bucketize(tgt, ec[b])` removes the intermediate entirely, O(N log K).
+
+Both should be bit-identical (all three are "count edges below the value"), but
+`losses_cat` is extracted-verbatim research code, so either wants a test
+asserting identical `binid` and identical loss on real data before it lands.
+
+Worth doing for the headroom — it raises the model/event size that fits on a
+given card — not because anything is currently blocked.
 
 ## 2. `FMTrainer` — only when a real run is wanted
 

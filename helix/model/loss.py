@@ -83,11 +83,12 @@ def losses_cat(occ, logits, B, tok_mask, edges, vis_w=0.0):
     bce = (bce_e * m_occ).sum() / m_occ.sum().clamp(min=1)
     K = logits.shape[-1]
     ec = edges[B["band_id"]]                                   # (n_cells, K+1) per-cell edges
-    # NOTE (see TODO.md 1): this materialises an (n_cells, n_slot, K-1)
-    # intermediate — ~4 GiB at a full 31-40k-cell event with K=128, which OOMs an
-    # 11 GB card before the model is the constraint. torch.bucketize computes the
-    # same thing with no intermediate; left as-is for now because this function is
-    # extracted verbatim and the swap wants an equivalence test first.
+    # NOTE (see TODO.md 1): the comparison is bool but .sum(-1) accumulates in
+    # int64, so this materialises (n_cells, n_slot, K-1) at 8 B/element — 3.75 GiB
+    # for a 31k-cell event at K=128. Fine on the hardware this was trained on
+    # (full events "fit", per fm/data.py); a transient that tips over an 11 GB
+    # card. sum(dtype=torch.int16) drops it ~8x, torch.bucketize removes it
+    # entirely. Left verbatim for now — either swap wants an equivalence test.
     binid = (tgt.unsqueeze(-1) >= ec[:, None, 1:-1]).sum(-1).clamp(0, K - 1)   # (n_cells, n_slot) true bin
     ce_e = F.cross_entropy(logits.reshape(-1, K), binid.reshape(-1), reduction="none").view_as(tgt)
     act = occ_t.bool() & valid & mrow
