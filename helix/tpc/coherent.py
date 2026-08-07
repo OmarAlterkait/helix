@@ -6,7 +6,7 @@ ORIGINAL image → α·subtract. Using the original image for estimation (the
 cleaned output only for detection) reduces bias: the better mask excludes more
 sub-threshold signal from the coherent estimate.
 
-Backend ops live in coherent_ops_{numpy,jax}; torch is not yet implemented
+Backend ops live in coherent_ops_{numpy,jax,torch}
 (the optical side, not coherent removal, is the torch workhorse).
 """
 from __future__ import annotations
@@ -23,9 +23,41 @@ def remove_coherent(image: Any, config: DetectorConfig, sigma_per_wire: Any | No
         return _remove_numpy(image, config, sigma_per_wire)
     if be == "jax":
         return _remove_jax(image, config, sigma_per_wire)
+    if be == "torch":
+        return _remove_torch(image, config, sigma_per_wire)
     raise NotImplementedError(
-        f"coherent removal has no '{be}' backend yet; use 'numpy' or 'jax' "
-        f"(add coherent_ops_{be}.py to extend, following the wavelet pattern)")
+        f"coherent removal has no '{be}' backend yet "
+        f"(add coherent_ops_{be}.py, following the wavelet pattern)")
+
+
+def _remove_torch(image, config, sigma):
+    """Line-for-line twin of :func:`_remove_numpy`.
+
+    Kept structurally identical rather than rewritten idiomatically, because the
+    two must agree numerically and the numpy version is the reference."""
+    from helix.tpc.coherent_ops_torch import (
+        group_median, broadcast_groups, signal_mask,
+        temporal_dilate, masked_group_mean, mad_sigma_per_wire)
+    nw, nt = image.shape
+    gs, nsigma = config.group_size, config.mask_threshold_nsigma
+
+    gm_full = broadcast_groups(group_median(image, gs), nw, gs)
+    residual = image - gm_full
+    if sigma is None:
+        sigma = mad_sigma_per_wire(residual)
+
+    mask = temporal_dilate(signal_mask(residual, sigma, nsigma),
+                           config.temporal_dilation_ticks)
+    est, nuf = masked_group_mean(image, mask, gs)
+    cleaned = image - broadcast_groups(nuf / float(gs), nw, gs) * broadcast_groups(est, nw, gs)
+
+    for _ in range(config.n_passes - 1):
+        detect = temporal_dilate(signal_mask(cleaned, sigma, nsigma),
+                                 config.temporal_dilation_ticks)
+        mask = mask | detect
+        est, nuf = masked_group_mean(image, mask, gs)
+        cleaned = image - broadcast_groups(nuf / float(gs), nw, gs) * broadcast_groups(est, nw, gs)
+    return cleaned
 
 
 def _remove_numpy(image, config, sigma):

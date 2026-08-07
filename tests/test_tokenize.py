@@ -1,6 +1,6 @@
 """The packaged tokenizer must reproduce the research one EXACTLY.
 
-``helix.tokenize.assemble`` is a port of
+``helix.model.tokenize.assemble`` is a port of
 ``research/coeff_foundation_model/vit_tpc.py::assemble_tpc_band`` — the tokenizer
 the FM was actually trained with (``fm/data.py`` calls it; ``fm/model.py``
 consumes ``inp``/``occ``). The reference below is a transcription of that
@@ -15,7 +15,7 @@ import os
 import numpy as np
 import pytest
 
-from helix.tokenize import assemble, PatchConfig
+from helix.model.tokenize import assemble, PatchConfig
 
 # the research constants (star_tpc / vit_tpc / star_model)
 LENS_T = np.array([271, 271, 542, 1084])
@@ -261,12 +261,12 @@ def test_transform_is_pimm_data_compatible_without_importing_it():
     import subprocess, sys as _s
     r = subprocess.run(
         [_s.executable, "-c",
-         "import sys, helix.tokenize; "
+         "import sys, helix.model.tokenize; "
          "print('pimm_data' in sys.modules or 'torch' in sys.modules)"],
         capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(__file__)))
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "False", "helix.tokenize pulled in pimm-data or torch"
-    from helix.tokenize import CoeffTokenize
+    assert r.stdout.strip() == "False", "helix.model.tokenize pulled in pimm-data or torch"
+    from helix.model.tokenize import CoeffTokenize
     assert CoeffTokenize.scope == "sample"
 
     gids = np.array([0, 1])
@@ -300,7 +300,7 @@ def test_transform_is_pimm_data_compatible_without_importing_it():
 
 
 def test_transform_reports_missing_metadata_clearly():
-    from helix.tokenize import CoeffTokenize
+    from helix.model.tokenize import CoeffTokenize
     sample = {"coeff": dict(band=np.array([0]), plane_gid=np.array([0]),
                             wire=np.array([0]), tau=np.array([0]),
                             value=np.zeros((1, 1), np.float32))}
@@ -313,7 +313,7 @@ def test_to_fm_supplies_every_key_the_model_gathers():
     occ, valid, cell, slot, target, tgt. The tokenizer mirrors vit_tpc's cell_*
     vocabulary and emits NO wirefeat, so without this adapter FMModel.forward
     raises KeyError('band_id') on its first access (model.py:266)."""
-    from helix.tokenize import to_fm, NW_MAX
+    from helix.model.tokenize import to_fm, NW_MAX
 
     gids = np.array([0, 1])
     band, gid, wire, tau, raw, raw_clean, sigma = _rows(seed=21, gids=(0, 1), nw=512)

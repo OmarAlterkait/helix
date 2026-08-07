@@ -350,7 +350,7 @@ class CoeffTokenize:
     Registration is the consumer's business — pimm (or a recipe) does::
 
         from pimm_data.transform import TRANSFORMS
-        from helix.tokenize import CoeffTokenize
+        from helix.model.tokenize import CoeffTokenize
         TRANSFORMS.register_module(module=CoeffTokenize)
 
     so ``dict(type='CoeffTokenize', ...)`` resolves in a config, while helix

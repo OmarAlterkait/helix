@@ -307,7 +307,7 @@ class FMModel(nn.Module):
             raise KeyError(
                 f"batch is missing {gone} required by "
                 f"{'losses_cat' if self.n_bins > 0 else 'losses_fused' if self.loss_fused else 'losses'}"
-                f"; helix.tokenize.to_fm() emits all of them")
+                f"; helix.model.tokenize.to_fm() emits all of them")
         m = self.make_mask(B) if tok_mask is None else tok_mask
         occ, val, logvar = self.raw_heads(B, m)
         if self.n_bins > 0:
