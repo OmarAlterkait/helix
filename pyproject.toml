@@ -39,3 +39,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["helix*"]
+
+# The detector description and the measured noise spectrum are DATA the code
+# loads by default — helix.tpc.geometry.load_plane_registry and
+# helix.tpc.noise.load_series_spectrum (the latter is the DEFAULT series
+# spectrum). Without this they are absent from a built wheel and both raise
+# FileNotFoundError, which an editable install hides completely.
+[tool.setuptools.package-data]
+"helix.tpc" = ["data/*.json", "data/*.npz"]
