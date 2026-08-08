@@ -20,7 +20,13 @@ def make_mask(B, mode, ratio, n_planes, gen=None):
     gid = B["plane_id"]
     if mode == "plane":                       # cross-plane: hide whole plane(s)
         gids = torch.unique(gid)
-        perm = gids[torch.randperm(len(gids), device=dev)]
+        # DELIBERATE DELTA from research/train.py, which calls randperm without
+        # the generator and so draws from the GLOBAL rng: 8 draws with an
+        # identical `gen` seed gave 5 distinct masks. Callers that pass `gen` are
+        # asking for reproducibility (research's own perband_mse does, per batch,
+        # and never got it). With gen=None this is byte-identical to before, and
+        # training passes gen=None — so training dynamics are untouched.
+        perm = gids[torch.randperm(len(gids), generator=gen, device=dev)]
         pick = perm[:n_planes]
         return torch.isin(gid, pick)
     if mode == "block":                       # contiguous wire-slab per plane (~ratio wide)
