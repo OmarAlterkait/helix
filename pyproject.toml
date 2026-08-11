@@ -1,6 +1,13 @@
 [project]
 name = "helix-tpc"
-version = "0.1.0"
+# Read from helix/__init__.py rather than duplicated here. These two drifted
+# (0.1.0 vs 0.2.0) and it was not cosmetic: helix/core/coeff_io.py stamps
+# helix.__version__ into every corpus shard, and pimm_data/coeff_verify.py
+# raises "shards were built by DIFFERENT helix versions" off that field — so the
+# provenance chain read a number the packaging disagreed with. The module stays
+# the source of truth because helix must import from a plain checkout on
+# PYTHONPATH, where importlib.metadata has nothing to read.
+dynamic = ["version"]
 description = "Hierarchical Encoding for Learned Inference on eXperimental data"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +43,9 @@ norecursedirs = ["temp", ".git", "*.egg-info"]
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "helix.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["helix*"]

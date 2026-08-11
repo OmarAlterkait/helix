@@ -76,9 +76,17 @@ def mad_sigma_per_wire(residual: np.ndarray) -> np.ndarray:
     abs_res = np.abs(residual)
     nt = abs_res.shape[1]
     mid = nt // 2
-    p = np.partition(abs_res, mid, axis=1)
     if nt % 2 == 1:
-        return (p[:, mid] / 0.6745).astype(np.float32)
+        return (np.partition(abs_res, mid, axis=1)[:, mid] / 0.6745).astype(np.float32)
+    # BOTH kth positions must be requested. np.partition(a, mid) only guarantees
+    # position `mid`; everything before it is merely <=, in no particular order,
+    # so `p[:, mid-1]` was *an* element below the median rather than the element
+    # just below it. Tick counts are even in production, so this was the branch
+    # that always ran: measured on (2000, 4096) gaussian residuals it disagreed
+    # with the true MAD on 16 wires, by up to 47% on those. It also put the numpy
+    # backend out of step with torch (which uses a real q50), which is exactly the
+    # drift the per-backend twins exist to make visible.
+    p = np.partition(abs_res, [mid - 1, mid], axis=1)
     return ((p[:, mid - 1] + p[:, mid]) / (2.0 * 0.6745)).astype(np.float32)
 
 
