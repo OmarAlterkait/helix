@@ -117,3 +117,46 @@ def test_hooks_exclude_the_ones_that_do_not_fit():
     for bad in ("SemSegEvaluator", "MAEEvaluator"):
         assert bad not in hooks_src, f"{bad} does not fit the coeff FM"
     assert "CheckpointSaver" in hooks_src, "a run with no checkpointing is a trap"
+
+
+# ---- the from-scratch categorical path -------------------------------------
+
+def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
+    """Training from scratch with a categorical head is the ACTUAL plan (m113 is
+    out-of-distribution on this corpus), and it needs bin edges that no
+    checkpoint supplies.
+
+    The edges are training-set statistics, so the model cannot invent them. This
+    pins that the failure is an actionable error at BUILD time rather than an
+    assertion on the first forward, and that a bins path satisfies it."""
+    import torch
+    from helix.model import build_fm
+
+    m = build_fm(dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
+                      dec_blocks=1, heads=4, dec_mode="cross", n_bins=16))
+    assert not hasattr(m, "bin_edges"), "a fresh categorical model must have no edges"
+
+    # a bins sidecar in tier1_setup_bins.py's format
+    path = tmp_path / "bins.pt"
+    torch.save(dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1),
+                    cent_asinh=torch.zeros(4, 16), cent_lin=torch.zeros(4, 16),
+                    K=16, SIGMA=2.6), path)
+
+    src = pathlib.Path(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "helix", "integrations", "pimm.py")).read_text()
+    assert "def _load_bins" in src, "no bins loader in the adapter"
+    assert "bins=None" in src, "build_coeff_fm does not accept a bins path"
+    assert "TRAINING-SET STATISTICS" in src, (
+        "the missing-bins error should explain WHY the model cannot supply them")
+
+    # the loader accepts both accepted shapes
+    ns = {}
+    exec(compile(src[src.index("def _load_bins"):], "pimm.py", "exec"), {"__name__": "x"}, ns)
+    got = ns["_load_bins"](str(path))
+    assert "edges" in got and got["edges"].shape == (4, 17)
+
+    conv = tmp_path / "converted.pt"
+    torch.save(dict(config={}, state_dict={},
+                    bins=dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1))), conv)
+    assert "edges" in ns["_load_bins"](str(conv))
