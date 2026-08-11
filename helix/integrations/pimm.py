@@ -28,7 +28,11 @@ model do not.
 
 from __future__ import annotations
 
+import math
+
 import torch
+from torch.optim.lr_scheduler import LambdaLR as _LambdaLR
+
 from pimm.datasets.builder import DATASETS
 from pimm.datasets.transform import Compose
 from pimm.datasets.transform.common import TRANSFORMS
@@ -39,6 +43,7 @@ from pimm.engines.train import TRAINERS, Trainer
 from pimm.models.builder import MODELS
 from pimm.utils import comm
 from pimm.utils.optimizer import OPTIMIZERS
+from pimm.utils.scheduler import SCHEDULERS
 from torch.utils.data import Dataset
 
 from helix.model.mup import expand_max_lr, param_group_ratios
@@ -46,7 +51,7 @@ from helix.model.tokenize import CoeffTokenize
 
 __all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
            "build_coeff_fm",
-           "FMTrainer", "CoeffFMEvaluator"]
+           "FMTrainer", "CoeffFMEvaluator", "WSDCooldownLR"]
 
 # The tokenizer needs no adapter — it is already a duck-typed transform
 # (``scope`` + ``__call__(dict) -> dict``), which is why it can live in helix
@@ -314,6 +319,40 @@ class FMTrainer(Trainer):
             self.cfg.scheduler.max_lr = expand_max_lr(
                 self.cfg.scheduler.max_lr, ratios)
         return super().build_scheduler()
+
+
+@SCHEDULERS.register_module()
+class WSDCooldownLR(_LambdaLR):
+    """The cooldown half of warmup-stable-decay: ``lr * max(floor, 1 - sqrt(p))``.
+
+    m113 trained the STABLE phase — `lr_mode: const`, described in mae_ddp.py as
+    "WSD stable phase: flat, no horizon baked in". That is the point of WSD: the
+    stable run commits to no total step count, so it can be extended, and the
+    decay is a SEPARATE short run started from a stable-phase checkpoint. A
+    checkpoint like m113's at 1,010,000 steps is therefore not an annealed model
+    and should not be read as one.
+
+    pimm has no equivalent. ``PolyLR`` is ``(1-p)**power``, which is a different
+    curve: at p=0.25 research gives 0.500 and PolyLR(power=0.5) gives 0.866.
+    ``1 - sqrt(p)`` drops fast and early, which is what a short cooldown wants.
+
+    The warmup-then-constant STABLE phase needs no new code —
+    ``MultiStepWithWarmupLR(milestones=[])`` leaves the decay factor at 1.0
+    forever, which is exactly it.
+
+    Being a LambdaLR, this scales each param group's own ``base_lr``, so muP's
+    per-group ratios survive without the ``max_lr`` expansion OneCycleLR needs.
+    """
+
+    def __init__(self, optimizer, total_steps, warmup=0, floor=1e-3,
+                 last_epoch=-1):
+        def wsd(s):
+            if warmup and s < warmup:
+                return s / warmup                      # research: lr * s / warmup
+            p = (s - warmup) / max(1, total_steps - warmup)
+            return max(floor, 1.0 - math.sqrt(min(p, 1.0)))
+
+        super().__init__(optimizer=optimizer, lr_lambda=wsd, last_epoch=last_epoch)
 
 
 @HOOKS.register_module()
