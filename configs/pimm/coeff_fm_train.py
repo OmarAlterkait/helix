@@ -113,9 +113,39 @@ model = dict(
     gd=2048,
 )
 
-optimizer = dict(type="AdamW", lr=3e-4, weight_decay=0.05)
-scheduler = dict(type="OneCycleLR", max_lr=3e-4, pct_start=0.25,
-                 anneal_strategy="cos", div_factor=10.0, final_div_factor=1000.0)
+# m113: lr 1.1e-3, wd 0.05, betas (0.9, 0.95).
+optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05)
+# WSD stable phase, as the base run (m113) trained: linear warmup then FLAT.
+#
+# This was OneCycleLR(max_lr=3e-4, pct_start=0.25). Both schedules have a warmup,
+# which is what made the difference easy to miss — but they are not the same
+# shape and not the same intent:
+#
+#   m113    4,000 warmup steps of 1,010,000 (0.4%), then constant 1.1e-3
+#   OneCycle  25% of steps warming up, then cosine down to max_lr/1000
+#
+# At 1M steps that is 4,000 warmup steps against 250,000, and a flat plateau
+# against an anneal to ~0. mae_ddp.py:164 calls const the "WSD stable phase:
+# flat, no horizon baked in" — the point being that the stable run commits to no
+# total step count, so it can be extended, and the cooldown is a SEPARATE short
+# run started from a stable-phase checkpoint. OneCycleLR bakes the horizon in
+# from step 0, which is the opposite.
+#
+# So m113's own checkpoint at 1,010,000 steps is a stable-phase model, not an
+# annealed one, and should not be read as a finished run.
+#
+# No new scheduler is needed for this half: MultiStepWithWarmupLR with EMPTY
+# milestones never applies its decay factor, leaving warmup-then-constant.
+# warmup_rate is a fraction of total_steps, so 4000/STEPS reproduces m113's
+# absolute warmup. For the cooldown, use helix's WSDCooldownLR (1 - sqrt(p),
+# bit-identical to research's lr_mode="decay"); pimm's PolyLR is a different
+# curve (0.866 vs 0.500 at p=0.25).
+#
+# Being a LambdaLR this scales each param group's own base_lr, so muP's
+# per-group ratios survive without the max_lr expansion OneCycleLR needed.
+STEPS = 1_010_000
+scheduler = dict(type="MultiStepWithWarmupLR", milestones=[],
+                 total_steps=STEPS, warmup_rate=4000 / STEPS)
 
 # ---------------------------------------------------------------------------
 # data — a handful of events, so the run is minutes not hours
