@@ -110,6 +110,59 @@ class PatchConfig:
                 f"cell_t must be 'centroid' or 'grid_center', got {self.cell_t!r}")
 
 
+
+# --------------------------------------------------------------------------
+# cell identity
+# --------------------------------------------------------------------------
+# Bit layout of a cell key. A cell is one (plane, band, wire-block, tick-block)
+# patch, and the key packs those four into one int64 so np.unique can find the
+# distinct cells in a single pass.
+#
+#   bits 40+    plane_gid
+#   bits 36-39  band        (4 bits -> up to 16 bands)
+#   bits 18-35  wire block  (18 bits)
+#   bits 0-17   tick block  (18 bits)
+_CELL_BAND_SHIFT, _CELL_WB_SHIFT, _CELL_GID_SHIFT = 36, 18, 40
+_CELL_BLOCK_MASK, _CELL_BAND_MASK = 0x3FFFF, 0xF
+
+
+def cell_key(plane_gid, band, wire, tau, cfg=None):
+    """Pack coordinates into the cell id the tokenizer groups by.
+
+    Public because anything that wants to attach per-cell information to a
+    tokenized event — a probe target, a truth label, an attention mask — has to
+    agree with :func:`assemble` on which coefficients share a cell, and the only
+    way to agree is to run the same packing.
+
+    ``wire``/``tau`` are RAW coordinates; the patch division happens here, so a
+    caller never has to know ``pw``/``pt``. Returns int64, directly comparable
+    against the keys :func:`assemble` builds.
+    """
+    cfg = cfg or PatchConfig()
+    plane_gid = np.asarray(plane_gid, np.int64)
+    band = np.asarray(band, np.int64)
+    wb = np.asarray(wire, np.int64) // cfg.pw
+    tb = np.asarray(tau, np.int64) // cfg.pt
+    if wb.size and (wb.max() > _CELL_BLOCK_MASK or tb.max() > _CELL_BLOCK_MASK):
+        raise ValueError(
+            f"wire/tick block index overflows its {_CELL_WB_SHIFT}-bit field "
+            f"(max {_CELL_BLOCK_MASK}): got wb<={int(wb.max())}, "
+            f"tb<={int(tb.max())}. The key would alias two distinct cells.")
+    if band.size and band.max() > _CELL_BAND_MASK:
+        raise ValueError(f"band {int(band.max())} overflows its 4-bit field")
+    return ((plane_gid << _CELL_GID_SHIFT) | (band << _CELL_BAND_SHIFT)
+            | (wb << _CELL_WB_SHIFT) | tb)
+
+
+def unpack_cell_key(key):
+    """Inverse of :func:`cell_key`: ``(plane_gid, band, wire_block, tick_block)``."""
+    key = np.asarray(key, np.int64)
+    return (key >> _CELL_GID_SHIFT,
+            (key >> _CELL_BAND_SHIFT) & _CELL_BAND_MASK,
+            (key >> _CELL_WB_SHIFT) & _CELL_BLOCK_MASK,
+            key & _CELL_BLOCK_MASK)
+
+
 def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
              norm_sigma, cfg=PatchConfig(), value_clean=None, dead_frac=0.0,
              rng=None):
@@ -148,14 +201,12 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
               if clean is not None else np.zeros_like(val))
 
     wb, tb = wire // pw, tau // pt
-    key = (plane_gid << 40) | (band << 36) | (wb << 18) | tb
+    key = cell_key(plane_gid, band, wire, tau, cfg)
     uniq, cell = np.unique(key, return_inverse=True)
     n_cells = len(uniq)
     slot = (wire % pw) * pt + (tau % pt)
-    cell_band = ((uniq >> 36) & 0xF).astype(np.int64)
-    cell_gid = (uniq >> 40).astype(np.int64)
-    cell_wb = ((uniq >> 18) & 0x3FFFF).astype(np.int64)
-    cell_tb = (uniq & 0x3FFFF).astype(np.int64)
+    cell_gid, cell_band, cell_wb, cell_tb = (
+        a.astype(np.int64) for a in unpack_cell_key(uniq))
 
     occ = np.zeros((n_cells, nslot), bool)
     inp = np.zeros((n_cells, nslot), np.float32)
