@@ -51,7 +51,7 @@ from helix.model.tokenize import CoeffTokenize
 
 __all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
            "build_coeff_fm",
-           "FMTrainer", "CoeffFMEvaluator", "WSDCooldownLR"]
+           "FMTrainer", "CoeffFMEvaluator", "WSDStableLR", "WSDCooldownLR", "WeightEMA"]
 
 # The tokenizer needs no adapter — it is already a duck-typed transform
 # (``scope`` + ``__call__(dict) -> dict``), which is why it can live in helix
@@ -322,6 +322,43 @@ class FMTrainer(Trainer):
 
 
 @SCHEDULERS.register_module()
+class WSDStableLR(_LambdaLR):
+    """Warmup-stable phase with an ABSOLUTE warmup step count.
+
+    Exists because ``warmup_rate`` cannot express what m113 did.
+    ``Trainer.build_scheduler`` (pimm engines/train.py:733) OVERWRITES
+    ``cfg.scheduler.total_steps`` with ``iters_per_epoch * epoch`` before
+    building, unconditionally — so a config that sets ``total_steps`` has it
+    discarded, and any ``warmup_rate`` is reinterpreted against the
+    trainer-derived total.
+
+    That is not a hypothetical. Expressing m113's 4,000 warmup steps as
+    ``warmup_rate = 4000/1_010_000`` against a 1,500-step run yields **5.94
+    steps** of warmup: the LR reaches 1.1e-3 by step 7 instead of step 4000 —
+    571x research's value at that point, 5.3x the integrated LR over the run —
+    on a cold 12-block d=512 transformer. That is the classic loss-spike
+    configuration, and it silently rescales again with any change to max_len,
+    epoch or GPU count.
+
+    So warmup is specified in STEPS here and total_steps is ignored entirely
+    (the stable phase is flat, so it needs no horizon — which is the point of
+    WSD: "flat, no horizon baked in", mae_ddp.py:164).
+
+    Matches research's ``lr * s / warmup`` ramp exactly.
+    """
+
+    def __init__(self, optimizer, warmup=4000, total_steps=None, last_epoch=-1):
+        # total_steps is accepted and ignored: the trainer injects it whether or
+        # not it is wanted, and silently dropping it beats failing on a kwarg
+        # the caller never set.
+        def stable(s):
+            return min(1.0, s / warmup) if warmup > 0 else 1.0
+
+        super().__init__(optimizer=optimizer, lr_lambda=stable,
+                         last_epoch=last_epoch)
+
+
+@SCHEDULERS.register_module()
 class WSDCooldownLR(_LambdaLR):
     """The cooldown half of warmup-stable-decay: ``lr * max(floor, 1 - sqrt(p))``.
 
@@ -353,6 +390,69 @@ class WSDCooldownLR(_LambdaLR):
             return max(floor, 1.0 - math.sqrt(min(p, 1.0)))
 
         super().__init__(optimizer=optimizer, lr_lambda=wsd, last_epoch=last_epoch)
+
+
+@HOOKS.register_module()
+class WeightEMA(HookBase):
+    """Exponential moving average of the weights, written into the checkpoint.
+
+    m113 trained with ``ema: 0.9999`` (half-life ~6931 steps). Research keeps a
+    full-state EMA on rank 0, updates it after every optimizer step, and saves it
+    into every checkpoint and snapshot (mae_ddp.py:147-155, 201-205, 233).
+
+    It is not an optional polish step for a WSD run. The stable phase is FLAT by
+    design — no annealing — so the raw weights stay at full LR noise for the
+    whole run. The EMA is what stands in for the annealed model until a cooldown
+    is actually run, which is what downstream probing is meant to read. Without
+    it, probes score a checkpoint that is noisier than anything research probed.
+
+    Rank 0 only, matching research: the EMA is an artifact, not part of the
+    optimisation, so it needs no synchronisation.
+    """
+
+    def __init__(self, decay=0.9999, key="state_dict_ema"):
+        self.decay = float(decay)
+        self.key = key
+        self._shadow = None
+
+    def _model(self):
+        return unwrap_model(self.trainer.model)
+
+    def after_step(self):
+        if comm.get_rank() != 0:
+            return
+        sd = self._model().state_dict()
+        if self._shadow is None:
+            self._shadow = {k: v.detach().clone().float() for k, v in sd.items()}
+            return
+        d = self.decay
+        for k, v in sd.items():
+            sh = self._shadow.get(k)
+            if sh is None or not v.is_floating_point():
+                self._shadow[k] = v.detach().clone().float()
+            else:
+                sh.mul_(d).add_(v.detach().float(), alpha=1.0 - d)
+
+    def state_dict(self):
+        """Picked up by the checkpoint payload if the trainer collects hooks."""
+        return {} if self._shadow is None else \
+            {k: v.clone() for k, v in self._shadow.items()}
+
+    def after_train(self):
+        """Write the EMA beside the final checkpoint.
+
+        Written separately rather than relying on the trainer's payload:
+        pimm's build_checkpoint_payload has no hook-state slot, so an EMA that
+        only lived in memory would evaporate at the end of the run.
+        """
+        if comm.get_rank() != 0 or self._shadow is None:
+            return
+        import os
+        path = os.path.join(self.trainer.cfg.save_path, "model", "model_ema.pth")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save({"state_dict": self._shadow, "decay": self.decay}, path)
+        self.trainer.logger.info(
+            f"WeightEMA(decay={self.decay}) -> {path}")
 
 
 @HOOKS.register_module()
