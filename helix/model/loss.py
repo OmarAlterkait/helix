@@ -94,9 +94,20 @@ def losses_cat(occ, logits, B, tok_mask, edges, vis_w=0.0):
     # original's ">=" tie-break (a tgt landing exactly ON an edge goes up);
     # tests/test_losses_cat_binning.py pins that against the old expression,
     # ties included.
-    binid = torch.empty(tgt.shape, dtype=torch.long, device=tgt.device)
     band_id = B["band_id"]
-    for b in range(edges.shape[0]):
+    # A band with no row in `edges` would leave its slots UNWRITTEN below, and
+    # torch.empty returns whatever was in memory — a loss that silently varies
+    # between identical calls. The original indexed `edges[band_id]` directly and
+    # raised IndexError; fail the same way, loudly.
+    n_band = edges.shape[0]
+    if band_id.numel() and int(band_id.max()) >= n_band:
+        raise IndexError(
+            f"band_id up to {int(band_id.max())} but `edges` has only {n_band} "
+            f"rows — the bin table does not cover every band present. Derive "
+            f"edges with the same n_bands the tokenizer emits "
+            f"(PatchConfig.n_bands).")
+    binid = torch.empty(tgt.shape, dtype=torch.long, device=tgt.device)
+    for b in range(n_band):
         sel = band_id == b
         if sel.any():
             binid[sel] = torch.bucketize(tgt[sel], edges[b, 1:-1].contiguous(),

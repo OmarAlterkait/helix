@@ -49,3 +49,18 @@ def synthetic_plane(config):
         "nw": nw,
         "nt": nt,
     }
+
+
+# Pin torch's intra-op threads for the whole suite.
+#
+# Two reasons, both measured. Speed: these tests run many tiny models, where 20
+# threads cost far more in coordination than they save — 381s -> 66s across
+# test_model_fm.py + test_training_parity.py. Determinism: CPU float reductions
+# split across threads, so the sum order (and the last bits) depend on the thread
+# count, which depends on machine load. That is what made the goldens fail
+# intermittently before they pinned it themselves.
+try:
+    import torch
+    torch.set_num_threads(4)
+except ImportError:
+    pass

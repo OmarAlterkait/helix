@@ -243,3 +243,23 @@ def test_empty_plane_survives_whole_event_read(tmp_path):
     assert set(out) == set(cfg.plane_labels)
     assert all(out[f"volume_0_{pl}"][0].size == 0 for pl in PLANES)
     assert any(out[f"volume_1_{pl}"][0].size > 0 for pl in PLANES)
+
+
+# ---- non-contiguous event ids ---------------------------------------------
+
+def test_list_events_reports_actual_ids(tmp_path):
+    """Event ids are not guaranteed to be 0..n-1. `sim_wire_sensor_0065.h5` of
+    run_0027575715 holds 199 events spanning 0..199 with 167 absent, while its
+    own config.n_events attr still says 200 — so anything deriving indices from
+    a COUNT asks for a missing id and drops a real one off the tail."""
+    from helix.tpc.io import list_events, count_events
+    p = str(tmp_path / "holey.h5")
+    truth = _write_current(p, n_events=5)
+    with h5py.File(p, "a") as f:
+        del f["event_002"]                       # punch a hole in the middle
+
+    ids = list_events(p)
+    assert ids == (0, 1, 3, 4)                   # the real ids, not range(4)
+    assert count_events(p) == 4                  # count alone would say 0..3
+    assert max(ids) not in range(count_events(p))  # id 4 is past the count
+    assert truth                                  # fixture actually wrote data

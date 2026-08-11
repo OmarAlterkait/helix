@@ -6,6 +6,10 @@ build/
 .pytest_cache/
 figures/
 *.npz
+# ...except packaged data: helix/tpc/noise.py loads this by DEFAULT
+# (DEFAULT_SERIES_SPECTRUM), so an untracked copy means a clone or a wheel
+# raises FileNotFoundError on the default path. 3.8 kB.
+!helix/tpc/data/*.npz
 temp/
 
 # ── research/report tracking (2026-07-23): track the text/code record, not artifacts ──
