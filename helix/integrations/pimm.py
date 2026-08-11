@@ -348,10 +348,28 @@ class CoeffFMEvaluator(HookBase):
             self.eval()
 
     def eval(self):
+        """Rank 0 evaluates; the others wait at a barrier.
+
+        The barrier is symmetric or it deadlocks. Every non-zero rank blocks in
+        ``comm.synchronize()``, so rank 0 MUST rejoin on every exit path — the
+        try/finally, not a call at the end of the happy path. Getting this wrong
+        does not fail: the run completes training and evaluation, logs a final
+        checkpoint, and then hangs forever, because rank 0 walks into the
+        collective checkpoint save while the others are still in the barrier.
+        That is exactly what happened on the first 2-GPU run.
+        """
+        world = comm.get_world_size()
         if comm.get_rank() != 0:
-            if comm.get_world_size() > 1:
+            if world > 1:
                 comm.synchronize()
             return
+        try:
+            self._eval_rank0()
+        finally:
+            if world > 1:
+                comm.synchronize()          # rejoin, whatever happened above
+
+    def _eval_rank0(self):
         loader = getattr(self.trainer, "val_loader", None)
         if loader is None:
             self.trainer.logger.info("CoeffFMEvaluator: no val_loader; skipping")

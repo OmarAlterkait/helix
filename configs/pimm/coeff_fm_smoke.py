@@ -45,7 +45,16 @@ seed = 0
 # logs, and the artifact simply is not there afterwards.
 save_path = "/sdf/data/neutrino/omara/exp/coeff_fm_smoke"
 
-# 1 always — the FM has no event separation (MULTI_EVENT_BATCHING.md)
+# pimm's `batch_size` is the GLOBAL batch across all ranks — default_config_parser
+# asserts `batch_size % world_size == 0` and derives batch_size_per_gpu from it.
+# What the FM requires is batch_size_per_gpu == 1 (it has no event separation, so
+# a rank holding two events would attend across them). So:
+#
+#     batch_size = number of GPUs        1 GPU -> 1,  2 GPUs -> 2,  8 GPUs -> 8
+#
+# which is exactly how the research trainer scaled: "each rank processes 1
+# event/step; gradients all-reduced => global batch = world events".
+# See MULTI_EVENT_BATCHING.md.
 batch_size = 1
 batch_size_val = 1
 batch_size_test = 1
@@ -116,7 +125,11 @@ _common = dict(
     dataset_name="sim_wire",
     modalities=("coeff", "coeff_clean"),
     transform=transform,
-    max_len=8,
+    # 32 events, so a 2-rank run still has 16 steps/rank: OneCycleLR's first
+    # phase is `pct_start * total_steps - 1`, which is DEGENERATE (zero length,
+    # ZeroDivisionError) when total_steps gets small — 8 events over 2 ranks
+    # gives 4 steps and 0.25 * 4 - 1 = 0.
+    max_len=32,
 )
 
 data = dict(train=dict(**_common), val=dict(**_common), test=dict(**_common))
