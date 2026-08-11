@@ -29,7 +29,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-RESEARCH = "/sdf/group/neutrino/omara/helix/research/coeff_foundation_model/fm"
+from _paths import RESEARCH_FM as RESEARCH                     # noqa: E402
 research_required = pytest.mark.skipif(
     not os.path.isdir(RESEARCH), reason=f"research tree absent: {RESEARCH}")
 

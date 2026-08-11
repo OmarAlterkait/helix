@@ -19,7 +19,7 @@ torch = pytest.importorskip("torch")
 
 from helix.model import build_fm, FMModel, losses, losses_fused, losses_cat  # noqa: E402
 
-RESEARCH = "/sdf/group/neutrino/omara/helix/research/coeff_foundation_model/fm"
+from _paths import RESEARCH_FM as RESEARCH                     # noqa: E402
 CKPT = os.path.join(RESEARCH, "ckpt_clean160cat_m113_snap1000000.pt")
 
 SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1, heads=4,

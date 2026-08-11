@@ -251,8 +251,9 @@ def test_backend_equivalent_on_same_input(tmp_path, bk):
 
 # ---- 3. physics acceptance (F0) on real data ------------------------------
 
-REAL = ("/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor/"
-        "run_0027575715/sim_wire_sensor_0000.h5")
+from _paths import sensor_shard                                # noqa: E402
+
+REAL = sensor_shard("run_0027575715", "sim_wire_sensor_0000.h5")
 
 
 @pytest.mark.skipif(not os.path.exists(REAL), reason="production shard not reachable")

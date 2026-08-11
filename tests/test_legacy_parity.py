@@ -27,9 +27,9 @@ import sys
 import numpy as np
 import pytest
 
-SHARD = ("/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor/"
-         "run_0027575766/sim_wire_sensor_0000.h5")
-RESEARCH = "/sdf/group/neutrino/omara/helix/research/coeff_foundation_model"
+from _paths import RESEARCH_ROOT as RESEARCH, sensor_shard     # noqa: E402
+
+SHARD = sensor_shard("run_0027575766", "sim_wire_sensor_0000.h5")
 KGATE, KSIG, KAPPA, GS, NB_OLD = 4.0, 3.0, 1.0, 64, 4
 
 

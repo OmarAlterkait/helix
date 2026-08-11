@@ -31,7 +31,8 @@ result.sparse.sparsity  # fraction of zero coefficients
 ```bash
 helix --input sensor.h5 --output processed.h5
 helix --input sensor.h5 --output processed.h5 --events 0-19
-helix --input sensor.h5 --output processed.h5 --coh-only    # coherent removal only
+helix --input sensor.h5 --output processed.h5 --removal gate   # coherent removal: gate|multipass|none
+helix --input sensor.h5 --output processed.h5 --to-coeffs     # write a coefficient shard
 helix --input sensor.h5 --output processed.h5 --backend jax  # force JAX/GPU
 ```
 
