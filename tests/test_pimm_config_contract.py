@@ -80,9 +80,14 @@ def test_derived_fields_really_are_derived():
 
 
 def test_batch_size_is_one():
-    """The FM has no event separation, so batch_size > 1 silently trains a model
-    whose tokens attend across unrelated events (MULTI_EVENT_BATCHING.md).
-    Cheap to assert, and the failure it prevents is invisible."""
+    """The FM needs batch_size_per_gpu == 1 — it has no event separation, so a
+    rank holding two events would attend across them (MULTI_EVENT_BATCHING.md).
+
+    pimm's `batch_size` is the GLOBAL batch and `default_config_parser` asserts
+    `batch_size % world_size == 0`, so the requirement is
+    `batch_size = number of GPUs`. The committed config targets a single GPU;
+    a multi-GPU launch overrides it (`--options batch_size=<n_gpus>`), which is
+    exactly how the research trainer scaled."""
     tree = ast.parse(pathlib.Path(CONFIG).read_text())
     vals = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
             for t in n.targets if isinstance(t, ast.Name)}
