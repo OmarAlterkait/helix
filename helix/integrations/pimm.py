@@ -36,12 +36,74 @@ from torch.utils.data import Dataset
 
 from helix.model.tokenize import CoeffTokenize
 
-__all__ = ["CoeffTokenize", "CoeffTPCDataset", "build_coeff_fm"]
+__all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "build_coeff_fm"]
 
 # The tokenizer needs no adapter — it is already a duck-typed transform
 # (``scope`` + ``__call__(dict) -> dict``), which is why it can live in helix
 # with no pimm import. Only the NAME has to reach pimm's registry.
 TRANSFORMS.register_module(module=CoeffTokenize, name="CoeffTokenize")
+
+
+@TRANSFORMS.register_module()
+class CoeffCollect:
+    """Tokenised part -> the flat tensor dict ``FMModel.forward`` consumes.
+
+    The terminal per-event transform, and it exists for three specific reasons
+    that only show up when you run pimm's actual collate over a real sample:
+
+    1. **Flatten.** ``CoeffTokenize`` leaves tokens nested under its part, but
+       the model reads ``plane_id``/``inp``/... at the top level.
+
+    2. **Tensorise.** pimm's ``collate_fn`` CONCATENATES tensor leaves
+       (``torch.cat``) but sends anything else to ``default_collate``, which
+       STACKS. Handing it numpy therefore produced ``inp`` of shape
+       ``(1, n_cells, n_slot)`` — a spurious batch dimension the model cannot
+       consume. Converting here puts us on the concatenating path, which is also
+       the one that stays correct if batching ever arrives.
+
+    3. **Drop ``n_cells``.** It is an int, so collate turns it into
+       ``tensor([30976])`` while ``make_mask`` does ``torch.rand(n)``.
+       ``FMModel.forward`` derives it from ``plane_id.shape[0]`` anyway, which is
+       also correct for a concatenated batch.
+
+    Deliberately does NOT emit ``offset``. pimm's ``run_step`` does
+    ``if "offset" in input_dict: input_dict["coord"].shape[0]`` — an offset
+    without a ``coord`` raises KeyError *after* the forward. The FM has no
+    ``coord`` and, having no event separation, requires ``batch_size=1`` anyway
+    (see MULTI_EVENT_BATCHING.md).
+    """
+
+    scope = "sample"
+
+    #: int/scalar sample fields that must not reach the model as 0-d tensors
+    DROP = ("n_cells",)
+
+    def __init__(self, part="coeff", keys=None, keep=("name",)):
+        self.part = part
+        self.keys = tuple(keys) if keys else None
+        self.keep = tuple(keep)
+
+    def __call__(self, data):
+        import numpy as np
+        import torch
+
+        sub = data.get(self.part)
+        if sub is None:
+            raise KeyError(
+                f"CoeffCollect: no part {self.part!r} in the sample (have "
+                f"{sorted(data)}) — it must run AFTER CoeffTokenize")
+        out = {}
+        for k, v in sub.items():
+            if k.startswith("_") or k in self.DROP:
+                continue
+            if self.keys is not None and k not in self.keys:
+                continue
+            if isinstance(v, np.ndarray):
+                out[k] = torch.from_numpy(np.ascontiguousarray(v))
+        for k in self.keep:                     # carry the event id for seeding/logging
+            if k in data:
+                out[k] = data[k]
+        return out
 
 
 @DATASETS.register_module()

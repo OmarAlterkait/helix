@@ -98,7 +98,27 @@ torch paths, pinned by `tests/test_forward_mirror.py`. The **jax** path
 --backend jax` still imports pimm-data. torch is the production backend, so this
 is the last loose end rather than a blocker.
 
-## 5. Verify the pimm registry wiring
+## 5. Reusing pimm's MAEEvaluator needs two changes
+
+The coeff FM IS a masked autoencoder, so `pimm/engines/hooks/eval/pretrain/mae.py`
+is the natural eval hook. It does not fit as-is, in two different ways — both
+pinned by `tests/test_pimm_step_contract.py` so neither surprises us on the first
+eval step:
+
+* **Hard failure.** It calls `model(input_dict, return_pred=return_viz)`.
+  `FMModel.forward(batch, tok_mask=None)` does not accept that kwarg, so eval
+  raises `TypeError` immediately. Fix by accepting (and honouring) `return_pred`,
+  or by writing a coeff-specific evaluator.
+* **Silent degradation.** It reads `coord_loss`, `feat_loss` and
+  `mask_ratio_actual` via `.get(..., 0.0)`. We emit `bce`, `val` and
+  `masked_frac`, so those metrics would log as 0.0 rather than fail — the worse
+  of the two failure modes.
+
+Its point-cloud visualisation path (`viz_visible_coord`) has no coeff analogue
+either. A thin `CoeffFMEvaluator` reusing its averaging + `neg_val_loss`
+checkpoint-selection logic is probably less work than bending it.
+
+## 6. Verify the pimm registry wiring
 
 `helix/integrations/pimm.py` registers three names, and
 `tests/test_integration_pimm.py` checks them — but both tests **skip** here,
@@ -106,7 +126,7 @@ because this environment has pimm checked out without its dependencies
 (`pyarrow`, `addict`). Nothing has exercised `build_dataset` / `build_model`
 through a real config. Needs an environment with pimm's deps installed.
 
-## 6. The retirement bundle — gated on FMTrainer parity
+## 7. The retirement bundle — gated on FMTrainer parity
 
 13 modules, ~3,700 lines, all reachable from `fm/mae_ddp.py`:
 
@@ -125,7 +145,7 @@ Caveat discovered late: the A/B can only verify **loop mechanics**. `mae_ddp`'s
 recorded numbers are on the white-noise distribution, so it cannot serve as a
 physics reference against a corpus built with the measured spectrum.
 
-## 7. Housekeeping
+## 8. Housekeeping
 
 * `tests/test_coeff_dataset.py` in pimm-data pins the cross-repo codec golden to
   the hardcoded path `/sdf/group/neutrino/omara/helix-consolidate`. As
