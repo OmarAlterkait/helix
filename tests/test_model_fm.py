@@ -219,3 +219,35 @@ def test_missing_batch_keys_name_themselves(fused, missing, names):
         B.pop(k)
     with pytest.raises(KeyError, match=names):
         model(B)
+
+
+def test_plane_frac_mixes_modes_per_step():
+    """`plane_frac` is a per-STEP mix, not a mode.
+
+    Research (mae_ddp.py:187) draws whole-plane masking with probability
+    plane_frac and mask_mode otherwise; m113 trained at 0.1. A run that only ever
+    masks randomly never has to reconstruct a plane it cannot see, so nothing
+    forces cross-plane triangulation — which is the whole reason the option
+    exists. The port dropped it, and because `mask_mode="plane"` exists it looked
+    like the capability was already there.
+    """
+    B = make_batch(n_slot=SMALL["n_slot"])
+    gid = B["plane_id"]
+
+    def whole_plane(msk):
+        return all(bool(msk[gid == g].all()) or bool((~msk[gid == g]).all())
+                   for g in gid.unique())
+
+    counts = {}
+    for pf in (0.0, 0.5, 1.0):
+        model = build_fm(dict(SMALL), plane_frac=pf)
+        torch.manual_seed(0)
+        counts[pf] = sum(whole_plane(model.make_mask(B)) for _ in range(200))
+
+    assert counts[0.0] == 0, "plane_frac=0 must never mask a whole plane"
+    assert counts[1.0] == 200, "plane_frac=1 must always mask whole planes"
+    assert 60 < counts[0.5] < 140, f"plane_frac=0.5 should mix, got {counts[0.5]}/200"
+
+    # An explicit mode= overrides the policy and skips the draw entirely.
+    model = build_fm(dict(SMALL), plane_frac=1.0)
+    assert not whole_plane(model.make_mask(B, mode="random"))
