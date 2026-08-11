@@ -15,6 +15,8 @@
    "plane",
    "wire"
   ],
+  "gd": 2048,
+  "gp": 1024,
   "heads": 8,
   "mup": true,
   "n_band": 4,
@@ -23,14 +25,16 @@
   "n_slot": 128,
   "n_wirefeat": 1,
   "nll": false,
+  "rope_split": false,
+  "serial": true,
   "wire_rope": true
  },
  "device": "cpu",
  "model": {
-  "encode": "float32|(300, 512)|7892630cceef7cf9",
+  "encode": "float32|(300, 512)|891dfe02a6d13b90",
   "logvar": "None",
-  "occ_logit": "float32|(300, 128)|ebdba918b95ca531",
-  "val": "float32|(300, 128, 128)|3ccfac1f1b94de51"
+  "occ_logit": "float32|(300, 128)|044b85c8b01f92e7",
+  "val": "float32|(300, 128, 128)|2df2021282551e22"
  },
  "threads": 1,
  "tokenizer": {
@@ -46,7 +50,7 @@
    "occ": "float32|(30976, 128)|b66e0fea1e6c860c",
    "plane_id": "int64|(30976,)|9a6127b1e6944e94",
    "slot": "int64|(231536,)|408b0a3227db1c63",
-   "t_phys": "float32|(30976,)|90ebd77a80de3f38",
+   "t_phys": "float32|(30976,)|c510afa48f8551db",
    "target": "float32|(231536,)|15edec531a141d15",
    "tgt": "float32|(30976, 128)|9c321d1b650c4cb1",
    "val": "float32|(231536,)|94cf4706d63f11a9",
@@ -66,7 +70,7 @@
    "occ": "float32|(39689, 128)|e61a91b90c06449b",
    "plane_id": "int64|(39689,)|f5601344cbb6dfd2",
    "slot": "int64|(503327,)|44a343713a9fe915",
-   "t_phys": "float32|(39689,)|35c7562dac1d194f",
+   "t_phys": "float32|(39689,)|95b9d34647a735f2",
    "target": "float32|(503327,)|e15008c50561528e",
    "tgt": "float32|(39689, 128)|40d5ee5cb438af78",
    "val": "float32|(503327,)|4e9b0153c5ae3117",
@@ -74,6 +78,13 @@
    "wire_pos": "float32|(39689,)|e627130aae535e14",
    "wirefeat": "float32|(39689, 1)|d2084352639c6ba7"
   }
+ },
+ "tokenizer_cfg": {
+  "cell_t": "grid_center",
+  "cellt_research": "canonical",
+  "n_bands": 4,
+  "pt": 8,
+  "pw": 16
  },
  "torch": "2.5.1+cu121",
  "verified_against_research": true
