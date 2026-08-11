@@ -99,8 +99,14 @@ def model_outputs(model, cfg):
     return out
 
 
-def tokenizer_outputs():
-    """helix.model.tokenize on pinned REAL corpus events."""
+def tokenizer_outputs(tok_cfg=None):
+    """helix.model.tokenize on pinned REAL corpus events.
+
+    `tok_cfg` is the converted checkpoint's `tokenizer` block, so the golden
+    freezes the geometry the WEIGHTS were trained with. It used to be a bare
+    PatchConfig(), whose cell_t default is 'centroid' — while m113 trained with
+    research's 'canonical' (= helix 'grid_center'). Nothing recorded that, so
+    the golden pinned a tokenizer the checkpoint had never seen."""
     import glob
     from helix.core.coeff_io import read_coeff_event
     from helix.model.tokenize import assemble, to_fm, PatchConfig
@@ -124,13 +130,27 @@ def tokenizer_outputs():
         cc = read_coeff_event(clean, ev, coords_from=shard)
         tok = assemble(ce.band, ce.plane_gid, ce.wire, ce.tau, ce.value,
                        gids=gids, n_wires=n_wires, band_lengths=band_lengths,
-                       norm_sigma=norm_sigma, cfg=PatchConfig(),
+                       norm_sigma=norm_sigma, cfg=_patch_cfg(tok_cfg),
                        value_clean=cc.value)
         fm = to_fm(tok)
         out[f"ev{ev}"] = {k: dig(v) for k, v in sorted(fm.items())
                           if isinstance(v, np.ndarray)}
         out[f"ev{ev}"]["n_cells"] = int(tok["n_cells"])
     return out
+
+
+def _patch_cfg(tok_cfg):
+    """PatchConfig for a checkpoint's recorded tokenizer geometry."""
+    from helix.model.tokenize import PatchConfig
+    if not tok_cfg:
+        raise SystemExit(
+            "the converted checkpoint has no `tokenizer` block, so the patch "
+            "geometry it was trained with is unknown. Re-run "
+            "tools/convert_fm_ckpt.py with --train-config to record it.")
+    kw = {k: tok_cfg[k] for k in ("pw", "pt", "cell_t") if k in tok_cfg}
+    if tok_cfg.get("n_bands"):
+        kw["n_bands"] = int(tok_cfg["n_bands"])
+    return PatchConfig(**kw)
 
 
 def load_anchor():
@@ -176,7 +196,11 @@ def build(verify_against_research):
     cfg, sd = blob["config"], blob["state_dict"]
     if isinstance(cfg.get("film"), list):
         cfg = dict(cfg, film=tuple(cfg["film"]))
-    model = build_fm(cfg, serial=True).cpu()
+    # serial / rope_split now come from the blob. Both used to fall back to
+    # build_fm's defaults (serial=True, rope_split=True) on BOTH sides of the
+    # comparison, so the parity proof was self-consistent but was not taken at
+    # m113's operating point (it trained with rope_split=0).
+    model = build_fm(cfg).cpu()
     model.load_state_dict(sd, strict=True)
 
     got = {"model": model_outputs(model, cfg),
@@ -184,6 +208,7 @@ def build(verify_against_research):
                       for k, v in sorted(cfg.items())},
            "ckpt_digest": blob["provenance"]["state_digest"],
            "anchor": os.path.basename(src),
+           "tokenizer_cfg": blob.get("tokenizer"),
            "device": "cpu",
            "threads": 1,
            "torch": torch.__version__,
@@ -194,6 +219,8 @@ def build(verify_against_research):
         from model_serial import SerialFMModel as Ref
         ref_kw = dict(cfg)
         ref_kw.pop("n_wirefeat", None)
+        ref_kw.pop("serial", None)      # build_fm's class selector, not a kwarg
+        assert ref_kw.get("rope_split") == cfg.get("rope_split")   # the whole point
         ref = Ref(**{k: (tuple(v) if isinstance(v, list) else v)
                      for k, v in ref_kw.items()})
         ref.load_state_dict(sd, strict=True)
@@ -205,7 +232,7 @@ def build(verify_against_research):
                 f"The golden would enshrine a divergence.")
         got["verified_against_research"] = True
 
-    tok = tokenizer_outputs()
+    tok = tokenizer_outputs(blob.get("tokenizer"))
     if tok is not None:
         got["tokenizer"] = tok
     return got

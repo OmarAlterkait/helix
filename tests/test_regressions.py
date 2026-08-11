@@ -107,6 +107,46 @@ def test_no_builtin_hash_used_for_seeding():
 # Version: stamped into every shard, and checked across shards by pimm-data
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# The golden must be anchored at the operating point the weights were trained at
+# --------------------------------------------------------------------------
+
+def test_golden_pins_m113_operating_point():
+    """`rope_split` and `cell_t` are not stored in the checkpoint.
+
+    They live only in the run's YAML, so both the model builder and the
+    tokenizer used to fall back to their own defaults — `rope_split=True` and
+    `cell_t='centroid'` — while m113 trained at `rope_split=0` and research's
+    `canonical` (= helix `grid_center`). Because the SAME defaults applied on
+    both sides of the helix-vs-research comparison, the parity proof still held;
+    it was simply taken at a configuration m113 had never been trained at.
+
+    Digest equality alone would not catch a regression here: re-capturing at the
+    wrong operating point changes every digest at once, which reads like an
+    intentional refresh. This names the configuration instead.
+    """
+    import json
+
+    g = json.loads((REPO / "tests" / "goldens_fm.json").read_text())
+    cfg, tok = g["config"], g.get("tokenizer_cfg")
+
+    assert cfg.get("serial") is True
+    assert cfg.get("rope_split") is False, (
+        "m113 trained with rope_split=0; a golden captured at the build_fm "
+        "default (True) pins a model the checkpoint was never trained as")
+    assert (cfg.get("gp"), cfg.get("gd")) == (1024, 2048)
+
+    assert tok, "golden records no tokenizer geometry"
+    assert tok["cell_t"] == "grid_center", (
+        "m113 trained with research cellt='canonical', which is helix "
+        "'grid_center'; PatchConfig's default is 'centroid'")
+    assert tok["cellt_research"] == "canonical"
+    assert (tok["pw"], tok["pt"]) == (16, 8)
+
+    # The proof is only worth anything if research witnessed it.
+    assert g.get("verified_against_research") is True
+
+
 def test_version_is_single_sourced():
     """pyproject must not carry its own literal.
 
