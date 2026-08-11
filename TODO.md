@@ -77,24 +77,31 @@ param groups in `before_train`. It preserves layer-wise LRs but rewrites weight
 decay, which would undo muP's `wd*m` decoupling. Our `param_groups` already does
 the no-decay split, so the hook is redundant — just never add it to the config.
 
-### The one thing worth asking pimm's author for
+### A latent pimm bug we happen to avoid (report only if convenient)
 
-`engines/train.py` in `run_step`:
+`engines/train.py`, in `run_step`:
 
 ```python
 if "offset" in input_dict:
     output_dict["avg_pts"] = input_dict["coord"].shape[0] / len(input_dict["offset"])
 ```
 
-Any model whose batch carries `offset` but no `coord` raises **KeyError after the
-forward pass** — a crash on step 1. The sibling accounting at line ~454 is
-already guarded (`try/except TypeError`); this one is not. A one-line fix
-(`and "coord" in input_dict`, or `.get`).
+A batch with `offset` but no `coord` raises KeyError AFTER the forward. The
+sibling accounting at line ~454 is guarded (`try/except TypeError`); this is not.
 
-It does not block us today only because `CoeffCollect` deliberately emits no
-`offset`. But that is precisely the field multi-event batching would need
-(MULTI_EVENT_BATCHING.md), so the guard is what would unblock that path later.
-Worth reporting regardless: it affects any non-point-cloud model.
+**Would we ever hit it? Almost certainly not.** `offset` only enters a batch when
+a transform emits one (pimm's `Collect` via `offset_keys_dict`, `multiview`,
+`hmae`) — `collate_fn` never adds it — and `CoeffCollect` emits none.
+`tests/test_pimm_step_contract.py` asserts that unconditionally.
+
+Reaching it needs either multi-event batching, which we measured as buying ~0
+throughput and deferred (`MULTI_EVENT_BATCHING.md`), or someone using pimm's
+`Collect` — the natural idiom — instead of `CoeffCollect`. The second is the
+realistic one, and it fails loudly rather than silently.
+
+So: a genuine one-line bug affecting any non-point-cloud model in pimm, worth
+mentioning to its author as a courtesy, but NOT something we need. Earlier notes
+here framed it as the one thing we needed upstream; that was overstated.
 
 ## 2b. (was 2) FMTrainer background
 
