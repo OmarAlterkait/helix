@@ -41,11 +41,16 @@ test_only = False
 seed = 0
 save_path = "exp/coeff_fm_encode"
 
-# batch_size MUST stay 1. The FM has no event separation: attention runs over
-# whatever tokens it is given, so batch_size=2 does not fail — it silently trains
-# a model whose tokens attend across unrelated events. One event is already
-# ~31-40k tokens and saturates the GPU roughly 8x over, so there is nothing to
-# gain either. See MULTI_EVENT_BATCHING.md.
+# pimm's `batch_size` is the GLOBAL batch across all ranks — default_config_parser
+# asserts `batch_size % world_size == 0` and derives batch_size_per_gpu from it.
+# What the FM requires is batch_size_per_gpu == 1 (it has no event separation, so
+# a rank holding two events would attend across them). So:
+#
+#     batch_size = number of GPUs        1 GPU -> 1,  2 GPUs -> 2,  8 GPUs -> 8
+#
+# which is exactly how the research trainer scaled: "each rank processes 1
+# event/step; gradients all-reduced => global batch = world events".
+# See MULTI_EVENT_BATCHING.md.
 batch_size = 1
 batch_size_val = 1
 batch_size_test = 1
