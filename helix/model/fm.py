@@ -31,11 +31,10 @@ from helix.model.mask import make_mask
 # different logvar clamp for NLL heads, (-12, 8) fused vs (-8, 8) gathered:
 # measured 6379 vs 360 on one batch.
 #
-# plane_frac is recorded here but NOT yet implemented, and it is not the same as
-# mask_mode="plane": research mixes per STEP (mae_ddp.py:174 — plane masking with
-# probability plane_frac, random otherwise), which is what forces cross-plane
-# triangulation. m113 trained at 0.1. helix can currently do all-plane or
-# all-random but not that blend, so a run reproducing m113 is still not exact.
+# plane_frac mixes the two masking modes PER STEP (research mae_ddp.py:187):
+# whole-plane masking with that probability, mask_mode otherwise. It is NOT the
+# same as mask_mode="plane", which would mask planes every step. m113 trained at
+# 0.1; the default here is research's 0.0, so it must be asked for.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, loss_fused=True, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None)
@@ -296,8 +295,31 @@ class FMModel(nn.Module):
         return self
 
     def make_mask(self, B, ratio=None, mode=None, n_planes=None, gen=None):
-        """Draw a token mask for this batch under the model's configured policy."""
-        return make_mask(B, self.mask_mode if mode is None else mode,
+        """Draw a token mask for this batch under the model's configured policy.
+
+        ``plane_frac`` mixes the two modes PER STEP: with that probability the
+        step masks whole planes, otherwise it uses ``mask_mode``. That mix is the
+        point — a run that only ever masks randomly never has to reconstruct a
+        plane it cannot see, so nothing forces cross-plane triangulation, and a
+        run that only ever masks planes never learns the within-plane task.
+        m113 trained at 0.1 (research mae_ddp.py:187).
+
+        An explicit ``mode=`` overrides the policy and skips the draw, so callers
+        that want one specific mode (evaluation, tests) are unaffected.
+        """
+        m = self.mask_mode if mode is None else mode
+        if mode is None and self.plane_frac > 0:
+            # Research draws this from numpy's global RNG. Using torch keeps the
+            # draw on the batch's device and honours `gen`, which is the same
+            # trade already made and documented for randperm in mask.py: the
+            # distribution is identical, the stream is not.
+            dev = B["plane_id"].device
+            r = (torch.rand((), generator=gen, device=dev)
+                 if (gen is not None and gen.device.type == dev.type)
+                 else torch.rand((), device=dev))
+            if float(r) < self.plane_frac:
+                m = "plane"
+        return make_mask(B, m,
                          self.mask_ratio if ratio is None else ratio,
                          self.n_planes if n_planes is None else n_planes, gen=gen)
 
