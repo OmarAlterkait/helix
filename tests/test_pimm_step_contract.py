@@ -102,15 +102,29 @@ def test_collate_preserves_shapes_at_batch_size_one(pimm_collate, sample):
 
 @pimm_src
 @corpus
-def test_no_offset_without_coord(pimm_collate, sample):
-    """pimm's run_step does `if "offset" in input_dict: input_dict["coord"]...`,
-    so emitting an offset without a coord KeyErrors AFTER the forward — a crash
-    on step 1 that no model-level test would show."""
+def test_batch_carries_no_offset(pimm_collate, sample):
+    """Our batch must carry NO `offset`, and this asserts it directly.
+
+    pimm's run_step does
+    `if "offset" in input_dict: input_dict["coord"].shape[0]`, so an offset
+    without a coord raises KeyError AFTER the forward — a crash on step 1. We
+    stay clear of it by never emitting one, which is a property of CoeffCollect
+    rather than a happy accident, so it is worth asserting.
+
+    Written as an unconditional assertion on purpose: the obvious form,
+    `if "offset" in out: assert "coord" in out`, asserts NOTHING while no offset
+    exists, which is exactly the state we are in.
+
+    `offset` only enters a batch when a transform emits one (pimm's `Collect`
+    via offset_keys_dict, multiview, hmae) — collate never adds it. So the way
+    this breaks is someone reaching for pimm's `Collect`, the natural idiom, in
+    place of `CoeffCollect`."""
     out = pimm_collate([sample])
-    if "offset" in out:
-        assert "coord" in out, (
-            "batch carries 'offset' but no 'coord'; pimm's run_step will raise "
-            "KeyError after the forward pass")
+    assert "offset" not in out, (
+        "batch gained an 'offset'. pimm's run_step will then read "
+        "input_dict['coord'], which the FM does not have -> KeyError after the "
+        "forward. Either drop the offset or add a coord.")
+    assert "coord" not in out, "unexpected 'coord' — has the batch contract changed?"
 
 
 @pimm_src
