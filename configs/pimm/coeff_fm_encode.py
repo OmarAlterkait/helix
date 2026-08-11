@@ -73,6 +73,16 @@ deterministic = False
 # (TODO.md 2); until then this stays None rather than approximating it wrongly.
 param_dicts = None
 
+# Read by pimm/train.py (the ENTRYPOINT), not by the Trainer — a config-contract
+# test that only scans engines/train.py for `self.cfg.<name>` misses these.
+structured_logging = dict(
+    enabled=False,
+    trace_hooks=False,
+    batch_stats_every=1,
+    max_file_size_mb=128,
+    backup_count=3,
+)
+
 # ---------------------------------------------------------------------------
 # model
 # ---------------------------------------------------------------------------

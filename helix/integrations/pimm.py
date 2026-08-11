@@ -44,7 +44,8 @@ from torch.utils.data import Dataset
 from helix.model.mup import expand_max_lr, param_group_ratios
 from helix.model.tokenize import CoeffTokenize
 
-__all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "build_coeff_fm",
+__all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
+           "build_coeff_fm",
            "FMTrainer", "CoeffFMEvaluator"]
 
 # The tokenizer needs no adapter — it is already a duck-typed transform
@@ -163,6 +164,25 @@ class CoeffTPCDataset(Dataset):
 
 
 @MODELS.register_module("Coeff-FM")
+class CoeffFM:
+    """Factory registered as ``Coeff-FM``.
+
+    A class rather than a function because pimm's registry requires one:
+    ``_register_module`` raises ``TypeError: module must be a class``, and
+    ``build_from_cfg`` ends in ``obj_cls(**args)``. ``__new__`` returns the
+    ``FMModel`` itself, so a config gets a model rather than a wrapper, and
+    nothing downstream has to unwrap it.
+
+    Found only by running it: the registry's type check fires at DECORATION
+    time, so a function here fails at import of this module — every test that
+    read the source instead of importing it stayed green.
+    """
+
+    def __new__(cls, checkpoint=None, weights=True, bins=None, **cfg):
+        return build_coeff_fm(checkpoint=checkpoint, weights=weights,
+                              bins=bins, **cfg)
+
+
 def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
     """Build the coefficient FM, optionally restoring a converted checkpoint.
 
@@ -180,7 +200,7 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
     """
     from helix.model import build_fm
 
-    blob = bins = None
+    blob = None      # NOT `blob = bins = None`: that clobbered the caller's bins
     if checkpoint is not None:
         import torch
         blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
