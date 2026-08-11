@@ -124,6 +124,8 @@ class PatchConfig:
 #   bits 0-17   tick block  (18 bits)
 _CELL_BAND_SHIFT, _CELL_WB_SHIFT, _CELL_GID_SHIFT = 36, 18, 40
 _CELL_BLOCK_MASK, _CELL_BAND_MASK = 0x3FFFF, 0xF
+#: plane_gid occupies bits 40..62 — bit 63 is the sign, so it must stay clear.
+_CELL_GID_MASK = (1 << 23) - 1
 
 
 def cell_key(plane_gid, band, wire, tau, cfg=None):
@@ -143,13 +145,24 @@ def cell_key(plane_gid, band, wire, tau, cfg=None):
     band = np.asarray(band, np.int64)
     wb = np.asarray(wire, np.int64) // cfg.pw
     tb = np.asarray(tau, np.int64) // cfg.pt
-    if wb.size and (wb.max() > _CELL_BLOCK_MASK or tb.max() > _CELL_BLOCK_MASK):
-        raise ValueError(
-            f"wire/tick block index overflows its {_CELL_WB_SHIFT}-bit field "
-            f"(max {_CELL_BLOCK_MASK}): got wb<={int(wb.max())}, "
-            f"tb<={int(tb.max())}. The key would alias two distinct cells.")
-    if band.size and band.max() > _CELL_BAND_MASK:
-        raise ValueError(f"band {int(band.max())} overflows its 4-bit field")
+    # Check BOTH ends of every field. Guarding only .max() left the two cheapest
+    # routes to the aliasing this raises about wide open: a single negative tau
+    # is all-ones in two's complement, so `| tb` sets every bit and the key
+    # becomes exactly -1 — collapsing rows from different planes, bands and
+    # wires into ONE cell, while max(tb)=0 sails past an upper-bound-only check.
+    # plane_gid was unbounded entirely: gid 2**24 wraps to gid 0.
+    for name, a, hi in (("wire block", wb, _CELL_BLOCK_MASK),
+                        ("tick block", tb, _CELL_BLOCK_MASK),
+                        ("band", band, _CELL_BAND_MASK),
+                        ("plane_gid", plane_gid, _CELL_GID_MASK)):
+        if not a.size:
+            continue
+        lo_v, hi_v = int(a.min()), int(a.max())
+        if lo_v < 0 or hi_v > hi:
+            raise ValueError(
+                f"{name} out of range [0, {hi}]: got [{lo_v}, {hi_v}]. The key "
+                f"would silently alias distinct cells (a negative value sets "
+                f"every bit; an over-range one wraps).")
     return ((plane_gid << _CELL_GID_SHIFT) | (band << _CELL_BAND_SHIFT)
             | (wb << _CELL_WB_SHIFT) | tb)
 

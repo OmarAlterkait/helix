@@ -25,6 +25,8 @@ custom_imports = dict(
 
 CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
 CKPT = "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt"
+
+from helix.model.checkpoint import patch_config_from_checkpoint  # noqa: E402
 # Bin edges derived FROM THIS CORPUS (scripts/derive_coeff_bins.py). m113's were
 # derived from the old white-noise cache and are mis-sized per band against this
 # data: measured overflow 0.016/0.010/0.022/0.218% against a ~0.1% design target,
@@ -106,8 +108,15 @@ scheduler = dict(type="OneCycleLR", max_lr=3e-4, pct_start=0.05,
 # The corpus stores RAW coefficients; the tokenizer normalises with the shard's
 # frozen norm_sigma table, which rides along in sample['coeff']['_meta'].
 transform = [
+    # cfg= is NOT optional here. This recipe restores real trained weights, and
+    # the tokenizer geometry they were trained with is recorded in the checkpoint
+    # (m113: cell_t='grid_center', from research cellt='canonical'). Omitting it
+    # falls through to PatchConfig(), whose cell_t default is 'centroid' — a
+    # different time coordinate on 94.06% of cells (mean |delta| 19.5 on corpus
+    # event 0). The model would be fed coordinates it had never seen, and every
+    # array would still have the right shape.
     dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
-         fm_names=True),
+         fm_names=True, cfg=patch_config_from_checkpoint(CKPT)),
     # Terminal per-event step. Not optional and not cosmetic: it flattens the
     # part to the top level, and converts numpy -> torch so pimm's collate takes
     # its CONCATENATE path. Left as numpy, collate sends the arrays to

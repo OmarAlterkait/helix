@@ -104,6 +104,15 @@ model = dict(
     dec_mode="cross",         # SerialFMModel's decoder is grouped-cross
     mup=True,
     d_base=128,
+    # Stated, not inherited. serial/rope_split/gp/gd leave NO trace in the
+    # weights, so a checkpoint written by this run cannot record what it used —
+    # which is exactly how m113 ended up evaluable only by guessing. Each of the
+    # four moves every golden digest. rope_split=False matches m113; flip it
+    # deliberately if you mean to.
+    serial=True,
+    rope_split=False,
+    gp=1024,
+    gd=2048,
 )
 
 optimizer = dict(type="AdamW", lr=3e-4, weight_decay=0.05)
@@ -114,7 +123,12 @@ scheduler = dict(type="OneCycleLR", max_lr=3e-4, pct_start=0.25,
 # data — a handful of events, so the run is minutes not hours
 # ---------------------------------------------------------------------------
 transform = [
+    # Pin cell_t explicitly. The default is 'centroid', which research measured
+    # as the better probing representation (3D probe 0.60 vs 0.42) — but a run
+    # that means to be comparable with m113 must say which one it chose, because
+    # the two differ on ~94% of cells and nothing downstream reports it.
     dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
+         cfg=dict(cell_t="centroid"),
          fm_names=True),
     dict(type="CoeffCollect", part="coeff"),
 ]

@@ -48,6 +48,8 @@ CKPT = os.path.join(RESEARCH, "ckpt_clean160cat_m113_snap1000000.pt")
 # nothing else, so the guarantee outlives the research tree. The raw research
 # checkpoint is only consulted when capturing.
 ARCHIVE = "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt"
+#: m113's run config — the ONLY record of rope_split/cellt, needed to convert.
+M113_YAML = os.path.join(RESEARCH, "configs", "clean160cat_m113.yaml")
 CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
 
 BATCH_SEED = 20260806          # regenerate the input batch, don't store it
@@ -166,7 +168,17 @@ def load_anchor():
         return b, ARCHIVE
     if os.path.exists(CKPT):
         from tools.convert_fm_ckpt import convert
-        return convert(CKPT, None), CKPT
+        # M113_YAML is REQUIRED here now. The converter refuses to guess the
+        # operating point, so this fallback — documented above as "falls back to
+        # converting the research checkpoint" — would otherwise die with a
+        # message about `serial` rather than about the anchor.
+        if not os.path.exists(M113_YAML):
+            raise SystemExit(
+                f"the archived anchor is missing and the research run config "
+                f"needed to convert {CKPT} is not at {M113_YAML}. The operating "
+                f"point (rope_split, cellt) is recorded nowhere else, so the "
+                f"checkpoint cannot be converted without it.")
+        return convert(CKPT, None, train_config=M113_YAML), CKPT
     raise SystemExit(
         f"no anchor checkpoint found.\n"
         f"  looked for: {ARCHIVE}\n"

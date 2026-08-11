@@ -25,7 +25,12 @@
 # --norm-sigma input to every build job.
 set -euo pipefail
 
-H=${HELIX_ROOT:-/sdf/group/neutrino/omara/helix-consolidate}
+# Default to THIS checkout, resolved from the script's own location. It used to
+# name /sdf/group/neutrino/omara/helix-consolidate, which exists — a divergent
+# branch 32 commits behind, missing the MAD median fix, the packaged noise
+# spectrum, the m113 anchoring and the whole pimm integration. A default-invoked
+# corpus build silently used superseded DSP, and nothing in the output said so.
+H=${HELIX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 SRC=${SRC_ROOT:-/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor}
 OUT=${OUT_ROOT:-/sdf/data/neutrino/omara/coeff_tpc}
 CALIB=$OUT/_calib

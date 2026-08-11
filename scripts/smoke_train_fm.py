@@ -80,7 +80,9 @@ def main(argv=None):
     cfg = dict(n_slot=128, n_band=4, n_plane=6, d=a.d, blocks=a.blocks,
                dec_blocks=2, heads=8, n_bins=128, dec_mode="cross",
                mup=True, d_base=128)
-    model = build_fm(cfg, serial=True).to(dev)
+    # rope_split is explicit for the same reason the configs pin it: it leaves no
+    # trace in the weights, and defaulting it is what made m113 unevaluable.
+    model = build_fm(cfg, serial=True, rope_split=False).to(dev)
     edges = torch.load(a.bins_from, map_location=dev,
                        weights_only=False)["bins"]["edges"]
     model.set_bins(edges)

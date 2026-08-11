@@ -88,7 +88,13 @@ class CoeffCollect:
     #: int/scalar sample fields that must not reach the model as 0-d tensors
     DROP = ("n_cells",)
 
-    def __init__(self, part="coeff", keys=None, keep=("name",)):
+    # 'ident' is kept by DEFAULT. CoeffCollect rebuilds `out` from scratch and
+    # copies only `keep` from the top level, so with keep=("name",) the source
+    # identity pimm-data attaches — (run, source_file, event), the thing that
+    # lets a probe reach simulation truth without rebuilding the corpus — was
+    # silently dropped before it ever reached a batch. pimm's collate handles it:
+    # str lists stay lists, the int becomes a tensor.
+    def __init__(self, part="coeff", keys=None, keep=("name", "ident")):
         self.part = part
         self.keys = tuple(keys) if keys else None
         self.keep = tuple(keep)

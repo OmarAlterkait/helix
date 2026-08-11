@@ -21,10 +21,23 @@ from helix.model.mask import make_mask
 # deliberately NOT arguments of the extracted __init__ — they carry no
 # parameters, so keeping them off the verbatim signature keeps a checkpoint's
 # architecture metadata and the parameter tree in exact correspondence. They
-# are applied by build_fm() as instance attributes; the values here are the
-# defaults, and match the research CLI defaults in mae_ddp.py.
-_TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.5, n_planes=1,
-                   loss_fused=False, vis_w=0.0, noisy=False,
+# are applied by build_fm() as instance attributes.
+#
+# These track the research CLI defaults in mae_ddp.py. Two of them did NOT, under
+# a comment asserting that they did: mask_ratio was 0.5 against `--mask 0.75`,
+# and loss_fused was False against `--fused 1`. m113 trained at 0.75, so a helix
+# run masked 48% of tokens where research masked 72% — a different task, not a
+# different hyperparameter. `--fused` is MSE-benign (2.4e-7) but selects a
+# different logvar clamp for NLL heads, (-12, 8) fused vs (-8, 8) gathered:
+# measured 6379 vs 360 on one batch.
+#
+# plane_frac is recorded here but NOT yet implemented, and it is not the same as
+# mask_mode="plane": research mixes per STEP (mae_ddp.py:174 — plane masking with
+# probability plane_frac, random otherwise), which is what forces cross-plane
+# triangulation. m113 trained at 0.1. helix can currently do all-plane or
+# all-random but not that blend, so a run reproducing m113 is still not exact.
+_TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
+                   plane_frac=0.0, loss_fused=True, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None)
 
 
