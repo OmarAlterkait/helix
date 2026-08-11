@@ -81,7 +81,7 @@ imports pimm-data. torch is the production backend, so this is a loose end.
 * `tests/test_coeff_dataset.py` in pimm-data pins the cross-repo codec golden to
   the hardcoded path `/sdf/group/neutrino/omara/helix-consolidate`, so as
   `extraction` diverges it compares against the wrong tree.
-* Version split: `pyproject.toml` 0.1.0 vs `helix/__init__.py` 0.2.0.
+* ~~Version split: `pyproject.toml` 0.1.0 vs `helix/__init__.py` 0.2.0~~ — FIXED (0362328): pyproject reads the module via `[tool.setuptools.dynamic]`.
 * The 10 back-compat flat shims (`helix/_backend.py`, `helix/io.py`, ...) are
   imported only by 6 scripts and 4 tests, all internal. helix has no external
   consumer.

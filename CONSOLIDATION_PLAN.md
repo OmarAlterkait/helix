@@ -70,7 +70,7 @@ edit + merge-at-boundary).
 | item | action | notes |
 |---|---|---|
 | `helix/{coherent,config,io,pipeline,run,wavelet,_*}.py` shims | KEEP (for now) | back-compat re-exports; `tests/conftest.py` imports through them. Retire only after migrating tests. |
-| `pyproject.toml` version 0.1.0 vs `__init__` 0.2.0 | FIX | sync to 0.2.0. |
+| `pyproject.toml` version 0.1.0 vs `__init__` 0.2.0 | DONE (0362328) — single-sourced via `[tool.setuptools.dynamic]` | sync to 0.2.0. |
 | `README.md` | REWRITE | pre-restructure; describe 3 layers + backends + 3 modes + removal family (gate default). |
 | `CLAUDE.md` | UPDATE | pipeline description → removal family; "coherent has no torch backend" → gate is the torch path. |
 

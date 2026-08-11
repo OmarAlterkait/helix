@@ -64,24 +64,69 @@ def read_train_config(path):
     text = open(path).read()
     try:
         import yaml
-        return yaml.safe_load(text) or {}
+        data = yaml.safe_load(text) or {}
     except ImportError:
-        pass
+        data = _parse_flat_yaml(text)
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"{path}: expected a mapping of settings, got {type(data).__name__}")
+    return data
+
+
+_YAML_BOOL = {"true": True, "yes": True, "on": True,
+              "false": False, "no": False, "off": False}
+
+
+def _parse_flat_yaml(text):
+    """Minimal parser for the flat ``key: value`` run configs.
+
+    Only used when PyYAML is absent — which is the normal case, since PyYAML is
+    not a dependency of this package.
+
+    It must reproduce YAML's SCALAR typing, not just split on the colon. An
+    earlier version returned the string ``'false'`` for ``serial: false``, and
+    ``bool('false')`` is ``True`` — so a run that explicitly disabled something
+    was read as enabling it, inside the very function that exists to stop a
+    setting from being guessed wrong. m113 writes its flags as ``0``/``1`` so it
+    was unaffected, but ten other configs in the same directory use ``true`` and
+    ``false``.
+
+    Deliberately rejects what it cannot represent (nesting, sequences) rather
+    than silently flattening it, which is the other way the old version lied.
+    """
     out = {}
-    for line in text.splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line or ":" not in line:
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        if raw.strip().startswith("#") or not raw.strip():
             continue
-        k, v = (x.strip() for x in line.split(":", 1))
+        if raw[:1] in (" ", "\t") or raw.lstrip().startswith("- "):
+            raise SystemExit(
+                f"line {lineno}: this parser handles only flat 'key: value' "
+                f"configs, and PyYAML is not installed to handle the rest. "
+                f"Install PyYAML, or flatten the config.\n  {raw.rstrip()}")
+        if ":" not in raw:
+            continue
+        k, v = (x.strip() for x in raw.split(":", 1))
+        # Strip comments only when unquoted — '#' is legal inside a scalar.
+        if v[:1] not in ("'", '"'):
+            v = v.split("#", 1)[0].strip()
         if not v:
             continue
-        try:
-            out[k] = int(v)
-        except ValueError:
+        if v[:1] in ("'", '"') and v[-1:] == v[:1] and len(v) > 1:
+            out[k] = v[1:-1]
+            continue
+        low = v.lower()
+        if low in _YAML_BOOL:
+            out[k] = _YAML_BOOL[low]
+        elif low in ("null", "~"):
+            out[k] = None
+        else:
             try:
-                out[k] = float(v)
+                out[k] = int(v)
             except ValueError:
-                out[k] = v.strip("'\"")
+                try:
+                    out[k] = float(v)
+                except ValueError:
+                    out[k] = v
     return out
 
 
@@ -162,7 +207,8 @@ def load_bins(path, n_bins):
 
 
 def convert(src, dst=None, *, use_ema=False, bins_path=None, verify=True,
-            train_config=None, serial=None, rope_split=None):
+            train_config=None, serial=None, rope_split=None, cellt=None,
+            gp=None, gd=None):
     ck = torch.load(src, map_location="cpu", weights_only=False)
     meta = {k: ck[k] for k in _META_KEYS if k in ck}
     if "film" in ck and isinstance(ck["film"], str):
@@ -181,12 +227,27 @@ def convert(src, dst=None, *, use_ema=False, bins_path=None, verify=True,
 
     # ---- the operating point the weights were trained at -------------------
     yml = read_train_config(train_config) if train_config else {}
-    tc = {k: yml.get(k, d) for k, d in _RESEARCH_DEFAULTS.items()}
+    cli = {"rope_split": rope_split, "cellt": cellt, "gp": gp, "gd": gd}
+    tc, src = {}, {}
+    for k, d in _RESEARCH_DEFAULTS.items():
+        if cli.get(k) is not None:
+            tc[k], src[k] = cli[k], "cli"
+        elif k in yml:
+            tc[k], src[k] = yml[k], "yaml"
+        else:
+            tc[k], src[k] = d, "research-default"
 
     # A serial checkpoint and a full-attention one have IDENTICAL parameter
     # shapes — verified: the m113 state dict loads strict=True into either. So
     # nothing in the weights can settle this, and a default would just pick one
     # silently. Require the YAML, or an explicit assertion from the caller.
+    if serial is not None and train_config and bool(serial) != bool(tc["serial"]):
+        # Previously the YAML silently won and --no-serial was discarded, while
+        # --rope-split on the same command line silently overrode the YAML. Two
+        # neighbouring flags with opposite precedence is worse than either rule.
+        raise SystemExit(
+            f"--{'' if serial else 'no-'}serial contradicts {train_config} "
+            f"(serial: {tc['serial']!r}). Drop one.")
     if train_config:
         is_serial = bool(tc["serial"])
     elif serial is not None:
@@ -200,15 +261,32 @@ def convert(src, dst=None, *, use_ema=False, bins_path=None, verify=True,
             "Pass --train-config <run>.yaml (which also carries rope_split and "
             "cellt, neither of which is stored in the checkpoint), or assert it "
             "with --serial/--no-serial.")
+    # Every field here moves the forward pass and leaves no trace in the weights.
+    # Measured on real m113 weights: changing gp 1024->256, gd 2048->512, or
+    # rope_split each move ALL THREE golden digests (occ_logit, val, encode).
+    # cellt moves the tokenizer's t_phys. So none of them may come from a
+    # research default silently — that is the entire argument this tool makes
+    # about rope_split, and it applies verbatim to the other three.
+    #
+    # A research default is only a GUESS when there is no YAML. With the run's
+    # YAML in hand, an omitted key means the argparse default applied to that
+    # run — that is how mae_ddp.py resolved it, so the pair (YAML + research
+    # defaults) fully determines the operating point. m113 omits `cellt`
+    # precisely this way. Refusing there would reject the one input that
+    # actually answers the question.
+    needed = ["cellt"] + (["rope_split", "gp", "gd"] if is_serial else [])
+    guessed = ([] if train_config
+               else [k for k in needed if src[k] == "research-default"])
+    if guessed:
+        raise SystemExit(
+            f"these change what the model computes, are not stored in the "
+            f"checkpoint, and were not supplied: {', '.join(guessed)}.\n"
+            f"Measured: gp, gd and rope_split each move every golden digest; "
+            f"cellt moves the tokenizer's time coordinate.\n"
+            f"Pass --train-config <run>.yaml, or give them explicitly "
+            f"(--rope-split, --gp, --gd, --cellt).")
     if is_serial:
-        if train_config is None and rope_split is None:
-            raise SystemExit(
-                "serial checkpoint, but `rope_split` is unknown. It reroutes "
-                "RoPE on every serial layer, so the wrong value silently "
-                "evaluates a different model (research defaults to 1; m113 "
-                "trained with 0). Pass --train-config or --rope-split 0|1.")
-        cfg["rope_split"] = bool(tc["rope_split"] if rope_split is None
-                                 else rope_split)
+        cfg["rope_split"] = bool(tc["rope_split"])
         cfg["gp"], cfg["gd"] = int(tc["gp"]), int(tc["gd"])
     # Record it, so `build_fm(blob["config"])` alone rebuilds the right class and
     # no caller has to remember to pass serial= on the side.
@@ -249,6 +327,7 @@ def convert(src, dst=None, *, use_ema=False, bins_path=None, verify=True,
         "bins": bins,
         "provenance": {
             "train_config": os.path.abspath(train_config) if train_config else None,
+            "operating_point_source": dict(src),
             "train": {k: yml[k] for k in _TRAIN_KEYS if k in yml},
             "source": os.path.abspath(src),
             "weights": which,
@@ -294,6 +373,10 @@ def main(argv=None):
                     help="assert a full-attention checkpoint")
     ap.add_argument("--rope-split", type=int, choices=(0, 1),
                     help="serial RoPE routing, when there is no --train-config")
+    ap.add_argument("--cellt", choices=("canonical", "centroid"),
+                    help="tokenizer cell-time mode, when there is no --train-config")
+    ap.add_argument("--gp", type=int, help="serial plane-group size")
+    ap.add_argument("--gd", type=int, help="serial drift-group size")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the inferred config; write nothing")
     a = ap.parse_args(argv)
@@ -303,11 +386,12 @@ def main(argv=None):
     blob = convert(a.src, None if a.dry_run else a.dst,
                    use_ema=a.ema, bins_path=a.bins,
                    train_config=a.train_config, serial=a.serial,
-                   rope_split=a.rope_split)
+                   rope_split=a.rope_split, cellt=a.cellt, gp=a.gp, gd=a.gd)
     cfg, prov = blob["config"], blob["provenance"]
     print(f"{a.src}\n  step      {prov['step']}   weights: {prov['weights']}")
     print(f"  config    {cfg}")
     print(f"  tokenizer {blob['tokenizer']}")
+    print(f"  op-source {prov['operating_point_source']}")
     if prov.get("train"):
         print(f"  train     {prov['train']}")
     print(f"  bins      {'inlined from ' + prov['bins_file'] if blob['bins'] else 'n/a'}")

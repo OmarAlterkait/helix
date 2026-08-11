@@ -198,12 +198,24 @@ def test_serial_rejects_self_decoder():
     build_fm(dict(SMALL, dec_mode="self"), serial=False)      # fine unserialised
 
 
-def test_missing_batch_keys_name_themselves():
+@pytest.mark.parametrize("fused,missing,names", [
+    (False, ("cell", "slot", "target"), "losses"),
+    (True, ("tgt",), "losses_fused"),
+])
+def test_missing_batch_keys_name_themselves(fused, missing, names):
     """A batch lacking what the configured objective reads must say which keys
-    and which objective — not raise a bare KeyError from inside the loss."""
-    model = build_fm(SMALL)                       # sparse losses(): needs cell/slot/target
+    and which objective — not raise a bare KeyError from inside the loss.
+
+    Parametrized over BOTH objectives rather than whichever is the default. It
+    previously covered only the sparse path via `build_fm(SMALL)`, with a comment
+    asserting that was the default — so when the default moved to fused (to match
+    research's `--fused 1`) this failed for a reason unrelated to the behaviour
+    it guards. The two objectives read different representations of the same
+    tokens, so each needs its own check.
+    """
+    model = build_fm(dict(SMALL), loss_fused=fused)
     B = make_batch(n_slot=SMALL["n_slot"])
-    for k in ("cell", "slot", "target"):
+    for k in missing:
         B.pop(k)
-    with pytest.raises(KeyError, match="losses"):
+    with pytest.raises(KeyError, match=names):
         model(B)
