@@ -24,7 +24,7 @@ pytest                            # full suite (~10s; torch/jax tests importorsk
 pytest tests/test_optical.py -q   # one file
 python tests/bench_numpy.py       # legacy numpy-ops microbenchmarks
 
-helix-tpc --input sensor.h5 --output out.h5 --backend jax   # TPC CLI (alias: helix); --coh-only, --events 0-19
+helix-tpc --input sensor.h5 --output out.h5 --backend jax   # TPC CLI (alias: helix); --removal gate|multipass|none, --to-coeffs, --events 0-19
 python scripts/optical/sweep_big.py depth 100              # optical rate-distortion campaign, sharded across all GPUs (stages: depth|complete_wav|complete_lev|complete_meth)
 ```
 
@@ -38,7 +38,7 @@ Heavy frameworks (`jax`, `torch`) are imported **only when their backend is sele
 - `backend.ops("helix.core.wavelet_ops")` imports and returns **only the active backend's** module (`importlib`, cached). The framework import lives inside that file.
 - Selection precedence: `set_backend(name)` > `$HELIX_BACKEND` > `"numpy"`. Valid: `numpy`, `jax`, `torch`.
 
-To add a backend to a family, drop in `<family>_<newbackend>.py` implementing the same functions — no dispatcher change needed. `coherent` has no torch backend yet (raises a clear error); the optical/torch path is the wavelet workhorse.
+To add a backend to a family, drop in `<family>_<newbackend>.py` implementing the same functions — no dispatcher change needed. That holds for `wavelet` and `coherent_gate`, which dispatch through `backend.ops(...)`. It does NOT hold for `coherent`: it hand-rolls an `if be == ...` chain and keeps the algorithm in `_remove_{numpy,jax,torch}` inside the facade, so adding a backend there means editing the dispatcher. All three families now have numpy, jax and torch backends.
 
 ### Wavelet core (`helix.core.wavelet`)
 

@@ -21,10 +21,18 @@ qualified 2-pass result).
 Qualified default: kgate=3.0, ksig=3.0, npass=2, group_size=64, A-parity ``sigc``
 (``quantile(0.5)``). See ``research/r2_qualification/REPORT.md``.
 
-Backends: ``numpy`` (reference, also the legacy ``sigc_mode='median'`` path) and
+Backends: ``numpy`` (reference, also the legacy ``sigc_mode='median'`` path),
 ``jax`` (GPU, ~42x, bit-identical to numpy — ``jnp.quantile`` matches
-``np.quantile``). There is deliberately no torch backend: ``torch.median`` takes
-the lower middle rather than averaging, so it cannot reproduce A-parity ``sigc``.
+``np.quantile``) and ``torch``.
+
+The torch port has to work around one thing: ``torch.median`` returns the LOWER
+of the two middle values while ``np.quantile(..., 0.5)`` AVERAGES them, so a
+naive port cannot reproduce A-parity ``sigc`` — they differ by ~1e-4 relative on
+even-length inputs, which flips a handful of gate decisions per event.
+``coherent_gate_ops_torch._q50`` reproduces the averaging convention instead.
+(An earlier version of this docstring concluded from that discrepancy that a
+torch backend was impossible and said none existed; the backend was written
+anyway, and the workaround is what makes it agree.)
 """
 from __future__ import annotations
 

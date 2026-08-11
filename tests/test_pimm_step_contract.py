@@ -28,8 +28,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-PIMM = "/sdf/group/neutrino/omara/pimm-fm"
-CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
+from _paths import PIMM_ROOT as PIMM, CORPUS                   # noqa: E402
 
 pimm_src = pytest.mark.skipif(
     not os.path.isdir(PIMM), reason=f"pimm source tree absent: {PIMM}")

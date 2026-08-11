@@ -23,7 +23,7 @@ import re
 
 import pytest
 
-PIMM = "/sdf/group/neutrino/omara/pimm-fm"
+from _paths import PIMM_ROOT as PIMM                           # noqa: E402
 TRAIN_PY = os.path.join(PIMM, "pimm/engines/train.py")
 DEFAULTS_PY = os.path.join(PIMM, "pimm/engines/defaults.py")
 CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
