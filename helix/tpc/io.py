@@ -277,6 +277,21 @@ def count_events(path) -> int:
         return sum(1 for k in f.keys() if k.startswith("event_"))
 
 
+def list_events(path) -> tuple[int, ...]:
+    """The event ids actually present, ascending.
+
+    Event ids are NOT guaranteed to be ``0..count_events()-1``: production files
+    can be missing an id in the middle (``sim_wire_sensor_0065.h5`` of
+    run_0027575715 has 199 events spanning 0..199, with 167 absent, while its own
+    ``config.n_events`` attr still claims 200). Anything that derives event
+    indices from a COUNT therefore both requests an id that does not exist and
+    silently skips a real one at the tail — enumerate with this instead.
+    """
+    with h5py.File(path, "r") as f:
+        return tuple(sorted(int(k.split("_", 1)[1]) for k in f.keys()
+                            if k.startswith("event_")))
+
+
 def write_processed(path, event_idx, planes: dict[str, SparseResult], config: DetectorConfig) -> None:
     """Write processed sparse results to HDF5 (numpy list-of-bands coeffs)."""
     with h5py.File(path, "a") as f:

@@ -171,7 +171,7 @@ def main():
     from helix.core import backend
     backend.set_backend(args.backend)
     from helix.tpc.io import (config_from_file, read_sensor_event,
-                              read_sensor_event_coo, count_events)
+                              read_sensor_event_coo, count_events, list_events)
     from helix.tpc.config import DetectorConfig
     from helix.tpc.pipeline import canonical_plane_gid
     from helix.tpc.corpus import build_corpus
@@ -359,8 +359,18 @@ def main():
             with_clean=not args.calibrate,
             cal_events=tuple(args.cal_events) if args.cal_events else None)
     else:
-        n = count_events(args.shard)
-        _evs = range(args.event_start, min(args.event_start + args.events, n))
+        # Select from the ids that EXIST, not from range(count): production files
+        # can omit an id in the middle, so a count-derived range asks for a
+        # missing event (hard failure) and drops a real one off the tail.
+        # --event-start/--events stay positional into this list, so shards
+        # partition the file without overlap however the ids are numbered.
+        _ids = list_events(args.shard)
+        _evs = _ids[args.event_start:args.event_start + args.events]
+        if len(_ids) != (_ids[-1] - _ids[0] + 1 if _ids else 0):
+            _absent = sorted(set(range(_ids[0], _ids[-1] + 1)) - set(_ids))
+            print(f"note: {Path(args.shard).name} has non-contiguous event ids — "
+                  f"{len(_absent)} absent in {_ids[0]}..{_ids[-1]}: {_absent[:10]}"
+                  f"{'...' if len(_absent) > 10 else ''}", flush=True)
         # carry (source_file, event, resolved_seed) so /ident records the true
         # origin AND the one noise realisation this shard bakes in
         events = [(_src_name, e, _seed(e)) for e in _evs]

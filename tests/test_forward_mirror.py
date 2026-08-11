@@ -35,11 +35,20 @@ NW, NT, GS = 128, 256, 64
 def test_defaults_match():
     """The inline physics constants are the model. If these drift, everything
     downstream drifts silently."""
-    assert h_noise.DEFAULT_ENC == p_noise.DEFAULT_ENC
-    for name in ("DEFAULT_GROUP_SIZE", "DEFAULT_COHERENT_RMS_ADC",
-                 "DEFAULT_SAMPLING_RATE_HZ"):
-        if hasattr(p_noise, name):
-            assert getattr(h_noise, name) == getattr(p_noise, name), name
+    # Compare the NAME SETS first. The previous version listed three constants
+    # behind `if hasattr(p_noise, name)`, and one of them (DEFAULT_COHERENT_RMS_ADC)
+    # does not exist on either side — it is DEFAULT_COH_RMS_ADC. The guard turned
+    # that typo into a silent skip, so the test pinned 2 of the 8 constants and
+    # said nothing about coherent rms, beta, slope, corner frequency, or the
+    # default spectrum.
+    h_names = {n for n in dir(h_noise) if n.startswith("DEFAULT_")}
+    p_names = {n for n in dir(p_noise) if n.startswith("DEFAULT_")}
+    assert h_names == p_names, (
+        f"the mirrors expose different constants: helix-only {h_names - p_names}, "
+        f"pimm-data-only {p_names - h_names}")
+    assert h_names, "no DEFAULT_* constants found — has the module been renamed?"
+    for name in sorted(h_names):
+        assert getattr(h_noise, name) == getattr(p_noise, name), name
 
 
 def test_plane_registry_matches():
