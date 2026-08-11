@@ -82,14 +82,26 @@ def losses_cat(occ, logits, B, tok_mask, edges, vis_w=0.0):
     bce_e = F.binary_cross_entropy_with_logits(occ, occ_t, reduction="none")
     bce = (bce_e * m_occ).sum() / m_occ.sum().clamp(min=1)
     K = logits.shape[-1]
-    ec = edges[B["band_id"]]                                   # (n_cells, K+1) per-cell edges
-    # NOTE (see TODO.md 1): the comparison is bool but .sum(-1) accumulates in
-    # int64, so this materialises (n_cells, n_slot, K-1) at 8 B/element — 3.75 GiB
-    # for a 31k-cell event at K=128. Fine on the hardware this was trained on
-    # (full events "fit", per fm/data.py); a transient that tips over an 11 GB
-    # card. sum(dtype=torch.int16) drops it ~8x, torch.bucketize removes it
-    # entirely. Left verbatim for now — either swap wants an equivalence test.
-    binid = (tgt.unsqueeze(-1) >= ec[:, None, 1:-1]).sum(-1).clamp(0, K - 1)   # (n_cells, n_slot) true bin
+    # True bin per slot. The original expression was
+    #     binid = (tgt.unsqueeze(-1) >= edges[band][:, None, 1:-1]).sum(-1)
+    # which materialises (n_cells, n_slot, K-1) — and since the comparison is
+    # bool while .sum(-1) accumulates in int64, at 8 B/element: 4.66 GiB for a
+    # 37k-cell event at K=128. That OOMs an 11 GB card mid-run; it did, on the
+    # first real FMTrainer launch, at step 4.
+    #
+    # `edges` has only n_band distinct rows, so bucketize per band gives the
+    # identical index with no intermediate at all. right=True reproduces the
+    # original's ">=" tie-break (a tgt landing exactly ON an edge goes up);
+    # tests/test_losses_cat_binning.py pins that against the old expression,
+    # ties included.
+    binid = torch.empty(tgt.shape, dtype=torch.long, device=tgt.device)
+    band_id = B["band_id"]
+    for b in range(edges.shape[0]):
+        sel = band_id == b
+        if sel.any():
+            binid[sel] = torch.bucketize(tgt[sel], edges[b, 1:-1].contiguous(),
+                                         right=True)
+    binid = binid.clamp(0, K - 1)                              # (n_cells, n_slot)
     ce_e = F.cross_entropy(logits.reshape(-1, K), binid.reshape(-1), reduction="none").view_as(tgt)
     act = occ_t.bool() & valid & mrow
     val = (ce_e * act).sum() / act.sum().clamp(min=1)
