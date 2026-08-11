@@ -111,41 +111,35 @@ model = dict(
     rope_split=False,
     gp=1024,
     gd=2048,
+    # m113 masked whole planes on 10% of steps. Without it nothing ever forces
+    # cross-plane triangulation — a different pretraining task, not a nudge.
+    plane_frac=0.1,
 )
 
-# m113: lr 1.1e-3, wd 0.05, betas (0.9, 0.95).
-optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05)
+# betas are NOT AdamW's default here. m113 used (0.9, 0.95) (mae_ddp.py:110);
+# torch defaults to (0.9, 0.999), and passing only lr/weight_decay silently took
+# the default. beta2 0.999 is a ~1000-step second-moment window against ~20 at
+# 0.95, so one large gradient damps updates ~50x longer — the opposite of what a
+# large-LR transformer recipe wants, and worst precisely when paired with a
+# too-short warmup.
+optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95))
 # WSD stable phase, as the base run (m113) trained: linear warmup then FLAT.
 #
-# This was OneCycleLR(max_lr=3e-4, pct_start=0.25). Both schedules have a warmup,
-# which is what made the difference easy to miss — but they are not the same
-# shape and not the same intent:
+#   m113    4,000 warmup steps, then constant 1.1e-3, no horizon baked in
+#   (was)   OneCycleLR pct_start=0.25 -> 25% of steps warming, cosine to ~0
 #
-#   m113    4,000 warmup steps of 1,010,000 (0.4%), then constant 1.1e-3
-#   OneCycle  25% of steps warming up, then cosine down to max_lr/1000
+# Warmup is given in ABSOLUTE STEPS, not a rate. Trainer.build_scheduler
+# (pimm engines/train.py:733) OVERWRITES cfg.scheduler.total_steps with
+# iters_per_epoch * epoch, unconditionally — so `warmup_rate=4000/1_010_000`
+# was reinterpreted against a 1,500-step run and became 5.94 steps of warmup:
+# full 1.1e-3 by step 7 instead of step 4000, 571x research's LR at that point,
+# on a cold 12-block d=512 transformer. WSDStableLR ignores total_steps (a flat
+# phase needs no horizon) so the schedule cannot be rescaled by max_len, epoch
+# or GPU count.
 #
-# At 1M steps that is 4,000 warmup steps against 250,000, and a flat plateau
-# against an anneal to ~0. mae_ddp.py:164 calls const the "WSD stable phase:
-# flat, no horizon baked in" — the point being that the stable run commits to no
-# total step count, so it can be extended, and the cooldown is a SEPARATE short
-# run started from a stable-phase checkpoint. OneCycleLR bakes the horizon in
-# from step 0, which is the opposite.
-#
-# So m113's own checkpoint at 1,010,000 steps is a stable-phase model, not an
-# annealed one, and should not be read as a finished run.
-#
-# No new scheduler is needed for this half: MultiStepWithWarmupLR with EMPTY
-# milestones never applies its decay factor, leaving warmup-then-constant.
-# warmup_rate is a fraction of total_steps, so 4000/STEPS reproduces m113's
-# absolute warmup. For the cooldown, use helix's WSDCooldownLR (1 - sqrt(p),
-# bit-identical to research's lr_mode="decay"); pimm's PolyLR is a different
-# curve (0.866 vs 0.500 at p=0.25).
-#
-# Being a LambdaLR this scales each param group's own base_lr, so muP's
-# per-group ratios survive without the max_lr expansion OneCycleLR needed.
-STEPS = 1_010_000
-scheduler = dict(type="MultiStepWithWarmupLR", milestones=[],
-                 total_steps=STEPS, warmup_rate=4000 / STEPS)
+# For the cooldown, swap in WSDCooldownLR (1 - sqrt(p)), which is bit-identical
+# to research's lr_mode="decay". pimm's PolyLR is a different curve.
+scheduler = dict(type="WSDStableLR", warmup=4000)
 
 # ---------------------------------------------------------------------------
 # data — a handful of events, so the run is minutes not hours
@@ -171,18 +165,44 @@ _common = dict(
     # phase is `pct_start * total_steps - 1`, which is DEGENERATE (zero length,
     # ZeroDivisionError) when total_steps gets small — 8 events over 2 ranks
     # gives 4 steps and 0.25 * 4 - 1 = 0.
-    max_len=1500,
 )
 
-data = dict(train=dict(**_common), val=dict(**_common), test=dict(**_common))
+# A REAL split. train/val/test were the same dict against the same root with the
+# same max_len, and get_data_list returns a deterministic PREFIX — so "val" was
+# byte-identical to train. That reports training loss under a different mask as
+# neg_val_loss, which is also what CheckpointSaver would select model_best on.
+#
+# Mirrors what the research trainer did by hand: files[:val_n] held out for
+# validation, plus a separate [holdout_lo, holdout_hi] band (m113: 30000-30299)
+# dropped from training so downstream PROBES are not scored on trained-on
+# events. Scaled to this corpus's 19,999 events.
+N_TRAIN, N_VAL, N_PROBE = 18_000, 1_000, 300
+PROBE_HOLDOUT = (N_TRAIN - N_PROBE, N_TRAIN)          # in no split's training set
+
+data = dict(
+    train=dict(**_common, event_range=(0, N_TRAIN), exclude_range=PROBE_HOLDOUT),
+    val=dict(**_common, event_range=(N_TRAIN, N_TRAIN + N_VAL)),
+    test=dict(**_common, event_range=(N_TRAIN, N_TRAIN + N_VAL)),
+)
 
 hooks = [
     dict(type="CheckpointLoader"),
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),
-    dict(type="InformationWriter"),
-    dict(type="CoeffFMEvaluator", max_batches=16),
-    dict(type="CheckpointSaver", save_freq=None),
+    # Research logs every 200 steps; log_frequency=1 would emit ~1M console
+    # lines and TB rows on a full run.
+    dict(type="InformationWriter", log_frequency=200),
+    # EMA is not polish for a WSD run: the stable phase is flat by design, so the
+    # raw weights sit at full LR noise for the whole run and the EMA is what
+    # stands in for an annealed model until a cooldown is actually run.
+    dict(type="WeightEMA", decay=0.9999),
+    # Was every_n_steps unset -> after_epoch only -> exactly ONE eval, after
+    # training. No training curve, and model_best selection was vacuous.
+    dict(type="CoeffFMEvaluator", every_n_steps=10_000, max_batches=200),
+    # Was save_freq=None -> CheckpointSaver.after_step returns early and only
+    # after_train saves. On a preemptible partition a long run could never make
+    # progress. Research saves every 2000 ("preemption loses <= this many").
+    dict(type="CheckpointSaver", save_freq=2000),
 ]
 
 train = dict(type="FMTrainer")
