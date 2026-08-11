@@ -108,6 +108,63 @@ def test_no_builtin_hash_used_for_seeding():
 # --------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------
+# cell_key is public so probes can agree with the tokenizer on cell identity
+# --------------------------------------------------------------------------
+
+def test_cell_key_round_trips():
+    from helix.model.tokenize import PatchConfig, cell_key, unpack_cell_key
+
+    cfg = PatchConfig()
+    rng = np.random.default_rng(3)
+    gid = rng.integers(0, 6, 5000)
+    band = rng.integers(0, cfg.n_bands, 5000)
+    wire = rng.integers(0, 4000, 5000)
+    tau = rng.integers(0, 6000, 5000)
+
+    k = cell_key(gid, band, wire, tau, cfg)
+    g2, b2, wb2, tb2 = unpack_cell_key(k)
+    np.testing.assert_array_equal(g2, gid)
+    np.testing.assert_array_equal(b2, band)
+    np.testing.assert_array_equal(wb2, wire // cfg.pw)
+    np.testing.assert_array_equal(tb2, tau // cfg.pt)
+
+
+def test_cell_key_agrees_with_assemble():
+    """The reason it is public: a probe must land on the tokenizer's cells.
+
+    If these two ever disagree, per-cell labels silently attach to the wrong
+    cells — every array still has the right length, so nothing raises.
+    """
+    from helix.model.tokenize import PatchConfig, assemble, cell_key
+
+    cfg = PatchConfig()
+    rng = np.random.default_rng(11)
+    n = 4000
+    gids = np.array([0, 1, 2], np.int64)
+    gid = rng.choice(gids, n)
+    band = rng.integers(0, cfg.n_bands, n)
+    wire = rng.integers(0, 300, n)
+    tau = rng.integers(0, 400, n)
+    # assemble requires unique (gid, band, wire, tau)
+    coords = np.unique(np.stack([gid, band, wire, tau], 1), axis=0)
+    gid, band, wire, tau = (coords[:, i].astype(np.int64) for i in range(4))
+
+    tok = assemble(band, gid, wire, tau,
+                   rng.normal(size=len(gid)).astype(np.float32),
+                   gids=gids, n_wires=np.full(len(gids), 320, np.int64),
+                   band_lengths=np.full(cfg.n_bands, 512, np.int64),
+                   norm_sigma=np.full((len(gids), cfg.n_bands), 2.6, np.float32),
+                   cfg=cfg)
+
+    # every row's key must resolve to the cell assemble put that row in
+    keys = cell_key(gid, band, wire, tau, cfg)
+    uniq = np.unique(keys)
+    assert tok["n_cells"] == len(uniq)
+    np.testing.assert_array_equal(
+        np.searchsorted(uniq, keys), tok["cell"])
+
+
+# --------------------------------------------------------------------------
 # The golden must be anchored at the operating point the weights were trained at
 # --------------------------------------------------------------------------
 
