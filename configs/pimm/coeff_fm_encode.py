@@ -52,6 +52,15 @@ model = dict(type="Coeff-FM", checkpoint=CKPT, weights=True)
 transform = [
     dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
          fm_names=True),
+    # Terminal per-event step. Not optional and not cosmetic: it flattens the
+    # part to the top level, and converts numpy -> torch so pimm's collate takes
+    # its CONCATENATE path. Left as numpy, collate sends the arrays to
+    # default_collate, which STACKS them and hands the model an
+    # (1, n_cells, n_slot) input it cannot consume. It also drops the int
+    # `n_cells` (collate would make it tensor([N]) while make_mask wants an int)
+    # and emits no `offset` (pimm's run_step reads input_dict["coord"] whenever
+    # an offset is present, and the FM has no coord).
+    dict(type="CoeffCollect", part="coeff"),
 ]
 
 _data_common = dict(
