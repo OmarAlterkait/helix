@@ -98,12 +98,15 @@ torch paths, pinned by `tests/test_forward_mirror.py`. The **jax** path
 --backend jax` still imports pimm-data. torch is the production backend, so this
 is the last loose end rather than a blocker.
 
-## 5. Reusing pimm's MAEEvaluator needs two changes
+## 5. A coeff evaluator (small; MAEEvaluator does not fit)
 
-The coeff FM IS a masked autoencoder, so `pimm/engines/hooks/eval/pretrain/mae.py`
-is the natural eval hook. It does not fit as-is, in two different ways — both
-pinned by `tests/test_pimm_step_contract.py` so neither surprises us on the first
-eval step:
+**Not a compatibility problem — a choice.** pimm's hook list is set per config
+(HMAE overrides it; the default list carries `SemSegEvaluator`), so nothing pulls
+`MAEEvaluator` in unless we ask. The config here simply omits it.
+
+It is worth recording WHY it is not the thing to reach for, since the coeff FM IS
+a masked autoencoder and reusing it looks obvious. Two reasons, both pinned by
+`tests/test_pimm_step_contract.py`:
 
 * **Hard failure.** It calls `model(input_dict, return_pred=return_viz)`.
   `FMModel.forward(batch, tok_mask=None)` does not accept that kwarg, so eval
@@ -114,9 +117,15 @@ eval step:
   `masked_frac`, so those metrics would log as 0.0 rather than fail — the worse
   of the two failure modes.
 
-Its point-cloud visualisation path (`viz_visible_coord`) has no coeff analogue
-either. A thin `CoeffFMEvaluator` reusing its averaging + `neg_val_loss`
-checkpoint-selection logic is probably less work than bending it.
+The second is the more telling one: `coord_loss`/`feat_loss` are a coordinate+
+feature point-cloud MAE's quantities. Ours are occupancy BCE and coefficient
+value. Renaming ours to match would make the metrics *misleading*, not
+compatible. Its visualisation path (`viz_visible_coord`) has no coeff analogue
+either.
+
+So: write a thin `CoeffFMEvaluator` — iterate val_loader, average, publish
+`neg_val_loss` for checkpoint selection — reusing MAEEvaluator's shape but not
+its metric names. Roughly 60 lines. Until then the config sets `evaluate=False`.
 
 ## 6. Verify the pimm registry wiring
 
