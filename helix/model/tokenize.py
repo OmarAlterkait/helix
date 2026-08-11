@@ -338,6 +338,22 @@ def to_fm(tok: dict, *, nw_max: float = NW_MAX) -> dict:
 
 # ---- transform wrapper (helix owns the whole tokenizer) --------------------
 
+
+def _name_hash(name: str) -> int:
+    """Stable 32-bit digest of an event name.
+
+    This used to be ``hash(name) & 0xFFFFFFFF``. Python salts *string* hashing
+    per process (PYTHONHASHSEED), so the seed derived from it changed on every
+    fresh interpreter: a resumed run, a re-run, and each DDP rank all drew
+    different masks for the same event, while the code reads as though the seed
+    is a deterministic function of the event. blake2b is stable across processes,
+    machines, and versions.
+    """
+    import hashlib
+    return int.from_bytes(
+        hashlib.blake2b(name.encode(), digest_size=4).digest(), "big")
+
+
 class CoeffTokenize:
     """Coeff rows -> patch tokens, as a pimm-data-compatible transform.
 
@@ -397,7 +413,7 @@ class CoeffTokenize:
         m = self._meta(sub)
         clean = data.get(self.clean_part)
         rng = None if self.seed is None else np.random.default_rng(
-            self.seed ^ (hash(data.get("name", "")) & 0xFFFFFFFF))
+            self.seed ^ _name_hash(data.get("name", "")))
         tok = assemble(
             sub["band"], sub["plane_gid"], sub["wire"], sub["tau"],
             np.asarray(sub["value"]).reshape(-1),
