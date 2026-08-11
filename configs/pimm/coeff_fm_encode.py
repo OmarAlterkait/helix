@@ -25,13 +25,18 @@ custom_imports = dict(
 
 CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
 CKPT = "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt"
+# Bin edges derived FROM THIS CORPUS (scripts/derive_coeff_bins.py). m113's were
+# derived from the old white-noise cache and are mis-sized per band against this
+# data: measured overflow 0.016/0.010/0.022/0.218% against a ~0.1% design target,
+# vs 0.145/0.124/0.138/0.126% for these.
+BINS = "/sdf/data/neutrino/omara/archive/coeff_bins_run0027575715.pt"
 
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 weight = None
 resume = False
-evaluate = False          # no coeff evaluator hook yet; see TODO.md 5
+evaluate = True
 test_only = False
 seed = 0
 save_path = "exp/coeff_fm_encode"
@@ -74,7 +79,7 @@ param_dicts = None
 # Architecture comes from the checkpoint (convert_fm_ckpt.py infers it from
 # tensor shapes and cross-checks the recorded metadata), so nothing is restated
 # here — a config that restated it could silently disagree.
-model = dict(type="Coeff-FM", checkpoint=CKPT, weights=True)
+model = dict(type="Coeff-FM", checkpoint=CKPT, weights=True, bins=BINS)
 
 optimizer = dict(type="AdamW", lr=3e-4, weight_decay=0.05)
 scheduler = dict(type="OneCycleLR", max_lr=3e-4, pct_start=0.05,
@@ -127,7 +132,11 @@ hooks = [
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=2),
     dict(type="InformationWriter"),
+    dict(type="CoeffFMEvaluator", max_batches=32),
     dict(type="CheckpointSaver", save_freq=None),
 ]
 
-train = dict(type="DefaultTrainer")
+# NOT DefaultTrainer: muP's per-group lr/weight_decay come from
+# model.param_groups(), which pimm's keyword-matching param_dicts cannot express,
+# and the scheduler needs a per-group max_lr list or it flattens them.
+train = dict(type="FMTrainer")

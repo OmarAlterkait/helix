@@ -28,15 +28,24 @@ model do not.
 
 from __future__ import annotations
 
+import torch
 from pimm.datasets.builder import DATASETS
 from pimm.datasets.transform import Compose
 from pimm.datasets.transform.common import TRANSFORMS
+from pimm.distributed import unwrap_model
+from pimm.engines.hooks.builder import HOOKS
+from pimm.engines.hooks.default import HookBase
+from pimm.engines.train import TRAINERS, Trainer
 from pimm.models.builder import MODELS
+from pimm.utils import comm
+from pimm.utils.optimizer import OPTIMIZERS
 from torch.utils.data import Dataset
 
+from helix.model.mup import expand_max_lr, param_group_ratios
 from helix.model.tokenize import CoeffTokenize
 
-__all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "build_coeff_fm"]
+__all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "build_coeff_fm",
+           "FMTrainer", "CoeffFMEvaluator"]
 
 # The tokenizer needs no adapter — it is already a duck-typed transform
 # (``scope`` + ``__call__(dict) -> dict``), which is why it can live in helix
@@ -220,3 +229,158 @@ def _load_bins(path):
     raise ValueError(
         f"{path}: no bin edges found (expected an 'edges' key, or a converted "
         f"checkpoint carrying 'bins')")
+
+
+@TRAINERS.register_module()
+class FMTrainer(Trainer):
+    """pimm's Trainer with the two things muP needs, and nothing else.
+
+    Config: ``train = dict(type="FMTrainer")``.
+
+    pimm's own machinery covers everything else — DDP, resume, logging, hooks,
+    the loop itself. Only the optimizer and the scheduler cannot be expressed in
+    config, for one reason each.
+    """
+
+    def build_optimizer(self):
+        """Take param groups from the MODEL rather than from name matching.
+
+        pimm's ``build_optimizer`` groups parameters by substring matches against
+        ``cfg.param_dicts`` keywords. muP cannot be written that way: the hidden
+        group's ``lr / m`` and its compensating ``weight_decay * m`` come from
+        the model's width multiplier, not from anything in a parameter's name.
+        ``FMModel.param_groups`` already computes them, and is verified
+        bit-identical to the research implementation.
+        """
+        model = unwrap_model(self.model)          # may be DDP-wrapped by build_model
+        if not hasattr(model, "param_groups"):
+            raise TypeError(
+                f"{type(model).__name__} has no param_groups(); FMTrainer exists "
+                f"to use it. Use pimm's DefaultTrainer for models without muP.")
+        if self.cfg.param_dicts:
+            raise ValueError(
+                "param_dicts is set, but FMTrainer takes its groups from "
+                "model.param_groups(). Keyword matching cannot express muP, and "
+                "having both would silently pick one — remove param_dicts.")
+
+        cfg = dict(self.cfg.optimizer)
+        base_lr = cfg.get("lr")
+        groups = model.param_groups(base_lr, weight_decay=cfg.get("weight_decay"))
+        cfg["params"] = groups                    # type/betas/etc still honoured
+        opt = OPTIMIZERS.build(cfg)
+        self._mup_ratios = param_group_ratios(opt.param_groups, base_lr)
+        self.logger.info(
+            f"muP param groups: " + ", ".join(
+                f"[{i}] {sum(p.numel() for p in g['params'])/1e6:.1f}M "
+                f"lr x{r:.3f} wd={g.get('weight_decay')}"
+                for i, (g, r) in enumerate(zip(opt.param_groups, self._mup_ratios))))
+        return opt
+
+    def build_scheduler(self):
+        """Give the scheduler a PER-GROUP peak LR so muP survives it.
+
+        ``OneCycleLR`` takes ``max_lr`` as a scalar or a per-group list. A scalar
+        assigns every group the same peak, which discards muP silently — the
+        hidden group would climb to ``base_lr`` instead of ``base_lr / m``.
+        """
+        ratios = getattr(self, "_mup_ratios", None)
+        if ratios and "max_lr" in self.cfg.scheduler:
+            self.cfg.scheduler.max_lr = expand_max_lr(
+                self.cfg.scheduler.max_lr, ratios)
+        return super().build_scheduler()
+
+
+@HOOKS.register_module()
+class CoeffFMEvaluator(HookBase):
+    """Validation for the coefficient FM.
+
+    Deliberately not pimm's ``MAEEvaluator``: that one passes ``return_pred=``
+    (which ``FMModel.forward`` does not take) and reports ``coord_loss`` /
+    ``feat_loss``, which are a point-cloud MAE's quantities. Ours are occupancy
+    BCE and coefficient value — renaming them to match would make the numbers
+    misleading rather than compatible.
+
+    Masks are drawn from a SEEDED generator keyed on the batch index, so the
+    same events are masked the same way at every evaluation. Without that the
+    metric moves epoch to epoch because the mask moved, which reads as model
+    variance. (Research's eval intended this and did not get it: its 'plane' mode
+    ignored the generator and drew from the global RNG — see helix.model.mask.)
+
+    Publishes ``-avg_loss`` as ``neg_val_loss`` so pimm's CheckpointSaver can
+    select on it (higher is better, by its convention).
+    """
+
+    def __init__(self, every_n_steps=0, max_batches=None, mask_seed=7):
+        self.every_n_steps = int(every_n_steps)
+        self.max_batches = max_batches
+        self.mask_seed = int(mask_seed)
+
+    def after_step(self):
+        if self.every_n_steps <= 0:
+            return
+        step = (self.trainer.comm_info["iter"]
+                + self.trainer.comm_info["iter_per_epoch"] * self.trainer.comm_info["epoch"])
+        if (step + 1) % self.every_n_steps == 0:
+            self.eval()
+
+    def after_epoch(self):
+        if self.every_n_steps <= 0:
+            self.eval()
+
+    def eval(self):
+        if comm.get_rank() != 0:
+            if comm.get_world_size() > 1:
+                comm.synchronize()
+            return
+        loader = getattr(self.trainer, "val_loader", None)
+        if loader is None:
+            self.trainer.logger.info("CoeffFMEvaluator: no val_loader; skipping")
+            return
+
+        from pimm.distributed import move_batch_to_device
+        self.trainer.logger.info(">>>>>>>> Coeff FM validation >>>>>>>>")
+        model = self.trainer.model
+        was_training = model.training
+        model.eval()
+        core = unwrap_model(model)
+        device = self.trainer.parallel_context.device
+
+        totals, n = {}, 0
+        with torch.no_grad():
+            for i, input_dict in enumerate(loader):
+                if self.max_batches is not None and i >= self.max_batches:
+                    break
+                B = move_batch_to_device(input_dict, device)
+                B.setdefault("n_cells", B["plane_id"].shape[0])
+                gen = torch.Generator(device=device).manual_seed(self.mask_seed + i)
+                mask = core.make_mask(B, gen=gen)      # SAME mask every evaluation
+                if getattr(self.trainer.cfg, "enable_amp", False):
+                    dtype = (torch.bfloat16
+                             if self.trainer.cfg.amp_dtype == "bfloat16"
+                             else torch.float16)
+                    with torch.autocast(device_type=device.type, dtype=dtype):
+                        out = model(B, tok_mask=mask)
+                else:
+                    out = model(B, tok_mask=mask)
+                for k, v in out.items():
+                    if torch.is_tensor(v) and v.ndim == 0:
+                        totals[k] = totals.get(k, 0.0) + float(v)
+                n += 1
+
+        if was_training:
+            model.train()
+        if not n:
+            self.trainer.logger.info("CoeffFMEvaluator: val_loader was empty")
+            return
+
+        avg = {k: v / n for k, v in totals.items()}
+        self.trainer.logger.info(
+            f"   [coeff-eval] batches={n} " +
+            " ".join(f"{k}={v:.4f}" for k, v in sorted(avg.items())))
+        writer = getattr(self.trainer, "writer", None)
+        if writer is not None:
+            step = self.trainer.comm_info.get("epoch", 0)
+            for k, v in avg.items():
+                writer.add_scalar(f"val/{k}", v, step)
+        self.trainer.comm_info["current_metric_value"] = -avg["loss"]   # higher is better
+        self.trainer.comm_info["current_metric_name"] = "neg_val_loss"

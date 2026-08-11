@@ -150,9 +150,13 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
     assert "TRAINING-SET STATISTICS" in src, (
         "the missing-bins error should explain WHY the model cannot supply them")
 
-    # the loader accepts both accepted shapes
-    ns = {}
-    exec(compile(src[src.index("def _load_bins"):], "pimm.py", "exec"), {"__name__": "x"}, ns)
+    # Extract the function with ast, not a slice to EOF: the module has grown
+    # classes after it whose decorators reference pimm names, and a slice would
+    # drag them in. (The same fragility that once truncated the model extraction.)
+    node = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef) and n.name == "_load_bins")
+    ns = {"torch": torch}
+    exec(compile(ast.get_source_segment(src, node), "pimm.py", "exec"), ns)
     got = ns["_load_bins"](str(path))
     assert "edges" in got and got["edges"].shape == (4, 17)
 

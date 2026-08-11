@@ -52,82 +52,29 @@ asserting identical `binid` and identical loss on real data before it lands.
 Worth doing for the headroom — it raises the model/event size that fits on a
 given card — not because anything is currently blocked.
 
-## 2. `FMTrainer` — two overrides, and one upstream ask
+## 2. (done) FMTrainer, CoeffFMEvaluator, corpus bins
 
-**Status:** not built. `scripts/smoke_train_fm.py` covers "does the loop work"
-with no pimm dependency.
+Built in `helix/integrations/pimm.py` and `scripts/derive_coeff_bins.py`; pimm
+still unmodified. Kept here only as a pointer:
 
-Reading pimm's Trainer closely, the integration is smaller than the map assumed
-and needs almost nothing from pimm:
+* `FMTrainer` — two overrides. `build_optimizer` takes groups from
+  `model.param_groups()` (via `unwrap_model`, since `build_model` may DDP-wrap)
+  because keyword matching cannot express muP, and refuses a config that also
+  sets `param_dicts`. `build_scheduler` expands a scalar `max_lr` into the
+  per-group list, without which OneCycleLR flattens muP.
+* `CoeffFMEvaluator` — masks drawn from a generator seeded on the batch index, so
+  the metric moves only when the model does. Publishes `neg_val_loss` for
+  CheckpointSaver.
+* `scripts/derive_coeff_bins.py` — edges from THIS corpus. Overflow against the
+  ~0.1% design target, on held-out events: m113's 0.016/0.010/0.022/0.218%,
+  these 0.145/0.124/0.138/0.126%.
 
-* `build_optimizer` -> `AdamW(model.param_groups(lr, weight_decay=wd), lr=lr,
-  betas=(0.9, 0.95))`. pimm groups parameters by substring matching on names,
-  which cannot express muP. The map (5b.3) proposed a `param_dicts="model"`
-  branch upstream; overriding the method needs nothing from anyone.
-* `build_scheduler` -> `OneCycleLR(max_lr=[lr*r for r in ratios])`. Verified:
-  the per-group list preserves the muP ratios for a whole schedule, a scalar
-  flattens them.
+**Landmine:** never add the `WeightDecayExclusion` hook. It rewrites optimizer
+param groups in `before_train`, preserving layer-wise LRs but rewriting weight
+decay — which would undo muP's `wd*m` decoupling. `param_groups` already does the
+no-decay split.
 
-`TRAINERS.build(dict(type=cfg.train.type, ...))` resolves after `custom_imports`
-runs, so `FMTrainer` can be registered from `helix.integrations.pimm` exactly
-like the other three names — pimm still needs no change.
-
-**Landmine, not a blocker:** the `WeightDecayExclusion` hook rewrites optimizer
-param groups in `before_train`. It preserves layer-wise LRs but rewrites weight
-decay, which would undo muP's `wd*m` decoupling. Our `param_groups` already does
-the no-decay split, so the hook is redundant — just never add it to the config.
-
-### A latent pimm bug we happen to avoid (report only if convenient)
-
-`engines/train.py`, in `run_step`:
-
-```python
-if "offset" in input_dict:
-    output_dict["avg_pts"] = input_dict["coord"].shape[0] / len(input_dict["offset"])
-```
-
-A batch with `offset` but no `coord` raises KeyError AFTER the forward. The
-sibling accounting at line ~454 is guarded (`try/except TypeError`); this is not.
-
-**Would we ever hit it? Almost certainly not.** `offset` only enters a batch when
-a transform emits one (pimm's `Collect` via `offset_keys_dict`, `multiview`,
-`hmae`) — `collate_fn` never adds it — and `CoeffCollect` emits none.
-`tests/test_pimm_step_contract.py` asserts that unconditionally.
-
-Reaching it needs either multi-event batching, which we measured as buying ~0
-throughput and deferred (`MULTI_EVENT_BATCHING.md`), or someone using pimm's
-`Collect` — the natural idiom — instead of `CoeffCollect`. The second is the
-realistic one, and it fails loudly rather than silently.
-
-So: a genuine one-line bug affecting any non-point-cloud model in pimm, worth
-mentioning to its author as a courtesy, but NOT something we need. Earlier notes
-here framed it as the one thing we needed upstream; that was overstated.
-
-## 2b. (was 2) FMTrainer background
-
-**Status:** deliberately not built. `scripts/smoke_train_fm.py` covers the
-"does the loop work" case without any pimm dependency.
-
-The point of using pimm at all is to stop maintaining a bespoke training loop:
-pimm brings DDP, checkpoint/resume, W&B + structured logging, the hook lifecycle,
-slurm launch, and — the real prize — the pretrain eval suite
-(`MAEEvaluator`, `EventProbeSuiteEvaluator`, linear probes).
-
-When it is built it is two method overrides:
-
-* `build_optimizer` → `AdamW(model.param_groups(lr, weight_decay=wd), lr=lr,
-  betas=(0.9, 0.95))`. pimm's own `build_optimizer` groups parameters by
-  substring matching on names, which cannot express muP.
-* `build_scheduler` → preserve the per-group LR ratios. `fm/mae_ddp.py` does
-  `ratio = [pg["lr"]/lr ...]` then `pg["lr"] = lr_at(step) * ratio[i]`. A
-  scheduler that sets one LR for all groups **silently discards muP**. pimm
-  expresses this as `OneCycleLR`'s per-group `max_lr` list.
-
-Home: `helix/integrations/pimm.py`, with the other adapters — it encodes model
-knowledge (use the model's own param groups) rather than training policy, and it
-keeps pimm untouched.
-
-## 3. Re-derive the categorical bins — marginal
+## 3. (done) The categorical bins are re-derived
 
 **Status:** optional. The existing bins still fit.
 
