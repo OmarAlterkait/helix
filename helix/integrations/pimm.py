@@ -154,7 +154,7 @@ class CoeffTPCDataset(Dataset):
 
 
 @MODELS.register_module("Coeff-FM")
-def build_coeff_fm(checkpoint=None, weights=True, **cfg):
+def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
     """Build the coefficient FM, optionally restoring a converted checkpoint.
 
     ``FMModel.forward(batch) -> dict`` already satisfies pimm's Trainer contract
@@ -185,11 +185,38 @@ def build_coeff_fm(checkpoint=None, weights=True, **cfg):
         if isinstance(arch.get("film"), list):     # torch round-trip makes it a list
             arch["film"] = tuple(arch["film"])
         arch.update(cfg)
-        cfg, bins = arch, blob.get("bins")
+        cfg = arch
+        if bins is None:
+            bins = blob.get("bins")
+
+    if isinstance(bins, str):
+        bins = _load_bins(bins)
 
     model = build_fm(cfg)
     if blob is not None and weights:
         model.load_state_dict(blob["state_dict"], strict=True)
-    if bins is not None and getattr(model, "n_bins", 0) > 0:
+    if getattr(model, "n_bins", 0) > 0:
+        if bins is None:
+            raise ValueError(
+                f"n_bins={model.n_bins} (categorical head) but no bin edges were "
+                f"supplied. They are TRAINING-SET STATISTICS, not learned "
+                f"parameters, so the model cannot invent them: pass "
+                f"bins='/path/to/bins.pt' in the model config, or a `checkpoint` "
+                f"whose converted blob carries them inline. Derive fresh edges "
+                f"for a new corpus with research tier1_setup_bins.py — the ones "
+                f"m113 shipped with came from a different noise model.")
         model.set_bins(bins["edges"], bins.get("cent_asinh"), bins.get("cent_lin"))
     return model
+
+
+def _load_bins(path):
+    """Bin edges from either a bins sidecar or a converted checkpoint."""
+    import torch
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    if "edges" in blob:                       # tier1_setup_bins.py sidecar
+        return blob
+    if isinstance(blob.get("bins"), dict):    # converted checkpoint
+        return blob["bins"]
+    raise ValueError(
+        f"{path}: no bin edges found (expected an 'edges' key, or a converted "
+        f"checkpoint carrying 'bins')")

@@ -52,7 +52,51 @@ asserting identical `binid` and identical loss on real data before it lands.
 Worth doing for the headroom — it raises the model/event size that fits on a
 given card — not because anything is currently blocked.
 
-## 2. `FMTrainer` — only when a real run is wanted
+## 2. `FMTrainer` — two overrides, and one upstream ask
+
+**Status:** not built. `scripts/smoke_train_fm.py` covers "does the loop work"
+with no pimm dependency.
+
+Reading pimm's Trainer closely, the integration is smaller than the map assumed
+and needs almost nothing from pimm:
+
+* `build_optimizer` -> `AdamW(model.param_groups(lr, weight_decay=wd), lr=lr,
+  betas=(0.9, 0.95))`. pimm groups parameters by substring matching on names,
+  which cannot express muP. The map (5b.3) proposed a `param_dicts="model"`
+  branch upstream; overriding the method needs nothing from anyone.
+* `build_scheduler` -> `OneCycleLR(max_lr=[lr*r for r in ratios])`. Verified:
+  the per-group list preserves the muP ratios for a whole schedule, a scalar
+  flattens them.
+
+`TRAINERS.build(dict(type=cfg.train.type, ...))` resolves after `custom_imports`
+runs, so `FMTrainer` can be registered from `helix.integrations.pimm` exactly
+like the other three names — pimm still needs no change.
+
+**Landmine, not a blocker:** the `WeightDecayExclusion` hook rewrites optimizer
+param groups in `before_train`. It preserves layer-wise LRs but rewrites weight
+decay, which would undo muP's `wd*m` decoupling. Our `param_groups` already does
+the no-decay split, so the hook is redundant — just never add it to the config.
+
+### The one thing worth asking pimm's author for
+
+`engines/train.py` in `run_step`:
+
+```python
+if "offset" in input_dict:
+    output_dict["avg_pts"] = input_dict["coord"].shape[0] / len(input_dict["offset"])
+```
+
+Any model whose batch carries `offset` but no `coord` raises **KeyError after the
+forward pass** — a crash on step 1. The sibling accounting at line ~454 is
+already guarded (`try/except TypeError`); this one is not. A one-line fix
+(`and "coord" in input_dict`, or `.get`).
+
+It does not block us today only because `CoeffCollect` deliberately emits no
+`offset`. But that is precisely the field multi-event batching would need
+(MULTI_EVENT_BATCHING.md), so the guard is what would unblock that path later.
+Worth reporting regardless: it affects any non-point-cloud model.
+
+## 2b. (was 2) FMTrainer background
 
 **Status:** deliberately not built. `scripts/smoke_train_fm.py` covers the
 "does the loop work" case without any pimm dependency.
