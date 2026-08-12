@@ -176,6 +176,66 @@ def unpack_cell_key(key):
             key & _CELL_BLOCK_MASK)
 
 
+def tick_of_tau(tau, plane_gid, band, cfg=None):
+    """Physical drift time (raw ticks) of the coefficient at ``(band, tau)``.
+
+    The forward half of the tokenizer's time convention:
+    ``(tau + delta[band]) * 2**lev[band] - toff[plane_gid % 3]``.
+    ``assemble`` uses it for both ``cell_t`` modes, and :func:`tau_of_tick`
+    inverts it.
+    """
+    cfg = cfg or PatchConfig()
+    band = np.asarray(band, np.int64)
+    dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float32)
+    delta = np.asarray(cfg.delta, np.float32)
+    toff = np.asarray(cfg.toff, np.float32)
+    return ((np.asarray(tau, np.float32) + delta[band]) * dec[band]
+            - toff[np.asarray(plane_gid, np.int64) % 3]).astype(np.float32)
+
+
+def tau_of_tick(tick, plane_gid, band, band_lengths, cfg=None):
+    """Inverse of :func:`tick_of_tau`: which ``tau`` in ``band`` covers ``tick``.
+
+    Rounds (not floors) and clips into ``[0, band_lengths[band])``, matching the
+    tokenizer's own convention.
+
+    ``band_lengths`` is REQUIRED and comes from the shard's ``/config`` — it is a
+    property of the CORPUS (it moves with ``n_ticks_raw`` and ``dwt_level``),
+    while ``cfg`` is a property of the CHECKPOINT. The research implementation
+    hard-coded ``LENS_T = [271, 271, 542, 1084]`` beside its own copies of
+    ``lev``/``delta``/``toff``; those agreed with the shipped corpus by luck. A
+    drifted copy makes a probe gather the WRONG cell's features, which does not
+    crash — it returns a number near the geometry null that looks like a result.
+    """
+    cfg = cfg or PatchConfig()
+    band = np.asarray(band, np.int64)
+    dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float64)
+    delta = np.asarray(cfg.delta, np.float64)
+    toff = np.asarray(cfg.toff, np.float64)
+    lens = np.asarray(band_lengths, np.int64)
+    t_sig = np.asarray(tick, np.float64) + toff[np.asarray(plane_gid, np.int64) % 3]
+    tau = np.round(t_sig / dec[band] - delta[band]).astype(np.int64)
+    return np.clip(tau, 0, lens[band] - 1)
+
+
+def pixel_cells(plane_gid, wire, tick, band_lengths, cfg=None):
+    """The ``n_bands`` cell keys covering a raw pixel ``(plane_gid, wire, tick)``.
+
+    Public for the same reason :func:`cell_key` is: anything attaching per-cell
+    information to a tokenized event — a probe target above all — must agree with
+    :func:`assemble` on which cell a pixel lands in, and the only way to agree is
+    to run the same arithmetic. Returns ``(len(pixels), n_bands)`` int64.
+    """
+    cfg = cfg or PatchConfig()
+    plane_gid = np.asarray(plane_gid, np.int64)
+    wire = np.asarray(wire, np.int64)
+    out = np.empty((plane_gid.size, cfg.n_bands), np.int64)
+    for b in range(cfg.n_bands):
+        tau = tau_of_tick(tick, plane_gid, np.full(plane_gid.shape, b), band_lengths, cfg)
+        out[:, b] = cell_key(plane_gid, np.full(plane_gid.shape, b), wire, tau, cfg)
+    return out
+
+
 def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
              norm_sigma, cfg=PatchConfig(), value_clean=None, dead_frac=0.0,
              rng=None):
@@ -277,8 +337,7 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float32)
     toff = np.asarray(cfg.toff, np.float32)
     if cfg.cell_t == "centroid":
-        tp = ((tau.astype(np.float32) + np.asarray(cfg.delta, np.float32)[band]) * dec[band]
-              - toff[plane_gid % 3])
+        tp = tick_of_tau(tau, plane_gid, band, cfg)   # shared with tau_of_tick
         w = (np.float32(cfg.sigma_norm) * np.abs(ratio)).astype(np.float32) + 1e-6
         ws = np.zeros(n_cells, np.float32); ts = np.zeros(n_cells, np.float32)
         np.add.at(ws, cell, w); np.add.at(ts, cell, w * tp)
