@@ -273,6 +273,30 @@ class FMTrainer(Trainer):
     config, for one reason each.
     """
 
+    def build_train_loader(self):
+        """Refuse a per-GPU batch other than 1.
+
+        pimm's ``batch_size`` is GLOBAL and ``batch_size_per_gpu`` is derived as
+        ``batch_size // world_size``. The FM has NO event separation — attention
+        runs over whatever tokens it is handed — so a per-GPU batch above 1
+        concatenates unrelated events into one token set and silently trains a
+        model whose tokens attend across event boundaries. Nothing downstream
+        can see that; the loss simply means something else.
+
+        It is easy to hit by accident, because the correct global value tracks
+        the GPU count: ``batch_size = 4`` is right on 4 ranks and wrong on 1.
+        See MULTI_EVENT_BATCHING.md.
+        """
+        per_gpu = self.cfg.batch_size // comm.get_world_size()
+        if per_gpu != 1:
+            raise ValueError(
+                f"batch_size={self.cfg.batch_size} over world_size="
+                f"{comm.get_world_size()} gives {per_gpu} events per GPU. The FM "
+                f"requires exactly 1: it has no event separation, so a larger "
+                f"per-GPU batch trains attention ACROSS unrelated events without "
+                f"failing. Set batch_size to the number of ranks.")
+        return super().build_train_loader()
+
     def build_optimizer(self):
         """Take param groups from the MODEL rather than from name matching.
 
