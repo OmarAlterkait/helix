@@ -42,17 +42,28 @@ __all__ = ["fit_alongwire", "verify_alongwire", "u_of"]
 TOL = 1e-3
 
 
-def fit_alongwire(plane_gid, y, z, wire, n_gid=6, min_points=500):
+def fit_alongwire(plane_gid, y, z, wire, n_gid=6, min_points=500, event=None):
     """Least-squares along-wire unit vectors, ``{gid: (uy, uz)}``.
 
     ``wire ~ a*y + b*z + c`` per plane; along-wire is perpendicular to the pitch
-    direction ``(a, b)``. Returns the vectors plus per-gid diagnostics, because a
-    fit is only trustworthy with its residual attached.
+    direction ``(a, b)``.
+
+    **Pass ``event`` whenever the data spans more than one event.** The intercept
+    ``c`` is PER EVENT — measured across 8 probe events, each fits the exact
+    constant with a 0.30-wire residual, while pooling them under one intercept
+    gives 15.1 wires and shifts the axis from (-0.5000, +0.8660) to
+    (-0.4892, +0.8722). The direction is what we want and it is stable; only the
+    offset moves. Giving each event its own intercept (by centring within event)
+    recovers the exact fit from pooled data.
+
+    The reference concatenates events before the least squares
+    (``pb_aw.fit_alongwire``) and so carries this bias.
     """
     plane_gid = np.asarray(plane_gid, np.int64)
     y = np.asarray(y, np.float64)
     z = np.asarray(z, np.float64)
     wire = np.asarray(wire, np.float64)
+    event = None if event is None else np.asarray(event)
 
     vecs, diag = {}, {}
     for g in range(n_gid):
@@ -60,15 +71,26 @@ def fit_alongwire(plane_gid, y, z, wire, n_gid=6, min_points=500):
         n = int(s.sum())
         if n < min_points:
             continue
-        A = np.column_stack([y[s], z[s], np.ones(n)])
-        coef, *_ = np.linalg.lstsq(A, wire[s], rcond=None)
+        ys, zs, ws = y[s].copy(), z[s].copy(), wire[s].copy()
+        if event is not None:
+            # Per-event intercept == centring within event, then no intercept.
+            _, inv = np.unique(event[s], return_inverse=True)
+            for arr in (ys, zs, ws):
+                m = np.zeros(inv.max() + 1)
+                cnt = np.bincount(inv, minlength=len(m)).astype(float)
+                np.add.at(m, inv, arr)
+                arr -= (m / np.maximum(cnt, 1))[inv]
+            A = np.column_stack([ys, zs, np.zeros(n)])
+        else:
+            A = np.column_stack([ys, zs, np.ones(n)])
+        coef, *_ = np.linalg.lstsq(A, ws, rcond=None)
         a, b = float(coef[0]), float(coef[1])
         pitch = float(np.hypot(a, b))
         if pitch <= 0:
             raise ValueError(f"gid {g}: degenerate wire fit (pitch {pitch})")
         vecs[g] = np.array([-b / pitch, a / pitch], np.float64)
         diag[g] = dict(pitch_wires_per_mm=pitch, n=n,
-                       resid_rms_wires=float(np.sqrt(np.mean((A @ coef - wire[s]) ** 2))))
+                       resid_rms_wires=float(np.sqrt(np.mean((A @ coef - ws) ** 2))))
     if not vecs:
         raise ValueError(
             f"no plane had >= {min_points} deposits with a known wire — the "
@@ -76,16 +98,21 @@ def fit_alongwire(plane_gid, y, z, wire, n_gid=6, min_points=500):
     return vecs, diag
 
 
-def verify_alongwire(stored, plane_gid, y, z, wire, tol=TOL, min_points=500):
+def verify_alongwire(stored, plane_gid, y, z, wire, tol=TOL, min_points=500,
+                     event=None):
     """Re-fit and compare against the frozen table; raise if anything moved.
 
     ``stored`` is ``(n_gid, 2)`` as written into the truth artifact's ``/config``.
     A silent move here would redefine the target midway through a study, so this
     is a hard failure rather than a warning.
+
+    Pass ``event`` for multi-event data, for the same reason :func:`fit_alongwire`
+    needs it — without it the pooled fit is biased and this would report a
+    spurious move.
     """
     stored = np.asarray(stored, np.float64)
-    fresh, diag = fit_alongwire(plane_gid, y, z, wire,
-                                n_gid=stored.shape[0], min_points=min_points)
+    fresh, diag = fit_alongwire(plane_gid, y, z, wire, n_gid=stored.shape[0],
+                                min_points=min_points, event=event)
     bad = {}
     for g, v in fresh.items():
         # Sign is arbitrary in the fit (u and -u are the same axis); compare the
