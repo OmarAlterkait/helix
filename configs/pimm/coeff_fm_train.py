@@ -166,12 +166,17 @@ scheduler = dict(type="WSDStableLR", warmup=WARMUP)
 # data — a handful of events, so the run is minutes not hours
 # ---------------------------------------------------------------------------
 transform = [
-    # Pin cell_t explicitly. The default is 'centroid', which research measured
-    # as the better probing representation (3D probe 0.60 vs 0.42) — but a run
-    # that means to be comparable with m113 must say which one it chose, because
-    # the two differ on ~94% of cells and nothing downstream reports it.
+    # grid_center, because that is what the long run used. m113's config does not
+    # set `cellt`, so it took mae_ddp.py:54's default "canonical" — which is
+    # helix's "grid_center" (identical formula; helix renamed it). The two differ
+    # on ~94% of cells, so this is not a detail.
+    #
+    # PatchConfig's default is "centroid", which research measured as the better
+    # probing representation (3D probe 0.60 vs 0.42). That makes centroid worth
+    # an ablation once probes exist — but it is not what the reference run did,
+    # so it is not the default here.
     dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
-         cfg=dict(cell_t="centroid"),
+         cfg=dict(cell_t="grid_center"),
          fm_names=True),
     dict(type="CoeffCollect", part="coeff"),
 ]
