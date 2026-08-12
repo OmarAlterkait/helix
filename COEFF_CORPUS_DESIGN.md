@@ -190,6 +190,52 @@ byte-for-byte copy of the noisy shard's. The *shards* are joined by identity
 pretraining uses just `('coeff',)`. A clean-only `modalities=('coeff_clean',)` is
 rejected — a values-only shard has no coords of its own to return.
 
+#### The clean target is NOT digitized — a deliberate difference from research
+
+The clean image is captured after `densify` and **before both `add_intrinsic_noise`
+and `digitize`** (`scripts/build_coeff_corpus.py`), so the target is continuous
+charge while the noisy input is integer ADC. Research digitized both
+(`star_tpc.py`: `clean=[Densify(geom), Digitize(geom=geom)]`).
+
+There is no scale bug in this asymmetry: `digitize` returns a *pedestal-subtracted*
+integer-valued float, so both sides sit around zero on the same scale. The only
+difference is quantization.
+
+**Measured, not estimated.** The DWT is orthonormal, so iid ±0.5 ADC quantization in
+the image maps to sd √(1/12) = 0.2887 per *coefficient* — there is no averaging
+benefit from the transform. Propagating that through `arcsinh(clean/σ)` against the
+corpus's own bin edges, over 2.1M real coefficients:
+
+| band | rows | labels that would change | mean \|Δbin\| | p99 |
+|---|---|---|---|---|
+| 0 (A4) | 702,651 | 13.8% | 0.15 | 2 |
+| 1 (D4) | 492,291 | 12.2% | 0.13 | 1 |
+| 2 (D3) | 539,215 | 16.2% | 0.19 | 2 |
+| 3 (D2) | 389,290 | **34.6%** | **0.47** | **4** |
+
+17.9% overall. D2 is worst because it has the smallest `norm_sigma` (1.36) and the
+narrowest bins (0.080). `arcsinh` compresses large coefficients, so the effect is
+concentrated on small ones — which are most of the surviving support.
+
+**Why float wins:**
+
+1. It is an irreducible loss floor carrying no learnable signal. The model cannot
+   resolve the underlying signal to better than the noise level, which is far above
+   one ADC count, so `digitize(s)` is `s` plus unpredictable jitter. Roughly
+   0.2–0.5 nats of categorical CE against a run that reached 2.29.
+2. **Saturation.** `digitize` clips to `[0, adc_max]`. A float target preserves true
+   charge where the *noisy* observation saturated; digitizing the clean would clip
+   the truth too, losing information exactly at the high-charge points.
+3. Rounding a continuous prediction to ADC codes is trivial; recovering charge from
+   a rounded one is not. Predicting continuous truth from a quantized observation is
+   the standard denoising/dequantization framing and the more general artifact.
+4. Comparability with m113 was the main argument the other way, and m113 is a
+   hyperparameter source rather than a reproduction target.
+
+**Consequence to remember:** our categorical CE will sit *below* m113's partly for
+this reason alone, independent of model quality. Do not read that gap as an
+improvement.
+
 ### `coeff_charge` modality — DEFERRED (future)
 
 Not built now. When deconvolution work needs it, it lands as another separate
