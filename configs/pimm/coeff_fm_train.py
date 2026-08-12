@@ -53,7 +53,7 @@ save_path = "/sdf/data/neutrino/omara/exp/coeff_fm_train"
 # which is exactly how the research trainer scaled: "each rank processes 1
 # event/step; gradients all-reduced => global batch = world events".
 # See MULTI_EVENT_BATCHING.md.
-batch_size = 1
+batch_size = 4                # 4 ranks x 1 event = m113's effective batch
 batch_size_val = 1
 batch_size_test = 1
 num_worker = 4
