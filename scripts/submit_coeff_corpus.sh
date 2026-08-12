@@ -42,6 +42,18 @@
 #SBATCH --mem=12G
 #SBATCH --cpus-per-task=6
 #SBATCH --gpus=1
+# PIN THE GPU ARCHITECTURE. The DSP is architecture-sensitive: float reduction
+# order differs between GPU generations, which flips a small number of gate and
+# threshold decisions. Measured on sim_wire_sensor_0000.h5, identical code and
+# inputs: 2080 Ti gives 58,411,720 surviving coefficients, A100 gives
+# 58,421,269 — 0.016% apart, and NOT bit-comparable. Both are individually
+# deterministic (two A100 rebuilds are bit-identical).
+#
+# Without this line an 800-job array takes whatever the pool offers, so one
+# corpus could be built across several architectures and nothing on disk would
+# say so. run_0027575715 was built entirely on turing and reproduces
+# bit-for-bit there, which is the only reason that corpus is coherent.
+#SBATCH --partition=turing
 set -euo pipefail
 
 # Default to THIS checkout, resolved from the script's own location. It used to
