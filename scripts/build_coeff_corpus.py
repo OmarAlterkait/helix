@@ -173,6 +173,16 @@ def main():
     from helix.tpc.io import (config_from_file, read_sensor_event,
                               read_sensor_event_coo, count_events, list_events)
     from helix.core.coeff_io import _code_version
+
+    def _device_name(backend):
+        if backend != "torch":
+            return backend
+        try:
+            import torch
+            return (f"torch:{torch.cuda.get_device_name(0)}"
+                    if torch.cuda.is_available() else "torch:cpu")
+        except Exception:
+            return "torch:unknown"
     from helix.tpc.config import DetectorConfig
     from helix.tpc.pipeline import canonical_plane_gid
     from helix.tpc.corpus import build_corpus
@@ -352,7 +362,12 @@ def main():
         # clean, while a surviving build log shows 12 shards imported corpus.py
         # from a different worktree.
         code=_code_version(),
-        pimm_data_src=os.path.abspath(args.pimm_src))
+        pimm_data_src=os.path.abspath(args.pimm_src),
+        # The GPU generation is part of the build, not the environment: the
+        # torch DSP path is architecture-sensitive (turing vs A100 differ on
+        # 0.016% of surviving coefficients for identical code and input), so a
+        # corpus spanning generations is not one corpus.
+        device=_device_name(args.backend))
 
     noise_meta = dict(kind="white" if args.white else "colored",
                       incoherent=True, coherent=True,
