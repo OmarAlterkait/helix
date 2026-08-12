@@ -20,6 +20,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Stage-1 probe truth reads the doraemon hits/step shards, which are written
+# with a compression plugin. Without this h5py raises "can't open directory
+# /usr/local/hdf5/lib/plugin" on read — it worked in one container by accident.
+probe = ["hdf5plugin>=4.0"]
+
 # Backend frameworks are optional: helix.core imports only the selected one
 # lazily. NumPy (base dep) is always available; add jax and/or torch as needed.
 jax-cpu = ["jax[cpu]>=0.4.20"]
