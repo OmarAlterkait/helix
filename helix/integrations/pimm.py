@@ -567,7 +567,14 @@ class CoeffFMEvaluator(HookBase):
                 B = move_batch_to_device(input_dict, device)
                 B.setdefault("n_cells", B["plane_id"].shape[0])
                 gen = torch.Generator(device=device).manual_seed(self.mask_seed + i)
-                mask = core.make_mask(B, gen=gen)      # SAME mask every evaluation
+                # mode="random" EXPLICITLY, matching research: mae_ddp.py:216
+                # passes args.mask_mode to perband_mse_cat, so the eval metric is
+                # a pure random-mask number even when plane_frac > 0 (research
+                # reports the plane-masked number as a SEPARATE curve, and only
+                # for non-categorical heads — m113 is categorical, so its eval
+                # was pure random). Without this, plane_frac makes val loss a
+                # 90/10 mixture and it stops being comparable across runs.
+                mask = core.make_mask(B, mode="random", gen=gen)   # SAME every eval
                 if getattr(self.trainer.cfg, "enable_amp", False):
                     dtype = (torch.bfloat16
                              if self.trainer.cfg.amp_dtype == "bfloat16"

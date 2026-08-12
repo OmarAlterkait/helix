@@ -128,7 +128,7 @@ transform = [
     # that means to be comparable with m113 must say which one it chose, because
     # the two differ on ~94% of cells and nothing downstream reports it.
     dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
-         cfg=dict(cell_t="centroid"),
+         cfg=dict(cell_t="grid_center"),   # as the long run (m113) did
          fm_names=True),
     dict(type="CoeffCollect", part="coeff"),
 ]
