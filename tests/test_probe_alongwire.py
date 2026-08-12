@@ -62,3 +62,49 @@ def test_u_projects_onto_the_axis_in_metres():
     gid = np.array([2, 2])                       # Y: along-wire is (-1, 0)
     b1 = np.array([[0.0, 1000.0, 0.0], [0.0, -2000.0, 0.0]])
     np.testing.assert_allclose(u_of(gid, b1, EXPECTED), [-1.0, 2.0], atol=1e-6)
+
+
+def _multi_event(n_ev=6, n=1500, seed=1):
+    """The same geometry in every event, but a per-event wire offset.
+
+    Measured on real data: each probe event fits the exact constant at 0.30-wire
+    residual, while pooling 8 of them under ONE intercept gives 15.14 wires and
+    shifts the axis to (-0.4892, +0.8722). The direction is stable; only the
+    offset moves.
+    """
+    rng = np.random.default_rng(seed)
+    gid, y, z, wire, ev = [], [], [], [], []
+    for e in range(n_ev):
+        g = rng.integers(0, 6, n)
+        yy = rng.uniform(-1500, 1500, n)
+        zz = rng.uniform(-1500, 1500, n)
+        ang = np.array([np.pi / 6, 5 * np.pi / 6, np.pi / 2] * 2)[g]
+        offset = 500.0 * e                       # the per-event intercept
+        gid.append(g); y.append(yy); z.append(zz)
+        wire.append(PITCH * (yy * np.cos(ang) + zz * np.sin(ang)) + offset)
+        ev.append(np.full(n, e))
+    return (np.concatenate(gid), np.concatenate(y), np.concatenate(z),
+            np.concatenate(wire), np.concatenate(ev))
+
+
+def test_pooling_events_without_per_event_intercepts_is_biased():
+    """Guards the defect: one intercept across events corrupts the axis."""
+    gid, y, z, wire, ev = _multi_event()
+    pooled, pdiag = fit_alongwire(gid, y, z, wire)                 # no event=
+    exact, ediag = fit_alongwire(gid, y, z, wire, event=ev)        # per-event
+
+    assert pdiag[0]["resid_rms_wires"] > 1.0, "fixture does not exercise the bias"
+    for g, v in exact.items():
+        d = min(np.linalg.norm(v - EXPECTED[g]), np.linalg.norm(v + EXPECTED[g]))
+        assert d < 1e-6, (g, v)
+        assert ediag[g]["resid_rms_wires"] < 1e-6
+    worst = max(min(np.linalg.norm(pooled[g] - EXPECTED[g]),
+                    np.linalg.norm(pooled[g] + EXPECTED[g])) for g in pooled)
+    assert worst > 1e-3, "pooled fit should be visibly off; fixture too easy"
+
+
+def test_verify_accepts_multi_event_data_when_given_event():
+    gid, y, z, wire, ev = _multi_event()
+    verify_alongwire(EXPECTED, gid, y, z, wire, event=ev)
+    with pytest.raises(ValueError, match="along-wire geometry moved"):
+        verify_alongwire(EXPECTED, gid, y, z, wire)      # biased -> spurious move
