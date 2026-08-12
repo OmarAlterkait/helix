@@ -172,6 +172,7 @@ def main():
     backend.set_backend(args.backend)
     from helix.tpc.io import (config_from_file, read_sensor_event,
                               read_sensor_event_coo, count_events, list_events)
+    from helix.core.coeff_io import _code_version
     from helix.tpc.config import DetectorConfig
     from helix.tpc.pipeline import canonical_plane_gid
     from helix.tpc.corpus import build_corpus
@@ -341,7 +342,17 @@ def main():
         spectrum_sha256=None if args.white else _sha256(args.npz),
         seed_formula=("loader:content_seed(name|0|0|0)" if args.mode == "loader"
                       else "serial:blake2b(run/source_file/ev{n})"),
-        builder="build_coeff_corpus.py")
+        builder="build_coeff_corpus.py",
+        # Stamped HERE, by the composer, not only inside helix's writer. This
+        # script sys.path-injects a --helix-root and a --pimm-src, so the tree
+        # that runs is chosen at the command line; the writer can only report
+        # the helix it was imported from, and only if it is recent enough to try.
+        # run_0027575715 shows why: 0 of its 100 shards carry `code`, so
+        # verify_corpus skipped its mixed-tree check and reported the corpus
+        # clean, while a surviving build log shows 12 shards imported corpus.py
+        # from a different worktree.
+        code=_code_version(),
+        pimm_data_src=os.path.abspath(args.pimm_src))
 
     noise_meta = dict(kind="white" if args.white else "colored",
                       incoherent=True, coherent=True,
