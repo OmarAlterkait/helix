@@ -143,9 +143,6 @@ optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95))
 #
 # For the cooldown, swap in WSDCooldownLR (1 - sqrt(p)), which is bit-identical
 # to research's lr_mode="decay". pimm's PolyLR is a different curve.
-N_TRAIN, N_VAL, N_PROBE = 18_000, 1_000, 300
-PROBE_HOLDOUT = (N_TRAIN - N_PROBE, N_TRAIN)          # in no split's training set
-
 # Every cadence below is DERIVED from the run length. Hard-coding m113's
 # absolute constants onto a shorter run is the error this file already made
 # twice: `warmup_rate` reinterpreted against a 1,500-step run (~6 steps), then
@@ -155,7 +152,11 @@ PROBE_HOLDOUT = (N_TRAIN - N_PROBE, N_TRAIN)          # in no split's training s
 #   warmup   4,000 / 1,010,000 = 0.40%
 #   eval    10,000 / 1,010,000 = 0.99%
 #   save     2,000 / 1,010,000 = 0.20%
-STEPS = (N_TRAIN - N_PROBE) * epoch // batch_size
+# Resolved from the identity split below, recorded in holdout.json beside the
+# corpus. A literal, not a fraction of 19,999, so that changing HOLDOUT without
+# re-resolving is a visible inconsistency rather than a silent rescale.
+N_TRAIN_EVENTS = 19_034
+STEPS = N_TRAIN_EVENTS * epoch // batch_size
 WARMUP = max(100, round(0.0040 * STEPS))
 EVAL_EVERY = max(50, round(0.0099 * STEPS))
 SAVE_EVERY = max(50, round(0.0020 * STEPS))
@@ -193,20 +194,31 @@ _common = dict(
     # gives 4 steps and 0.25 * 4 - 1 = 0.
 )
 
-# A REAL split. train/val/test were the same dict against the same root with the
-# same max_len, and get_data_list returns a deterministic PREFIX — so "val" was
-# byte-identical to train. That reports training loss under a different mask as
-# neg_val_loss, which is also what CheckpointSaver would select model_best on.
+# A REAL split, keyed on event IDENTITY rather than position.
 #
-# Mirrors what the research trainer did by hand: files[:val_n] held out for
-# validation, plus a separate [holdout_lo, holdout_hi] band (m113: 30000-30299)
-# dropped from training so downstream PROBES are not scored on trained-on
-# events. Scaled to this corpus's 19,999 events.
+# This was `event_range=(0, N_TRAIN)` etc. A positional slice is a valid split
+# exactly once: the joint index is built over a GLOB of shards, so adding a
+# shard renumbers everything after it and a probe holdout defined as
+# (17700, 18000) silently becomes a set of trained-on events. This corpus is
+# explicitly built to grow — one run now, eight planned — so that is the failure
+# that would actually happen, and nothing would report it.
+#
+# blake2b(run/source_file) + event is the SIMULATION event's identity, so the
+# split survives shard add/remove/reorder and even a corpus rebuild with a
+# different basis or noise model. Fractions cover [0,1) with no gap, so no event
+# lands in nothing — the positional scheme left 999 events (5%) unassigned.
+#
+# Resolved once and written to holdout.json beside the corpus: reproducible is
+# not the same as auditable, and a probe holdout that exists only as code cannot
+# be inspected, diffed or cited.
+#
+#   train 19,034   val 577   probe 388   (= 19,999, the whole corpus)
+HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
 
 data = dict(
-    train=dict(**_common, event_range=(0, N_TRAIN), exclude_range=PROBE_HOLDOUT),
-    val=dict(**_common, event_range=(N_TRAIN, N_TRAIN + N_VAL)),
-    test=dict(**_common, event_range=(N_TRAIN, N_TRAIN + N_VAL)),
+    train=dict(**_common, holdout=HOLDOUT, split_role="train"),
+    val=dict(**_common, holdout=HOLDOUT, split_role="val"),
+    test=dict(**_common, holdout=HOLDOUT, split_role="val"),
 )
 
 hooks = [
