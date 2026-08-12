@@ -35,8 +35,14 @@ from helix.model.mask import make_mask
 # whole-plane masking with that probability, mask_mode otherwise. It is NOT the
 # same as mask_mode="plane", which would mask planes every step. m113 trained at
 # 0.1; the default here is research's 0.0, so it must be asked for.
+# loss_fused stays FALSE as the library default even though research's CLI
+# default is --fused 1. It is not just a faster path: it requires a different set
+# of batch keys, and for an NLL head it selects the (-12, 8) logvar clamp instead
+# of (-8, 8) — measured 6379 vs 360 on one batch. A default that re-tasks every
+# existing consumer is the wrong place to express a per-run choice, so the
+# training recipe opts in explicitly instead.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
-                   plane_frac=0.0, loss_fused=True, vis_w=0.0, noisy=False,
+                   plane_frac=0.0, loss_fused=False, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None)
 
 

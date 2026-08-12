@@ -62,7 +62,7 @@ batch_size_val = 4            # likewise 1 event per rank
 batch_size_test = 4
 num_worker = 4
 
-epoch = 1
+epoch = 25                    # m113 saw each event ~25x; see STEPS below
 eval_epoch = 1
 clip_grad = 1.0
 
@@ -143,7 +143,24 @@ optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95))
 #
 # For the cooldown, swap in WSDCooldownLR (1 - sqrt(p)), which is bit-identical
 # to research's lr_mode="decay". pimm's PolyLR is a different curve.
-scheduler = dict(type="WSDStableLR", warmup=4000)
+N_TRAIN, N_VAL, N_PROBE = 18_000, 1_000, 300
+PROBE_HOLDOUT = (N_TRAIN - N_PROBE, N_TRAIN)          # in no split's training set
+
+# Every cadence below is DERIVED from the run length. Hard-coding m113's
+# absolute constants onto a shorter run is the error this file already made
+# twice: `warmup_rate` reinterpreted against a 1,500-step run (~6 steps), then
+# `warmup=4000` on a 4,425-step run (90% of the run). m113's values are
+# FRACTIONS of a 1,010,000-step run, so that is how they are expressed.
+#
+#   warmup   4,000 / 1,010,000 = 0.40%
+#   eval    10,000 / 1,010,000 = 0.99%
+#   save     2,000 / 1,010,000 = 0.20%
+STEPS = (N_TRAIN - N_PROBE) * epoch // batch_size
+WARMUP = max(100, round(0.0040 * STEPS))
+EVAL_EVERY = max(50, round(0.0099 * STEPS))
+SAVE_EVERY = max(50, round(0.0020 * STEPS))
+
+scheduler = dict(type="WSDStableLR", warmup=WARMUP)
 
 # ---------------------------------------------------------------------------
 # data — a handful of events, so the run is minutes not hours
@@ -180,8 +197,6 @@ _common = dict(
 # validation, plus a separate [holdout_lo, holdout_hi] band (m113: 30000-30299)
 # dropped from training so downstream PROBES are not scored on trained-on
 # events. Scaled to this corpus's 19,999 events.
-N_TRAIN, N_VAL, N_PROBE = 18_000, 1_000, 300
-PROBE_HOLDOUT = (N_TRAIN - N_PROBE, N_TRAIN)          # in no split's training set
 
 data = dict(
     train=dict(**_common, event_range=(0, N_TRAIN), exclude_range=PROBE_HOLDOUT),
@@ -202,11 +217,11 @@ hooks = [
     dict(type="WeightEMA", decay=0.9999),
     # Was every_n_steps unset -> after_epoch only -> exactly ONE eval, after
     # training. No training curve, and model_best selection was vacuous.
-    dict(type="CoeffFMEvaluator", every_n_steps=10_000, max_batches=200),
+    dict(type="CoeffFMEvaluator", every_n_steps=EVAL_EVERY, max_batches=200),
     # Was save_freq=None -> CheckpointSaver.after_step returns early and only
     # after_train saves. On a preemptible partition a long run could never make
     # progress. Research saves every 2000 ("preemption loses <= this many").
-    dict(type="CheckpointSaver", save_freq=2000),
+    dict(type="CheckpointSaver", save_freq=SAVE_EVERY),
 ]
 
 train = dict(type="FMTrainer")
