@@ -151,16 +151,23 @@ class CoeffTPCDataset(Dataset):
 
     def __init__(self, data_root, split="", dataset_name="coeff_tpc",
                  modalities=("coeff", "coeff_clean"), transform=None, loop=1,
-                 max_len=-1, strict_lengths=True):
+                 max_len=-1, strict_lengths=True, event_range=None,
+                 exclude_range=None):
         super().__init__()
         try:
             from pimm_data import CoeffTPCDataset as _DS
         except ImportError:                       # older layout / partial install
             from pimm_data.coeff import CoeffTPCDataset as _DS
+        # event_range / exclude_range are what make train and val DIFFERENT
+        # events. This wrapper has its own signature, so a parameter added to the
+        # inner dataset is invisible here unless it is forwarded — and an
+        # unforwarded split silently becomes "no split" only if the wrapper
+        # swallows kwargs, which it must not.
         self._inner = _DS(data_root=data_root, split=split,
                           dataset_name=dataset_name, modalities=tuple(modalities),
                           transform=None, loop=loop, max_len=max_len,
-                          strict_lengths=strict_lengths)
+                          strict_lengths=strict_lengths,
+                          event_range=event_range, exclude_range=exclude_range)
         self.transform = Compose(transform)
 
     def __len__(self):

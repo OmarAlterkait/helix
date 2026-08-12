@@ -53,9 +53,13 @@ save_path = "/sdf/data/neutrino/omara/exp/coeff_fm_train"
 # which is exactly how the research trainer scaled: "each rank processes 1
 # event/step; gradients all-reduced => global batch = world events".
 # See MULTI_EVENT_BATCHING.md.
+# ALL THREE are global and all three are asserted divisible by world_size
+# (default_config_parser: `batch_size_val is None or batch_size_val % world_size
+# == 0`). batch_size_val = 1 therefore aborts any multi-rank launch at setup,
+# before a single step runs — found by the first real 4-GPU launch.
 batch_size = 4                # 4 ranks x 1 event = m113's effective batch
-batch_size_val = 1
-batch_size_test = 1
+batch_size_val = 4            # likewise 1 event per rank
+batch_size_test = 4
 num_worker = 4
 
 epoch = 1
