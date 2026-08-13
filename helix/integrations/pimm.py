@@ -241,7 +241,8 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
 
     model = build_fm(cfg)
     if blob is not None and weights:
-        model.load_state_dict(blob["state_dict"], strict=True)
+        from helix.model.checkpoint import load_converted
+        load_converted(model, blob)
     if getattr(model, "n_bins", 0) > 0:
         if bins is None:
             raise ValueError(

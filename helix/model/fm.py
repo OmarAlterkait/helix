@@ -59,6 +59,28 @@ class FMModel(nn.Module):
         # attention pairs (the triangulation pairs). Wire identity still enters via FiLM. (audit bug 2)
         self.wire_rope = wire_rope
         self.n_bins = n_bins                      # >0 => categorical (discretized-bin) value head
+        if n_bins > 0:
+            # PERSISTENT. These are training-set statistics that inference is
+            # WRONG without — the BatchNorm running_mean/running_var case, not
+            # the causal-mask case. `persistent=False` is for tensors __init__
+            # can regenerate from its own arguments (rotary inv_freq, attention
+            # masks); bin edges cannot be regenerated from anything.
+            #
+            # They were non-persistent, so they vanished from every state_dict
+            # the trainer wrote and the edges survived only as a PATH STRING in
+            # a sidecar json. A checkpoint moved away from its experiment
+            # directory was then unusable, and the probe could not read anything
+            # we trained. 4 x 129 float32 = 2 kB; there is no cost argument.
+            #
+            # Allocated here so the shape exists before any load; set_bins fills
+            # it, and a state_dict load overwrites it.
+            # NaN, not zeros: "allocated but never set" must stay distinguishable
+            # from real edges. All-zero edges are not valid (they must increase),
+            # but zeros would still silently bucketise everything into one bin,
+            # trading a loud failure for a wrong number. NaN cannot be mistaken
+            # for data and `forward` checks it.
+            self.register_buffer("bin_edges",
+                                 torch.full((n_band, n_bins + 1), float("nan")))
         self.dec_mode = dec_mode                  # "self" = full-attn decoder over all N; "cross" = CrossMAE (cheaper)
         # --- muP (Yang & Hu, Tensor Programs V, arXiv:2203.03466) ---
         # m = d/d_base is the width multiplier. Under muP the optimal Adam LR is
@@ -286,15 +308,22 @@ class FMModel(nn.Module):
         """Register the categorical head's bin edges, shape (n_band, n_bins+1).
 
         Required before ``forward`` when ``n_bins > 0``: ``losses_cat`` needs
-        them, and they are training-set statistics rather than learned
-        parameters, so they ride as non-persistent buffers instead of living in
-        the config. The research trainer kept them in a separate sidecar file
-        that the checkpoint never referenced."""
+        them. They are training-set statistics the model cannot invent, so they
+        are PERSISTENT buffers and travel inside the state_dict — see the
+        allocation in ``__init__`` for why. The research trainer kept them in a
+        separate sidecar the checkpoint never referenced, which is the failure
+        this closes."""
         assert self.n_bins > 0, "set_bins() on a model built with n_bins=0"
-        edges = torch.as_tensor(edges)
+        edges = torch.as_tensor(edges, dtype=self.bin_edges.dtype)
         assert edges.shape[1] == self.n_bins + 1, \
             f"edges {tuple(edges.shape)} inconsistent with n_bins={self.n_bins}"
-        self.register_buffer("bin_edges", edges, persistent=False)
+        assert edges.shape[0] == self.bin_edges.shape[0], \
+            f"edges has {edges.shape[0]} bands, model has {self.bin_edges.shape[0]}"
+        self.bin_edges.copy_(edges.to(self.bin_edges.device))
+        # Non-persistent, unlike the edges: nothing in helix or pimm reads these
+        # (they are carried for a charge read-back that was never built), so
+        # putting them in the state_dict would only create load asymmetries
+        # between models whose set_bins was called with and without them.
         for nm, v in (("bin_cent_asinh", cent_asinh), ("bin_cent_lin", cent_lin)):
             if v is not None:
                 self.register_buffer(nm, torch.as_tensor(v), persistent=False)
@@ -352,8 +381,10 @@ class FMModel(nn.Module):
         m = self.make_mask(B) if tok_mask is None else tok_mask
         occ, val, logvar = self.raw_heads(B, m)
         if self.n_bins > 0:
-            assert hasattr(self, "bin_edges"), \
-                "n_bins > 0 requires set_bins(edges) before forward()"
+            assert torch.isfinite(self.bin_edges).all(), \
+                ("n_bins > 0 requires set_bins(edges) before forward() — the "
+                 "edges buffer is still unset (NaN). They are training-set "
+                 "statistics the model cannot invent.")
             bce, vloss = losses_cat(occ, val, B, m, self.bin_edges, vis_w=self.vis_w)
         elif self.loss_fused:
             bce, vloss = losses_fused(occ, val, logvar, B, m, vis_w=self.vis_w,
