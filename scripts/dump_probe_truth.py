@@ -54,6 +54,29 @@ def _source_manifest_sha256(paths):
     return _sha256_text("\n".join(rows))
 
 
+def _position_of(shard, event_id):
+    """Position of ``event_id`` within a shard — NOT the id itself.
+
+    ``read_coeff_event`` slices by ``event_offset``, i.e. by POSITION. Ids and
+    positions coincide on every shard whose source events are contiguous, and
+    diverge on the ones that are not: ``sim_wire_sensor_0065.h5`` is missing
+    ``event_167``, so id 176 sits at position 175 there. Passing an id straight
+    in reads the NEXT event, silently, on that shard only.
+
+    Caught by the coverage check, which scored 0.383 where a matched event
+    scores 0.999 — the guard pointing at the consumer rather than the data.
+    """
+    import h5py
+    with h5py.File(shard, "r") as f:
+        ids = f["ident"]["event"][:]
+    pos = int(np.searchsorted(ids, event_id))
+    if pos >= len(ids) or int(ids[pos]) != int(event_id):
+        raise SystemExit(
+            f"{shard}: no event with id {event_id} (shard holds "
+            f"{len(ids)} events, {ids.min()}..{ids.max()})")
+    return pos
+
+
 def _dequantise(pos, vol_range):
     lo, hi = vol_range[:, 0], vol_range[:, 1]
     return lo + pos.astype(np.float64) / 65535.0 * (hi - lo)
@@ -155,7 +178,7 @@ def dump(args):
         cshard = os.path.join(corpus, f"sim_wire_coeff_{tag}.h5")
         with h5py.File(cshard, "r") as f:
             bl = f["config"]["band_lengths"][:]
-        ce = read_coeff_event(cshard, ev)
+        ce = read_coeff_event(cshard, _position_of(cshard, ev))
         m = ce.band < cfg.n_bands
         have = np.unique(cell_key(ce.plane_gid[m], ce.band[m], ce.wire[m], ce.tau[m], cfg))
         pc = pixel_cells(R["gid"], R["wire"], R["tick"], bl, cfg)
