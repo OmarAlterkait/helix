@@ -76,17 +76,24 @@ def group_centroids(pos, q, deposit_to_group):
             f"deposit count mismatch: deposit_to_group has {d2g.shape[0]} "
             f"entries, step has {pos.shape[0]} positions")
 
-    order = np.argsort(d2g, kind="stable")
-    dg, p, w = d2g[order], pos[order], q[order]
-    uniq, starts = np.unique(dg, return_index=True)
-    ends = np.concatenate([starts[1:], [dg.shape[0]]])
-    out = {}
-    for g, s, e in zip(uniq, starts, ends):
-        ww = w[s:e]
-        tot = ww.sum()
-        out[int(g)] = ((p[s:e] * ww[:, None]).sum(0) / tot if tot > 1e-12
-                       else p[s:e].mean(0))
-    return out
+    # Vectorised segment reduction. The obvious form is a Python loop over
+    # groups, but there are ~24k groups per event and that loop dominated the
+    # dump at 5.8 s/event.
+    uniq, inv = np.unique(d2g, return_inverse=True)
+    ng = len(uniq)
+    wsum = np.zeros(ng)
+    np.add.at(wsum, inv, q)
+    psum = np.zeros((ng, pos.shape[1]))
+    np.add.at(psum, inv, pos * q[:, None])
+    # Groups with no charge fall back to the unweighted mean rather than 0/0.
+    cnt = np.zeros(ng)
+    np.add.at(cnt, inv, 1.0)
+    plain = np.zeros((ng, pos.shape[1]))
+    np.add.at(plain, inv, pos)
+    ok = wsum > 1e-12
+    cen = np.where(ok[:, None], psum / np.maximum(wsum, 1e-12)[:, None],
+                   plain / np.maximum(cnt, 1)[:, None])
+    return {int(g): cen[i] for i, g in enumerate(uniq)}
 
 
 def pixel_truth(samples, centroids, qtot_min):
@@ -106,13 +113,23 @@ def pixel_truth(samples, centroids, qtot_min):
     grp = np.asarray(samples["group"], np.int64)
 
     # (pixel, group) -> summed charge, then reduce over groups per pixel.
-    key = np.stack([wire, tick, grp], 1)
-    uniq_pg, inv_pg = np.unique(key, axis=0, return_inverse=True)
+    # Pack (wire, tick, group) into ONE int64 rather than calling np.unique on a
+    # 2-D array, which sorts row-wise via a void view and is far slower.
+    W_BITS, T_BITS = 20, 20
+    if wire.min() < 0 or tick.min() < 0:
+        raise ValueError("negative wire/tick cannot be packed")
+    if wire.max() >= 1 << W_BITS or tick.max() >= 1 << T_BITS:
+        raise ValueError(f"wire {wire.max()} / tick {tick.max()} overflow the "
+                         f"{W_BITS}/{T_BITS}-bit packing")
+    pixkey = (wire << T_BITS) | tick
+    pgkey = (pixkey << 24) | np.minimum(grp, (1 << 24) - 1)
+    uniq_pg, inv_pg = np.unique(pgkey, return_inverse=True)
     q_pg = np.zeros(len(uniq_pg))
     np.add.at(q_pg, inv_pg, q)
 
-    pix = uniq_pg[:, :2]
-    uniq_pix, inv_pix = np.unique(pix, axis=0, return_inverse=True)
+    pix_of_pg = uniq_pg >> 24
+    grp_of_pg = uniq_pg & ((1 << 24) - 1)
+    uniq_pix, inv_pix = np.unique(pix_of_pg, return_inverse=True)
     qtot = np.zeros(len(uniq_pix))
     np.add.at(qtot, inv_pix, q_pg)
 
@@ -120,7 +137,7 @@ def pixel_truth(samples, centroids, qtot_min):
     order = np.lexsort((q_pg, inv_pix))
     top_group = np.empty(len(uniq_pix), np.int64)
     top_q = np.empty(len(uniq_pix))
-    top_group[inv_pix[order]] = uniq_pg[order, 2]
+    top_group[inv_pix[order]] = grp_of_pg[order]
     top_q[inv_pix[order]] = q_pg[order]
 
     keep = qtot >= float(qtot_min)
@@ -128,7 +145,8 @@ def pixel_truth(samples, centroids, qtot_min):
         return (np.empty(0, np.int32), np.empty(0, np.int32), np.empty(0, np.float32),
                 np.empty(0, np.float32), np.empty((0, 3), np.float32))
 
-    kw, kt = uniq_pix[keep, 0], uniq_pix[keep, 1]
+    kw = (uniq_pix[keep] >> T_BITS).astype(np.int64)
+    kt = (uniq_pix[keep] & ((1 << T_BITS) - 1)).astype(np.int64)
     kq, ktop, kgrp = qtot[keep], top_q[keep], top_group[keep]
     b1 = np.array([centroids.get(int(g), (np.nan, np.nan, np.nan)) for g in kgrp],
                   np.float64)
