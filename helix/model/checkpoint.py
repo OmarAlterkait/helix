@@ -63,3 +63,82 @@ def load_converted(model, blob, *, prefer="raw"):
         # any model whose set_bins was called without them.
     model.load_state_dict(sd, strict=True)
     return used
+
+
+#: Filenames ``pimm export`` writes, in preference order.
+_EXPORT_CONFIGS = ("config.json", "training_config.json")
+_EXPORT_WEIGHTS = ("model.safetensors", "model.bin")
+
+
+def is_export_dir(path):
+    """True if ``path`` looks like a ``pimm export`` directory."""
+    import os
+    return os.path.isdir(path) and any(
+        os.path.exists(os.path.join(path, w)) for w in _EXPORT_WEIGHTS)
+
+
+def load_export_dir(path, *, device=None):
+    """``(model, meta)`` from a ``pimm export`` directory.
+
+    This is the forward path for anything WE train. ``pimm export`` already
+    writes the HuggingFace-shaped pair — weights plus the resolved config beside
+    them — so there is no helix-specific checkpoint format to invent, and the
+    directory is portable by construction.
+
+    ``tools/convert_fm_ckpt.py`` stays frozen as the one-time rescue of the
+    historical m113 checkpoint, which could not describe itself. Nothing trained
+    from here should go through it.
+    """
+    import json
+    import os
+    import torch
+    from helix.model import build_fm
+    from helix.model.tokenize import PatchConfig
+
+    cfg_path = next((os.path.join(path, c) for c in _EXPORT_CONFIGS
+                     if os.path.exists(os.path.join(path, c))), None)
+    if cfg_path is None:
+        raise ValueError(
+            f"{path} has weights but none of {_EXPORT_CONFIGS} — the "
+            f"architecture is not recoverable. Re-export with the run's config.")
+    full = json.load(open(cfg_path))
+    mcfg = dict(full.get("model") or {})
+    if not mcfg:
+        raise ValueError(f"{cfg_path} carries no 'model' section")
+    for k in ("type", "checkpoint", "bins", "weights"):
+        mcfg.pop(k, None)                      # builder selectors, not arch
+    if isinstance(mcfg.get("film"), list):
+        mcfg["film"] = tuple(mcfg["film"])
+
+    model = build_fm(mcfg)
+    wpath = next(os.path.join(path, w) for w in _EXPORT_WEIGHTS
+                 if os.path.exists(os.path.join(path, w)))
+    if wpath.endswith(".safetensors"):
+        try:
+            from safetensors.torch import load_file
+        except ImportError:
+            raise SystemExit(
+                f"{wpath} needs the safetensors package, which is absent here. "
+                f"Re-export with --no-safe-serialization to get model.bin, or "
+                f"install safetensors in this image.")
+        sd = load_file(wpath)
+    else:
+        sd = torch.load(wpath, map_location="cpu", weights_only=False)
+        sd = sd.get("state_dict", sd)
+    sd = {k[7:] if k.startswith("module.") else k: v for k, v in sd.items()}
+    model.load_state_dict(sd, strict=True)     # bin_edges rides along, persistent
+
+    # Tokenizer geometry travels in the same config, inside the transform list.
+    tok = None
+    for t in (full.get("transform") or []):
+        if isinstance(t, dict) and t.get("type") == "CoeffTokenize":
+            tok = dict(t.get("cfg") or {})
+            break
+    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model.to(dev).eval()
+    for prm in model.parameters():
+        prm.requires_grad_(False)
+    meta = dict(source="pimm-export", weights=os.path.basename(wpath),
+                config=mcfg, tokenizer=tok,
+                patch_config=PatchConfig(**tok) if tok else None)
+    return model, meta

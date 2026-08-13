@@ -231,7 +231,9 @@ hooks = [
     # EMA is not polish for a WSD run: the stable phase is flat by design, so the
     # raw weights sit at full LR noise for the whole run and the EMA is what
     # stands in for an annealed model until a cooldown is actually run.
-    dict(type="WeightEMA", decay=0.9999),
+    # save_freq matches CheckpointSaver so the EMA and the weights land within a
+    # step of each other; the hook logs a warning if they diverge on resume.
+    dict(type="WeightEMA", decay=0.9999, save_freq=SAVE_EVERY),
     # Was every_n_steps unset -> after_epoch only -> exactly ONE eval, after
     # training. No training curve, and model_best selection was vacuous.
     dict(type="CoeffFMEvaluator", every_n_steps=EVAL_EVERY, max_batches=200),
