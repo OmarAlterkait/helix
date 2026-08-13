@@ -45,12 +45,8 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
 
     used = "random-init"
     if not random_init:
-        sd, used = blob["state_dict"], "raw"
-        if weights == "ema":
-            ema = blob.get("state_dict_ema") or blob.get("ema")
-            if ema:
-                sd, used = ema, "ema"
-        model.load_state_dict(sd, strict=True)
+        from helix.model.checkpoint import load_converted
+        used = load_converted(model, blob, prefer=weights)
     model.to(dev).eval()
     for p in model.parameters():
         p.requires_grad_(False)

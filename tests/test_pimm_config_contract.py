@@ -139,7 +139,15 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
 
     m = build_fm(dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
                       dec_blocks=1, heads=4, dec_mode="cross", n_bins=16))
-    assert not hasattr(m, "bin_edges"), "a fresh categorical model must have no edges"
+    # The buffer EXISTS (persistent, so it rides in the state_dict and a
+    # checkpoint no longer needs a sidecar) but is unset — NaN, which cannot be
+    # mistaken for data. Absence was the old contract; the sentinel is the new
+    # one, and it still makes "built but never given edges" a loud failure
+    # rather than a model that silently bucketises everything into one bin.
+    import math
+    assert hasattr(m, "bin_edges")
+    assert not torch.isfinite(m.bin_edges).any(), \
+        "a fresh categorical model must have no USABLE edges"
 
     # a bins sidecar in tier1_setup_bins.py's format
     path = tmp_path / "bins.pt"

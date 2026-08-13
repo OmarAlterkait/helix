@@ -213,7 +213,8 @@ def build(verify_against_research):
     # comparison, so the parity proof was self-consistent but was not taken at
     # m113's operating point (it trained with rope_split=0).
     model = build_fm(cfg).cpu()
-    model.load_state_dict(sd, strict=True)
+    from helix.model.checkpoint import load_converted
+    load_converted(model, blob)
 
     got = {"model": model_outputs(model, cfg),
            "config": {k: list(v) if isinstance(v, tuple) else v
@@ -235,7 +236,11 @@ def build(verify_against_research):
         assert ref_kw.get("rope_split") == cfg.get("rope_split")   # the whole point
         ref = Ref(**{k: (tuple(v) if isinstance(v, list) else v)
                      for k, v in ref_kw.items()})
-        ref.load_state_dict(sd, strict=True)
+        ref.load_state_dict({k: v for k, v in sd.items()
+                             if not k.startswith("bin_")}, strict=True)
+        if blob.get("bins") is not None:
+            ref.set_bins(blob["bins"]["edges"], blob["bins"].get("cent_asinh"),
+                         blob["bins"].get("cent_lin"))
         ref_out = model_outputs(_AsHeads(ref), cfg)
         bad = [k for k in got["model"] if got["model"][k] != ref_out[k]]
         if bad:

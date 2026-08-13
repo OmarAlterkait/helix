@@ -65,7 +65,14 @@ def _pair(arch):
     torch.manual_seed(0)
     new = build_fm(dict(arch), serial=True)
     ref = Research(**arch)
-    ref.load_state_dict(new.state_dict(), strict=True)   # identical init
+    # Identical init. `bin_edges` is filtered because it is a PERSISTENT buffer
+    # in helix and does not exist in the research model at all — it is a
+    # training-set statistic that rides in our state_dict so a checkpoint can be
+    # loaded without its sidecar. Filtering keeps this a parity check on the
+    # PARAMETERS, which is what it is for; the edges are set explicitly on both
+    # sides by the callers that need them.
+    ref.load_state_dict({k: v for k, v in new.state_dict().items()
+                         if not k.startswith("bin_")}, strict=True)
     new.eval(); ref.eval()
     return new, ref
 
