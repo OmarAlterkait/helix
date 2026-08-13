@@ -31,6 +31,11 @@ _LAZY = {
     "fit_alongwire": "helix.probe.alongwire",
     "verify_alongwire": "helix.probe.alongwire",
     "u_of": "helix.probe.alongwire",
+    "decode_hits_plane": "helix.probe.truth",
+    "group_centroids": "helix.probe.truth",
+    "pixel_truth": "helix.probe.truth",
+    "fit_probe": "helix.probe.fit",
+    "fisher_r": "helix.probe.metrics",
 }
 
 __all__ = sorted(_LAZY)
