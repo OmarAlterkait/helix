@@ -36,6 +36,10 @@ _LAZY = {
     "pixel_truth": "helix.probe.truth",
     "fit_probe": "helix.probe.fit",
     "fisher_r": "helix.probe.metrics",
+    "load_probe_model": "helix.probe.features",
+    "features_at_layer": "helix.probe.features",
+    "gather_cell_features": "helix.probe.features",
+    "patch_rows": "helix.probe.patches",
 }
 
 __all__ = sorted(_LAZY)
