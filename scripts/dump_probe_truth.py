@@ -77,6 +77,44 @@ def _position_of(shard, event_id):
     return pos
 
 
+
+_PIX_KEYS = ("gid", "wire", "tick", "qtot", "ftop", "b1")
+_FIT_KEYS = ("gid", "y", "z", "wire")
+
+
+def _ckpt_save(path, rows):
+    """Checkpoint completed events so a preemption costs minutes, not the run.
+
+    Written atomically: a run killed mid-write leaves the previous checkpoint
+    intact rather than a truncated one. Measured need — a 388-event dump was
+    preempted at event 175 and lost everything.
+    """
+    import os
+    blob = {"n": np.array([len(rows)])}
+    for i, r in enumerate(rows):
+        for k in _PIX_KEYS:
+            blob[f"{i}.{k}"] = r[k]
+        for k in _FIT_KEYS:
+            blob[f"{i}._fit.{k}"] = r["_fit"][k]
+        blob[f"{i}.ident"] = np.array([r["ident"][0], r["ident"][1], str(r["ident"][2])])
+        blob[f"{i}.cov"] = np.asarray(r["_cov"], np.float64)
+    np.savez(path + ".tmp", **blob)
+    os.replace(path + ".tmp", path)
+
+
+def _ckpt_load(path):
+    d = np.load(path, allow_pickle=False)
+    out = []
+    for i in range(int(d["n"][0])):
+        r = {k: d[f"{i}.{k}"] for k in _PIX_KEYS}
+        r["_fit"] = {k: d[f"{i}._fit.{k}"] for k in _FIT_KEYS}
+        run, src, ev = d[f"{i}.ident"]
+        r["ident"] = (str(run), str(src), int(ev))
+        r["_cov"] = d[f"{i}.cov"].tolist()
+        out.append(r)
+    return out
+
+
 def _dequantise(pos, vol_range):
     lo, hi = vol_range[:, 0], vol_range[:, 1]
     return lo + pos.astype(np.float64) / 65535.0 * (hi - lo)
@@ -114,7 +152,24 @@ def dump(args):
     ev_rows, touched = [], set()
     cov_report = []
 
+    # Resume point. The manifest order is fixed, so the number of completed
+    # events is a sufficient cursor. The name carries every parameter that
+    # changes CONTENT, so a checkpoint from a different qtot_min or cell_t is
+    # never silently reused.
+    ck = os.path.join(args.work_dir or os.path.join(corpus, "truth"),
+                      f"_dump_ckpt_{args.split}_q{args.qtot_min:g}"
+                      f"_d{args.dom_threshold:g}_{args.cell_t}.npz")
+    os.makedirs(os.path.dirname(ck), exist_ok=True)
+    start = 0
+    if os.path.exists(ck) and not args.restart:
+        ev_rows = _ckpt_load(ck)
+        cov_report = [r["_cov"] for r in ev_rows]
+        start = len(ev_rows)
+        print(f"resuming after {start} events (from {os.path.basename(ck)})", flush=True)
+
     for n, ident in enumerate(events):
+        if n < start:
+            continue
         run, src, ev = ident["run"], ident["source_file"], int(ident["event"])
         tag = src.replace("sim_wire_sensor_", "").replace(".h5", "")
         hp = os.path.join(args.source, "hits", run, f"sim_wire_hits_{tag}.h5")
@@ -195,12 +250,15 @@ def dump(args):
                 f"Check toff/delta/lev, band_lengths, or the /ident pairing.")
 
         R["ident"] = (run, src, ev)
+        R["_cov"] = cov
         R["_fit"] = {k: (np.concatenate(v) if v else np.empty(0))
                      for k, v in fit_rows.items()}
         ev_rows.append(R)
         if (n + 1) % 25 == 0 or n + 1 == len(events):
+            _ckpt_save(ck, ev_rows)
             print(f"  {n+1}/{len(events)} events, "
-                  f"band0 cov {np.mean([c[0] for c in cov_report]):.4f}", flush=True)
+                  f"band0 cov {np.mean([c[0] for c in cov_report]):.4f}"
+                  f"  [checkpointed]", flush=True)
 
     # --- one along-wire fit over the whole split ---------------------------
     F = {k: np.concatenate([r["_fit"][k] for r in ev_rows]) for k in ("gid", "y", "z", "wire")}
@@ -288,6 +346,8 @@ def main(argv=None):
                          "mode-independent, which is why this artifact is not")
     ap.add_argument("--min-coverage", type=float, default=0.90)
     ap.add_argument("--limit", type=int, default=0, help="first N events only (smoke)")
+    ap.add_argument("--work-dir", default=None, help="where the resume checkpoint lives")
+    ap.add_argument("--restart", action="store_true", help="ignore any checkpoint")
     a = ap.parse_args(argv)
     if a.limit:
         print(f"--limit {a.limit}: dumping a SUBSET, not a usable artifact")
