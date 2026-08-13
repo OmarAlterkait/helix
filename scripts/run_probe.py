@@ -63,6 +63,29 @@ def _load_truth(path, corpus, strict=True):
     return cfg, aw, pix, offs, ident, problems
 
 
+def _position_of(shard, event_id):
+    """Position of ``event_id`` within a shard — NOT the id itself.
+
+    ``read_coeff_event`` slices by ``event_offset``, i.e. by POSITION. Ids and
+    positions coincide on every shard whose source events are contiguous, and
+    diverge on the ones that are not: ``sim_wire_sensor_0065.h5`` is missing
+    ``event_167``, so id 176 sits at position 175 there. Passing an id straight
+    in reads the NEXT event, silently, on that shard only.
+
+    Caught by the coverage check, which scored 0.383 where a matched event
+    scores 0.999 — the guard pointing at the consumer rather than the data.
+    """
+    import h5py
+    with h5py.File(shard, "r") as f:
+        ids = f["ident"]["event"][:]
+    pos = int(np.searchsorted(ids, event_id))
+    if pos >= len(ids) or int(ids[pos]) != int(event_id):
+        raise SystemExit(
+            f"{shard}: no event with id {event_id} (shard holds "
+            f"{len(ids)} events, {ids.min()}..{ids.max()})")
+    return pos
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--checkpoint", required=True)
@@ -122,7 +145,7 @@ def main(argv=None):
             c = f["config"]
             gids, nw = c["gids"][:], c["n_wires"][:]
             bl, ns = c["band_lengths"][:], c["norm_sigma"][:]
-        ce = read_coeff_event(shard, ev)
+        ce = read_coeff_event(shard, _position_of(shard, ev))
         tok = assemble(ce.band, ce.plane_gid, ce.wire, ce.tau, ce.value,
                        gids=gids, n_wires=nw, band_lengths=bl, norm_sigma=ns,
                        cfg=pcfg)
