@@ -30,7 +30,21 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
     import torch
     from helix.model import build_fm
 
+    from helix.model.checkpoint import is_export_dir, load_export_dir
+
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if is_export_dir(checkpoint):
+        # What WE train: a `pimm export` directory. bin_edges is persistent now,
+        # so the edges arrive with the weights and nothing needs a sidecar.
+        model, meta = load_export_dir(checkpoint, device=device)
+        if random_init:
+            fresh = build_fm(meta["config"])
+            fresh.to(dev).eval()
+            for prm in fresh.parameters():
+                prm.requires_grad_(False)
+            return fresh, dict(meta, weights="random-init", random_init=True)
+        return model, dict(meta, requested_weights=weights, random_init=False)
+
     blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if "config" not in blob or "state_dict" not in blob:
         raise ValueError(

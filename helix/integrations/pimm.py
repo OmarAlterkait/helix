@@ -442,10 +442,57 @@ class WeightEMA(HookBase):
     optimisation, so it needs no synchronisation.
     """
 
-    def __init__(self, decay=0.9999, key="state_dict_ema"):
+    def __init__(self, decay=0.9999, save_freq=None, key="state_dict_ema"):
         self.decay = float(decay)
+        self.save_freq = save_freq
         self.key = key
         self._shadow = None
+        self._step = 0
+
+    def _path(self):
+        import os
+        return os.path.join(self.trainer.cfg.save_path, "model", "model_ema.pth")
+
+    def before_train(self):
+        """Reload the shadow on resume, so preemption does not reset the average.
+
+        pimm's checkpoint payload has no slot for hook state, so nothing collects
+        `state_dict()` below. Rather than change shared infrastructure for one
+        consumer, the hook persists itself: at decay 0.9999 the half-life is
+        ~6,931 steps, so an EMA that restarts from the current weights on every
+        requeue is meaningless on a preemptable queue.
+        """
+        import os
+        import torch
+        if comm.get_rank() != 0 or not getattr(self.trainer.cfg, "resume", False):
+            return
+        path = self._path()
+        if not os.path.exists(path):
+            self.trainer.logger.info("WeightEMA: resume with no saved EMA; "
+                                     "the average restarts from here")
+            return
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+        self._shadow = {k: v.float() for k, v in blob["state_dict"].items()}
+        self._step = int(blob.get("step", 0))
+        now = int(getattr(self.trainer, "global_step", 0) or 0)
+        self.trainer.logger.info(
+            f"WeightEMA: resumed from step {self._step} (trainer at {now})")
+        if now and abs(now - self._step) > 1:
+            self.trainer.logger.warning(
+                f"WeightEMA: saved at step {self._step} but training resumes at "
+                f"{now} — the average is missing {abs(now - self._step)} steps")
+
+    def _save(self):
+        import os
+        import torch
+        if self._shadow is None:
+            return
+        path = self._path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        torch.save({"state_dict": self._shadow, "decay": self.decay,
+                    "step": self._step}, tmp)
+        os.replace(tmp, path)          # atomic: preemption cannot truncate it
 
     def _model(self):
         return unwrap_model(self.trainer.model)
@@ -453,6 +500,7 @@ class WeightEMA(HookBase):
     def after_step(self):
         if comm.get_rank() != 0:
             return
+        self._step = int(getattr(self.trainer, "global_step", self._step + 1))
         sd = self._model().state_dict()
         if self._shadow is None:
             self._shadow = {k: v.detach().clone().float() for k, v in sd.items()}
@@ -464,11 +512,16 @@ class WeightEMA(HookBase):
                 self._shadow[k] = v.detach().clone().float()
             else:
                 sh.mul_(d).add_(v.detach().float(), alpha=1.0 - d)
+        self._maybe_save()
 
     def state_dict(self):
         """Picked up by the checkpoint payload if the trainer collects hooks."""
         return {} if self._shadow is None else \
             {k: v.clone() for k, v in self._shadow.items()}
+
+    def _maybe_save(self):
+        if self.save_freq and self._step and self._step % int(self.save_freq) == 0:
+            self._save()
 
     def after_train(self):
         """Write the EMA beside the final checkpoint.
@@ -479,12 +532,9 @@ class WeightEMA(HookBase):
         """
         if comm.get_rank() != 0 or self._shadow is None:
             return
-        import os
-        path = os.path.join(self.trainer.cfg.save_path, "model", "model_ema.pth")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save({"state_dict": self._shadow, "decay": self.decay}, path)
+        self._save()
         self.trainer.logger.info(
-            f"WeightEMA(decay={self.decay}) -> {path}")
+            f"WeightEMA(decay={self.decay}, step={self._step}) -> {self._path()}")
 
 
 @HOOKS.register_module()
