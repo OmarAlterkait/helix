@@ -116,7 +116,16 @@ def triangulate_designs(geo, own_feats, plane, tick, wire, event, *, tbin=8):
     """
     geo = np.asarray(geo, np.float32)
     own = np.asarray(own_feats, np.float32)
-    ctx, ctxw, hit = slab_context(plane, tick, own, wire, event, tbin=tbin)
+    # Band-POOL before forming context, as the reference does
+    # (probe_3d_triangulate: `pooled = fpix.reshape(n, 4, fd).mean(1)`). Passing
+    # the full 4-band vector makes the context 2 x 4 x fd, so the cross design is
+    # own(2048) + ctx(4096) + geo = 6162 dims; at 2.5M rows that is 61 GB and
+    # OOM-killed a 200 GB node. Pooled it is 2 x fd = 1024, and the partner is a
+    # slab MEAN anyway — averaging bands before averaging the slab loses nothing
+    # the un-pooled form kept.
+    pooled = (own.reshape(own.shape[0], 4, -1).mean(1).astype(np.float32)
+              if own.shape[1] % 4 == 0 else own)
+    ctx, ctxw, hit = slab_context(plane, tick, pooled, wire, event, tbin=tbin)
     return {
         "solo": np.concatenate([own, geo], 1),
         "cross": np.concatenate([own, ctx, hit, geo], 1),

@@ -86,6 +86,17 @@ def _position_of(shard, event_id):
     return pos
 
 
+def _emit(path, row):
+    """Append one completed probe row immediately.
+
+    Both probes used to be written only after BOTH finished, so an OOM in
+    triangulate discarded a complete four-arm mlp result that had already run.
+    """
+    with open(path, "a") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+    print(f"  -> appended {row['probe']} to {path}", flush=True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--checkpoint", required=True)
@@ -222,6 +233,7 @@ def main(argv=None):
             print(f"  [mlp] {name:8s} fisher_r={r:+.4f}", flush=True)
         if "geo" in row and "trained" in row:
             row["d_over_geo_r"] = round(row["trained"]["fisher_r"] - row["geo"]["fisher_r"], 4)
+        _emit(a.out, row)
         out_rows.append(row)
 
     if "triangulate" in wanted:
@@ -236,11 +248,9 @@ def main(argv=None):
                              n_groups=minfo["n_groups"],
                              stop_epoch=round(info["mean_stop_epoch"], 1))
             print(f"  [tri] {name:8s} fisher_r={r:+.4f}", flush=True)
+        _emit(a.out, row)
         out_rows.append(row)
 
-    with open(a.out, "a") as f:
-        for r in out_rows:
-            f.write(json.dumps(r, sort_keys=True) + "\n")
     print(f"wrote {len(out_rows)} rows -> {a.out}")
     return 0
 

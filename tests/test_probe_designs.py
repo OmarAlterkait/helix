@@ -50,15 +50,20 @@ def test_slab_does_not_match_across_volumes_or_drift_bins():
 def test_triangulate_arms_nest_correctly():
     """solo must be exactly the single-plane design on the same rows, so the
     three arms are comparable."""
-    n, fd, gd = 6, 4, 3
+    n, n_bands, band_d, gd = 6, 4, 5, 3
+    fd = n_bands * band_d
     geo = np.random.default_rng(0).normal(size=(n, gd)).astype(np.float32)
     own = np.random.default_rng(1).normal(size=(n, fd)).astype(np.float32)
     plane = np.array([0, 1, 2, 0, 1, 2])
     d = triangulate_designs(geo, own, plane, np.full(n, 50.0),
                             np.arange(n) * 100.0, np.zeros(n))
+    # solo is exactly the single-plane design, so the arms are comparable
     np.testing.assert_array_equal(d["solo"], np.concatenate([own, geo], 1))
     np.testing.assert_array_equal(d["solo"][:, :fd], own)
-    assert d["cross"].shape[1] == fd + 2 * fd + 2 + gd
+    # Context is BAND-POOLED before the slab mean (as the reference does), so it
+    # is 2 x band_d, not 2 x fd — the un-pooled form made the cross design 6162
+    # dims and OOM-killed a 200 GB node at 2.5M rows.
+    assert d["cross"].shape[1] == fd + 2 * band_d + 2 + gd
     assert d["xwire"].shape[1] == fd + 2 + 2 + gd    # wires, not features
     assert d["xwire"].shape[1] < d["cross"].shape[1]
 
