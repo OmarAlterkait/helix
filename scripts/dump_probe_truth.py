@@ -129,6 +129,42 @@ def _dequantise(pos, vol_range):
     return lo + pos.astype(np.float64) / 65535.0 * (hi - lo)
 
 
+class _OutputLock:
+    """Exclusive claim on the output path, so two dumps cannot share one file.
+
+    Not hypothetical: a second dump launched while the first was finishing
+    truncated a completed 1,034 MB artifact to 687 MB, and h5py then refused it
+    with "bad object header version number". The per-event checkpoints survived,
+    so the cost was a re-merge rather than a re-extraction — but nothing stopped
+    the collision.
+
+    O_CREAT|O_EXCL, holding the pid, so a stale lock names who to blame.
+    """
+
+    def __init__(self, path):
+        self.path = path + ".lock"
+
+    def __enter__(self):
+        import os
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            raise SystemExit(
+                f"another dump holds {self.path} (contents: "
+                f"{open(self.path).read().strip()!r}). Wait for it, or remove "
+                f"the lock if that process is gone.")
+        os.write(fd, f"pid {os.getpid()} on {os.uname().nodename}\n".encode())
+        os.close(fd)
+        return self
+
+    def __exit__(self, *exc):
+        import os
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+
+
 def dump(args):
     import h5py
     try:
@@ -290,6 +326,7 @@ def dump(args):
     outdir = os.path.join(corpus, "truth")
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, f"probe_truth_{args.split}.h5")
+    lock = _OutputLock(out).__enter__()
     ident_txt = "\n".join(sorted(f"{r['ident'][0]}/{r['ident'][1]}/{r['ident'][2]}"
                                  for r in ev_rows))
     offs = np.cumsum([0] + [len(r["gid"]) for r in ev_rows]).astype(np.int64)
@@ -335,6 +372,7 @@ def dump(args):
         i.create_dataset("source_file", data=np.array([r["ident"][1] for r in ev_rows], dtype=st))
         i.create_dataset("event", data=np.array([r["ident"][2] for r in ev_rows], np.int64))
 
+    lock.__exit__()
     print(f"wrote {out}  ({offs[-1]:,} pixels, {len(ev_rows)} events, "
           f"{os.path.getsize(out)/2**20:.0f} MB)")
 
