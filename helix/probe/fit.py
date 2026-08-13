@@ -113,13 +113,27 @@ def fit_probe(X, y, event, plane=None, *, n_folds=5, epochs=40, batch=8192,
             sd = X[tr].std(0, keepdims=True).clip(1e-6)
             ym = float(y[tr].mean())
 
+            # Standardised copies stay on the CPU; only minibatches cross to the
+            # GPU. The design is rows x dims and both grow: at 388 events and
+            # 2048 feature dims it is 2.5M x 2064 x 4 B = 20.6 GB, which OOMs a
+            # 40 GB card once the model and workspace are resident. A minibatch
+            # is ~67 MB. Nothing about the fit changes — only where the array
+            # lives between steps.
             def _t(mask):
-                return (torch.from_numpy((X[mask] - mu) / sd).to(dev),
-                        torch.from_numpy(y[mask] - ym).to(dev))
+                return (torch.from_numpy(((X[mask] - mu) / sd).astype(np.float32)),
+                        torch.from_numpy((y[mask] - ym).astype(np.float32)))
 
             Xtr, ytr = _t(tr)
             Xva, yva = _t(va)
             Xte, _ = _t(te)
+            ytr_d = ytr.to(dev)
+
+            def _fwd(Xcpu, chunk=65536):
+                """Forward a CPU-resident design in chunks."""
+                outs = []
+                for i in range(0, Xcpu.shape[0], chunk):
+                    outs.append(head(Xcpu[i:i + chunk].to(dev, non_blocking=True)))
+                return torch.cat(outs) if outs else torch.empty(0, device=dev)
             va_event = event[va]
             va_plane = None if plane is None else np.asarray(plane)[va]
             va_y = y[va]
@@ -134,16 +148,17 @@ def fit_probe(X, y, event, plane=None, *, n_folds=5, epochs=40, batch=8192,
             best, best_state, bad, stop_ep = -np.inf, None, 0, epochs
             for ep in range(epochs):
                 head.net.train()
-                perm = torch.randperm(n, device=dev)
+                perm = torch.randperm(n)          # CPU: indexes a CPU design
                 for k in range(steps_per_epoch):     # EPOCHS, not a fixed budget
                     idx = perm[k * batch:(k + 1) * batch]
-                    loss = ((head(Xtr[idx]) - ytr[idx]) ** 2).mean()
+                    xb = Xtr[idx.cpu()].to(dev, non_blocking=True)
+                    loss = ((head(xb) - ytr_d[idx]) ** 2).mean()
                     opt.zero_grad(); loss.backward(); opt.step()
                 head.net.eval()
                 with torch.no_grad():
-                    vpred = head(Xva)
+                    vpred = _fwd(Xva)
                     if va_plane is None:
-                        score = -float(((vpred - yva) ** 2).mean())      # MSE fallback
+                        score = -float(((vpred.cpu() - yva) ** 2).mean())  # MSE fallback
                     else:
                         from .metrics import fisher_r
                         r, _, _ = fisher_r(va_y, vpred.cpu().numpy() + ym,
@@ -164,7 +179,7 @@ def fit_probe(X, y, event, plane=None, *, n_folds=5, epochs=40, batch=8192,
 
             head.net.eval()
             with torch.no_grad():
-                oof[si, te] = head(Xte).cpu().numpy().astype(np.float64) + ym
+                oof[si, te] = _fwd(Xte).cpu().numpy().astype(np.float64) + ym
             if verbose:
                 print(f"  seed {seed} fold {f}: stopped at epoch {stop_ep}, "
                       f"val score {best:+.4f}", flush=True)
