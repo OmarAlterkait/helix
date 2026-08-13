@@ -98,8 +98,12 @@ def _ckpt_save(path, rows):
             blob[f"{i}._fit.{k}"] = r["_fit"][k]
         blob[f"{i}.ident"] = np.array([r["ident"][0], r["ident"][1], str(r["ident"][2])])
         blob[f"{i}.cov"] = np.asarray(r["_cov"], np.float64)
-    np.savez(path + ".tmp", **blob)
-    os.replace(path + ".tmp", path)
+    # np.savez APPENDS .npz when the name lacks it, so `path + ".tmp"` becomes
+    # `path.tmp.npz` on disk and the replace below then looks for a file that
+    # was never written. Name the temp file with the suffix it will actually get.
+    tmp = path + ".tmp.npz"
+    np.savez(tmp, **blob)
+    os.replace(tmp, path)
 
 
 def _ckpt_load(path):
