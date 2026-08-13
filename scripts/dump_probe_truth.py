@@ -82,40 +82,45 @@ _PIX_KEYS = ("gid", "wire", "tick", "qtot", "ftop", "b1")
 _FIT_KEYS = ("gid", "y", "z", "wire")
 
 
-def _ckpt_save(path, rows):
-    """Checkpoint completed events so a preemption costs minutes, not the run.
+def _ckpt_save(dirpath, index, row):
+    """Append ONE event's arrays. Never rewrites what is already on disk.
 
-    Written atomically: a run killed mid-write leaves the previous checkpoint
-    intact rather than a truncated one. Measured need — a 388-event dump was
-    preempted at event 175 and lost everything.
+    The first version re-serialised every completed event on each checkpoint:
+    ~20 MB per event means a 388-event dump rewrites ~7.8 GB fifteen times,
+    ~60 GB of writes for a job whose real work is reading ~2 GB. O(n^2) I/O for
+    an O(n) task, and it dominated the runtime.
+
+    One file per event, written atomically, resumed by counting them.
     """
     import os
-    blob = {"n": np.array([len(rows)])}
-    for i, r in enumerate(rows):
-        for k in _PIX_KEYS:
-            blob[f"{i}.{k}"] = r[k]
-        for k in _FIT_KEYS:
-            blob[f"{i}._fit.{k}"] = r["_fit"][k]
-        blob[f"{i}.ident"] = np.array([r["ident"][0], r["ident"][1], str(r["ident"][2])])
-        blob[f"{i}.cov"] = np.asarray(r["_cov"], np.float64)
-    # np.savez APPENDS .npz when the name lacks it, so `path + ".tmp"` becomes
-    # `path.tmp.npz` on disk and the replace below then looks for a file that
-    # was never written. Name the temp file with the suffix it will actually get.
-    tmp = path + ".tmp.npz"
+    blob = {k: row[k] for k in _PIX_KEYS}
+    for k in _FIT_KEYS:
+        blob[f"_fit.{k}"] = row["_fit"][k]
+    blob["ident"] = np.array([row["ident"][0], row["ident"][1], str(row["ident"][2])])
+    blob["cov"] = np.asarray(row["_cov"], np.float64)
+    path = os.path.join(dirpath, f"ev{index:06d}.npz")
+    tmp = path + ".tmp.npz"          # np.savez appends .npz; name it so replace works
     np.savez(tmp, **blob)
     os.replace(tmp, path)
 
 
-def _ckpt_load(path):
-    d = np.load(path, allow_pickle=False)
+def _ckpt_load(dirpath):
+    """Every completed event, in manifest order. Stops at the first gap."""
+    import os
     out = []
-    for i in range(int(d["n"][0])):
-        r = {k: d[f"{i}.{k}"] for k in _PIX_KEYS}
-        r["_fit"] = {k: d[f"{i}._fit.{k}"] for k in _FIT_KEYS}
-        run, src, ev = d[f"{i}.ident"]
+    i = 0
+    while True:
+        path = os.path.join(dirpath, f"ev{i:06d}.npz")
+        if not os.path.exists(path):
+            break
+        d = np.load(path, allow_pickle=False)
+        r = {k: d[k] for k in _PIX_KEYS}
+        r["_fit"] = {k: d[f"_fit.{k}"] for k in _FIT_KEYS}
+        run, src, ev = d["ident"]
         r["ident"] = (str(run), str(src), int(ev))
-        r["_cov"] = d[f"{i}.cov"].tolist()
+        r["_cov"] = d["cov"].tolist()
         out.append(r)
+        i += 1
     return out
 
 
@@ -161,15 +166,16 @@ def dump(args):
     # changes CONTENT, so a checkpoint from a different qtot_min or cell_t is
     # never silently reused.
     ck = os.path.join(args.work_dir or os.path.join(corpus, "truth"),
-                      f"_dump_ckpt_{args.split}_q{args.qtot_min:g}"
-                      f"_d{args.dom_threshold:g}_{args.cell_t}.npz")
-    os.makedirs(os.path.dirname(ck), exist_ok=True)
+                      f"_dump_{args.split}_q{args.qtot_min:g}"
+                      f"_d{args.dom_threshold:g}_{args.cell_t}")
+    os.makedirs(ck, exist_ok=True)
     start = 0
-    if os.path.exists(ck) and not args.restart:
+    if os.path.isdir(ck) and not args.restart:
         ev_rows = _ckpt_load(ck)
         cov_report = [r["_cov"] for r in ev_rows]
         start = len(ev_rows)
-        print(f"resuming after {start} events (from {os.path.basename(ck)})", flush=True)
+        if start:
+            print(f"resuming after {start} events", flush=True)
 
     for n, ident in enumerate(events):
         if n < start:
@@ -258,11 +264,10 @@ def dump(args):
         R["_fit"] = {k: (np.concatenate(v) if v else np.empty(0))
                      for k, v in fit_rows.items()}
         ev_rows.append(R)
+        _ckpt_save(ck, n, R)                     # O(1) per event
         if (n + 1) % 25 == 0 or n + 1 == len(events):
-            _ckpt_save(ck, ev_rows)
             print(f"  {n+1}/{len(events)} events, "
-                  f"band0 cov {np.mean([c[0] for c in cov_report]):.4f}"
-                  f"  [checkpointed]", flush=True)
+                  f"band0 cov {np.mean([c[0] for c in cov_report]):.4f}", flush=True)
 
     # --- one along-wire fit over the whole split ---------------------------
     F = {k: np.concatenate([r["_fit"][k] for r in ev_rows]) for k in ("gid", "y", "z", "wire")}
