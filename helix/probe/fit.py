@@ -58,13 +58,23 @@ def _event_folds(event, n_folds, seed):
     return np.array([fold_of[int(e)] for e in event], np.int64)
 
 
-def fit_probe(X, y, event, *, n_folds=5, epochs=40, batch=8192, lr=2e-3,
-              weight_decay=1e-2, seeds=(0, 1, 2), val_frac=0.2, patience=6,
-              device=None, hidden=128, dropout=0.1, verbose=False):
+def fit_probe(X, y, event, plane=None, *, n_folds=5, epochs=40, batch=8192,
+              lr=2e-3, weight_decay=1e-2, seeds=(0, 1, 2), val_frac=0.2,
+              patience=6, device=None, hidden=128, dropout=0.1, verbose=False):
     """Out-of-fold predictions for every row, averaged over seeds.
 
     Returns ``(oof, info)``. ``oof[i]`` is predicted by a head that never saw
     row ``i``'s EVENT during training or early-stopping selection.
+
+    **Selection uses the probe's own metric when ``plane`` is given**, not
+    validation MSE. This matters more than it sounds: 97.4% of ``u``'s variance
+    is BETWEEN ``(event, plane)`` groups while ``fisher_r`` scores WITHIN them,
+    so val MSE plateaus almost immediately — long before any within-group
+    structure is learned — and MSE-based early stopping halts a head that has
+    learned only which group a row belongs to. Measured: an MSE-stopped head
+    scored 0.026 on inputs where a plain global least-squares fit reaches 0.189.
+    ``probe_3d_rigor`` selects on "val per-event within-plane R^2" for the same
+    reason; the probe that survived to the end lost that.
     """
     import torch
 
@@ -110,6 +120,9 @@ def fit_probe(X, y, event, *, n_folds=5, epochs=40, batch=8192, lr=2e-3,
             Xtr, ytr = _t(tr)
             Xva, yva = _t(va)
             Xte, _ = _t(te)
+            va_event = event[va]
+            va_plane = None if plane is None else np.asarray(plane)[va]
+            va_y = y[va]
 
             torch.manual_seed(seed)
             head = ProbeHead(X.shape[1], hidden, dropout)
@@ -118,7 +131,7 @@ def fit_probe(X, y, event, *, n_folds=5, epochs=40, batch=8192, lr=2e-3,
 
             n = Xtr.shape[0]
             steps_per_epoch = max(1, n // batch)
-            best, best_state, bad, stop_ep = np.inf, None, 0, epochs
+            best, best_state, bad, stop_ep = -np.inf, None, 0, epochs
             for ep in range(epochs):
                 head.net.train()
                 perm = torch.randperm(n, device=dev)
@@ -128,9 +141,16 @@ def fit_probe(X, y, event, *, n_folds=5, epochs=40, batch=8192, lr=2e-3,
                     opt.zero_grad(); loss.backward(); opt.step()
                 head.net.eval()
                 with torch.no_grad():
-                    vloss = float(((head(Xva) - yva) ** 2).mean())
-                if vloss < best - 1e-6:
-                    best, bad = vloss, 0
+                    vpred = head(Xva)
+                    if va_plane is None:
+                        score = -float(((vpred - yva) ** 2).mean())      # MSE fallback
+                    else:
+                        from .metrics import fisher_r
+                        r, _, _ = fisher_r(va_y, vpred.cpu().numpy() + ym,
+                                           va_event, va_plane)
+                        score = -1e9 if not np.isfinite(r) else r
+                if score > best + 1e-6:
+                    best, bad = score, 0
                     best_state = {k: v.detach().clone()
                                   for k, v in head.net.state_dict().items()}
                 else:
@@ -147,9 +167,10 @@ def fit_probe(X, y, event, *, n_folds=5, epochs=40, batch=8192, lr=2e-3,
                 oof[si, te] = head(Xte).cpu().numpy().astype(np.float64) + ym
             if verbose:
                 print(f"  seed {seed} fold {f}: stopped at epoch {stop_ep}, "
-                      f"val mse {best:.5f}", flush=True)
+                      f"val score {best:+.4f}", flush=True)
 
-    return oof.mean(0), dict(n_folds=n_folds, seeds=list(seeds), epochs=epochs,
+    return oof.mean(0), dict(selection="fisher_r" if plane is not None else "mse",
+                             n_folds=n_folds, seeds=list(seeds), epochs=epochs,
                              batch=batch, mean_stop_epoch=float(np.mean(stopped_at)),
                              hit_epoch_cap=int(sum(s == epochs for s in stopped_at)),
                              n_rows=int(X.shape[0]),

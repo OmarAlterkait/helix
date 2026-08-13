@@ -352,6 +352,11 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
         slot=slot.astype(np.int64), n_cells=n_cells,
         occ=occ.astype(np.float32), inp=inp, tgt=tgt, valid=valid,
         dead=dead.astype(np.float32), cell_band=cell_band, cell_gid=cell_gid,
+        # The sorted unique cell keys, in CELL-INDEX order — so `cell_key(...)`
+        # for a pixel can be searchsorted into this to find its feature row.
+        # Returned rather than recomputed by callers: `np.unique` already
+        # produced it here, and a second derivation is a second chance to drift.
+        cell_key=uniq.astype(np.int64),
         cell_t=cell_t, cell_wire=(cell_wb * pw).astype(np.float32),
         # Integer block indices. cell_wire carries wb*pw already, but as float32
         # for RoPE; cell_tb has no float twin at all, because `cell_t` is a
