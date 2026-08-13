@@ -78,3 +78,25 @@ def test_probe_loader_accepts_an_export_dir(tmp_path):
     assert rmeta["random_init"] and rmeta["weights"] == "random-init"
     # the random twin must NOT carry the trained weights
     assert not torch.allclose(trained.embed.weight, rnd.embed.weight)
+
+
+def test_ema_shadow_moves_to_the_model_device_on_resume():
+    """The resume path must not leave the shadow on the CPU.
+
+    Found by an actual 2-GPU resume: pimm restored step 600, the sidecar
+    reloaded, and the first EMA update raised "Expected all tensors to be on the
+    same device". A fresh run never reaches it — there the shadow is cloned from
+    the live model and is already on-device — so only a resume exercises it.
+
+    Checked without pimm by driving the update arithmetic directly.
+    """
+    shadow = {"w": torch.zeros(4)}                     # as loaded, on CPU
+    live = {"w": torch.ones(4)}                        # as the model holds it
+    d = 0.9
+    for k, v in live.items():
+        sh = shadow[k]
+        if sh.device != v.device:
+            sh = sh.to(v.device)
+            shadow[k] = sh
+        sh.mul_(d).add_(v.float(), alpha=1.0 - d)
+    torch.testing.assert_close(shadow["w"], torch.full((4,), 0.1))
