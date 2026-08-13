@@ -152,22 +152,27 @@ class CoeffTPCDataset(Dataset):
     def __init__(self, data_root, split="", dataset_name="coeff_tpc",
                  modalities=("coeff", "coeff_clean"), transform=None, loop=1,
                  max_len=-1, strict_lengths=True, event_range=None,
-                 exclude_range=None):
+                 exclude_range=None, holdout=None, split_role=None):
         super().__init__()
         try:
             from pimm_data import CoeffTPCDataset as _DS
         except ImportError:                       # older layout / partial install
             from pimm_data.coeff import CoeffTPCDataset as _DS
-        # event_range / exclude_range are what make train and val DIFFERENT
-        # events. This wrapper has its own signature, so a parameter added to the
-        # inner dataset is invisible here unless it is forwarded — and an
-        # unforwarded split silently becomes "no split" only if the wrapper
-        # swallows kwargs, which it must not.
+        # Split parameters must be FORWARDED. This wrapper re-declares the inner
+        # dataset's signature, so anything added there is invisible here until
+        # it is listed — and configs resolve THIS class, not the inner one.
+        #
+        # That has now bitten twice: event_range/exclude_range (fixed in
+        # df14602) and then holdout/split_role, which failed the first real
+        # 2-GPU launch with "unexpected keyword argument 'holdout'". The unit
+        # tests construct the inner dataset directly and cannot see it. If a
+        # third split parameter appears, add it here in the same commit.
         self._inner = _DS(data_root=data_root, split=split,
                           dataset_name=dataset_name, modalities=tuple(modalities),
                           transform=None, loop=loop, max_len=max_len,
                           strict_lengths=strict_lengths,
-                          event_range=event_range, exclude_range=exclude_range)
+                          event_range=event_range, exclude_range=exclude_range,
+                          holdout=holdout, split_role=split_role)
         self.transform = Compose(transform)
 
     def __len__(self):
@@ -471,8 +476,14 @@ class WeightEMA(HookBase):
             self.trainer.logger.info("WeightEMA: resume with no saved EMA; "
                                      "the average restarts from here")
             return
+        # Loaded to CPU, then moved to wherever the MODEL lives. Without the
+        # move the first update mixes a CPU shadow with CUDA weights and raises
+        # "Expected all tensors to be on the same device" — a fresh run never
+        # hits it, because there the shadow is cloned from the live model and is
+        # already on-device. Reachable only on resume.
         blob = torch.load(path, map_location="cpu", weights_only=False)
-        self._shadow = {k: v.float() for k, v in blob["state_dict"].items()}
+        ref = next(self._model().parameters()).device
+        self._shadow = {k: v.float().to(ref) for k, v in blob["state_dict"].items()}
         self._step = int(blob.get("step", 0))
         now = int(getattr(self.trainer, "global_step", 0) or 0)
         self.trainer.logger.info(
@@ -508,6 +519,9 @@ class WeightEMA(HookBase):
         d = self.decay
         for k, v in sd.items():
             sh = self._shadow.get(k)
+            if sh is not None and sh.device != v.device:
+                sh = sh.to(v.device)                  # belt and braces
+                self._shadow[k] = sh
             if sh is None or not v.is_floating_point():
                 self._shadow[k] = v.detach().clone().float()
             else:

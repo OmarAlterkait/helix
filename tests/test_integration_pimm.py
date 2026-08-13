@@ -12,6 +12,7 @@ have pimm checked out but not its dependencies.
 
 import importlib.util
 import os
+from pathlib import Path
 
 import pytest
 
@@ -118,3 +119,41 @@ def test_example_config_declares_the_custom_import():
     assert cfg.batch_size == 1, "the FM has no event separation; see MULTI_EVENT_BATCHING.md"
     assert cfg.model["type"] == "Coeff-FM"
     assert cfg.data["train"]["type"] == "CoeffTPCDataset"
+
+
+def test_dataset_wrapper_forwards_every_inner_parameter():
+    """The helix wrapper re-declares pimm-data's dataset signature, and CONFIGS
+    RESOLVE THE WRAPPER. So a parameter added to the inner dataset is invisible
+    until it is forwarded here.
+
+    That has bitten twice: event_range/exclude_range, then holdout/split_role —
+    the latter failed the first real 2-GPU launch with "unexpected keyword
+    argument 'holdout'" after passing every unit test, because the tests
+    construct the INNER dataset directly.
+
+    Compared by AST so this needs neither pimm nor a built dataset.
+    """
+    import ast
+    import inspect
+
+    pimm_data = pytest.importorskip("pimm_data")
+    from pimm_data.coeff import CoeffTPCDataset as Inner
+
+    src = (Path(__file__).resolve().parent.parent
+           / "helix" / "integrations" / "pimm.py").read_text()
+    wrapper = None
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ClassDef) and node.name == "CoeffTPCDataset":
+            for f in node.body:
+                if isinstance(f, ast.FunctionDef) and f.name == "__init__":
+                    wrapper = {a.arg for a in f.args.args} | {
+                        a.arg for a in f.args.kwonlyargs}
+    assert wrapper, "could not find the wrapper's __init__"
+
+    inner = set(inspect.signature(Inner.__init__).parameters)
+    # ignore_index is a base-class concern the wrapper deliberately does not expose
+    missing = inner - wrapper - {"ignore_index"}
+    assert not missing, (
+        f"the wrapper does not forward {sorted(missing)} — a config passing them "
+        f"raises TypeError at trainer build, which no unit test sees because "
+        f"they construct the inner dataset directly")
