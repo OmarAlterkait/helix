@@ -221,9 +221,15 @@ def main(argv=None):
     wanted = [p.strip() for p in a.probes.split(",") if p.strip()]
 
     if "mlp" in wanted:
-        designs = mlp_designs(geo, arms)
         row = dict(base, probe="mlp")
-        for name, X in designs.items():
+        # ONE design resident at a time. mlp_designs(geo, arms) built all four up
+        # front — 4 x 2064 dims x 2.5M rows x 4 B is ~62 GB of concatenated
+        # copies on top of the 60 GB the three raw arms already hold, which
+        # OOM-killed a 200 GB node before triangulate could start.
+        for name in ("geo", "trained", "random", "raw"):
+            if name != "geo" and arms.get(name) is None:
+                continue
+            X = mlp_designs(geo, {} if name == "geo" else {name: arms[name]})[name]
             oof, info = fit_probe(X, y, event, plane, n_folds=a.folds,
                                   epochs=a.epochs, seeds=seeds)
             r, rs, minfo = fisher_r(y, oof, event, plane)
@@ -231,16 +237,22 @@ def main(argv=None):
                              n_groups=minfo["n_groups"],
                              stop_epoch=round(info["mean_stop_epoch"], 1))
             print(f"  [mlp] {name:8s} fisher_r={r:+.4f}", flush=True)
+            del X, oof
         if "geo" in row and "trained" in row:
             row["d_over_geo_r"] = round(row["trained"]["fisher_r"] - row["geo"]["fisher_r"], 4)
         _emit(a.out, row)
         out_rows.append(row)
 
     if "triangulate" in wanted:
+        import gc
+        for k in ("random", "raw"):          # only `trained` is used from here
+            arms.pop(k, None)
+        gc.collect()
         d = triangulate_designs(geo, arms["trained"], plane, cat("tick"),
-                                   cat("wire"), event)
+                                cat("wire"), event)
         row = dict(base, probe="triangulate")
-        for name, X in d.items():
+        for name in list(d):
+            X = d.pop(name)                  # hand off; do not keep a second ref
             oof, info = fit_probe(X, y, event, plane, n_folds=a.folds,
                                   epochs=a.epochs, seeds=seeds)
             r, rs, minfo = fisher_r(y, oof, event, plane)
@@ -248,6 +260,8 @@ def main(argv=None):
                              n_groups=minfo["n_groups"],
                              stop_epoch=round(info["mean_stop_epoch"], 1))
             print(f"  [tri] {name:8s} fisher_r={r:+.4f}", flush=True)
+            del X, oof
+            gc.collect()
         _emit(a.out, row)
         out_rows.append(row)
 
