@@ -177,3 +177,35 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
     torch.save(dict(config={}, state_dict={},
                     bins=dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1))), conv)
     assert "edges" in ns["_load_bins"](str(conv))
+
+
+def test_configs_bootstrap_helix_onto_sys_path():
+    """Every pimm config must put helix on sys.path ITSELF, by APPEND.
+
+    pimm's scripts/train.sh hard-sets PYTHONPATH to its own code directory in
+    every branch, so a launch through `pimm submit` cannot see helix by
+    environment alone. The config is a Python file executed before
+    `custom_imports` is processed (Config.fromfile), so it can bootstrap itself
+    — which avoids installing helix into a shared image.
+
+    It MUST append. pimm's loader does insert(0, temp_dir) -> import -> pop(0),
+    so an insert(0) here lands in the slot the pop removes and the bootstrap
+    deletes itself. That failed silently: helix stayed unimportable and
+    custom_imports raised a bare ImportError with the real cause swallowed.
+    """
+    import re
+    from pathlib import Path
+
+    cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
+    found = sorted(cfg_dir.glob("coeff_fm_*.py"))
+    assert found, "no pimm configs found"
+    for path in found:
+        src = path.read_text()
+        assert "custom_imports" in src, path.name
+        boot = re.search(r"_sys\.path\.(insert|append)\(", src)
+        assert boot, f"{path.name} does not bootstrap helix onto sys.path"
+        assert boot.group(1) == "append", (
+            f"{path.name} uses sys.path.{boot.group(1)} — pimm's loader pops "
+            f"index 0 after importing the config, so insert(0) removes itself")
+        assert src.index("_sys.path.") < src.index("custom_imports"), (
+            f"{path.name} bootstraps AFTER custom_imports, which is too late")

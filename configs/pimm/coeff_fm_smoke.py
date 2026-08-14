@@ -19,6 +19,32 @@ Run (Turing, 1 GPU)::
          bash -lc 'python3 -m pimm.train --config-file .../coeff_fm_smoke.py'
 """
 
+import os as _os
+import sys as _sys
+
+# Put helix on sys.path BEFORE custom_imports is read. pimm's Config.fromfile
+# executes this file first and only then processes `custom_imports`
+# (pimm/utils/config.py:394-400), so this is enough to make
+# `helix.integrations.pimm` importable without helix being installed.
+#
+# It matters because pimm's scripts/train.sh hard-sets PYTHONPATH to its own
+# code directory in every branch, clobbering anything the caller exported — so
+# a launch through `pimm submit` cannot see helix by environment alone. Doing it
+# here keeps the config runnable under `pimm submit`, a bare `torchrun`, or a
+# direct `python -m pimm.train`, with no image change and nothing to install.
+#
+# HELIX_ROOT overrides, so this is not pinned to one checkout.
+# NOT derived from __file__: pimm copies the config into a temporary module
+# before executing it (Config._file2dict), so __file__ points at the temp copy
+# and any path computed from it is wrong.
+# APPEND, never insert(0). pimm's loader does `sys.path.insert(0, temp_dir)`,
+# imports this file, then `sys.path.pop(0)` to undo it — so an insert(0) here
+# lands in the slot that pop removes, and the bootstrap silently deletes itself
+# (verified: helix stayed unimportable and the pop left the temp dir behind).
+# Appending also avoids shadowing anything already installed.
+_sys.path.append(_os.environ.get(
+    "HELIX_ROOT", "/sdf/group/neutrino/omara/helix-extraction"))
+
 custom_imports = dict(
     imports=["helix.integrations.pimm"],
     allow_failed_imports=False,
