@@ -85,14 +85,13 @@ train:
     # replicates both model and optimizer, and train.sh's resume lookup already
     # accepts model_last.pth alongside model/last.
     checkpoint_format: legacy
-    # Also state it as a hook backend. apply_checkpoint_backend_defaults injects
-    # `hooks.CheckpointSaverIteration.backend=dcp` for any multi-GPU or chained
-    # run unless an explicit `hooks.*.backend` option is present, and the
-    # dry-run showed it doing exactly that. checkpoint_format still wins in
-    # _checkpoint_format, so the result was correct but the rendered command
-    # said `dcp` and `legacy` at once — one of which is a lie to anyone reading
-    # the job script.
-    hooks.CheckpointSaver.backend: legacy
+    # Do NOT also pass this as `hooks.CheckpointSaver.backend`. That hook's
+    # __init__ takes only (save_freq, evaluator_every_n_steps), so the option
+    # merges an unknown kwarg into its config dict and building it raises
+    # TypeError — the run dies at "=> Building hooks ...", before step 1.
+    # (`backend` belongs to CheckpointSaverIteration, a different hook, which
+    # is what apply_checkpoint_backend_defaults actually targets.)
+    # checkpoint_format above already wins in _checkpoint_format.
 
 env:
   NCCL_SOCKET_IFNAME: "^docker0,lo"
