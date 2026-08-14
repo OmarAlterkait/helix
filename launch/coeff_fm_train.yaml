@@ -1,0 +1,98 @@
+# `pimm submit` recipe for the coefficient-FM pretraining run.
+#
+#   PIMM=/sdf/group/neutrino/omara/pimm-fm
+#   PYTHONPATH=$PIMM /sdf/data/neutrino/omara/venvs/pimm-launch/bin/python \
+#     -m pimm.cli.submit --site s3df-container \
+#     --recipe /sdf/group/neutrino/omara/helix-extraction/launch/coeff_fm_train.yaml
+#
+# Why the driver runs from a venv on /sdf/data rather than the image or the host
+# python: `pimm submit` shells out to sbatch, which is NOT in pimm-latest.sif
+# (and the bound host binary cannot reach the configless controller from inside
+# the container — its DNS SRV lookup fails). The host python is 3.6.8, too old
+# for tyro and for the modern package index. So the driver gets its own
+# uv-managed 3.11 venv with just submitit + tyro + pyyaml; the JOB still runs
+# entirely in the image.
+#
+# `train.config` resolves to <pimm>/configs/helix/coeff_fm_train.py, which is a
+# SYMLINK to helix's configs/pimm/. train.sh has no absolute-config path
+# (CONFIG_DIR=configs/${DATASET}/${CONFIG}.py, always relative to the pimm
+# repo), so the config has to be reachable from there; a symlink keeps helix the
+# single source of truth and leaves pimm's tracked tree clean (git reports it
+# untracked). It resolves inside the container because it points into /sdf,
+# which is bound.
+
+site: s3df-container
+
+run:
+  name: coeff-fm-train
+  timestamp: true
+
+paths:
+  # Absolute: the rendered sbatch body does `cd <repo_root>` and the default "."
+  # would land wherever sbatch happened to be invoked from.
+  repo_root: /sdf/group/neutrino/omara/pimm-fm
+  # NOT the default {repo_root}/exp — that would write a multi-GB experiment
+  # tree into the pimm checkout.
+  exp_root: /sdf/data/neutrino/omara/exp
+
+resources:
+  scheduler: slurm
+  nnodes: 1
+  # 4 ranks x 1 event. The FM has no event separation, so batch_size_per_gpu
+  # must be 1 and the config's global batch_size=4 is tied to this number —
+  # changing one without the other either wedges setup (batch_size % world_size)
+  # or silently trains a model whose tokens attend across unrelated events.
+  nproc_per_node: 4
+  cpus_per_proc: 4
+  account: mli:cider-ml
+  partition: ampere            # A100-40GB: K=128 logits are ~2.4 GB at a full event
+  qos: preemptable
+  mem: 200G
+  # Measured: 0.249 s/step avg over the first 200 steps at this exact config and
+  # topology, x 118,962 steps = 8.2 h, plus ~101 evals and periodic saves. 12 h
+  # leaves headroom without asking for a slot that queues badly.
+  time: "12:00:00"
+  job_name: coeff-fm-train
+
+container:
+  runtime: singularity
+  image: /sdf/data/neutrino/youngsam/images/pimm-latest.sif
+  binds:
+    - /sdf
+    - /lscratch
+  interpreter: /opt/pimm/.venv/bin/python
+
+chain:
+  # Preemptable means eviction is normal, not exceptional. Each attempt requeues
+  # the SAME job id with train.resume=true (submit.py:202-206 sets resume on
+  # every job after the first), and train.sh then finds the checkpoint itself.
+  # 4 attempts x 12 h covers the ~9 h run even if three of them are evicted.
+  jobs: 4
+
+train:
+  config: helix/coeff_fm_train
+  # No `weight`. train.sh's resume branch derives it (`pimm.utils.path
+  # latest-checkpoint`) and exits 2 if none exists, rather than silently
+  # restarting from scratch — so setting it here would only be able to be wrong.
+  options:
+    # NOT the DCP default that apply_checkpoint_backend_defaults would pick for a
+    # multi-GPU chained run. DCP's save planner calls dist.gather_object on the
+    # default process group, and pimm initialises that group as NCCL-only
+    # (comm.py:183-184); the gather dies with "NCCL Error 1: unhandled cuda
+    # error" and then every rank hangs until the 600 s watchdog fires. Measured
+    # on 4 GPUs at the first save (step 238).
+    # `legacy` writes one rank-0 file. That is complete here because DDP
+    # replicates both model and optimizer, and train.sh's resume lookup already
+    # accepts model_last.pth alongside model/last.
+    checkpoint_format: legacy
+    # Also state it as a hook backend. apply_checkpoint_backend_defaults injects
+    # `hooks.CheckpointSaverIteration.backend=dcp` for any multi-GPU or chained
+    # run unless an explicit `hooks.*.backend` option is present, and the
+    # dry-run showed it doing exactly that. checkpoint_format still wins in
+    # _checkpoint_format, so the result was correct but the rendered command
+    # said `dcp` and `legacy` at once — one of which is a lie to anyone reading
+    # the job script.
+    hooks.CheckpointSaver.backend: legacy
+
+env:
+  NCCL_SOCKET_IFNAME: "^docker0,lo"
