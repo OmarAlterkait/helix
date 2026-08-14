@@ -41,6 +41,62 @@ import os
 import numpy as np
 
 
+GS = 64   # gate block width; the artifacts are exactly this wide
+
+
+def residual_crop(clean, diff, hw=90, ht=220):
+    """Window centred on the worst OFF-SIGNAL residual.
+
+    best_crop finds signal, which is the wrong place to look at coherent
+    leftovers: in a signal-dense block the common mode is large and the gate
+    refuses it at any kgate, so 3.0 and 4.0 look identical there. The leftover
+    strips live in the QUIET regions, so centre on the largest |diff| where the
+    clean target is zero.
+    """
+    off = np.where(np.abs(clean) > 0, 0.0, np.abs(diff))
+    nw, T = off.shape
+    w0, t0 = np.unravel_index(int(np.argmax(off)), off.shape)
+    wi = max(0, min(int(w0) - hw // 2, nw - hw))
+    ti = max(0, min(int(t0) - ht // 2, T - ht))
+    return slice(wi, wi + hw), slice(ti, ti + ht)
+
+
+def best_crop(clean, hw=90, ht=220):
+    """Signal-rich window. Verbatim from research/wire_denoise/viz_2x2.py."""
+    en = np.abs(clean)
+    nw, T = en.shape
+    wc = en.sum(1)
+    tc = en.sum(0)
+    wi = max(0, min(int(np.argmax(np.convolve(wc, np.ones(hw), 'same'))) - hw // 2, nw - hw))
+    ti = max(0, min(int(np.argmax(np.convolve(tc, np.ones(ht), 'same'))) - ht // 2, T - ht))
+    return slice(wi, wi + hw), slice(ti, ti + ht)
+
+
+def symlog_im_crop(ax, img, title, ws, ts, vmax, cbar=True):
+    """Cropped panel with 64-wire group boundaries, as research/wire_denoise does.
+
+    The dashed lines matter here: leftover coherent sits in whole `group_size`
+    blocks, so the gridlines show at a glance whether a residual strip is a gate
+    block or something else.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import SymLogNorm
+
+    norm = SymLogNorm(linthresh=2.0, vmin=-vmax, vmax=vmax, base=10)
+    extent = [ws.start, ws.stop, ts.start, ts.stop]
+    im = ax.imshow(img.T, aspect="auto", origin="lower", cmap="RdBu_r", norm=norm,
+                   extent=extent)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("wire")
+    ax.set_ylabel("tick")
+    first = ((ws.start // GS) + 1) * GS
+    for g in range(first, ws.stop, GS):
+        ax.axvline(g, color="gray", lw=0.5, ls="--", alpha=0.5)
+    if cbar:
+        plt.colorbar(im, ax=ax, fraction=0.045, pad=0.02, label="ADC")
+    return im
+
+
 def symlog_im(ax, img, title, vmax, cbar=True):
     """Verbatim from research/coeff_foundation_model/viz_2x2_coeff.py."""
     import matplotlib.pyplot as plt
@@ -136,6 +192,20 @@ def main():
                     default="/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz")
     ap.add_argument("--no-noisy", action="store_true",
                     help="skip the regenerated panel; corpus-only (3 of 4 panels)")
+    ap.add_argument("--crop", action="store_true",
+                    help="zoom to the signal-rich window (best_crop) instead of "
+                         "the full plane, with 64-wire group boundaries drawn")
+    ap.add_argument("--crop-on", choices=("signal", "residual"), default="signal",
+                    help="'signal' = best_crop (signal-rich, research convention); "
+                         "'residual' = centre on the worst off-signal leftover, "
+                         "which is where kgate actually changes the picture")
+    ap.add_argument("--crop-at", type=int, nargs=2, metavar=("WIRE", "TICK"),
+                    default=None,
+                    help="force the crop's start indices. Needed to compare two "
+                         "corpora: each would otherwise pick its own worst-residual "
+                         "window and the panels would not be the same patch.")
+    ap.add_argument("--hw", type=int, default=90, help="crop width in wires")
+    ap.add_argument("--ht", type=int, default=220, help="crop height in ticks")
     ap.add_argument("--outdir", required=True)
     a = ap.parse_args()
 
@@ -153,6 +223,11 @@ def main():
     cc = read_coeff_event(clean_shard, a.event, coords_from=ce)
     src_file, ev = str(ce.source_file), int(ce.event)
     print(f"corpus event: {src_file} evt{ev:03d}  ({ce.n_coeff:,} coeffs)")
+
+    import json as _json
+    import h5py as _h5
+    with _h5.File(noisy_shard, "r") as _f:
+        kg_lbl = _json.loads(_f["config"].attrs["removal_json"]).get("kgate", "?")
 
     removed_all = ce.reconstruct_images()
     clean_all = cc.reconstruct_images()
@@ -186,22 +261,57 @@ def main():
         f0 = 1.0 - np.abs(diff)[sig].sum() / max(np.abs(cl)[sig].sum(), 1e-9)
         vmax = max(float(np.percentile(np.abs(cl[sig]), 99.5)) if sig.any() else 20.0, 30.0)
 
-        fig, ax = plt.subplots(2, 2, figsize=(13, 9))
-        symlog_im(ax[0, 0], cl, "clean (truth, co-supported target)", vmax)
-        if noisy_all is not None:
-            symlog_im(ax[0, 1], noisy_all[gid],
-                      "noisy: +coherent +intrinsic (regenerated, seed-matched)", vmax)
+        if a.crop:
+            if a.crop_at:
+                ws = slice(a.crop_at[0], a.crop_at[0] + a.hw)
+                ts = slice(a.crop_at[1], a.crop_at[1] + a.ht)
+            elif a.crop_on == "residual":
+                ws, ts = residual_crop(cl, diff, a.hw, a.ht)
+            else:
+                ws, ts = best_crop(cl, a.hw, a.ht)
+            print(f"  crop w[{ws.start}:{ws.stop}] t[{ts.start}:{ts.stop}]")
+            cl_v, rc_v = cl[ws, ts], rc[ws, ts]
+            no_v = noisy_all[gid][ws, ts] if noisy_all is not None else None
+            df_v = rc_v - cl_v
+            # vmax from the CROP, not the full plane: a window-local scale is what
+            # makes the residual visible at this zoom.
+            sg = np.abs(cl_v) > 0
+            vmax = max(float(np.percentile(np.abs(cl_v[sg]), 99.5)) if sg.any() else 20.0, 30.0)
+            fig, ax = plt.subplots(2, 2, figsize=(11, 8))
+            symlog_im_crop(ax[0, 0], cl_v, "clean (truth, co-supported target)", ws, ts, vmax)
+            if no_v is not None:
+                symlog_im_crop(ax[0, 1], no_v, "noisy: +coherent +intrinsic (seed-matched)",
+                               ws, ts, vmax)
+            else:
+                ax[0, 1].set_axis_off()
+                ax[0, 1].text(0.5, 0.5, "noisy not stored in corpus", ha="center",
+                              va="center", fontsize=11)
+            symlog_im_crop(ax[1, 0], rc_v, "removed: corpus coeff -> DWT recon", ws, ts, vmax)
+            symlog_im_crop(ax[1, 1], df_v, "diff (recon - clean)", ws, ts,
+                           max(vmax * 0.5, 20.0))
+            fig.suptitle(f"{src_file} evt{ev:03d}  plane_gid {gid}  ZOOM "
+                         f"w[{ws.start}:{ws.stop}] t[{ts.start}:{ts.stop}]  "
+                         f"kgate={kg_lbl}  on={a.crop_on}  F0={f0:.3f} (full plane)",
+                         fontweight="bold")
+            tag = f"zoom{a.crop_on[0]}"
         else:
-            ax[0, 1].set_axis_off()
-            ax[0, 1].text(0.5, 0.5, "noisy not stored in corpus",
-                          ha="center", va="center", fontsize=11)
-        symlog_im(ax[1, 0], rc, "removed: corpus coeff -> DWT recon", vmax)
-        symlog_im(ax[1, 1], diff, "diff (recon - clean)", max(vmax * 0.5, 20.0))
-        fig.suptitle(f"{src_file} evt{ev:03d}  plane_gid {gid}  FULL PLANE "
-                     f"({cl.shape[0]}w x {cl.shape[1]}t)  FROM CORPUS  F0={f0:.3f}",
-                     fontweight="bold")
+            fig, ax = plt.subplots(2, 2, figsize=(13, 9))
+            symlog_im(ax[0, 0], cl, "clean (truth, co-supported target)", vmax)
+            if noisy_all is not None:
+                symlog_im(ax[0, 1], noisy_all[gid],
+                          "noisy: +coherent +intrinsic (regenerated, seed-matched)", vmax)
+            else:
+                ax[0, 1].set_axis_off()
+                ax[0, 1].text(0.5, 0.5, "noisy not stored in corpus",
+                              ha="center", va="center", fontsize=11)
+            symlog_im(ax[1, 0], rc, "removed: corpus coeff -> DWT recon", vmax)
+            symlog_im(ax[1, 1], diff, "diff (recon - clean)", max(vmax * 0.5, 20.0))
+            fig.suptitle(f"{src_file} evt{ev:03d}  plane_gid {gid}  FULL PLANE "
+                         f"({cl.shape[0]}w x {cl.shape[1]}t)  kgate={kg_lbl}  F0={f0:.3f}",
+                         fontweight="bold")
+            tag = "full"
         fig.tight_layout()
-        out = f"{a.outdir}/corpus_ev{ev:03d}_gid{gid}.png"
+        out = f"{a.outdir}/{tag}_ev{ev:03d}_gid{gid}.png"
         fig.savefig(out, dpi=120)
         plt.close(fig)
         print(f"saved {out}  vmax={vmax:.0f}  F0={f0:.3f}")
