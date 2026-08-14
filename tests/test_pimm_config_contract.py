@@ -201,11 +201,14 @@ def test_configs_bootstrap_helix_onto_sys_path():
     assert found, "no pimm configs found"
     for path in found:
         src = path.read_text()
-        assert "custom_imports" in src, path.name
+        # The ASSIGNMENT, not the word — the bootstrap comment mentions
+        # custom_imports and would otherwise match first, making the ordering
+        # check below compare against the wrong position.
+        assign = src.index("custom_imports = ")
         boot = re.search(r"_sys\.path\.(insert|append)\(", src)
         assert boot, f"{path.name} does not bootstrap helix onto sys.path"
         assert boot.group(1) == "append", (
             f"{path.name} uses sys.path.{boot.group(1)} — pimm's loader pops "
             f"index 0 after importing the config, so insert(0) removes itself")
-        assert src.index("_sys.path.") < src.index("custom_imports"), (
+        assert src.index("_sys.path.") < assign, (
             f"{path.name} bootstraps AFTER custom_imports, which is too late")
