@@ -112,7 +112,7 @@ def symlog_im(ax, img, title, vmax, cbar=True):
     return im
 
 
-def regenerate_noisy(shard_path, run, ev, geom_path, npz):
+def regenerate_planes(shard_path, run, ev, geom_path, npz):
     """Rebuild the noisy dense planes for one event, the builder's SERIAL way.
 
     Replicates ``build_coeff_corpus.py::_plane_fn_torch`` (lines 238-269) and its
@@ -169,12 +169,20 @@ def regenerate_noisy(shard_path, run, ev, geom_path, npz):
     offset = torch.tensor([wire.numel()], dtype=torch.long, device=dev)
 
     grids = _dops.densify(wire, time_, val, pid, offset, reg)
+    clean = {int(g): x[0].detach().cpu().numpy().copy() for g, x in grids.items()}
     grids = _dops.add_intrinsic_noise(grids, reg, seeds=[seed], incoherent=True,
                                       coherent=True, series_spectrum=spec,
                                       group_size=cfg.group_size)
     peds = {int(g): cfg.pedestals.get(gmap[int(g)].split("_")[-1], 0) for g in grids}
     grids = _dops.digitize(grids, peds, n_bits=12)
-    return {int(g): x[0].detach().cpu().numpy() for g, x in grids.items()}, seed
+    noisy = {int(g): x[0].detach().cpu().numpy() for g, x in grids.items()}
+    return noisy, clean, seed
+
+
+def regenerate_noisy(shard_path, run, ev, geom_path, npz):
+    """Back-compat shim: ``(noisy, seed)``."""
+    noisy, _clean, seed = regenerate_planes(shard_path, run, ev, geom_path, npz)
+    return noisy, seed
 
 
 def main():
@@ -190,6 +198,16 @@ def main():
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json")
     ap.add_argument("--npz",
                     default="/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz")
+    ap.add_argument("--clean-source", choices=("corpus", "true"), default="corpus",
+                    help="'corpus' = the stored coeff_clean, i.e. the CO-SUPPORTED "
+                         "target the FM regresses onto (clean restricted to the "
+                         "coordinates removal+threshold kept). 'true' = the "
+                         "noise-free image itself, regenerated. They differ: the "
+                         "co-supported target is missing ~2.7% of the true signal "
+                         "charge, so a diff against it forgives whatever the "
+                         "denoiser discarded, and its inverse-DWT leakage spreads "
+                         "nonzero pixels far wider (1.85M vs 392k) which distorts "
+                         "any mask built from it.")
     ap.add_argument("--no-noisy", action="store_true",
                     help="skip the regenerated panel; corpus-only (3 of 4 panels)")
     ap.add_argument("--crop", action="store_true",
@@ -232,12 +250,15 @@ def main():
     removed_all = ce.reconstruct_images()
     clean_all = cc.reconstruct_images()
 
-    noisy_all = None
+    noisy_all = true_clean_all = None
+    if a.clean_source == "true" and a.no_noisy:
+        raise SystemExit("--clean-source true needs the regeneration that "
+                         "--no-noisy skips")
     if not a.no_noisy:
         # The corpus event carries the SHARD it came from; the noisy image is
         # regenerated from that sensor shard, not from a run-wide index.
         sensor_shard = os.path.join(a.source_root, a.split, src_file)
-        noisy_all, seed = regenerate_noisy(
+        noisy_all, true_clean_all, seed = regenerate_planes(
             sensor_shard, str(ce.run) or a.split, ev, a.geom, a.npz)
         # The corpus records the seed the builder used. If the recomputed one
         # differs we are about to draw a different noise realisation than the
@@ -249,11 +270,15 @@ def main():
                 f"!= stored {stored} — the regenerated panel would not match")
         print(f"noise seed {seed} matches the corpus")
 
+    CLEAN_TITLE = ("clean (TRUE noise-free image)" if a.clean_source == "true"
+                   else "clean (co-supported target)")
+
     for gid in a.planes:
         if gid not in clean_all:
             print(f"  plane {gid} not in this shard's plane set {sorted(clean_all)}")
             continue
-        cl, rc = clean_all[gid], removed_all[gid]
+        cl = (true_clean_all[gid] if a.clean_source == "true" else clean_all[gid])
+        rc = removed_all[gid]
         diff = rc - cl
         sig = np.abs(cl) > 0
         # Same F0 the reference figure reports: fraction of clean charge left
@@ -278,7 +303,7 @@ def main():
             sg = np.abs(cl_v) > 0
             vmax = max(float(np.percentile(np.abs(cl_v[sg]), 99.5)) if sg.any() else 20.0, 30.0)
             fig, ax = plt.subplots(2, 2, figsize=(11, 8))
-            symlog_im_crop(ax[0, 0], cl_v, "clean (truth, co-supported target)", ws, ts, vmax)
+            symlog_im_crop(ax[0, 0], cl_v, CLEAN_TITLE, ws, ts, vmax)
             if no_v is not None:
                 symlog_im_crop(ax[0, 1], no_v, "noisy: +coherent +intrinsic (seed-matched)",
                                ws, ts, vmax)
@@ -291,12 +316,12 @@ def main():
                            max(vmax * 0.5, 20.0))
             fig.suptitle(f"{src_file} evt{ev:03d}  plane_gid {gid}  ZOOM "
                          f"w[{ws.start}:{ws.stop}] t[{ts.start}:{ts.stop}]  "
-                         f"kgate={kg_lbl}  on={a.crop_on}  F0={f0:.3f} (full plane)",
+                         f"kgate={kg_lbl}  clean={a.clean_source}  on={a.crop_on}  F0={f0:.3f} (full plane)",
                          fontweight="bold")
             tag = f"zoom{a.crop_on[0]}"
         else:
             fig, ax = plt.subplots(2, 2, figsize=(13, 9))
-            symlog_im(ax[0, 0], cl, "clean (truth, co-supported target)", vmax)
+            symlog_im(ax[0, 0], cl, CLEAN_TITLE, vmax)
             if noisy_all is not None:
                 symlog_im(ax[0, 1], noisy_all[gid],
                           "noisy: +coherent +intrinsic (regenerated, seed-matched)", vmax)
@@ -311,7 +336,7 @@ def main():
                          fontweight="bold")
             tag = "full"
         fig.tight_layout()
-        out = f"{a.outdir}/{tag}_ev{ev:03d}_gid{gid}.png"
+        out = f"{a.outdir}/{tag}_{a.clean_source}_ev{ev:03d}_gid{gid}.png"
         fig.savefig(out, dpi=120)
         plt.close(fig)
         print(f"saved {out}  vmax={vmax:.0f}  F0={f0:.3f}")
