@@ -120,6 +120,14 @@ def main():
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json",
                     help="plane registry (pimm_data.geometry.load_plane_registry)")
     ap.add_argument("--dataset-name", default="wire_test_00_00_02")
+    ap.add_argument("--kgate", type=float, default=None,
+                    help="coherent-gate threshold in units of the per-band coherent "
+                         "scale. None -> DetectorConfig's default (3.0), which is "
+                         "what run_0027575715 was built with. The research figures "
+                         "and evals all used 4.0; at 3.0 genuine coherent excursions "
+                         "are misclassified as signal and survive as block-wide "
+                         "strips (~15x more off-signal residual, and slightly WORSE "
+                         "F0). Recorded in removal_json either way.")
     ap.add_argument("--run", default="")
     ap.add_argument("--file-index", type=int, default=0)
     ap.add_argument("--events", type=int, default=100)
@@ -196,7 +204,8 @@ def main():
     reg = load_plane_registry(args.geom)
     base = config_from_file(args.shard)
     cfg = DetectorConfig(num_time_steps=base.num_time_steps,
-                         plane_labels=base.plane_labels, pedestals=base.pedestals)
+                         plane_labels=base.plane_labels, pedestals=base.pedestals,
+                         **({} if args.kgate is None else dict(gate_kgate=args.kgate)))
     print(f"n_time={cfg.num_time_steps} planes={len(cfg.plane_labels)} "
           f"wavelet={cfg.wavelet} L{cfg.dwt_level} removal={cfg.removal} "
           f"k{cfg.gate_kgate}/np{cfg.gate_npass} noise={'white' if args.white else 'colored'}")
