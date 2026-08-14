@@ -46,12 +46,15 @@ from pimm.utils.optimizer import OPTIMIZERS
 from pimm.utils.scheduler import SCHEDULERS
 from torch.utils.data import Dataset
 
+from helix.integrations._bootstrap import (bootstrap_block, has_bootstrap,
+                                           running_roots)
 from helix.model.mup import expand_max_lr, param_group_ratios
 from helix.model.tokenize import CoeffTokenize
 
 __all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
            "build_coeff_fm",
-           "FMTrainer", "CoeffFMEvaluator", "WSDStableLR", "WSDCooldownLR", "WeightEMA"]
+           "FMTrainer", "CoeffFMEvaluator", "WSDStableLR", "WSDCooldownLR", "WeightEMA",
+           "HelixPathBootstrap"]
 
 # The tokenizer needs no adapter — it is already a duck-typed transform
 # (``scope`` + ``__call__(dict) -> dict``), which is why it can live in helix
@@ -427,6 +430,62 @@ class WSDCooldownLR(_LambdaLR):
             return max(floor, 1.0 - math.sqrt(min(p, 1.0)))
 
         super().__init__(optimizer=optimizer, lr_lambda=wsd, last_epoch=last_epoch)
+
+
+@HOOKS.register_module()
+class HelixPathBootstrap(HookBase):
+    """Put the helix `sys.path` bootstrap back into the config pimm dumps.
+
+    Without this a chained run cannot resume, and it fails LATE — after job 1 has
+    burned its whole wall-clock allocation.
+
+    The cause is that `Config.dump` serialises the RESOLVED dict, not the source:
+    `custom_imports` is a dict and survives, while the `sys.path.append` that made
+    `helix.integrations.pimm` importable is a STATEMENT and does not. Job 1 loads
+    the config from the repo and is fine; every later job takes train.sh's resume
+    branch, which loads `${EXP_DIR}/config.py` (train.sh:226) with
+    `PYTHONPATH=${EXP_DIR}/code` (train.sh:253) — pimm's own snapshot, which does
+    not contain helix. `custom_imports` then raises a bare ImportError with the
+    real ModuleNotFoundError swallowed by `import_modules_from_strings`.
+
+    So the dumped config is rewritten here, once, on rank 0. The root is taken
+    from the RUNNING helix rather than a constant, so a resumed job re-enters the
+    same checkout job 1 used instead of whatever the default happens to point at
+    by then; HELIX_ROOT still overrides. This runs in `before_train`, after
+    `_train_utils.py:147` has dumped the config.
+
+    It cannot instead snapshot helix into `${EXP_DIR}/code`: that directory is
+    built by `cp -r scripts tools pimm` inside pimm's train.sh, and the point of
+    this integration is that pimm is not modified.
+    """
+
+    def __init__(self, root=None):
+        self.root = root
+
+    def before_train(self):
+        import os
+
+        if comm.get_rank() != 0:
+            return
+        path = os.path.join(self.trainer.cfg.save_path, "config.py")
+        try:
+            with open(path) as fh:
+                src = fh.read()
+        except FileNotFoundError:
+            # No dump means nothing will be resumed from it either.
+            return
+        if has_bootstrap(src):
+            return
+        helix_root, pimm_data_root = running_roots()
+        helix_root = self.root or helix_root
+        tmp = path + ".helixtmp"
+        with open(tmp, "w") as fh:
+            fh.write(bootstrap_block(helix_root, pimm_data_root) + "\n" + src)
+        os.replace(tmp, path)          # atomic: a torn config.py is unresumable
+        self.trainer.logger.info(
+            f"HelixPathBootstrap: re-added the sys.path bootstrap to {path} "
+            f"(helix={helix_root!r}, pimm_data={pimm_data_root!r}) so chained "
+            f"jobs can resume")
 
 
 @HOOKS.register_module()
