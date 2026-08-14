@@ -19,31 +19,49 @@ Run (Turing, 1 GPU)::
          bash -lc 'python3 -m pimm.train --config-file .../coeff_fm_smoke.py'
 """
 
+# Put helix AND the pimm-data checkout on sys.path BEFORE custom_imports is read.
+# pimm's Config.fromfile executes this file first and only then processes
+# `custom_imports` (pimm/utils/config.py:394-400), so this is enough to make
+# `helix.integrations.pimm` importable without helix being installed.
+#
+# It matters because pimm's scripts/train.sh hard-sets PYTHONPATH to its own code
+# directory in every branch, clobbering anything the caller exported — so a
+# launch through `pimm submit` cannot see either package by environment alone.
+# Doing it here keeps the config runnable under `pimm submit`, a bare `torchrun`,
+# or a direct `python -m pimm.train`, with no image change and nothing to install.
+#
+# BOTH are needed, for different reasons. helix is absent from the pimm image
+# entirely; pimm_data IS installed there but at 0.3.0, which predates the coeff
+# corpus and has no CoeffTPCDataset — so the checkout has to WIN over
+# site-packages, not merely be present.
+#
+# insert(1), which is the only position that works:
+#   insert(0) is defeated by pimm's own loader — Config._file2dict does
+#     sys.path.insert(0, temp_dir) -> import_module -> sys.path.pop(0), and this
+#     file executes during that import, so an insert(0) here is what pop deletes.
+#   append survives the pop but loses to site-packages' stale pimm_data 0.3.0
+#     ("No module named 'pimm_data.coeff'").
+# insert(1) sits just under pimm's temp dir: the pop removes the temp dir and
+# leaves ours at the front.
+#
+# NOT derived from __file__: pimm copies the config into a temporary module
+# before executing it (Config._file2dict), so __file__ points at the temp copy.
+# HELIX_ROOT / PIMM_DATA_SRC override, so this is not pinned to one checkout.
 import os as _os
 import sys as _sys
 
-# Put helix on sys.path BEFORE custom_imports is read. pimm's Config.fromfile
-# executes this file first and only then processes `custom_imports`
-# (pimm/utils/config.py:394-400), so this is enough to make
-# `helix.integrations.pimm` importable without helix being installed.
-#
-# It matters because pimm's scripts/train.sh hard-sets PYTHONPATH to its own
-# code directory in every branch, clobbering anything the caller exported — so
-# a launch through `pimm submit` cannot see helix by environment alone. Doing it
-# here keeps the config runnable under `pimm submit`, a bare `torchrun`, or a
-# direct `python -m pimm.train`, with no image change and nothing to install.
-#
-# HELIX_ROOT overrides, so this is not pinned to one checkout.
-# NOT derived from __file__: pimm copies the config into a temporary module
-# before executing it (Config._file2dict), so __file__ points at the temp copy
-# and any path computed from it is wrong.
-# APPEND, never insert(0). pimm's loader does `sys.path.insert(0, temp_dir)`,
-# imports this file, then `sys.path.pop(0)` to undo it — so an insert(0) here
-# lands in the slot that pop removes, and the bootstrap silently deletes itself
-# (verified: helix stayed unimportable and the pop left the temp dir behind).
-# Appending also avoids shadowing anything already installed.
-_sys.path.append(_os.environ.get(
-    "HELIX_ROOT", "/sdf/group/neutrino/omara/helix-extraction"))
+for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix-extraction"),
+               ("PIMM_DATA_SRC", "/sdf/group/neutrino/omara/pimm-data/src")):
+    _p = _os.environ.get(_v) or _p
+    if _p not in _sys.path:
+        _sys.path.insert(1, _p)
+# REQUIRED, not tidiness. Config._file2dict keeps every module-level name that
+# does not start with `__` (pimm/utils/config.py:261-262), so these would enter
+# the config dict as MODULE OBJECTS. Config.dump then renders
+# `_os = <module 'os' ...>` and yapf rejects it —
+# `YapfError: <unknown>:1:5: invalid syntax` — killing the run during setup,
+# before step 1. Observed on the first launch after the bootstrap was added.
+del _os, _sys, _v, _p
 
 custom_imports = dict(
     imports=["helix.integrations.pimm"],
@@ -175,6 +193,13 @@ _common = dict(
 data = dict(train=dict(**_common), val=dict(**_common), test=dict(**_common))
 
 hooks = [
+    # MUST stay in this list. pimm dumps the RESOLVED config to
+    # <save_path>/config.py, which keeps `custom_imports` but drops the sys.path
+    # bootstrap at the top of this file (a statement, not a dict entry) — and
+    # train.sh's resume branch loads THAT file, with PYTHONPATH set to pimm's own
+    # code snapshot. Without this hook every chained/requeued job dies on a bare
+    # ImportError after job 1 has spent its full allocation.
+    dict(type="HelixPathBootstrap"),
     dict(type="CheckpointLoader"),
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),

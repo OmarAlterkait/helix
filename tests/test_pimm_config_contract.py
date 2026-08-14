@@ -188,10 +188,17 @@ def test_configs_bootstrap_helix_onto_sys_path():
     `custom_imports` is processed (Config.fromfile), so it can bootstrap itself
     — which avoids installing helix into a shared image.
 
-    It MUST append. pimm's loader does insert(0, temp_dir) -> import -> pop(0),
-    so an insert(0) here lands in the slot the pop removes and the bootstrap
-    deletes itself. That failed silently: helix stayed unimportable and
-    custom_imports raised a bare ImportError with the real cause swallowed.
+    It must use insert(1) — the only position that works, as both obvious
+    choices fail in opposite directions:
+
+      insert(0)  pimm's loader does insert(0, temp_dir) -> import -> pop(0), and
+                 the config executes during that import, so an insert(0) here is
+                 what the pop deletes. Fails silently: helix stays unimportable
+                 and custom_imports raises a bare ImportError with the real cause
+                 swallowed by import_modules_from_strings.
+      append     survives the pop, but loses to site-packages — the pimm image
+                 ships pimm_data 0.3.0, which has no coeff module, so the run
+                 dies on "No module named 'pimm_data.coeff'".
     """
     import re
     from pathlib import Path
@@ -205,10 +212,146 @@ def test_configs_bootstrap_helix_onto_sys_path():
         # custom_imports and would otherwise match first, making the ordering
         # check below compare against the wrong position.
         assign = src.index("custom_imports = ")
-        boot = re.search(r"_sys\.path\.(insert|append)\(", src)
-        assert boot, f"{path.name} does not bootstrap helix onto sys.path"
-        assert boot.group(1) == "append", (
-            f"{path.name} uses sys.path.{boot.group(1)} — pimm's loader pops "
-            f"index 0 after importing the config, so insert(0) removes itself")
+        # Ignore comment lines: they discuss insert(0) and append by name.
+        code = "\n".join(ln for ln in src.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        boot = re.search(r"_sys\.path\.(insert|append)\(\s*(\d+)?", code)
+        assert boot, f"{path.name} does not bootstrap onto sys.path"
+        assert (boot.group(1), boot.group(2)) == ("insert", "1"), (
+            f"{path.name} uses sys.path.{boot.group(1)}({boot.group(2) or ''}) — "
+            f"must be insert(1): insert(0) is removed by pimm's own pop(0), and "
+            f"append loses to the stale pimm_data in site-packages")
         assert src.index("_sys.path.") < assign, (
             f"{path.name} bootstraps AFTER custom_imports, which is too late")
+        assert "PIMM_DATA_SRC" in src, (
+            f"{path.name} bootstraps helix but not pimm_data; the image's 0.3.0 "
+            f"has no CoeffTPCDataset")
+
+
+def test_bootstrap_configs_also_register_the_rewrite_hook():
+    """A config that bootstraps sys.path MUST also list HelixPathBootstrap.
+
+    The two are one mechanism split across a process boundary: the source-level
+    bootstrap gets job 1 running, and the hook puts that bootstrap back into the
+    config pimm DUMPS so job 2 (which loads the dump, not this file) can import
+    helix at all. Having only the first is the dangerous state — it works
+    perfectly until the first requeue, hours in.
+    """
+    from pathlib import Path
+
+    cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
+    for path in sorted(cfg_dir.glob("coeff_fm_*.py")):
+        src = path.read_text()
+        if "_sys.path." not in src:
+            continue
+        assert "HelixPathBootstrap" in src, (
+            f"{path.name} bootstraps sys.path but never registers "
+            f"HelixPathBootstrap, so a resumed job cannot import helix")
+
+
+def test_bootstrap_block_is_valid_python_that_appends():
+    """The block the hook writes must parse, and must append rather than insert."""
+    import ast
+
+    from helix.integrations._bootstrap import bootstrap_block
+
+    block = bootstrap_block("/some/checkout", "/some/pimm-data/src")
+    ast.parse(block)                      # a syntax error here is unresumable
+    # The block's own comments explain the insert(0) trap, so check the CODE.
+    code = "\n".join(ln for ln in block.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    assert "_sys.path.insert(1, _p)" in code, (
+        "insert(1) is the only workable position: insert(0) is deleted by pimm's "
+        "own sys.path.pop(0), and append loses to site-packages' stale pimm_data")
+    assert "insert(0" not in code
+    assert ".append(" not in code
+    assert "'/some/checkout'" in block
+    assert "'/some/pimm-data/src'" in block, "pimm_data must be bootstrapped too"
+    assert "HELIX_ROOT" in block and "PIMM_DATA_SRC" in block
+
+
+def test_rewritten_config_is_importable_without_helix_on_the_path(tmp_path):
+    """End-to-end: dump-shaped config + the hook's block -> helix imports.
+
+    Simulates what train.sh's resume branch does — load <save_path>/config.py in
+    a process whose sys.path does NOT contain helix — and asserts the rewritten
+    file repairs it.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from helix.integrations._bootstrap import bootstrap_block
+
+    root = str(Path(__file__).resolve().parent.parent)
+
+    # A "fresh" pimm_data the block points at, and a "stale" one standing in for
+    # the 0.3.0 in site-packages. Only the fresh one has CoeffTPCDataset, which is
+    # exactly the difference that broke the first real launch.
+    fresh = tmp_path / "fresh"
+    (fresh / "pimm_data").mkdir(parents=True)
+    (fresh / "pimm_data" / "__init__.py").write_text(
+        "CoeffTPCDataset = object\nWHICH = 'fresh'\n")
+    stale = tmp_path / "stale"
+    (stale / "pimm_data").mkdir(parents=True)
+    (stale / "pimm_data" / "__init__.py").write_text("WHICH = 'stale'\n")
+
+    dumped = "custom_imports = dict(imports=['helix.integrations.pimm'])\n"
+    cfg = tmp_path / "config.py"
+    cfg.write_text(bootstrap_block(root, str(fresh)) + "\n" + dumped)
+
+    # Execute it the way the loader does: helix absent, and the stale pimm_data
+    # APPENDED, which is where site-packages sits relative to a fresh insert.
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import runpy, sys\n"
+        f"sys.path[:] = [p for p in sys.path if {root!r} not in p]\n"
+        f"sys.path.append({str(stale)!r})\n"
+        f"runpy.run_path({str(cfg)!r})\n"
+        "import importlib\n"
+        "importlib.import_module('helix')\n"
+        "pd = importlib.import_module('pimm_data')\n"
+        "print('HELIX-IMPORTABLE', 'pimm_data=' + pd.WHICH)\n")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    out = subprocess.run([sys.executable, str(probe)], capture_output=True,
+                         text=True, env=env)
+    assert "HELIX-IMPORTABLE" in out.stdout, out.stderr[-2000:]
+    assert "pimm_data=fresh" in out.stdout, (
+        "the bootstrapped pimm_data lost to the one later on sys.path — this is "
+        f"the 'No module named pimm_data.coeff' failure. stdout={out.stdout!r}")
+
+
+def test_configs_leave_no_module_objects_in_the_namespace():
+    """The sys.path bootstrap must not leak `_os`/`_sys` into the config dict.
+
+    `Config._file2dict` keeps every module-level name not starting with `__`
+    (pimm/utils/config.py:261-262). A leaked module object reaches `Config.dump`,
+    which renders `_os = <module 'os' ...>` and dies in yapf with
+    `YapfError: <unknown>:1:5: invalid syntax` — during setup, so the run never
+    starts. Encodes pimm's filter exactly rather than trusting the `del`.
+    """
+    import types
+    from pathlib import Path
+
+    cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
+    for path in sorted(cfg_dir.glob("coeff_fm_*.py")):
+        ns = {}
+        exec(compile(path.read_text(), str(path), "exec"), ns)
+        leaked = sorted(k for k, v in ns.items()
+                        if not k.startswith("__") and isinstance(v, types.ModuleType))
+        assert not leaked, (
+            f"{path.name} leaks module objects {leaked} into the config dict; "
+            f"Config.dump cannot serialise them and the run dies at setup")
+
+
+def test_bootstrap_block_deletes_its_temporaries():
+    """Same guarantee for the block the hook writes into the dumped config."""
+    import types
+
+    from helix.integrations._bootstrap import bootstrap_block
+
+    ns = {}
+    exec(compile(bootstrap_block("/a", "/b"), "<block>", "exec"), ns)
+    leaked = sorted(k for k, v in ns.items()
+                    if not k.startswith("__") and isinstance(v, types.ModuleType))
+    assert not leaked, f"bootstrap_block leaks {leaked}"
