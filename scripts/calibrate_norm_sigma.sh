@@ -35,6 +35,12 @@ SRC=${SRC_ROOT:-/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor}
 OUT=${OUT_ROOT:-/sdf/data/neutrino/omara/coeff_tpc}
 CALIB=$OUT/_calib
 N=${1:-100}
+# norm_sigma is the mean per-event sigma_threshold, and sigma_threshold is
+# computed from the coefficients AFTER coherent gating — so the gate threshold
+# feeds straight into it. A table calibrated at one kgate is inflated by whatever
+# coherent that setting leaves behind, and must not be reused at another.
+KGATE=${KGATE:-}
+KG_ARG=""; [ -n "$KGATE" ] && KG_ARG="--kgate $KGATE"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 [ -s "$CALIB/RUNS.txt" ] || { echo "FATAL: $CALIB/RUNS.txt missing (one run name per line or space-separated)"; exit 1; }
@@ -49,6 +55,7 @@ for r in $RUNS; do
     --shard "$SRC/$r/sim_wire_sensor_0000.h5" --out "$CALIB/$r" \
     --dataset-name sim_wire --run "$r" --file-index 0 \
     --event-start 0 --events "$N" --mode serial --backend torch \
+    $KG_ARG \
     --calibrate --save-norm-sigma "$CALIB/$r.npy" 2>&1 | tail -2
 done
 

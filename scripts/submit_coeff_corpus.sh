@@ -68,6 +68,22 @@ NORM=${NORM_SIGMA:-$OUT/_calib/norm_sigma_global.npy}
 EVENTS_PER_SHARD=${EVENTS_PER_SHARD:-200}   # = one source file
 SHARDS_PER_RUN=${SHARDS_PER_RUN:-100}      # = files per run
 RUNS_FILE=${RUNS_FILE:-$OUT/_calib/RUNS.txt}
+# Must match the kgate the frozen norm_sigma was calibrated at (see
+# calibrate_norm_sigma.sh). Empty -> DetectorConfig's default of 3.0, which is
+# what run_0027575715 was built with and which leaves block-wide coherent strips.
+KGATE=${KGATE:-}
+KG_ARG=""; [ -n "$KGATE" ] && KG_ARG="--kgate $KGATE"
+# The build needs torch/pywt/h5py, which the bare login/compute python does not
+# have. Set CONTAINER to run each task inside an image instead; unset keeps the
+# original bare-metal behaviour.
+CONTAINER=${CONTAINER:-}
+if [ -n "$CONTAINER" ]; then
+  PY=(singularity exec --nv -B /sdf,/lscratch "$CONTAINER" python3)
+  export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$H:${PIMM_DATA_SRC:-/sdf/group/neutrino/omara/pimm-data/src}"
+  export SINGULARITYENV_PYTHONPATH="$PYTHONPATH"
+else
+  PY=(python)
+fi
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false     # else JAX grabs 8.4 GB and torch OOMs
 
@@ -82,12 +98,13 @@ SHARD=$(printf "%04d" "$K")
 echo "task $IDX -> run=$RUN source file $SHARD (all $EVENTS_PER_SHARD events)"
 
 cd "$H"
-python scripts/build_coeff_corpus.py \
+"${PY[@]}" scripts/build_coeff_corpus.py \
   --shard "$SRC/$RUN/sim_wire_sensor_$SHARD.h5" \
   --out   "$OUT/$RUN" \
   --dataset-name sim_wire --run "$RUN" \
   --file-index "$K" --event-start 0 --events "$EVENTS_PER_SHARD" \
   --mode serial --backend torch \
+  $KG_ARG \
   --norm-sigma "$NORM"
 
 # --file-index MUST match --shard's numeric suffix: serial mode derives both the
