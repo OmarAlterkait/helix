@@ -112,3 +112,25 @@ def test_nonfinite_fails_open():
     with pytest.warns(UserWarning, match="non-finite"):
         out = coherent_gate(bands, npass=2)
     np.testing.assert_array_equal(out[1], bands[1].astype(np.float32))    # unchanged
+
+
+def test_kgate_sequence_longer_than_npass_raises():
+    """A per-pass kgate longer than npass must NOT be silently truncated.
+
+    `pipeline.py` stamps `removal_json` with the kgate the caller passed, so
+    truncation ships coefficients that the recorded provenance does not describe:
+    `--kgate 2.5,3.5` at npass=1 built a k=2.5 corpus labelled [2.5, 3.5]. Found
+    by an audit of the per-pass option, which had exactly this hole.
+    """
+    import numpy as np
+    import pytest
+
+    from helix.tpc.coherent_gate_ops_numpy import gate_band
+
+    b = np.random.default_rng(0).normal(size=(200, 64)).astype(np.float32)
+    # the legitimate uses still work
+    gate_band(b, group_size=64, kgate=[2.5, 3.5], ksig=3.0, npass=2)
+    gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=2)
+    gate_band(b, group_size=64, kgate=[2.5], ksig=3.0, npass=2)      # short: padded
+    with pytest.raises(ValueError, match="per-pass entries but npass"):
+        gate_band(b, group_size=64, kgate=[2.5, 3.5], ksig=3.0, npass=1)

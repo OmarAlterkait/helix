@@ -108,6 +108,16 @@ def gate_band(b: torch.Tensor, *, group_size: int, kgate, ksig: float,
     """Coherent-gate one band ``(W, Lb)`` → cleaned band."""
     W = b.shape[0]
     kg = list(kgate) if isinstance(kgate, (list, tuple, np.ndarray)) else [kgate] * npass
+    if len(kg) > npass:
+        # Silently dropping trailing entries ships a DIFFERENT corpus than the
+        # provenance records: pipeline.py stamps removal_json with the kgate the
+        # caller passed, so --kgate 2.5,3.5 at npass=1 produced a k=2.5 corpus
+        # labelled [2.5, 3.5]. A per-pass sequence longer than the pass count is
+        # a config error, not something to truncate.
+        raise ValueError(
+            f"kgate has {len(kg)} per-pass entries but npass={npass}; "
+            f"the extra entries would be silently ignored and the recorded "
+            f"provenance would not describe the coefficients produced")
     if len(kg) < npass:
         kg = kg + [kg[-1]] * (npass - len(kg))
     n_blocks = (W + group_size - 1) // group_size
