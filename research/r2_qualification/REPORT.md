@@ -215,3 +215,60 @@ on every axis. This is the qualified spec for the packaged front-end:
 Package with A-parity statistics (quantile(0.5) for sigc). k=4 remains the value
 the existing FM cache was built at — any default change is a corpus-rebuild
 decision (never mix k within a corpus).
+
+---
+
+## RECHECK on the FM corpus noise (2026-08-15) — why blips survive at k=3.0
+
+Triggered by visible leftover coherent in the shipped corpus (kgate=3.0,
+run_0027575715). Measured on the corpus's own noise realisations, 1,200
+(event, plane) pairs over 200 events spanning all 100 shards, F0 against the
+TRUE noise-free image (not the co-supported target, which inverts the ranking —
+see below). Harness: `_diag/kgate_variants.py`, paired per (event, plane).
+
+MECHANISM. `Mc = where(|M| < kgate*sigc, M, 0)` — where the block common mode
+exceeds the threshold the estimate is ZEROED, so nothing is subtracted and the
+whole coherent component survives. A refusal to act, not a bad estimate, which
+is why leftovers are exactly one `group_size` block wide and land where the
+clean image is empty.
+
+```
+setting        F0       dF0      off>5    ratio   off max   coeffs
+3.0        0.9056         -     23.44M    1.00x    14.78    56.79M
+2.5->3.5   0.9046   -0.0009     11.76M    1.99x    14.98    55.68M
+2.5->4.0   0.9023   -0.0032      9.51M    2.46x    15.40    55.35M
+2.5->4.5   0.9001   -0.0055      9.53M    2.46x    15.97    55.25M
+3.0->4.0   0.9016   -0.0039      9.68M    2.42x    15.53    55.18M
+3.5        0.9033   -0.0023     11.90M    1.97x    15.27    55.47M
+4.0        0.9007   -0.0048      9.92M    2.36x    15.86    55.13M
+4.0->3.0   0.9056   +0.0001     26.13M    0.90x    14.75    63.71M
+3.0 soft   0.8885   -0.0170     11.13M    2.11x    17.80    55.05M
+```
+
+- Confirms the (k1,k2) decoupling: signal loss tracks k1, leftover coherent
+  tracks k2. **2.5->4.0 dominates 3.0->4.0 and plain 4.0 on BOTH axes**, and k2
+  SATURATES at 4.0 (4.5 removes no more, costs another 0.0023 F0).
+- **2.5->3.5 halves the blip POPULATION at -0.0009 but leaves the STRONG blips**
+  — their |M| exceeds 3.5*sigc. An aggregate ratio is not an empty region; check
+  a residual-centred crop, not just the mean.
+- **gate_soft stays rejected, now on the artefact axis too**: -0.0170 F0 for
+  2.11x, against -0.0032 for 2.46x from 2.5->4.0. Clipping subtracts t from every
+  cell including signal-dense ones, bleeding a constant off all real charge —
+  hence also the worst off max (17.80).
+- **4.0->3.0 is harmful**: worse than baseline on artefacts (0.90x) and +12%
+  coefficients. Gating hard before signal is located, then re-estimating
+  permissively, leaves more residual AND inflates the corpus.
+
+METRIC WARNING. F0 measured against the stored `coeff_clean` (the co-supported
+target) REVERSES the ranking: it favours 4.0 over 3.0 on 90% of pairs while the
+true clean favours 3.0 on 93%. The co-supported target is missing ~2.7% of true
+signal charge — whatever threshold discarded is absent from the target too — and
+its reconstruction carries inverse-DWT leakage (1.85M nonzero px vs 392k), so any
+mask built from it is ~5x too large. Always denominate on the true clean.
+
+VERDICT: no setting of this gate gives 3.0's fidelity with the strong blips gone;
+the same scalar `sigc` per band governs both regimes. Frontier choice is
+**2.5->3.5** (fidelity-first, weak blips halved) or **2.5->4.0** (blips gone,
+-0.0032). Beating it needs a context-aware estimator — the two failure cases are
+cleanly separable by local signal occupancy, which `smart_removal`'s `occ_map`
+already computes ~free.
