@@ -198,6 +198,15 @@ def main():
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json")
     ap.add_argument("--npz",
                     default="/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz")
+    ap.add_argument("--removal", choices=("corpus", "de2"), default="corpus",
+                    help="'corpus' reads the stored coefficients. 'de2' recomputes "
+                         "the removed image with de2_clamp (research/coherent_coeffs/"
+                         "induction.py) from the regenerated noisy, then applies the "
+                         "SAME threshold+reconstruct, so the panel is comparable to a "
+                         "corpus one. de2 is sample-space, so there is no corpus to "
+                         "read it from until it is ported.")
+    ap.add_argument("--de2-clamp", type=float, default=4.0,
+                    help="clamp to the smart anchor, ADC (DE2_CLAMP.md default 4)")
     ap.add_argument("--clean-source", choices=("corpus", "true"), default="corpus",
                     help="'corpus' = the stored coeff_clean, i.e. the CO-SUPPORTED "
                          "target the FM regresses onto (clean restricted to the "
@@ -270,6 +279,36 @@ def main():
                 f"!= stored {stored} — the regenerated panel would not match")
         print(f"noise seed {seed} matches the corpus")
 
+    if a.removal == "de2":
+        import sys as _s
+        _s.path.insert(0, "/sdf/group/neutrino/omara/helix-extraction/research/coherent_coeffs")
+        from helix.core import backend as _bk
+        from helix.core.wavelet import (SparseResult, reconstruct as _rec,
+                                        threshold_bands as _thr, wavedec as _wd)
+        from helix.tpc.config import DetectorConfig
+        from helix.tpc.io import config_from_file
+        from helix.tpc.pipeline import _pad_time
+        _bk.set_backend("numpy")
+        import induction as _ind
+        _base = config_from_file(sensor_shard)
+        _cfg = DetectorConfig(num_time_steps=_base.num_time_steps,
+                              plane_labels=_base.plane_labels, pedestals=_base.pedestals)
+        removed_all = {}
+        for _g, _img in noisy_all.items():
+            _i = _img.astype(np.float32)
+            _cleaned, _ = _ind.final_removal(_i, clamp=a.de2_clamp, n_iter=4,
+                                             klo=0.7, khi=3.5, dilate=15, seed="amp")
+            _co, _lev = _wd(_pad_time(_cleaned, _cfg.dwt_level), wavelet=_cfg.wavelet,
+                            level=_cfg.dwt_level, mode=_cfg.dwt_mode)
+            _o, _nk, _nt2, _bs = _thr(_co, _cfg.threshold_spec())
+            removed_all[_g] = _rec(SparseResult(coeffs=_o, n_kept=_nk, n_total=_nt2,
+                                                sigma_per_band=_bs, wavelet=_cfg.wavelet,
+                                                level=_lev, mode=_cfg.dwt_mode),
+                                   _cfg.num_time_steps)
+        kg_lbl = f"de2_clamp({a.de2_clamp:g})"
+
+    REMOVED_TITLE = ("removed: de2_clamp -> DWT recon" if a.removal == "de2"
+                     else "removed: corpus coeff -> DWT recon")
     CLEAN_TITLE = ("clean (TRUE noise-free image)" if a.clean_source == "true"
                    else "clean (co-supported target)")
 
@@ -311,7 +350,7 @@ def main():
                 ax[0, 1].set_axis_off()
                 ax[0, 1].text(0.5, 0.5, "noisy not stored in corpus", ha="center",
                               va="center", fontsize=11)
-            symlog_im_crop(ax[1, 0], rc_v, "removed: corpus coeff -> DWT recon", ws, ts, vmax)
+            symlog_im_crop(ax[1, 0], rc_v, REMOVED_TITLE, ws, ts, vmax)
             symlog_im_crop(ax[1, 1], df_v, "diff (recon - clean)", ws, ts,
                            max(vmax * 0.5, 20.0))
             fig.suptitle(f"{src_file} evt{ev:03d}  plane_gid {gid}  ZOOM "
@@ -329,14 +368,14 @@ def main():
                 ax[0, 1].set_axis_off()
                 ax[0, 1].text(0.5, 0.5, "noisy not stored in corpus",
                               ha="center", va="center", fontsize=11)
-            symlog_im(ax[1, 0], rc, "removed: corpus coeff -> DWT recon", vmax)
+            symlog_im(ax[1, 0], rc, REMOVED_TITLE, vmax)
             symlog_im(ax[1, 1], diff, "diff (recon - clean)", max(vmax * 0.5, 20.0))
             fig.suptitle(f"{src_file} evt{ev:03d}  plane_gid {gid}  FULL PLANE "
                          f"({cl.shape[0]}w x {cl.shape[1]}t)  kgate={kg_lbl}  F0={f0:.3f}",
                          fontweight="bold")
             tag = "full"
         fig.tight_layout()
-        out = f"{a.outdir}/{tag}_{a.clean_source}_ev{ev:03d}_gid{gid}.png"
+        out = f"{a.outdir}/{tag}_{a.removal}_ev{ev:03d}_gid{gid}.png"
         fig.savefig(out, dpi=120)
         plt.close(fig)
         print(f"saved {out}  vmax={vmax:.0f}  F0={f0:.3f}")

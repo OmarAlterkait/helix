@@ -140,3 +140,93 @@ learn them as a shortcut, which a diffuse fidelity loss cannot become.
   diagnostic.
 * Three plane-dependent knobs is a qualification burden: the gate's single
   `kgate` took n=129 stratified events to settle.
+
+---
+
+# ADDENDUM (2026-08-15) — rescore PASSED; what the algorithm does, and the overhead
+
+## Verdict update
+
+The kill criterion in §4 has passed: de2_clamp(4) beats kgate=3.0 on EVERY axis
+(F0 +0.0011, off>5 3.13x fewer, rms 0.385 vs 0.507, off max 13.93 vs 14.77,
+fewer coefficients), 600 pairs over all 100 shards. See REPORT.md. Option C is
+justified; this addendum scopes the port.
+
+## What the algorithm actually does
+
+Per plane, iterating `n_iter` times from the smart coefficient-space anchor:
+
+1. **sigw** — per-wire intrinsic scale, `MAD_t(|x - median_t x|)/0.6745`. Depends
+   ONLY on the input, so it is loop-invariant (see overhead).
+2. **DETECT** — hysteresis on `z = |noisy - coh| / sigw`: seeds `z > khi=3.5`,
+   grow `z > klo=0.7` via 2-D 8-connected components, keep only components
+   containing a seed, then dilate `dilate=15` ticks in time. This is what makes
+   it context-aware: signal is a CONNECTED object, not a per-cell magnitude.
+3. **ESTIMATE** — per (block, tick), mean over the UN-FLAGGED wires; where fewer
+   than `minc=4` clean wires remain, interpolate along time from reliable ticks
+   (block median if fewer than 2). The gate instead REFUSES to subtract in such
+   cells, which is precisely where its blips come from.
+4. **CLAMP** — `coh = clip(de2, smc-4, smc+4)`. Load-bearing: unclamped de2 is
+   WORSE than kgate=3.0 on fidelity (0.9054 vs 0.9066). The anchor is what makes
+   the detector safe.
+
+## Overhead — measured, per event (6 planes, n_iter=4)
+
+```
+stage                          seconds    share
+smart anchor (numpy pywt)        6.415     30%
+sigw, recomputed x4              5.284     28%      <- loop-INVARIANT
+dilate_t (python loop+convolve)  4.196     23%
+ndimage.label (connected comp)   2.845     16%
+estimate (masked mean)           0.634      3%
+TOTAL                           ~18.5
+```
+
+Three of those five are avoidable, and one is a plain redundancy:
+
+| fix | measured | exact? |
+|---|---|---|
+| hoist `sigw` out of the iteration | 5.284 -> 1.321 (-3.96 s) | YES, bit-identical |
+| vectorise `dilate_t` (`uniform_filter1d`) | 4.196 -> 1.107 (3.8x) | YES, verified identical output |
+| anchor on helix torch/CUDA instead of numpy pywt | 6.415 -> 1.055 (6.1x) | same op, GPU float order |
+| detection arithmetic (`z`, thresholds) on CUDA | ~6.9 -> 0.073 (~90x) | same op, GPU float order |
+| `n_iter` 4 -> 2 | halves label+estimate | NO — needs validation ("diminishing after ~2") |
+| Y planes via plain-amp detect (no CC) | -1/3 of label | NO — needs validation |
+
+Optimised estimate: **~2.5-3 s/event against ~18.5 as written** (~6-7x), leaving
+`scipy.ndimage.label` (~1-1.4 s) as the only genuinely CPU-bound step. Against
+the current 0.8 s/event pipeline that is ~4x, not the 12x the first measurement
+suggested — a full corpus rebuild goes from ~4.4 h to ~15-20 GPU-h, or well
+under 2 h wall in the 100-task array.
+
+## Variations worth testing, cheapest first
+
+1. **Exact speedups** (hoist sigw, vectorise dilate). No validation needed beyond
+   an output-equality assert. ~8 s/event for an afternoon.
+2. **GPU the anchor + detection arithmetic.** Same ops, different backend; the
+   corpus is already architecture-pinned to turing, so this changes nothing about
+   reproducibility policy. ~11 s/event.
+3. **n_iter 2 vs 4.** The record says diminishing returns after ~2; if true this
+   halves the only CPU-bound stage. Validate on the 600-pair harness.
+4. **Plane-adaptive detector.** DE2_CLAMP.md: collection (Y) is ~optimal with
+   plain-amplitude detection and NO clamp, which removes connected components
+   entirely for 2 of 6 planes. Induction (U/V) keeps hysteresis.
+5. **GPU connected components.** Only worth it if 1-4 leave label dominant. An
+   iterated-dilation label-propagation on GPU is approximate but may suffice,
+   since the mask is later dilated by 15 ticks anyway.
+6. **Skip the separate anchor.** The corpus build ALREADY computes the smart gate
+   for its own removal; if the port shares that result the anchor becomes free
+   rather than 6.4 s.
+
+(6) is the one to check first at port time — it is pure bookkeeping and removes
+the single largest stage.
+
+## Port risks (unchanged from §6, plus)
+
+* `klo` percolation below 0.45 is a silent over-removal mode; a headless build
+  needs a per-event guard (e.g. reject if flagged fraction exceeds a bound) and a
+  recorded diagnostic.
+* de2 is SAMPLE space; the corpus stores coefficients. The pipeline gains a stage
+  (`removal='de2'`) rather than swapping one.
+* Three plane-dependent knobs vs the gate's one. The gate's single `kgate` took
+  n=129 stratified events to qualify.
