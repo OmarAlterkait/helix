@@ -8,6 +8,7 @@ Metric matches production compute_metrics_jax (F0 on signal pixels).
 """
 import os
 import sys
+import os as _os
 import numpy as np
 
 sys.path.insert(0, '/sdf/home/o/omara/neutrino_group/omara/pimm-data/src')
@@ -27,7 +28,15 @@ PLANES = {
 }
 
 NOISE_X, NOISE_Y, NOISE_Z = 0.90, 0.79, 0.22  # white RMS; series RMS = Y + Z*wire_len
-_NPZ = np.load('/sdf/home/o/omara/neutrino_group/omara/JAXTPC/config/noise_spectrum.npz')
+# Stale absolute path fixed 2026-08-15: this named
+# /sdf/home/o/omara/neutrino_group/omara/JAXTPC/config/noise_spectrum.npz, which
+# no longer resolves, so importing anything under research/coherent_coeffs died
+# at IMPORT time (cc_common -> common). NOISE_SPECTRUM_NPZ overrides; the default
+# is the live JAXTPC config.
+_NPZ_PATH = _os.environ.get(
+    "NOISE_SPECTRUM_NPZ",
+    "/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz")
+_NPZ = np.load(_NPZ_PATH)
 
 _DS = None
 def _ds():

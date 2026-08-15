@@ -272,3 +272,53 @@ the same scalar `sigc` per band governs both regimes. Frontier choice is
 -0.0032). Beating it needs a context-aware estimator — the two failure cases are
 cleanly separable by local signal occupancy, which `smart_removal`'s `occ_map`
 already computes ~free.
+
+## de2_clamp RESCORED on the artefact axis (2026-08-15) — disposition should change
+
+The "opt-in only" disposition (record 6n, and the qual2 line above) was reached on
+fidelity/win-rate. de2_clamp was never scored on LEFTOVER COHERENT, which is the
+axis that motivates replacing the gate at all. Rescored here on the same harness,
+same events and same denominators as the kgate sweep — 600 (event, plane) pairs,
+100 events, all 100 shards, F0 vs the TRUE clean, de2 and the gate pushed through
+an IDENTICAL threshold_bands -> reconstruct so the comparison is like-for-like.
+
+```
+method       F0        dF0 vs 3.0     off>5   ratio   off rms  off max   coeffs
+3.0      0.9066             -       11.74M   1.00x    0.5074   14.773   28.60M
+2.5->3.5 0.9057       -0.0009        5.88M   2.00x    0.4299   15.008   28.05M
+2.5->4.0 0.9033       -0.0033        4.77M   2.46x    0.4116   15.459   27.88M
+de2c4    0.9077       +0.0011        3.75M   3.13x    0.3853   13.934   28.39M
+de2c8    0.9059       -0.0007        4.06M   2.89x    0.3902   14.330   28.66M
+de2raw   0.9054       -0.0012        4.12M   2.85x    0.3915   14.578   28.70M
+```
+
+**de2_clamp (clamp=4) beats kgate=3.0 on EVERY axis**: fidelity (+0.0011),
+leftover coherent (3.13x fewer >5 ADC pixels), off-signal rms (0.385 vs 0.507),
+worst-case residual (13.93 vs 14.77) and coefficient count. It is best or
+tied-best on all six planes. Against the best gate cell (2.5->4.0) it is
++0.0044 F0 at 0.79x the off-signal.
+
+This is the property no kgate has: every gate setting that suppresses artefacts
+pays fidelity, because one scalar sigc per band governs both the empty-region and
+dense-deposit regimes. de2 separates them — hysteresis + connected components
+locates signal, the estimate uses only un-flagged wires, and the clamp bounds the
+sample-space estimate against the smart anchor where few clean wires remain.
+
+The clamp is load-bearing and the documented default is right: c4 (0.9077) >
+c8 (0.9059) > unclamped (0.9054). Unclamped de2 is WORSE than kgate=3.0 on
+fidelity, so the anchor is what makes the method safe, not the detector alone.
+
+COST, which the record did not state: the detect+estimate loop is ~9.7 s/event
+over 6 planes at n_iter=4, against ~0.8 s/event for the whole current pipeline —
+~12x — and scipy.ndimage.label is CPU-only, so the DSP stops being end-to-end
+on-device. In the 100-task build array that is ~2 h wall, not a blocker.
+
+Caveat: de2's published numbers are n=12 on research's own noise. This rescore is
+100 events on the corpus's actual seeds and colored spectrum, and it REPRODUCES
+the qualitative claim (nz_out at the intrinsic floor -> lowest off-signal rms of
+any method tested here).
+
+VERDICT: de2_clamp at clamp=4 is the recommended removal for the FM corpus,
+superseding "gate, kgate=3.0" for this use. Porting it is scoped in
+`research/coherent_coeffs/SCOPE_context_aware_removal.md` (option C); the kill
+criterion set there has now PASSED, so the port is justified.
