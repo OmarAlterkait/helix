@@ -103,6 +103,16 @@ def gate_bands(bands, *, group_size=64, kgate=3.0, ksig=3.0, npass=2,
             "the jax backend implements only sigc_mode='quantile' (A-parity); "
             "use the numpy backend for the legacy 'median' convention")
     kg = list(kgate) if isinstance(kgate, (list, tuple)) else [float(kgate)] * npass
+    if len(kg) > npass:
+        # Silently dropping trailing entries ships a DIFFERENT corpus than the
+        # provenance records: pipeline.py stamps removal_json with the kgate the
+        # caller passed, so --kgate 2.5,3.5 at npass=1 produced a k=2.5 corpus
+        # labelled [2.5, 3.5]. A per-pass sequence longer than the pass count is
+        # a config error, not something to truncate.
+        raise ValueError(
+            f"kgate has {len(kg)} per-pass entries but npass={npass}; "
+            f"the extra entries would be silently ignored and the recorded "
+            f"provenance would not describe the coefficients produced")
     if len(kg) < npass:
         kg = kg + [kg[-1]] * (npass - len(kg))
     kvec = jnp.asarray(kg[:npass], dtype=jnp.float32)
