@@ -55,7 +55,9 @@ set -uo pipefail
 IMAGE=/sdf/data/neutrino/youngsam/images/pimm-latest.sif
 PIMM=/sdf/group/neutrino/omara/pimm-fm
 EXP_ROOT=/sdf/data/neutrino/omara/exp
-RUN_NAME=coeff-fm-train
+# Overridable, because EXP_DIR is derived from it: reusing a name silently
+# points a NEW run at a FINISHED run's directory.
+RUN_NAME=${RUN_NAME:-coeff-fm-train}
 # train.sh builds EXP_DIR as ${EXP_ROOT}/${DATASET}/${EXP_NAME}, and DATASET is
 # the directory part of the config ref (`helix/coeff_fm_train` -> `helix`).
 EXP_DIR=${EXP_ROOT}/helix/${RUN_NAME}
@@ -71,12 +73,24 @@ mkdir -p "${EXP_ROOT}/logs"
 # It must not be `-r true` for a second reason: train.sh's resume branch exits 2
 # when it finds no checkpoint, so that flag would kill the very first attempt.
 WARM_ARGS=""
+RESTARTS=${SLURM_RESTART_COUNT:-0}
 if [ -e "${EXP_DIR}/model/model_last.pth" ]; then
-  WARM_ARGS="-w ${EXP_DIR}/model/model_last.pth"
-  echo "[wrapper] requeued: warm-starting from ${EXP_DIR}/model/model_last.pth"
-  echo "[wrapper] NOTE optimizer state and step counter reset (pimm resume is broken)"
+  if [ "$RESTARTS" -gt 0 ]; then
+    WARM_ARGS="-w ${EXP_DIR}/model/model_last.pth"
+    echo "[wrapper] requeue #${RESTARTS}: warm-starting from ${EXP_DIR}/model/model_last.pth"
+    echo "[wrapper] NOTE optimizer state and step counter reset (pimm resume is broken)"
+  else
+    # FIRST attempt, yet a checkpoint is already there: the run name collides
+    # with a previous run. Warm-starting here would silently continue THAT
+    # model -- e.g. training on a rebuilt corpus while initialised from weights
+    # fitted to the old one, which looks like a valid run and is not.
+    echo "ERROR: ${EXP_DIR}/model/model_last.pth exists on a FIRST attempt." >&2
+    echo "       RUN_NAME=${RUN_NAME} collides with an existing run. Choose a" >&2
+    echo "       different RUN_NAME or move the old directory aside." >&2
+    exit 2
+  fi
 else
-  echo "[wrapper] no checkpoint under ${EXP_DIR}/model — starting from scratch"
+  echo "[wrapper] no checkpoint under ${EXP_DIR}/model - starting from scratch"
 fi
 
 echo "[wrapper] job ${SLURM_JOB_ID:-?} restart count ${SLURM_RESTART_COUNT:-0}"
