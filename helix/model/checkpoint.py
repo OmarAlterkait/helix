@@ -28,6 +28,19 @@ def patch_config_from_checkpoint(checkpoint):
     import torch
     from helix.model.tokenize import PatchConfig
 
+    # A `pimm export` DIRECTORY is a valid checkpoint here too. It was not
+    # handled: load_probe_model learned about export dirs but this did not, so
+    # probing a pimm-trained model died on `IsADirectoryError` in torch.load
+    # before it reached the loader that would have coped.
+    if is_export_dir(checkpoint):
+        tok = _export_tokenizer_cfg(checkpoint)
+        if not tok:
+            return None
+        kw = {k: tok[k] for k in ("pw", "pt", "cell_t") if k in tok}
+        if tok.get("n_bands"):
+            kw["n_bands"] = int(tok["n_bands"])
+        return PatchConfig(**kw)
+
     blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
     tok = blob.get("tokenizer")
     if not tok:
@@ -36,6 +49,28 @@ def patch_config_from_checkpoint(checkpoint):
     if tok.get("n_bands"):
         kw["n_bands"] = int(tok["n_bands"])
     return PatchConfig(**kw)
+
+
+def _export_tokenizer_cfg(path):
+    """``CoeffTokenize``'s ``cfg`` dict from a ``pimm export`` config.json, or None.
+
+    Shared by :func:`patch_config_from_checkpoint` and :func:`load_export_dir` so
+    the two cannot disagree about where the tokenizer geometry lives. It travels
+    in the transform list rather than the model section, because it describes how
+    coefficients become tokens, not the architecture.
+    """
+    import json
+    import os
+
+    cfg_path = next((os.path.join(path, c) for c in _EXPORT_CONFIGS
+                     if os.path.exists(os.path.join(path, c))), None)
+    if cfg_path is None:
+        return None
+    full = json.load(open(cfg_path))
+    for t in (full.get("transform") or []):
+        if isinstance(t, dict) and t.get("type") == "CoeffTokenize":
+            return dict(t.get("cfg") or {})
+    return None
 
 
 def load_converted(model, blob, *, prefer="raw"):
@@ -129,11 +164,7 @@ def load_export_dir(path, *, device=None):
     model.load_state_dict(sd, strict=True)     # bin_edges rides along, persistent
 
     # Tokenizer geometry travels in the same config, inside the transform list.
-    tok = None
-    for t in (full.get("transform") or []):
-        if isinstance(t, dict) and t.get("type") == "CoeffTokenize":
-            tok = dict(t.get("cfg") or {})
-            break
+    tok = _export_tokenizer_cfg(path)
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model.to(dev).eval()
     for prm in model.parameters():
