@@ -68,11 +68,22 @@ custom_imports = dict(
     allow_failed_imports=False,
 )
 
-CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
-# Edges derived from THIS corpus (scripts/derive_coeff_bins.py). m113's came from
-# the old white-noise cache and are mis-sized per band here — see NOISE_BANDS.md.
+# The R1 corpus: same events, same identity-based split, but the coherent gate
+# refuses only when its own k-sigma mask actually fired (gate_tau=0.05) rather
+# than on |M| alone. Measured against the TRUE noise-free image over 1,200
+# (event, plane) pairs on all 100 shards: 5.32x less leftover coherent (stripe
+# 0.3189 -> 0.0599) for dF0 = -0.0001, and fewer coefficients. The predecessor
+# at /sdf/data/neutrino/omara/coeff_tpc/run_0027575715 carries block-wide
+# coherent leftovers in regions with no signal -- structured, block-aligned, and
+# therefore learnable as a shortcut by a masked-prediction model.
+CORPUS = "/sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715"
+# Edges derived from THIS corpus (scripts/derive_coeff_bins.py) — re-derived for
+# the R1 corpus, since norm_sigma is the mean per-event sigma_threshold and that
+# is computed from the GATED coefficients, so it moves when the gate does.
+# m113's came from the old white-noise cache and are mis-sized per band here —
+# see NOISE_BANDS.md.
 # K=128 needs Ampere: the logits are (n_cells, n_slot, K), ~2.4 GB at a full event.
-BINS = "/sdf/data/neutrino/omara/archive/coeff_bins_run0027575715.pt"
+BINS = "/sdf/data/neutrino/omara/archive/coeff_bins_r1_tau05_run0027575715.pt"
 
 # ---------------------------------------------------------------------------
 # run

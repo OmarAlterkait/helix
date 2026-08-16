@@ -3,11 +3,15 @@
 Backend module of the ``helix.tpc.coherent_gate_ops`` family — dispatched via
 ``backend.ops()``; call it through :func:`helix.tpc.coherent_gate.coherent_gate`.
 
-A line-for-line port of :mod:`helix.tpc.coherent_gate_ops_numpy` — same
+A port of :mod:`helix.tpc.coherent_gate_ops_numpy` — same
 mechanism, same qualified defaults (kgate=3.0, ksig=3.0, npass=2, group_size=64,
 A-parity ``sigc``), same fail-open on non-finite bands. See that module's
 docstring for the algorithm and ``research/r2_qualification/REPORT.md`` for the
 evidence behind the defaults.
+
+It reproduces the numpy reference's MECHANISM and conventions, not its bits:
+float32 reduction order differs, so the two agree to ~1e-4 ADC on real
+coefficients. See the tolerance discussion in :mod:`helix.tpc.coherent_gate`.
 
 Two things this port must get exactly right, because both silently change gate
 decisions rather than failing:

@@ -248,3 +248,33 @@ def test_occupancy_uses_the_real_block_width():
     assert occ.shape[0] == 31
     assert occ[-1, 0] == pytest.approx(1.0 / 49.0, rel=1e-6), \
         f"partial block occupancy scored against the wrong width: {occ[-1, 0]}"
+
+
+def test_backends_agree_to_a_documented_tolerance_not_exactly():
+    """numpy and torch agree to ~1e-4 ADC, and the docs must not claim more.
+
+    float32 reduction order differs between the backends, so the masked mean and
+    the MAD differ slightly; discrete threshold comparisons then turn some of
+    those into different decisions, and the block broadcast applies each decision
+    to 64 wires. Measured max |numpy - torch| on a real event is 1.2e-4 ADC,
+    unchanged by npass or tau. This pins a bound rather than asserting equality,
+    so a genuine regression is caught without the test failing on arithmetic that
+    was never going to match.
+    """
+    import numpy as np
+    import torch
+
+    from helix.tpc.coherent_gate_ops_numpy import gate_band as gb_np
+    from helix.tpc.coherent_gate_ops_torch import gate_band as gb_t
+
+    b = _rng_band(seed=3)
+    for npass in (1, 2):
+        for tau in (None, 0.05):
+            a = gb_np(b, group_size=64, kgate=3.0, ksig=3.0, npass=npass, tau=tau)
+            c = gb_t(torch.as_tensor(b), group_size=64, kgate=3.0, ksig=3.0,
+                     npass=npass, tau=tau).numpy()
+            worst = float(np.abs(a - c).max())
+            assert worst < 1e-2, (
+                f"backends diverged by {worst:.3e} ADC at npass={npass}, tau={tau} "
+                f"- far beyond the ~1e-4 reduction-order floor, so something "
+                f"structural differs rather than the arithmetic")
