@@ -25,25 +25,24 @@
 #SBATCH --job-name=coeff-fm-train
 #SBATCH --account=mli:cider-ml
 #SBATCH --partition=ampere
-#SBATCH --qos=normal
+#SBATCH --qos=preemptable
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=12:00:00
-# normal QoS, NOT preemptable. That choice is forced by pimm, not preference:
-# RESUME IS BROKEN in this build, so an evicted run cannot pick up where it left
-# off. checkpoints.py:940 loads a legacy checkpoint with
-# `map_location=lambda storage, loc: storage.cuda()`, which moves the saved RNG
-# ByteTensor onto the GPU; torch.set_rng_state then rejects it with
-# "TypeError: RNG state must be a torch.ByteTensor". The other format is no help:
-# DCP's save planner gathers on the NCCL-only default group and dies at the first
-# save (see below). Measured both.
+# preemptable, with Slurm requeue as the babysitter. This is only safe because
+# resume now works: pimm's loader moved the saved RNG state to the GPU
+# (checkpoints.py:940 map_location) and torch.set_rng_state rejects a CUDA
+# tensor, so `resume=True` used to die before step 1 and an evicted run could
+# only warm-start with its optimizer and step counter reset -- which on a
+# 25-epoch schedule means restarting the schedule on every eviction.
+# helix.integrations.pimm._patch_rng_restore_to_cpu moves it back; verified
+# end-to-end ("Resuming train from structured state: global_step=32").
 #
-# Saving is fine, so a 7 h run inside a 12 h non-preemptable slot simply never
-# needs to resume. Requeue is kept only for a node failure, and the guard below
-# then does a WARM START rather than a resume.
+# So an eviction now costs at most SAVE_EVERY=238 steps, and --requeue puts the
+# SAME job id back in the queue automatically.
 #SBATCH --requeue
 # Append, don't truncate: a requeued attempt reuses %j, and the default would
 # erase the log of the attempt that got evicted.
@@ -72,21 +71,22 @@ mkdir -p "${EXP_ROOT}/logs"
 #
 # It must not be `-r true` for a second reason: train.sh's resume branch exits 2
 # when it finds no checkpoint, so that flag would kill the very first attempt.
-WARM_ARGS=""
+RESUME_ARGS=""
 RESTARTS=${SLURM_RESTART_COUNT:-0}
-if [ -e "${EXP_DIR}/model/model_last.pth" ]; then
+if [ -e "${EXP_DIR}/model/model_last.pth" ] || [ -d "${EXP_DIR}/model/last" ]; then
   if [ "$RESTARTS" -gt 0 ]; then
-    WARM_ARGS="-w ${EXP_DIR}/model/model_last.pth"
-    echo "[wrapper] requeue #${RESTARTS}: warm-starting from ${EXP_DIR}/model/model_last.pth"
-    echo "[wrapper] NOTE optimizer state and step counter reset (pimm resume is broken)"
+    # TRUE resume: train.sh derives the checkpoint itself and restores optimizer,
+    # scheduler, global_step, dataloader and RNG. Not a warm start.
+    RESUME_ARGS="-r true"
+    echo "[wrapper] requeue #${RESTARTS}: resuming ${EXP_DIR} (full trainer state)"
   else
-    # FIRST attempt, yet a checkpoint is already there: the run name collides
-    # with a previous run. Warm-starting here would silently continue THAT
-    # model -- e.g. training on a rebuilt corpus while initialised from weights
-    # fitted to the old one, which looks like a valid run and is not.
-    echo "ERROR: ${EXP_DIR}/model/model_last.pth exists on a FIRST attempt." >&2
-    echo "       RUN_NAME=${RUN_NAME} collides with an existing run. Choose a" >&2
-    echo "       different RUN_NAME or move the old directory aside." >&2
+    # FIRST attempt with a checkpoint already present: the run name collides with
+    # a previous run. Resuming here would silently continue THAT model -- e.g.
+    # training a rebuilt corpus from weights fitted to the old one, which looks
+    # like a valid run and answers nothing.
+    echo "ERROR: ${EXP_DIR}/model already holds a checkpoint on a FIRST attempt." >&2
+    echo "       RUN_NAME=${RUN_NAME} collides with an existing run. Pick another" >&2
+    echo "       RUN_NAME or move the old directory aside." >&2
     exit 2
   fi
 else
@@ -114,7 +114,7 @@ singularity exec --nv -B /sdf,/lscratch,"${PIMM}":/opt/pimm/src "${IMAGE}" \
     cd /opt/pimm/src
     sh /opt/pimm/src/scripts/train.sh \
       -m 1 -g 4 -c helix/coeff_fm_train -n ${RUN_NAME} \
-      -p /opt/pimm/.venv/bin/python -a ${RUN_NAME} ${WARM_ARGS} \
+      -p /opt/pimm/.venv/bin/python -a ${RUN_NAME} ${RESUME_ARGS} \
       -- --options checkpoint_format=legacy
   "
 rc=$?
