@@ -32,6 +32,13 @@ CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 pimm_src = pytest.mark.skipif(
     not os.path.exists(TRAIN_PY), reason=f"pimm source absent: {TRAIN_PY}")
 
+# `pimm_src` only asserts the SOURCE is on disk, which is all the tests that read
+# it as text need. Anything that actually imports pimm needs this instead: the
+# suite's usual image has the source visible but the package not importable.
+import importlib.util as _ilu                                    # noqa: E402
+pimm_importable = pytest.mark.skipif(
+    _ilu.find_spec("pimm") is None, reason="pimm not importable in this env")
+
 # Fields the Trainer reads but that are DERIVED by default_config_parser from
 # ones a config does set (batch_size / batch_size_val / num_worker divided by
 # world size), or that have an explicit getattr default.
@@ -355,3 +362,53 @@ def test_bootstrap_block_deletes_its_temporaries():
     leaked = sorted(k for k, v in ns.items()
                     if not k.startswith("__") and isinstance(v, types.ModuleType))
     assert not leaked, f"bootstrap_block leaks {leaked}"
+
+
+@pimm_importable
+def test_rng_restore_shim_moves_state_back_to_cpu():
+    """pimm's resume must survive pimm's own checkpoint loader.
+
+    `checkpoints.py:940` loads with `map_location=lambda storage, loc:
+    storage.cuda()`, which moves EVERY tensor in the payload to the GPU --
+    including the saved RNG state. `torch.set_rng_state` and
+    `torch.cuda.set_rng_state_all` both require CPU ByteTensors, so `resume=True`
+    raised "TypeError: RNG state must be a torch.ByteTensor" before the first
+    step. A preempted run could then only warm-start from the weights, resetting
+    the optimizer and global_step -- which restarts the LR schedule on every
+    eviction and makes a preemptable queue unusable for a long run.
+
+    Importing the adapter installs the fix; this pins that it survives a CUDA-ish
+    payload and stays idempotent.
+    """
+    import torch
+
+    import helix.integrations.pimm  # noqa: F401  (installs the shim on import)
+    from pimm.engines import _train_utils as tu
+
+    assert getattr(tu.restore_rng_state, "_helix_cpu_shim", False), \
+        "importing helix.integrations.pimm did not install the RNG shim"
+
+    # a payload shaped like pimm's, with the RNG state on a non-CPU-like device
+    class _FakeDev:
+        type = "cuda"
+
+    class _FakeTensor:
+        def __init__(self, real):
+            self._real = real
+            self.device = _FakeDev()
+
+        def cpu(self):
+            return self._real
+
+    real = torch.get_rng_state()
+    state = {"python": __import__("random").getstate(),
+             "numpy": __import__("numpy").random.get_state(),
+             "torch": _FakeTensor(real)}
+    tu.restore_rng_state(state)          # must not raise
+    assert torch.equal(torch.get_rng_state(), real)
+
+    # idempotent: importing again must not double-wrap
+    first = tu.restore_rng_state
+    from helix.integrations.pimm import _patch_rng_restore_to_cpu
+    _patch_rng_restore_to_cpu()
+    assert tu.restore_rng_state is first
