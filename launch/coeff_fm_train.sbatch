@@ -119,4 +119,30 @@ singularity exec --nv -B /sdf,/lscratch,"${PIMM}":/opt/pimm/src "${IMAGE}" \
   "
 rc=$?
 echo "[wrapper] train.sh exited ${rc}"
+
+# Slurm's --requeue covers PREEMPTION and node failure, not a non-zero exit. But
+# on a preemptable queue the most common startup failure is transient
+# infrastructure -- e.g. "CUDA error: CUDA-capable device(s) is/are busy or
+# unavailable" at torch.cuda.set_device, which happens when a node is still
+# releasing a just-preempted job. Left alone, that silently ends a 7 h run within
+# a minute of submission.
+#
+# So requeue ourselves on failure, but only while there is no checkpoint yet
+# (i.e. the failure is at startup, not mid-training where --requeue already
+# applies) and only a bounded number of times, so a DETERMINISTIC failure -- a
+# bad config, a missing corpus -- fails loudly instead of looping forever.
+MAX_STARTUP_REQUEUE=${MAX_STARTUP_REQUEUE:-3}
+if [ "${rc}" -ne 0 ] \
+   && [ ! -e "${EXP_DIR}/model/model_last.pth" ] \
+   && [ "${RESTARTS}" -lt "${MAX_STARTUP_REQUEUE}" ]; then
+  echo "[wrapper] startup failure with no checkpoint written (attempt $((RESTARTS+1))" \
+       "of ${MAX_STARTUP_REQUEUE}); requeueing ${SLURM_JOB_ID}" >&2
+  scontrol requeue "${SLURM_JOB_ID}"
+  sleep 30          # let the requeue register before the step exits
+  exit 0
+fi
+if [ "${rc}" -ne 0 ]; then
+  echo "[wrapper] NOT requeueing: either a checkpoint exists (so --requeue owns" \
+       "this) or ${MAX_STARTUP_REQUEUE} startup attempts are exhausted" >&2
+fi
 exit ${rc}
