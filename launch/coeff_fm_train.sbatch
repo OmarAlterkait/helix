@@ -135,8 +135,15 @@ MAX_STARTUP_REQUEUE=${MAX_STARTUP_REQUEUE:-3}
 if [ "${rc}" -ne 0 ] \
    && [ ! -e "${EXP_DIR}/model/model_last.pth" ] \
    && [ "${RESTARTS}" -lt "${MAX_STARTUP_REQUEUE}" ]; then
-  echo "[wrapper] startup failure with no checkpoint written (attempt $((RESTARTS+1))" \
-       "of ${MAX_STARTUP_REQUEUE}); requeueing ${SLURM_JOB_ID}" >&2
+  # NOTE a plain requeue can land on the SAME node, which is useless when the
+  # node itself is the problem. Seen: sdfampere010 reporting state=idle,
+  # reason=none while every job placed on it died at torch.cuda.set_device with
+  # "CUDA-capable device(s) is/are busy or unavailable" -- broken but not
+  # drained, so the scheduler kept handing it out. If the log shows the same node
+  # twice, resubmit with --exclude=<node> rather than waiting out the retries.
+  echo "[wrapper] startup failure on ${SLURMD_NODENAME:-?} with no checkpoint" \
+       "(attempt $((RESTARTS+1)) of ${MAX_STARTUP_REQUEUE}); requeueing" \
+       "${SLURM_JOB_ID}" >&2
   scontrol requeue "${SLURM_JOB_ID}"
   sleep 30          # let the requeue register before the step exits
   exit 0
