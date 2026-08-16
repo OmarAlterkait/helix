@@ -41,11 +41,17 @@ def _mad(x: torch.Tensor, dim: int) -> torch.Tensor:
 
 
 def _block_common_mode(b: torch.Tensor, ksig: float, sigmask: torch.Tensor,
-                       group_size: int) -> torch.Tensor:
-    """Per-(block, position) robust common mode M, shape (n_blocks, Lb)."""
+                       group_size: int, return_occ: bool = False):
+    """Per-(block, position) robust common mode M, shape (n_blocks, Lb).
+
+    ``return_occ`` also returns ``1 - nuf/block_size``, the fraction of the
+    block's wires the k-sigma test rejected — already computed as the mean's
+    denominator. Uses each block's REAL width so the partial trailing block is
+    judged on the same scale.
+    """
     W, Lb = b.shape
     ngf = W // group_size
-    Ms = []
+    Ms, Os = [], []
     if ngf > 0:
         bf = b[:ngf * group_size].reshape(ngf, group_size, Lb)
         smf = sigmask[:ngf * group_size].reshape(ngf, group_size, Lb)
@@ -56,6 +62,8 @@ def _block_common_mode(b: torch.Tensor, ksig: float, sigmask: torch.Tensor,
         nuf = uf.sum(1)
         mean = (bf * uf).sum(1) / torch.clamp_min(nuf, 1)
         Ms.append(torch.where(nuf > 0, mean, med))
+        if return_occ:
+            Os.append(1.0 - nuf.to(b.dtype) / float(group_size))
     rem = W - ngf * group_size
     if rem > 0:
         blk = b[ngf * group_size:]
@@ -67,7 +75,10 @@ def _block_common_mode(b: torch.Tensor, ksig: float, sigmask: torch.Tensor,
         nuf = uf.sum(0)
         mean = (blk * uf).sum(0) / torch.clamp_min(nuf, 1)
         Ms.append(torch.where(nuf > 0, mean, med)[None, :])
-    return torch.cat(Ms, dim=0)                                  # (n_blocks, Lb)
+        if return_occ:
+            Os.append((1.0 - nuf.to(b.dtype) / float(rem))[None, :])
+    M = torch.cat(Ms, dim=0)                                     # (n_blocks, Lb)
+    return (M, torch.cat(Os, dim=0)) if return_occ else M
 
 
 def _detect_signal(cleaned_band: torch.Tensor, ksig: float, group_size: int) -> torch.Tensor:
@@ -104,8 +115,14 @@ def _sigc(M: torch.Tensor, mode: str) -> torch.Tensor:
 
 
 def gate_band(b: torch.Tensor, *, group_size: int, kgate, ksig: float,
-              npass: int, sigc_mode: str = "quantile") -> torch.Tensor:
-    """Coherent-gate one band ``(W, Lb)`` → cleaned band."""
+              npass: int, tau=None, sigc_mode: str = "quantile") -> torch.Tensor:
+    """Coherent-gate one band ``(W, Lb)`` → cleaned band.
+
+    ``tau`` adds the occupancy condition — refuse only when |M| is large AND more
+    than ``tau`` of the block's wires were flagged. ``None`` reproduces the legacy
+    magnitude-only rule bit-for-bit. See the numpy twin for why the magnitude
+    test alone is wrong, and why occupancy must come from pass 1.
+    """
     W = b.shape[0]
     kg = list(kgate) if isinstance(kgate, (list, tuple, np.ndarray)) else [kgate] * npass
     if len(kg) > npass:
@@ -124,10 +141,17 @@ def gate_band(b: torch.Tensor, *, group_size: int, kgate, ksig: float,
     idx = torch.clamp(torch.arange(W, device=b.device) // group_size, max=n_blocks - 1)
     sm = torch.zeros_like(b, dtype=torch.bool)
     cleaned = b
+    occ1 = None
     for p in range(npass):
-        M = _block_common_mode(b, ksig, sm, group_size)
+        if p == 0:
+            M, occ1 = _block_common_mode(b, ksig, sm, group_size, return_occ=True)
+        else:
+            M = _block_common_mode(b, ksig, sm, group_size)
         sc = _sigc(M, sigc_mode)
-        Mc = torch.where(M.abs() < kg[p] * sc, M, torch.zeros((), dtype=M.dtype, device=M.device))
+        refuse = M.abs() >= kg[p] * sc
+        if tau is not None:
+            refuse = refuse & (occ1 > tau)
+        Mc = torch.where(refuse, torch.zeros((), dtype=M.dtype, device=M.device), M)
         cleaned = b - Mc[idx]
         if p + 1 < npass:
             sm = _detect_signal(cleaned, ksig, group_size)
@@ -142,6 +166,7 @@ def gate_bands(
     ksig: float = 3.0,
     npass: int = 2,
     gate_approx: bool = True,
+    tau=None,
     sigc_mode: str = "quantile",
 ) -> list[torch.Tensor]:
     """Coherent-remove a plane's DWT bands ``[cA, cD_L, …, cD_1]`` (list in, list out).
@@ -165,5 +190,5 @@ def gate_bands(
             out.append(b)
             continue
         out.append(gate_band(b, group_size=group_size, kgate=kgate, ksig=ksig,
-                             npass=npass, sigc_mode=sigc_mode))
+                             npass=npass, tau=tau, sigc_mode=sigc_mode))
     return out

@@ -94,7 +94,8 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
         coeffs, lev = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
                               mode=config.dwt_mode)
         gated = coherent_gate(coeffs, group_size=config.group_size, kgate=config.gate_kgate,
-                              ksig=config.gate_ksig, npass=config.gate_npass, gate_approx=True)
+                              ksig=config.gate_ksig, npass=config.gate_npass,
+                              tau=config.gate_tau, gate_approx=True)
         out, n_kept, n_total, band_sigma = threshold_bands(gated, config.threshold_spec())
         sparse = SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
                               sigma_per_band=band_sigma, wavelet=config.wavelet,
@@ -153,7 +154,8 @@ def basis_from_config(config: DetectorConfig, *, band_lengths, level: int) -> Ba
         n_ticks_raw=config.num_time_steps, pad=npad, band_lengths=tuple(band_lengths),
         sigma_norm=config.sigma_norm,
         removal=dict(kind=config.removal, kgate=config.gate_kgate, ksig=config.gate_ksig,
-                     npass=config.gate_npass, group_size=config.group_size),
+                     npass=config.gate_npass, tau=config.gate_tau,
+                     group_size=config.group_size),
         threshold=dict(method="universal", func=config.threshold_mode,
                        scale=config.threshold_kappa, per_band_sigma=True,
                        threshold_approx=config.threshold_include_approx),

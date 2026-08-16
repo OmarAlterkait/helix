@@ -42,17 +42,21 @@ _OPS = "helix.tpc.coherent_gate_ops"
 
 
 def coherent_gate(bands, *, group_size=64, kgate=3.0, ksig=3.0, npass=2,
-                  gate_approx=True, sigc_mode="quantile"):
+                  gate_approx=True, tau=None, sigc_mode="quantile"):
     """Coherent-gate a plane's DWT bands ``[cA, cD_L, …, cD_1]`` (list in, list out).
 
     ``gate_approx=False`` leaves the approximation band (index 0) untouched.
     ``kgate`` may be a scalar or a per-pass sequence. Non-finite input fails open
     (the band is returned unchanged) so a bad event never propagates corrupted
     coefficients. Dispatches to the active backend.
+
+    ``tau`` is the occupancy tolerance: refuse to subtract only when |M| is large
+    AND more than this fraction of the block's wires were flagged by the k-sigma
+    test. ``None`` is the legacy magnitude-only rule.
     """
     return backend.ops(_OPS).gate_bands(
         bands, group_size=group_size, kgate=kgate, ksig=ksig, npass=npass,
-        gate_approx=gate_approx, sigc_mode=sigc_mode)
+        gate_approx=gate_approx, tau=tau, sigc_mode=sigc_mode)
 
 
 # The single-band helper stays importable from the numpy backend for tests that
