@@ -32,7 +32,14 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=12:00:00
-# preemptable, with Slurm requeue as the babysitter. This is only safe because
+# preemptable. NOTE the babysitter is NOT --requeue: this cluster runs
+# PreemptMode=CANCEL (QoS preemptable: "within,cancel"), so a preempted job is
+# CANCELLED outright and never returns to the queue, whatever --requeue says.
+# Confirmed the hard way: a run reached epoch 11/25 (step 51,170, 3h20m) and then
+# simply vanished. Continuation therefore needs something OUTSIDE the job --
+# submit a chain of `--dependency=afterany` jobs, each carrying ALLOW_RESUME=1
+# (see launch/chain_submit.sh). --requeue is kept because it still covers node
+# failure, which is requeued rather than cancelled. This is only safe because
 # resume now works: pimm's loader moved the saved RNG state to the GPU
 # (checkpoints.py:940 map_location) and torch.set_rng_state rejects a CUDA
 # tensor, so `resume=True` used to die before step 1 and an evicted run could
@@ -73,20 +80,23 @@ mkdir -p "${EXP_ROOT}/logs"
 # when it finds no checkpoint, so that flag would kill the very first attempt.
 RESUME_ARGS=""
 RESTARTS=${SLURM_RESTART_COUNT:-0}
+# Explicit opt-in for continuing an EXISTING run directory. Needed because a
+# preempt-cancel means the continuation is a brand-new job with
+# SLURM_RESTART_COUNT=0, which is indistinguishable from a run-name collision
+# without being told which one this is.
+ALLOW_RESUME=${ALLOW_RESUME:-0}
 if [ -e "${EXP_DIR}/model/model_last.pth" ] || [ -d "${EXP_DIR}/model/last" ]; then
-  if [ "$RESTARTS" -gt 0 ]; then
-    # TRUE resume: train.sh derives the checkpoint itself and restores optimizer,
+  if [ "$RESTARTS" -gt 0 ] || [ "$ALLOW_RESUME" = "1" ]; then
+    # TRUE resume: train.sh derives the checkpoint and pimm restores optimizer,
     # scheduler, global_step, dataloader and RNG. Not a warm start.
     RESUME_ARGS="-r true"
-    echo "[wrapper] requeue #${RESTARTS}: resuming ${EXP_DIR} (full trainer state)"
+    echo "[wrapper] resuming ${EXP_DIR} (full trainer state; restarts=${RESTARTS}," \
+         "allow_resume=${ALLOW_RESUME})"
   else
-    # FIRST attempt with a checkpoint already present: the run name collides with
-    # a previous run. Resuming here would silently continue THAT model -- e.g.
-    # training a rebuilt corpus from weights fitted to the old one, which looks
-    # like a valid run and answers nothing.
-    echo "ERROR: ${EXP_DIR}/model already holds a checkpoint on a FIRST attempt." >&2
-    echo "       RUN_NAME=${RUN_NAME} collides with an existing run. Pick another" >&2
-    echo "       RUN_NAME or move the old directory aside." >&2
+    echo "ERROR: ${EXP_DIR}/model already holds a checkpoint, this is a FIRST" >&2
+    echo "       attempt, and ALLOW_RESUME is not set. Continuing would silently" >&2
+    echo "       train from THAT model. Set ALLOW_RESUME=1 to continue it, or" >&2
+    echo "       pick a different RUN_NAME." >&2
     exit 2
   fi
 else
