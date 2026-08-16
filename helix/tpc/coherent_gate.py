@@ -22,14 +22,26 @@ Qualified default: kgate=3.0, ksig=3.0, npass=2, group_size=64, A-parity ``sigc`
 (``quantile(0.5)``). See ``research/r2_qualification/REPORT.md``.
 
 Backends: ``numpy`` (reference, also the legacy ``sigc_mode='median'`` path),
-``jax`` (GPU, ~42x, bit-identical to numpy — ``jnp.quantile`` matches
-``np.quantile``) and ``torch``.
+``jax`` (GPU, ~42x) and ``torch``.
+
+BACKENDS AGREE TO ~1e-4 ADC, NOT EXACTLY, and that is inherent rather than a
+defect to chase. Measured on a real event (6 planes x 5 bands, 46.5M
+coefficients): max |numpy - torch| = 1.2e-4 ADC, unchanged by ``npass`` or
+``tau``. Three things compose to produce it — float32 reductions whose result
+depends on summation order (the masked mean, the MAD), discrete threshold
+comparisons taken on those floats, and a broadcast that applies one block
+decision to all 64 wires. A corpus is therefore BACKEND-specific as well as
+architecture-specific, which is why ``scripts/submit_coeff_corpus.sh`` pins the
+GPU generation and every build passes ``--backend torch``. Do not read the
+per-backend docstrings as promising bit-equality.
 
 The torch port has to work around one thing: ``torch.median`` returns the LOWER
 of the two middle values while ``np.quantile(..., 0.5)`` AVERAGES them, so a
 naive port cannot reproduce A-parity ``sigc`` — they differ by ~1e-4 relative on
 even-length inputs, which flips a handful of gate decisions per event.
-``coherent_gate_ops_torch._q50`` reproduces the averaging convention instead.
+``coherent_gate_ops_torch._q50`` reproduces the averaging convention instead,
+which removes that SYSTEMATIC discrepancy (it does not remove the float32
+reduction-order one above).
 (An earlier version of this docstring concluded from that discrepancy that a
 torch backend was impossible and said none existed; the backend was written
 anyway, and the workaround is what makes it agree.)
