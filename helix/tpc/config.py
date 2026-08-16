@@ -33,6 +33,26 @@ class DetectorConfig:
     gate_kgate: float = 3.0
     gate_ksig: float = 3.0
     gate_npass: int = 2
+    # Occupancy tolerance on the REFUSAL. The gate refuses to subtract a large
+    # block common mode on the assumption it is signal contamination — but
+    # coherent noise is identical on every wire of a block, so it cannot produce
+    # an outlier, and a large |M| with an EMPTY k-sigma mask is coherent noise in
+    # its own Gaussian tail, not signal. Refusing there leaves the whole
+    # component behind, one block wide: the leftover-coherent "blips".
+    #
+    # tau = the fraction of a block's wires that must be flagged before the
+    # magnitude test is allowed to veto. 0.05 = 3 of 64, which matches the
+    # k-sigma test's own false-positive rate, so chance outliers do not veto.
+    # Measured over 1,200 (event, plane) pairs on all 100 shards of
+    # run_0027575715, against the TRUE noise-free image:
+    #   stripe (block-mean residual, signal-free cells)  5.32x lower
+    #   off-signal pixels > 5 ADC                        2.61x fewer
+    #   F0                                               -0.0001 (wins 85% of pairs)
+    #   coefficients                                     fewer
+    # No runtime cost: nuf is already the mean's denominator.
+    # None restores the legacy magnitude-only rule bit-for-bit (needed to
+    # reproduce corpora built before 2026-08-16).
+    gate_tau: float | None = 0.05
 
     # ── wavelet sparsification (shared helix.core) ──
     wavelet: str = "coif3"

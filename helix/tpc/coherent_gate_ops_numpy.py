@@ -40,17 +40,24 @@ def _mad(x: np.ndarray, axis=None) -> np.ndarray:
 
 
 def _block_common_mode(b: np.ndarray, ksig: float, sigmask: np.ndarray,
-                       group_size: int) -> np.ndarray:
+                       group_size: int, return_occ: bool = False):
     """Per-(block, position) robust common mode M, shape (n_blocks, Lb).
 
     Blocks are contiguous runs of `group_size` wires; a trailing partial block is
     handled separately. Within a block, M is the mean over wires whose residual
     from the block median is within `ksig` MADs AND not flagged as signal; blocks
     with no such wires fall back to the median.
+
+    Occupancy (``return_occ``) is ``1 - nuf/block_size`` — the fraction of the
+    block's wires the k-sigma test rejected. It is computed here anyway as the
+    mean's denominator; returning it lets the gate condition its refusal on
+    whether the mask actually FIRED, rather than on the magnitude of M alone.
+    Note it uses each block's REAL width, so the 49- and 35-wire trailing blocks
+    are judged on the same scale as the full ones.
     """
     W, Lb = b.shape
     ngf = W // group_size
-    Ms = []
+    Ms, Os = [], []
     if ngf > 0:
         bf = b[:ngf * group_size].reshape(ngf, group_size, Lb)
         smf = sigmask[:ngf * group_size].reshape(ngf, group_size, Lb)
@@ -61,6 +68,8 @@ def _block_common_mode(b: np.ndarray, ksig: float, sigmask: np.ndarray,
         nuf = uf.sum(1)
         mean = (bf * uf).sum(1) / np.maximum(nuf, 1)
         Ms.append(np.where(nuf > 0, mean, med))
+        if return_occ:
+            Os.append(1.0 - nuf / float(group_size))
     rem = W - ngf * group_size
     if rem > 0:
         blk = b[ngf * group_size:]
@@ -72,7 +81,10 @@ def _block_common_mode(b: np.ndarray, ksig: float, sigmask: np.ndarray,
         nuf = uf.sum(0)
         mean = (blk * uf).sum(0) / np.maximum(nuf, 1)
         Ms.append(np.where(nuf > 0, mean, med)[None, :])
-    return np.concatenate(Ms, axis=0)                            # (n_blocks, Lb)
+        if return_occ:
+            Os.append((1.0 - nuf / float(rem))[None, :])
+    M = np.concatenate(Ms, axis=0)                               # (n_blocks, Lb)
+    return (M, np.concatenate(Os, axis=0)) if return_occ else M
 
 
 def _detect_signal(cleaned_band: np.ndarray, ksig: float, group_size: int) -> np.ndarray:
@@ -105,8 +117,24 @@ def _sigc(M: np.ndarray, mode: str) -> float:
 
 
 def gate_band(b: np.ndarray, *, group_size: int, kgate, ksig: float,
-              npass: int, sigc_mode: str = "quantile") -> np.ndarray:
-    """Coherent-gate one band ``(W, Lb)`` → cleaned band. See module docstring."""
+              npass: int, tau=None, sigc_mode: str = "quantile") -> np.ndarray:
+    """Coherent-gate one band ``(W, Lb)`` → cleaned band. See module docstring.
+
+    ``tau`` adds the occupancy condition: refuse to subtract only when |M| is
+    large AND more than ``tau`` of the block's wires were flagged. ``None``
+    reproduces the legacy magnitude-only rule bit-for-bit.
+
+    The rule the magnitude test alone gets wrong: coherent noise is identical on
+    every wire of a block, so it CANNOT produce an outlier. An empty mask is
+    therefore positive evidence that nothing but coherent noise is present and M
+    is the plain mean of all wires — refusing it because |M| landed in the
+    coherent's own Gaussian tail leaves the whole component behind, one block
+    wide, which is the leftover-coherent "blip" population.
+
+    Occupancy MUST come from pass 1. At a cell pass 1 refused, the cleaned band
+    still holds the full coherent, so ``_detect_signal`` flags every wire and
+    pass-2 occupancy is 1.0 by construction — the statistic destroys itself.
+    """
     W = b.shape[0]
     kg = list(kgate) if isinstance(kgate, (list, tuple, np.ndarray)) else [kgate] * npass
     if len(kg) > npass:
@@ -125,10 +153,17 @@ def gate_band(b: np.ndarray, *, group_size: int, kgate, ksig: float,
     idx = np.minimum(np.arange(W) // group_size, n_blocks - 1)
     sm = np.zeros_like(b, dtype=bool)
     cleaned = b
+    occ1 = None
     for p in range(npass):
-        M = _block_common_mode(b, ksig, sm, group_size)
+        if p == 0:
+            M, occ1 = _block_common_mode(b, ksig, sm, group_size, return_occ=True)
+        else:
+            M = _block_common_mode(b, ksig, sm, group_size)
         sc = _sigc(M, sigc_mode)
-        Mc = np.where(np.abs(M) < kg[p] * sc, M, 0.0)
+        refuse = np.abs(M) >= kg[p] * sc
+        if tau is not None:
+            refuse = refuse & (occ1 > tau)
+        Mc = np.where(refuse, 0.0, M)
         cleaned = b - Mc[idx]
         if p + 1 < npass:
             sm = _detect_signal(cleaned, ksig, group_size)
@@ -143,6 +178,7 @@ def gate_bands(
     ksig: float = 3.0,
     npass: int = 2,
     gate_approx: bool = True,
+    tau=None,
     sigc_mode: str = "quantile",
 ) -> list[np.ndarray]:
     """Coherent-remove a plane's DWT bands ``[cA, cD_L, …, cD_1]`` (list in, list out).
@@ -171,5 +207,5 @@ def gate_bands(
             out.append(b)
             continue
         out.append(gate_band(b, group_size=group_size, kgate=kgate, ksig=ksig,
-                             npass=npass, sigc_mode=sigc_mode))
+                             npass=npass, tau=tau, sigc_mode=sigc_mode))
     return out

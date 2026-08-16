@@ -134,3 +134,117 @@ def test_kgate_sequence_longer_than_npass_raises():
     gate_band(b, group_size=64, kgate=[2.5], ksig=3.0, npass=2)      # short: padded
     with pytest.raises(ValueError, match="per-pass entries but npass"):
         gate_band(b, group_size=64, kgate=[2.5, 3.5], ksig=3.0, npass=1)
+
+
+# ---- R1: the occupancy condition on the refusal -----------------------------
+
+def _rng_band(seed=0, W=1969, Lb=271):
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    b = rng.normal(scale=3.0, size=(W, Lb)).astype(np.float32)
+    # inject block-wide common mode (coherent: IDENTICAL on every wire) ...
+    for g in range(0, W, 64):
+        b[g:g + 64] += rng.normal(scale=7.0, size=(1, Lb)).astype(np.float32)
+    # ... and sparse signal on a few wires (contamination: only SOME wires)
+    for w in rng.choice(W, 40, replace=False):
+        b[w, rng.choice(Lb, 5, replace=False)] += 120.0
+    return b
+
+
+def test_tau_none_reproduces_the_legacy_gate_bitwise():
+    """`tau=None` must be bit-identical to the magnitude-only rule.
+
+    Corpora built before 2026-08-16 used it, so this is what makes them
+    reproducible after the occupancy condition landed.
+    """
+    import numpy as np
+
+    from helix.tpc.coherent_gate_ops_numpy import _block_common_mode, _sigc, gate_band
+
+    b = _rng_band()
+    for npass in (1, 2):
+        got = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=npass, tau=None)
+        # recompute the legacy rule inline, independent of the implementation
+        W = b.shape[0]
+        nblk = (W + 63) // 64
+        idx = np.minimum(np.arange(W) // 64, nblk - 1)
+        sm = np.zeros_like(b, dtype=bool)
+        for p in range(npass):
+            M = _block_common_mode(b, 3.0, sm, 64)
+            Mc = np.where(np.abs(M) < 3.0 * _sigc(M, "quantile"), M, 0.0)
+            ref = b - Mc[idx]
+            if p + 1 < npass:
+                from helix.tpc.coherent_gate_ops_numpy import _detect_signal
+                sm = _detect_signal(ref, 3.0, 64)
+        assert np.array_equal(got, ref.astype(b.dtype, copy=False)), \
+            f"tau=None diverged from the legacy rule at npass={npass}"
+
+
+def test_tau_only_ever_subtracts_more_single_pass():
+    """At npass=1 the occupancy condition can only RE-ADMIT refusals.
+
+    It ANDs an extra term onto the refusal, so a cell the legacy rule already
+    subtracted must come out identical; tau can only turn a refusal INTO a
+    subtraction. This pins that tau changes the DECISION and never the estimator.
+
+    Stated for npass=1 deliberately. At npass=2 it does NOT hold, and that is
+    correct rather than a bug: pass 1's output feeds `_detect_signal`, so
+    re-admitting a cell changes pass 2's signal mask and therefore pass 2's
+    common mode everywhere. R1's effect is consequently not confined to the
+    cells it re-admits -- see test_tau_npass2_propagates_through_detection.
+    """
+    import numpy as np
+
+    from helix.tpc.coherent_gate_ops_numpy import gate_band
+
+    b = _rng_band(seed=1)
+    legacy = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=1, tau=None)
+    r1 = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=1, tau=0.05)
+    diff = legacy != r1
+    assert diff.any(), "tau=0.05 changed nothing on a band with coherent noise"
+    assert np.array_equal(legacy[~diff], r1[~diff])
+    assert np.allclose(legacy[diff], b[diff]), \
+        "tau altered a cell the legacy rule had already subtracted"
+
+
+def test_tau_npass2_propagates_through_detection():
+    """At npass=2 the change is NOT confined to the re-admitted cells.
+
+    Documented because it is surprising and it bounds what the parity tests can
+    claim: pass 1's cleaned band seeds `_detect_signal`, so a re-admitted cell
+    shifts pass 2's mask and hence pass 2's estimate for its whole block.
+    """
+    import numpy as np
+
+    from helix.tpc.coherent_gate_ops_numpy import gate_band
+
+    b = _rng_band(seed=1)
+    legacy = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=2, tau=None)
+    r1 = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=2, tau=0.05)
+    diff = legacy != r1
+    touched = ~np.isclose(legacy[diff], b[diff])
+    assert touched.any(), (
+        "expected npass=2 to alter cells the legacy rule had already subtracted, "
+        "via the pass-1 -> _detect_signal -> pass-2 feedback")
+
+
+def test_occupancy_uses_the_real_block_width():
+    """The trailing partial block must be judged on its own width, not 64.
+
+    Planes are 1969 and 1443 wires, so the last block holds 49 or 35. Scoring its
+    occupancy against 64 would make the same number of flagged wires look like
+    less contamination there than in a full block.
+    """
+    import numpy as np
+
+    from helix.tpc.coherent_gate_ops_numpy import _block_common_mode
+
+    W = 1969                                   # 30 full blocks + 49
+    b = np.zeros((W, 8), np.float32)
+    sm = np.zeros_like(b, dtype=bool)
+    b[-49:, :] = 1.0
+    b[-1, :] = 500.0                           # one clear outlier in the partial block
+    _, occ = _block_common_mode(b, 3.0, sm, 64, return_occ=True)
+    assert occ.shape[0] == 31
+    assert occ[-1, 0] == pytest.approx(1.0 / 49.0, rel=1e-6), \
+        f"partial block occupancy scored against the wrong width: {occ[-1, 0]}"

@@ -198,7 +198,11 @@ def main():
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json")
     ap.add_argument("--npz",
                     default="/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz")
-    ap.add_argument("--removal", choices=("corpus", "de2"), default="corpus",
+    ap.add_argument("--r1-tau", type=float, default=0.0,
+                    help="R1 occupancy tolerance: subtract a large |M| when at most "
+                         "this FRACTION of the block's wires were flagged. 0.0 = "
+                         "'subtract unless the mask fired at all'.")
+    ap.add_argument("--removal", choices=("corpus", "de2", "r1"), default="corpus",
                     help="'corpus' reads the stored coefficients. 'de2' recomputes "
                          "the removed image with de2_clamp (research/coherent_coeffs/"
                          "induction.py) from the regenerated noisy, then applies the "
@@ -279,6 +283,36 @@ def main():
                 f"!= stored {stored} — the regenerated panel would not match")
         print(f"noise seed {seed} matches the corpus")
 
+    if a.removal == "r1":
+        import sys as _s
+        _s.path.insert(0, "/sdf/data/neutrino/omara/exp/_diag")
+        from helix.core import backend as _bk
+        from helix.core.wavelet import (SparseResult, reconstruct as _rec,
+                                        threshold_bands as _thr, wavedec as _wd)
+        from helix.tpc.config import DetectorConfig
+        from helix.tpc.io import config_from_file
+        from helix.tpc.pipeline import _pad_time
+        from r1_gate import gate_band_r1
+        import torch as _t
+        _bk.set_backend("numpy")
+        _base = config_from_file(sensor_shard)
+        _cfg = DetectorConfig(num_time_steps=_base.num_time_steps,
+                              plane_labels=_base.plane_labels, pedestals=_base.pedestals)
+        removed_all = {}
+        for _g, _img in noisy_all.items():
+            _co, _lev = _wd(_pad_time(_img.astype(np.float32), _cfg.dwt_level),
+                            wavelet=_cfg.wavelet, level=_cfg.dwt_level, mode=_cfg.dwt_mode)
+            _gt = [np.asarray(gate_band_r1(
+                _t.as_tensor(np.asarray(_b2, np.float32)), group_size=_cfg.group_size,
+                kgate=[_cfg.gate_kgate] * _cfg.gate_npass, ksig=_cfg.gate_ksig,
+                npass=_cfg.gate_npass, tau=a.r1_tau).numpy(), np.float32) for _b2 in _co]
+            _o, _nk, _nt2, _bs = _thr(_gt, _cfg.threshold_spec())
+            removed_all[_g] = _rec(SparseResult(coeffs=_o, n_kept=_nk, n_total=_nt2,
+                                                sigma_per_band=_bs, wavelet=_cfg.wavelet,
+                                                level=_lev, mode=_cfg.dwt_mode),
+                                   _cfg.num_time_steps)
+        kg_lbl = f"R1(tau={a.r1_tau:g})"
+
     if a.removal == "de2":
         import sys as _s
         _s.path.insert(0, "/sdf/group/neutrino/omara/helix-extraction/research/coherent_coeffs")
@@ -307,8 +341,9 @@ def main():
                                    _cfg.num_time_steps)
         kg_lbl = f"de2_clamp({a.de2_clamp:g})"
 
-    REMOVED_TITLE = ("removed: de2_clamp -> DWT recon" if a.removal == "de2"
-                     else "removed: corpus coeff -> DWT recon")
+    REMOVED_TITLE = {"de2": "removed: de2_clamp -> DWT recon",
+                     "r1": "removed: R1 gate -> DWT recon"}.get(
+                         a.removal, "removed: corpus coeff -> DWT recon")
     CLEAN_TITLE = ("clean (TRUE noise-free image)" if a.clean_source == "true"
                    else "clean (co-supported target)")
 

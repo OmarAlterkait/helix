@@ -36,11 +36,13 @@ def _pad_wires(b, gs):
     return b, W
 
 
-def _gate_band_core(b, gs, kgate, ksig, npass):
+def _gate_band_core(b, gs, kgate, ksig, npass, tau):
     """Gate one band ``(W, Lb)`` -> cleaned band ``(W, Lb)``.
 
     ``kgate`` is a per-pass vector (length ``npass``) so the pass loop unrolls
-    without retracing on scalar values.
+    without retracing on scalar values. ``tau`` < 0 disables the occupancy
+    condition (the legacy magnitude-only rule); it is a float rather than None so
+    it does not become a retracing static argument.
     """
     bp, W = _pad_wires(b, gs)
     nb, Lb = bp.shape[0] // gs, bp.shape[1]
@@ -49,6 +51,8 @@ def _gate_band_core(b, gs, kgate, ksig, npass):
     blk0 = jnp.nan_to_num(blk)
     sm = jnp.zeros_like(blk, dtype=bool)          # signal mask (per pass)
     cleaned = bp
+    nvalid = valid.sum(axis=1)                    # real wires per block (NaN pad)
+    occ1 = None
 
     for p in range(npass):
         med = jnp.nanquantile(blk, 0.5, axis=1)                       # (nb, Lb)
@@ -59,8 +63,12 @@ def _gate_band_core(b, gs, kgate, ksig, npass):
         nuf = uf.sum(axis=1)
         mean = jnp.where(uf, blk0, 0.0).sum(axis=1) / jnp.maximum(nuf, 1)
         M = jnp.where(nuf > 0, mean, med)                             # (nb, Lb)
+        if p == 0:                       # occupancy from PASS 1 only; pass 2 is
+            occ1 = 1.0 - nuf / jnp.maximum(nvalid, 1)   # 1.0 by construction
         sigc = jnp.maximum(jnp.quantile(jnp.abs(M), 0.5) / 0.6745, _EPS)
-        Mc = jnp.where(jnp.abs(M) < kgate[p] * sigc, M, 0.0)
+        refuse = jnp.abs(M) >= kgate[p] * sigc
+        refuse = jnp.where(tau < 0, refuse, refuse & (occ1 > tau))
+        Mc = jnp.where(refuse, 0.0, M)
         cleaned = bp - jnp.repeat(Mc, gs, axis=0)
         if p + 1 < npass:                                             # re-detect signal
             cb = cleaned.reshape(nb, gs, Lb)
@@ -73,7 +81,7 @@ def _gate_band_core(b, gs, kgate, ksig, npass):
 
 
 @functools.partial(jax.jit, static_argnames=("gs", "npass", "lens", "skip_first"))
-def _gate_all(flat, gs, kgate, ksig, npass, lens, skip_first):
+def _gate_all(flat, gs, kgate, ksig, npass, lens, skip_first, tau):
     """Gate EVERY band of a plane in ONE compiled kernel.
 
     ``flat`` is the band-concatenated plane ``(W, sum(lens))``. The band loop runs
@@ -85,13 +93,13 @@ def _gate_all(flat, gs, kgate, ksig, npass, lens, skip_first):
     for i, L in enumerate(lens):
         seg = flat[:, off:off + L]
         out.append(seg if (i == 0 and skip_first)
-                   else _gate_band_core(seg, gs, kgate, ksig, npass))
+                   else _gate_band_core(seg, gs, kgate, ksig, npass, tau))
         off += L
     return jnp.concatenate(out, axis=1)
 
 
 def gate_bands(bands, *, group_size=64, kgate=3.0, ksig=3.0, npass=2,
-               gate_approx=True, sigc_mode="quantile"):
+               gate_approx=True, tau=None, sigc_mode="quantile"):
     """Coherent-gate a plane's DWT bands ``[cA, cD_L, …, cD_1]`` (list in, list out).
 
     ``sigc_mode`` is accepted for API parity with the numpy backend; JAX only
@@ -123,6 +131,9 @@ def gate_bands(bands, *, group_size=64, kgate=3.0, ksig=3.0, npass=2,
     else:
         lens = tuple(int(np.asarray(b).shape[-1]) for b in bands)
         flat = jnp.concatenate([jnp.asarray(b, jnp.float32) for b in bands], axis=1)
+    # tau<0 is the in-trace sentinel for 'no occupancy condition'; passing
+    # None would make it a static arg and retrace per value.
     gated = _gate_all(flat, int(group_size), kvec, float(ksig), int(npass),
-                      lens, not gate_approx)
+                      lens, not gate_approx,
+                      float(-1.0 if tau is None else tau))
     return FlatBands(gated, lens)
