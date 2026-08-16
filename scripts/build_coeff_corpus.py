@@ -138,6 +138,13 @@ def main():
                          "comma-separated PER-PASS sequence too (npass=2), e.g. "
                          "'4.0,3.0' = aggressive first pass then a permissive "
                          "second; gate_band already indexes kgate by pass.")
+    ap.add_argument("--tau", type=str, default=None,
+                    help="occupancy tolerance on the gate's REFUSAL: refuse only "
+                         "when |M| is large AND more than this fraction of the "
+                         "block's wires were flagged. Default (unset) is "
+                         "DetectorConfig's 0.05 = 3 of 64. Pass 'none' for the "
+                         "legacy magnitude-only rule, which is what corpora built "
+                         "before 2026-08-16 used. Recorded in removal_json.")
     ap.add_argument("--run", default="")
     ap.add_argument("--file-index", type=int, default=0)
     ap.add_argument("--events", type=int, default=100)
@@ -215,10 +222,13 @@ def main():
     base = config_from_file(args.shard)
     cfg = DetectorConfig(num_time_steps=base.num_time_steps,
                          plane_labels=base.plane_labels, pedestals=base.pedestals,
-                         **({} if args.kgate is None else dict(gate_kgate=_parse_kgate(args.kgate))))
+                         **({} if args.kgate is None else dict(gate_kgate=_parse_kgate(args.kgate))),
+                         **({} if args.tau is None else
+                            dict(gate_tau=None if str(args.tau).lower() == "none"
+                                 else float(args.tau))))
     print(f"n_time={cfg.num_time_steps} planes={len(cfg.plane_labels)} "
           f"wavelet={cfg.wavelet} L{cfg.dwt_level} removal={cfg.removal} "
-          f"k{cfg.gate_kgate}/np{cfg.gate_npass} noise={'white' if args.white else 'colored'}")
+          f"k{cfg.gate_kgate}/np{cfg.gate_npass}/tau{cfg.gate_tau} noise={'white' if args.white else 'colored'}")
 
     use_jax = args.backend == "jax"
     use_torch = args.backend == "torch"
