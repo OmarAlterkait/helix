@@ -322,3 +322,57 @@ VERDICT: de2_clamp at clamp=4 is the recommended removal for the FM corpus,
 superseding "gate, kgate=3.0" for this use. Porting it is scoped in
 `research/coherent_coeffs/SCOPE_context_aware_removal.md` (option C); the kill
 criterion set there has now PASSED, so the port is justified.
+
+---
+
+## CORRECTIONS to the de2 RECHECK above (2026-08-16)
+
+The RECHECK section overstated its case in three specific ways. Recorded here
+rather than edited away, because the errors are instructive.
+
+1. **The de2 rescore was NOT on the same sample as the kgate sweep.** It ran one
+   event per shard (event 0, n=100); the kgate sweep ran two (events 0 and 97,
+   n=200). The kgate=3.0 baseline is 0.9056 in one table and 0.9066 in the other
+   — a 0.0010 shift from event selection alone, the same size as the +0.0011
+   headline. The two tables are printed adjacently and must not be cross-read.
+2. **"Never scored on leftover coherent" was false.** `grid.py:144-145` computes
+   `coh_left` and `stripe` against the TRUE injected coherent field, on 100
+   stratified events, and the (k1,k2) table above already reports stripe
+   0.335 -> 0.222 -> 0.187. The rescore re-derived a known result with a weaker
+   post-threshold proxy.
+3. **The effect is an order of magnitude below what record 6n rejected.** 6n
+   dismissed de2 because its gain was ~1% of charge, inside calorimetric
+   resolution; +0.0011 F0 is 0.11%. Dismissing 6n as "reached on fidelity" does
+   not answer that, because +0.0011 is itself a fidelity number.
+
+Also: "beats kgate=3.0 on EVERY axis" scored de2 against a setting this same
+document had already put off the frontier, and its "fewer coefficients" is false
+against the frontier (de2c4 28.39M vs 2.5->4.0's 27.88M). `off max` is not a
+valid axis at all — once the blips are gone the extreme residual is
+signal-adjacent ringing, not coherent (share of off-signal >5 ADC pixels lying
+near signal: 17% at kgate 3.0, 45% at 2.5->4.0, 48% at de2c4).
+
+**The de2 disposition therefore stands as the qualification left it.** What the
+RECHECK does establish correctly is that (3.0, 3.0) is not on the leftover-
+coherent frontier — which the grid's `stripe` column already showed in July.
+
+## SUPERSEDED: the kgate frontier is not the right knob (2026-08-16)
+
+All of the above tunes WHEN to refuse by moving a magnitude threshold, which is
+why every cell of it trades fidelity against leftover coherent. The frontier
+disappears once the refusal is conditioned on the k-sigma mask's occupancy
+instead (`gate_tau`, default 0.05 — see helix/tpc/config.py and the commit
+"gate: condition the refusal on occupancy"). Measured on the same 1,200 pairs
+used above:
+
+    setting          F0       dF0     stripe   ratio
+    kgate 3.0     0.9056         -    0.3189   1.00x
+    kgate 2.5->4.0 0.9023  -0.0032    0.0931   3.42x   <- best cell of the frontier
+    tau 0.05      0.9055  -0.0001    0.0599   5.32x   <- 32x less cost, better removal
+
+Knobs re-checked under tau and left unchanged: `npass=1` is WORSE (stripe 2.09x
+vs 2.32x, and coefficients rise to 57.33M, above baseline — pass 2 genuinely
+purifies the estimate, contrary to the reading that it only rescued the gate's
+own false refusals); `ksig=4.0` reaches 4.74x but costs -0.0012, so tau strictly
+dominates it; disabling the gate in D1/D2 changes nothing (stripe 0.1376 vs
+0.1378). kgate, ksig and npass all stay at 3.0 / 3.0 / 2.
