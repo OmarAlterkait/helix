@@ -93,11 +93,38 @@ def load_converted(model, blob, *, prefer="raw"):
     if blob.get("bins") and "bin_edges" not in sd:
         sd = dict(sd)
         sd["bin_edges"] = torch.as_tensor(blob["bins"]["edges"])
-        # Only the EDGES. bin_cent_asinh / bin_cent_lin stay non-persistent
-        # because nothing reads them — injecting them makes strict=True fail on
-        # any model whose set_bins was called without them.
+        # The converted blob may also carry the centroids; take them when
+        # present, and let the backfill below supply NaN when it does not.
+        for _n, _k in (("bin_cent_asinh", "cent_asinh"),
+                       ("bin_cent_lin", "cent_lin"),
+                       ("bin_cent_ratio", "cent_ratio")):
+            if blob["bins"].get(_k) is not None:
+                sd[_n] = torch.as_tensor(blob["bins"][_k])
+    sd = _backfill_centroids(model, sd)
     model.load_state_dict(sd, strict=True)
     return used
+
+
+#: Bin-centroid buffers. Persistent since the categorical read-back was fixed,
+#: so any checkpoint written before that carries `bin_edges` without them.
+_CENT_BUFFERS = ("bin_cent_asinh", "bin_cent_lin", "bin_cent_ratio")
+
+
+def _backfill_centroids(model, sd):
+    """Add missing centroid buffers from the model's own NaN-initialised ones.
+
+    Keeps ``strict=True`` meaningful — a missing WEIGHT stays an error — while
+    letting pre-fix checkpoints load. NaN is exactly the "absent" signal
+    ``tokenize.bin_centroids_ratio`` already falls back on, so a backfilled model
+    decodes through the closed form rather than silently using a wrong table.
+    """
+    missing = [n for n in _CENT_BUFFERS if n not in sd and hasattr(model, n)]
+    if not missing:
+        return sd
+    sd = dict(sd)
+    for n in missing:
+        sd[n] = getattr(model, n).detach().clone()
+    return sd
 
 
 #: Filenames ``pimm export`` writes, in preference order.
@@ -161,6 +188,12 @@ def load_export_dir(path, *, device=None):
         sd = torch.load(wpath, map_location="cpu", weights_only=False)
         sd = sd.get("state_dict", sd)
     sd = {k[7:] if k.startswith("module.") else k: v for k, v in sd.items()}
+    # The bin CENTROID buffers became persistent when the categorical read-back
+    # was fixed, so an export written before that carries `bin_edges` but not
+    # them. Backfill from the model's own NaN-initialised buffers rather than
+    # relaxing `strict`: a missing WEIGHT must still be an error, and NaN is
+    # exactly the "absent" signal `bin_centroids_ratio` already falls back on.
+    sd = _backfill_centroids(model, sd)
     model.load_state_dict(sd, strict=True)     # bin_edges rides along, persistent
 
     # Tokenizer geometry travels in the same config, inside the transform list.

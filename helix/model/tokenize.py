@@ -370,8 +370,21 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
 # ---- the inverse: tokens -> coefficient rows -------------------------------
 
 def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *,
-                    gids, norm_sigma, cfg):
+                    gids, norm_sigma, cfg, space="asinh"):
     """Shared core: an occupancy mask over the (cell, slot) grid -> coeff rows.
+
+    ``space`` says what ``values`` holds, because the inverse differs:
+
+      ``"asinh"``  the token, ``arcsinh(raw/sigma)`` -> ``sinh(v) * sigma``.
+                   Correct for ``inp``/``tgt`` and for the GAUSSIAN head's mu.
+      ``"ratio"``  the dimensionless coefficient ``raw/sigma`` -> ``v * sigma``.
+                   Correct for the CATEGORICAL head, whose read-back is
+                   ``sum_k p_k * E[raw/sigma | bin k]`` and is ALREADY an
+                   expectation of ``sinh``.
+
+    Passing a categorical posterior mean with ``space="asinh"`` applies ``sinh``
+    to a mean over many bins, which is Jensen-biased ~31% low. That shipped once;
+    hence the explicit parameter rather than a convention.
 
     ``(cell, slot)`` is a bijection with ``(plane_gid, band, wire, tau)`` given
     the per-cell block indices, so this inverts the scatter exactly. What differs
@@ -384,9 +397,14 @@ def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *,
     plane_gid = np.asarray(cell_gid, np.int64)[cell]
     wire = np.asarray(cell_wb, np.int64)[cell] * pw + slot // pt
     tau = np.asarray(cell_tb, np.int64)[cell] * pt + slot % pt
-    # undo arcsinh(raw / sigma): the token value is normalised per (plane, band)
+    # undo the per-(plane, band) normalisation; see `space` above for which one
     sig = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), 1e-6)
-    value = (np.sinh(np.asarray(values, np.float32)[cell, slot]) * sig).astype(np.float32)
+    v = np.asarray(values, np.float32)[cell, slot]
+    if space == "asinh":
+        v = np.sinh(v)
+    elif space != "ratio":
+        raise ValueError(f"space must be 'asinh' or 'ratio', got {space!r}")
+    value = (v * sig).astype(np.float32)
     return dict(band=band.astype(np.uint8), plane_gid=plane_gid.astype(np.int32),
                 wire=wire.astype(np.int32), tau=tau.astype(np.int32), value=value)
 
@@ -413,7 +431,8 @@ def detokenize(tok, *, gids, norm_sigma, cfg=PatchConfig(), values_key="inp"):
 
 
 def decode_prediction(occ_logit, values, tok, *, gids, norm_sigma,
-                      cfg=PatchConfig(), threshold=0.0, respect_valid=True):
+                      cfg=PatchConfig(), threshold=0.0, respect_valid=True,
+                      space="asinh"):
     """Model output -> coefficient rows.
 
     ``occ_logit`` and ``values`` are the FM's two heads over the ``(cell, slot)``
@@ -422,15 +441,79 @@ def decode_prediction(occ_logit, values, tok, *, gids, norm_sigma,
     where the slot is geometrically real — a slot past the plane's wire count or
     the band's length cannot hold a coefficient no matter what the head says.
 
-    For a categorical value head, pass the decoded bin centres as ``values``;
-    this function does not know how a head parameterises its value.
+    For a CATEGORICAL head, pass ``decode_categorical(...)`` output with
+    ``space="ratio"``. Do NOT pass bin centres with the default ``space="asinh"``:
+    that applies ``sinh`` to a posterior mean over many bins and reads back ~31%
+    of the charge. For a GAUSSIAN head, pass ``mu`` with ``space="asinh"``.
     """
     occ = np.asarray(occ_logit) > threshold
     if respect_valid and "valid" in tok:
         occ = occ & np.asarray(tok["valid"]).astype(bool)
     return _rows_from_grid(occ, values, tok["cell_band"], tok["cell_gid"],
                            tok["cell_wb"], tok["cell_tb"],
-                           gids=gids, norm_sigma=norm_sigma, cfg=cfg)
+                           gids=gids, norm_sigma=norm_sigma, cfg=cfg, space=space)
+
+
+
+def bin_centroids_ratio(edges, cent_ratio=None):
+    """Per-band ``E[raw/sigma | bin]`` for the categorical head, shape (n_band, K).
+
+    Prefers the MEASURED table (``cent_ratio`` from ``derive_coeff_bins``, which
+    is what the reference ships and reads back with). Falls back to the exact
+    closed form for a uniform density inside each bin::
+
+        E[sinh t | t in (a, b)] = (cosh b - cosh a) / (b - a)
+
+    which agrees with the measured table to ~0.3% and is the right thing for a
+    checkpoint exported before the centroids became persistent. The two OPEN
+    outer edges (written as the +-1e18 sentinel) are closed by reflecting the
+    neighbouring width; that under-reads the outermost bin by ~20-25% against the
+    measured table, which is unavoidable without the table and is why the table
+    is preferred.
+    """
+    e = np.array(edges, dtype=np.float64, copy=True)
+    if cent_ratio is not None:
+        c = np.asarray(cent_ratio, np.float64)
+        if np.isfinite(c).all():
+            return c.astype(np.float32)
+    BIG = 1e6                       # token space is arcsinh(); it stays single-digit
+    for b in range(e.shape[0]):
+        if abs(e[b, 0]) >= BIG:
+            e[b, 0] = e[b, 1] - (e[b, 2] - e[b, 1])
+        if abs(e[b, -1]) >= BIG:
+            e[b, -1] = e[b, -2] + (e[b, -2] - e[b, -3])
+    lo, hi = e[:, :-1], e[:, 1:]
+    w = np.maximum(hi - lo, 1e-12)
+    return ((np.cosh(hi) - np.cosh(lo)) / w).astype(np.float32)
+
+
+def decode_categorical(logits, cell_band, centroids, readout="mean"):
+    """Categorical head -> value in UNITS OF SIGMA (i.e. ``space="ratio"``).
+
+    ``logits`` is ``(n_cells, n_slot, K)``; ``centroids`` is ``(n_band, K)`` from
+    :func:`bin_centroids_ratio`. Returns ``(n_cells, n_slot)``.
+
+    ``readout="mean"`` is ``sum_k p_k * centroid_k`` — the CHARGE-closing estimate,
+    and what the reference uses everywhere (``fm/train.py:125``,
+    ``fm/e7_cat_eval.py:47``, ``fm/viz_cat.py:25``). ``readout="mode"`` takes the
+    modal bin's centroid, which the reference reports for bright-pixel fidelity.
+
+    Never apply ``sinh`` to the result: the centroids are already an expectation
+    of ``sinh``, so ``sinh(mean)`` double-applies it and reads back ~31% of the
+    charge. That is exactly the bug this function exists to make unavailable —
+    feed the output to ``_rows_from_grid(..., space="ratio")``.
+    """
+    x = np.asarray(logits, np.float32)
+    x = x - x.max(-1, keepdims=True)
+    p = np.exp(x)
+    p /= p.sum(-1, keepdims=True)
+    c = np.asarray(centroids, np.float32)[np.asarray(cell_band, np.int64)]  # (n_cells, K)
+    if readout == "mean":
+        return np.einsum("csk,ck->cs", p, c).astype(np.float32)
+    if readout == "mode":
+        k = p.argmax(-1)                                   # (n_cells, n_slot)
+        return np.take_along_axis(c[:, None, :], k[..., None], -1)[..., 0].astype(np.float32)
+    raise ValueError(f"readout must be 'mean' or 'mode', got {readout!r}")
 
 
 # ---- model-side key contract ----------------------------------------------
