@@ -28,6 +28,7 @@ model do not.
 
 from __future__ import annotations
 
+import contextlib
 import math
 
 import torch
@@ -563,6 +564,7 @@ class WeightEMA(HookBase):
         self.key = key
         self._shadow = None
         self._step = 0
+        self._pnames = None
 
     def _path(self):
         import os
@@ -618,6 +620,35 @@ class WeightEMA(HookBase):
     def _model(self):
         return unwrap_model(self.trainer.model)
 
+    def _averaged_names(self):
+        """Names the EMA should actually average: PARAMETERS only.
+
+        Buffers are copied verbatim from the live model instead. Averaging one is
+        at best meaningless, and here it was actively wrong: ``bin_edges`` is a
+        constant table of training-set statistics that rides in the state_dict
+        (so a checkpoint carries its own bin scheme — see ``set_bins``).
+
+        ``sh.mul_(d).add_(v, alpha=1-d)`` with ``sh == v`` is the identity in
+        exact arithmetic but NOT in float32: ``v*0.9999`` and ``v*1e-4`` each
+        round, and for a generic edge value the two do not sum back to ``v``. The
+        error is a deterministic drift to a nearby fixed point, not a random walk
+        — measured on a real table it reaches 1.9e-4 within 400 steps and settles
+        at 9.1e-4, i.e. 0.83% of a 0.11-wide bin, by ~4,000. That is what the
+        shipped EMA exports carry while the raw exports are exact, so the EMA and
+        raw weights of one run bin against slightly different schemes.
+
+        The +-1e18 open edges do NOT drift (their ulp swamps the increment), and
+        edges at exactly-representable values do not either — which is why this
+        needs a realistic table to reproduce at all.
+
+        This model has no BatchNorm (``sync_bn=False``, none in the module tree),
+        so no running statistic actually WANTS averaging. If one is ever added it
+        must be listed here deliberately rather than picked up by accident.
+        """
+        if self._pnames is None:
+            self._pnames = {n for n, _ in self._model().named_parameters()}
+        return self._pnames
+
     def after_step(self):
         if comm.get_rank() != 0:
             return
@@ -627,12 +658,13 @@ class WeightEMA(HookBase):
             self._shadow = {k: v.detach().clone().float() for k, v in sd.items()}
             return
         d = self.decay
+        avg = self._averaged_names()
         for k, v in sd.items():
             sh = self._shadow.get(k)
             if sh is not None and sh.device != v.device:
                 sh = sh.to(v.device)                  # belt and braces
                 self._shadow[k] = sh
-            if sh is None or not v.is_floating_point():
+            if sh is None or k not in avg or not v.is_floating_point():
                 self._shadow[k] = v.detach().clone().float()
             else:
                 sh.mul_(d).add_(v.detach().float(), alpha=1.0 - d)
@@ -661,6 +693,51 @@ class WeightEMA(HookBase):
             f"WeightEMA(decay={self.decay}, step={self._step}) -> {self._path()}")
 
 
+def _acc_grid_free(core, B, mask, logits, gf):
+    """Accumulate var_expl / charge-closure sums for one eval batch.
+
+    Both are computed on the SAME support the value loss uses
+    (masked & valid & truly-occupied), and both are pooled over tokens by the
+    caller — per-batch means would reweight events by density.
+
+    Two read-outs, deliberately:
+      * ``cent_asinh`` -> the posterior mean in TOKEN space, for var_expl. That
+        is the space the target lives in, so the comparison needs no sinh.
+      * ``cent_ratio`` -> the posterior mean of ``raw/sigma`` = E[sinh t], for
+        charge. Applying sinh to the asinh-space mean instead is Jensen-biased
+        ~31% low; see ``tokenize.decode_categorical``.
+    """
+    ca = getattr(core, "bin_cent_asinh", None)
+    cr = getattr(core, "bin_cent_ratio", None)
+    if ca is None or cr is None or not (torch.isfinite(ca).all()
+                                        and torch.isfinite(cr).all()):
+        return                                   # centroids absent: skip silently
+    tgt, occ_t, valid = B["tgt"], B["occ"].bool(), B["valid"].bool()
+    sel = mask[:, None] & valid & occ_t
+    if not bool(sel.any()):
+        return
+    p = torch.softmax(logits.float(), -1)                     # (n_cells, n_slot, K)
+    band = B["band_id"].long()
+    rec_a = torch.einsum("csk,ck->cs", p, ca[band].float())
+    rec_r = torch.einsum("csk,ck->cs", p, cr[band].float())
+    y = tgt.float()[sel]
+    d = rec_a[sel] - y
+    gf["sse"] += float((d * d).sum())
+    gf["sy"] += float(y.sum())
+    gf["syy"] += float((y * y).sum())
+    gf["nv"] += float(sel.sum())
+    # UNSIGNED is the primary: the signed sum of a near-symmetric coefficient
+    # distribution is a small difference of large numbers, so the signed ratio
+    # swings wildly (a perfectly-binned predictor scored 0.008 on it in test).
+    # Research reports both for exactly this reason; the signed one is kept as a
+    # bias indicator, not as a closure measure.
+    r_sel, t_sel = rec_r[sel], torch.sinh(y)
+    gf["chg_pred"] += float(r_sel.abs().sum())
+    gf["chg_true"] += float(t_sel.abs().sum())
+    gf["chg_pred_s"] += float(r_sel.sum())
+    gf["chg_true_s"] += float(t_sel.sum())
+
+
 @HOOKS.register_module()
 class CoeffFMEvaluator(HookBase):
     """Validation for the coefficient FM.
@@ -681,10 +758,15 @@ class CoeffFMEvaluator(HookBase):
     select on it (higher is better, by its convention).
     """
 
-    def __init__(self, every_n_steps=0, max_batches=None, mask_seed=7):
+    def __init__(self, every_n_steps=0, max_batches=None, mask_seed=7,
+                 grid_free=True):
         self.every_n_steps = int(every_n_steps)
         self.max_batches = max_batches
         self.mask_seed = int(mask_seed)
+        # var_expl + charge closure, computed from the SAME forward as the
+        # loss (see _forward) — so this is free, not a second pass. Silently
+        # inert unless the checkpoint carries the bin centroids.
+        self.grid_free = bool(grid_free)
 
     def after_step(self):
         if self.every_n_steps <= 0:
@@ -720,6 +802,41 @@ class CoeffFMEvaluator(HookBase):
             if world > 1:
                 comm.synchronize()          # rejoin, whatever happened above
 
+    def _forward(self, model, core, B, mask, gf):
+        """One forward per batch: the loss AND the grid-free metrics from the
+        same heads.
+
+        The obvious version calls ``model(B, tok_mask=mask)`` for the loss and
+        ``core.raw_heads(B, mask)`` again for the metrics — a SECOND full
+        encoder+decoder pass. Evaluation is not cheap here: measured on
+        `coeff-fm-train`, eval is 43.8 s x 100 evals = 73 min of a 469 min run,
+        i.e. **15.5% of wall time**. Doubling it would cost ~15% of every future
+        run to compute two scalars.
+
+        So for the categorical head — the only one we train — reproduce
+        ``FMModel.forward``'s branch here from a single ``raw_heads`` call. Any
+        other head configuration falls back to ``forward``, which keeps this
+        correct for heads it does not know about rather than silently scoring
+        them with the wrong loss.
+
+        Calling ``core`` rather than ``model`` skips the DDP wrapper; under
+        ``no_grad`` in eval there is no gradient to synchronise, and the previous
+        code already reached for ``core.raw_heads`` for the same reason.
+        """
+        if self.grid_free and getattr(core, "n_bins", 0) > 0:
+            from helix.model.loss import losses_cat
+            assert torch.isfinite(core.bin_edges).all(), \
+                ("n_bins > 0 requires set_bins(edges) before evaluation — the "
+                 "edges buffer is still unset (NaN).")
+            occ, val, _ = core.raw_heads(B, mask)
+            bce, vloss = losses_cat(occ, val, B, mask, core.bin_edges,
+                                    vis_w=core.vis_w)
+            _acc_grid_free(core, B, mask, val, gf)
+            return {"loss": bce + vloss, "bce": bce.detach(),
+                    "val": vloss.detach(),
+                    "masked_frac": mask.float().mean().detach()}
+        return model(B, tok_mask=mask)
+
     def _eval_rank0(self):
         loader = getattr(self.trainer, "val_loader", None)
         if loader is None:
@@ -734,7 +851,9 @@ class CoeffFMEvaluator(HookBase):
         core = unwrap_model(model)
         device = self.trainer.parallel_context.device
 
-        totals, n = {}, 0
+        totals, counts, n = {}, {}, 0
+        gf = {k: 0.0 for k in ("sse", "sy", "syy", "nv", "chg_pred",
+                               "chg_true", "chg_pred_s", "chg_true_s")}
         with torch.no_grad():
             for i, input_dict in enumerate(loader):
                 if self.max_batches is not None and i >= self.max_batches:
@@ -750,17 +869,35 @@ class CoeffFMEvaluator(HookBase):
                 # was pure random). Without this, plane_frac makes val loss a
                 # 90/10 mixture and it stops being comparable across runs.
                 mask = core.make_mask(B, mode="random", gen=gen)   # SAME every eval
-                if getattr(self.trainer.cfg, "enable_amp", False):
-                    dtype = (torch.bfloat16
-                             if self.trainer.cfg.amp_dtype == "bfloat16"
-                             else torch.float16)
-                    with torch.autocast(device_type=device.type, dtype=dtype):
-                        out = model(B, tok_mask=mask)
-                else:
-                    out = model(B, tok_mask=mask)
+                ctx = (torch.autocast(
+                           device_type=device.type,
+                           dtype=(torch.bfloat16
+                                  if self.trainer.cfg.amp_dtype == "bfloat16"
+                                  else torch.float16))
+                       if getattr(self.trainer.cfg, "enable_amp", False)
+                       else contextlib.nullcontext())
+                with ctx:
+                    out = self._forward(model, core, B, mask, gf)
+                # POOL over tokens, do not average per-event means. Each loss
+                # term already divided by ITS OWN support inside the loss, so
+                # summing those means weights a 5k-token event equally with a
+                # 40k-token one. Dense events are both heavier and harder —
+                # corr(per-event CE, token count) = 0.79 — so the unweighted
+                # mean is biased optimistic by ~0.09 nats, which is larger than
+                # the k30-vs-R1 difference these numbers were used to compare.
+                # Research pools (fm/train.py:143, fm/cross_nll.py:41).
+                #
+                # The supports are recomputed here rather than returned from the
+                # loss, so `losses*` stay byte-comparable with research.
+                mrow = mask[:, None]
+                w_occ = float((mrow & B["valid"].bool()).sum())
+                w_val = float((B["occ"].bool() & B["valid"].bool() & mrow).sum())
+                wt = {"bce": w_occ, "val": w_val, "masked_frac": float(mask.numel())}
                 for k, v in out.items():
-                    if torch.is_tensor(v) and v.ndim == 0:
-                        totals[k] = totals.get(k, 0.0) + float(v)
+                    if torch.is_tensor(v) and v.ndim == 0 and k != "loss":
+                        w = wt.get(k, 1.0)
+                        totals[k] = totals.get(k, 0.0) + float(v) * w
+                        counts[k] = counts.get(k, 0.0) + w
                 n += 1
 
         if was_training:
@@ -769,13 +906,38 @@ class CoeffFMEvaluator(HookBase):
             self.trainer.logger.info("CoeffFMEvaluator: val_loader was empty")
             return
 
-        avg = {k: v / n for k, v in totals.items()}
+        # `loss` is rebuilt from the pooled parts, not pooled itself: it is
+        # bce + val, and the two have different denominators.
+        avg = {k: v / max(counts.get(k, n), 1e-9) for k, v in totals.items()}
+        avg["loss"] = avg.get("bce", 0.0) + avg.get("val", 0.0)
+        if gf["nv"] > 0:
+            # var_expl is GRID-FREE: it compares the posterior-mean asinh
+            # reconstruction against the target's own measured variance, so it
+            # survives a change of bin table or corpus in a way cross-entropy
+            # does not. charge_closure is Sum(pred)/Sum(true) in units of sigma,
+            # nominal 1.0. Research computes both every eval
+            # (fm/train.py:perband_mse_cat, mae_ddp.py:216-220); their absence
+            # here is why a 31%-low charge read-back and a cross-table CE
+            # comparison both went unnoticed.
+            mean_y = gf["sy"] / gf["nv"]
+            var_y = max(gf["syy"] / gf["nv"] - mean_y * mean_y, 1e-12)
+            avg["var_expl"] = 1.0 - (gf["sse"] / gf["nv"]) / var_y
+            if gf["chg_true"] > 1e-9:
+                avg["charge_closure"] = gf["chg_pred"] / gf["chg_true"]
+            if abs(gf["chg_true_s"]) > 1e-6 * max(gf["chg_true"], 1e-9):
+                avg["charge_bias"] = gf["chg_pred_s"] / gf["chg_true_s"]
         self.trainer.logger.info(
             f"   [coeff-eval] batches={n} " +
             " ".join(f"{k}={v:.4f}" for k, v in sorted(avg.items())))
         writer = getattr(self.trainer, "writer", None)
         if writer is not None:
-            step = self.trainer.comm_info.get("epoch", 0)
+            # GLOBAL STEP, not epoch. EVAL_EVERY (1178) does not divide
+            # iters_per_epoch (4758), so ~4 evals land inside each epoch and
+            # three of every four were overwritten — 100 evals collapsed to 25
+            # TB points. train.log kept all 100, which is why the curve script
+            # parses the log instead. Research keys fm_curve.jsonl on step.
+            step = int(getattr(self.trainer, "global_step", 0) or
+                       self.trainer.comm_info.get("epoch", 0))
             for k, v in avg.items():
                 writer.add_scalar(f"val/{k}", v, step)
         self.trainer.comm_info["current_metric_value"] = -avg["loss"]   # higher is better
