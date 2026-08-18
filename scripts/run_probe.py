@@ -111,6 +111,11 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--max-events", type=int, default=0)
+    ap.add_argument("--random-seed", type=int, default=0,
+                    help="seeds the random-init control. It was unseeded, so the "
+                         "null was a different network in every process and two "
+                         "arms of an A/B were scored against two different "
+                         "controls with nothing recording it.")
     ap.add_argument("--probes", default="mlp,triangulate")
     ap.add_argument("--allow-stale", action="store_true")
     a = ap.parse_args(argv)
@@ -143,7 +148,8 @@ def main(argv=None):
     print(f"{n_ev} probe events from {os.path.basename(truth_path)}", flush=True)
 
     model_t, meta_t = load_probe_model(a.checkpoint, weights=a.weights)
-    model_r, _ = load_probe_model(a.checkpoint, random_init=True)
+    model_r, _ = load_probe_model(a.checkpoint, random_init=True,
+                                  random_seed=a.random_seed)
     if meta_t.get("warning"):
         print("WARNING:", meta_t["warning"], flush=True)
 
@@ -207,14 +213,29 @@ def main(argv=None):
     print(f"total {len(y):,} patches over {len(np.unique(event))} events, "
           f"feature dim {arms['trained'].shape[1]}", flush=True)
 
+    # `corpus` is recorded because it was not, and an A/B whose entire independent
+    # variable IS the corpus produced rows that never said which one they read —
+    # it had to be recovered from `n_patch`. `weights` is the weight FILE
+    # BASENAME, which for an export dir is always "model.bin" whatever it holds,
+    # so it cannot distinguish EMA from raw on its own; `requested_weights` and
+    # `weights_warning` record the case where the two disagree. `seeds` is a
+    # SYSTEMATIC lever, not a nuisance parameter — `oof` is averaged over seeds,
+    # worth about +0.05 on the trained arm going 1 -> 3 — so rows with different
+    # `seeds` must never be compared, and `stale` says whether the truth artifact
+    # still matched the corpus it was used with.
     base = dict(tag=a.tag, checkpoint=os.path.abspath(a.checkpoint),
+                corpus=os.path.abspath(corpus),
                 layer=a.layer, weights=meta_t["weights"],
+                requested_weights=meta_t.get("requested_weights"),
+                weights_warning=meta_t.get("warning"),
+                random_seed=a.random_seed,
                 cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
                 qtot_min=float(cfg.get("qtot_min", -1)),
                 dom_threshold=float(cfg.get("dom_threshold", -1)),
                 folds=a.folds, epochs=a.epochs, seeds=a.seeds,
                 n_patch=int(len(y)), n_events=int(len(np.unique(event))),
-                truth=os.path.abspath(truth_path), when=int(time.time()))
+                truth=os.path.abspath(truth_path),
+                stale=list(stale), when=int(time.time()))
 
     seeds = tuple(range(a.seeds))
     out_rows = []
@@ -233,7 +254,8 @@ def main(argv=None):
             oof, info = fit_probe(X, y, event, plane, n_folds=a.folds,
                                   epochs=a.epochs, seeds=seeds)
             r, rs, minfo = fisher_r(y, oof, event, plane)
-            row[name] = dict(fisher_r=round(r, 4), std=round(float(rs.std()), 4),
+            row[name] = dict(fisher_r=round(r, 4),
+                             per_group_r_std=round(float(rs.std()), 4),
                              n_groups=minfo["n_groups"],
                              stop_epoch=round(info["mean_stop_epoch"], 1))
             print(f"  [mlp] {name:8s} fisher_r={r:+.4f}", flush=True)
@@ -256,7 +278,8 @@ def main(argv=None):
             oof, info = fit_probe(X, y, event, plane, n_folds=a.folds,
                                   epochs=a.epochs, seeds=seeds)
             r, rs, minfo = fisher_r(y, oof, event, plane)
-            row[name] = dict(fisher_r=round(r, 4), std=round(float(rs.std()), 4),
+            row[name] = dict(fisher_r=round(r, 4),
+                             per_group_r_std=round(float(rs.std()), 4),
                              n_groups=minfo["n_groups"],
                              stop_epoch=round(info["mean_stop_epoch"], 1))
             print(f"  [tri] {name:8s} fisher_r={r:+.4f}", flush=True)

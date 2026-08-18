@@ -63,11 +63,30 @@ def patch_rows(cell_rows, plane_gid, wire, tick, qtot, ftop, u, *,
     tmean = st / np.maximum(npix, 1)
 
     # A patch's plane: every pixel in it shares one, since plane is part of the
-    # cell key. Take the first pixel's.
-    first = np.full(ng, -1, np.int64)
+    # cell key -- with ONE exception per event. Pixels that matched no cell in
+    # any band all carry the tuple (-1,-1,-1,-1), so they group together
+    # regardless of plane: measured, that single row pools ~34k pixels spanning
+    # all six planes and both volumes, with all-zero features. It is 1 row of
+    # ~6400 and inflates every arm equally (+0.0015), but it is not a patch and
+    # its `plane` label is meaningless.
+    #
+    # `first[grp[order]] = order` is LAST-write-wins, so this took the last
+    # pixel while the comment said first. Immaterial for real patches (one plane
+    # each) and arbitrary for the all-miss row either way -- but a label that
+    # contradicts its own docstring is how the all-miss row went unnoticed.
+    # Take the first, as documented, and surface the exception.
     order = np.argsort(grp, kind="stable")
-    first[grp[order]] = order                        # last write per group wins
+    first = np.full(ng, -1, np.int64)
+    first[grp[order][::-1]] = order[::-1]            # reversed => FIRST wins
     plane = plane_gid[first]
+
+    # Which groups actually straddle planes. Callers can drop them; nothing is
+    # dropped here, so the row count stays comparable with earlier runs.
+    pmin = np.full(ng, np.iinfo(np.int64).max, np.int64)
+    pmax = np.full(ng, -1, np.int64)
+    np.minimum.at(pmin, grp, np.asarray(plane_gid, np.int64))
+    np.maximum.at(pmax, grp, np.asarray(plane_gid, np.int64))
+    multiplane = pmin != pmax
 
     presence = (uniq >= 0).astype(np.float32)
     geo = np.concatenate([
@@ -80,4 +99,7 @@ def patch_rows(cell_rows, plane_gid, wire, tick, qtot, ftop, u, *,
     return dict(cells=uniq[keep], y=y[keep].astype(np.float32),
                 geo=geo[keep], plane=plane[keep].astype(np.int64),
                 n_pixels=npix[keep], n_dom=ndom[keep].astype(np.int64),
-                n_bands=n_bands)
+                # True where a row's pixels do NOT share one plane -- i.e. the
+                # all-miss row, whose `plane` label is arbitrary. Expect exactly
+                # one per event, or zero if it had no dominant pixel.
+                multiplane=multiplane[keep], n_bands=n_bands)

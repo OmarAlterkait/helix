@@ -64,8 +64,22 @@ def test_triangulate_arms_nest_correctly():
     # is 2 x band_d, not 2 x fd — the un-pooled form made the cross design 6162
     # dims and OOM-killed a 200 GB node at 2.5M rows.
     assert d["cross"].shape[1] == fd + 2 * band_d + 2 + gd
-    assert d["xwire"].shape[1] == fd + 2 + 2 + gd    # wires, not features
+    # xwire carries NO own features — it is a model-INDEPENDENT ceiling
+    # (reference probe_3d_triangulate.py:96 = concatenate([xw, geo])). This
+    # assertion previously included `fd`, contradicting its own "wires, not
+    # features" comment, and that made the ceiling model-dependent: it produced
+    # an apparent k30-vs-R1 difference of 0.0248 for a design that cannot have
+    # one. The reference measures literally 0.6979 in every row of every jsonl
+    # across ~20 checkpoints, which is only possible with no model features.
+    assert d["xwire"].shape[1] == 2 + 2 + gd         # 2 wires + 2 hit + geo
     assert d["xwire"].shape[1] < d["cross"].shape[1]
+    # And the concrete property that matters: perturbing the model features must
+    # not move xwire at all.
+    own2 = own + 7.0
+    d2 = triangulate_designs(geo, own2, plane, np.full(n, 50.0),
+                             np.arange(n) * 100.0, np.zeros(n))
+    np.testing.assert_array_equal(d["xwire"], d2["xwire"])
+    assert not np.array_equal(d["solo"], d2["solo"])   # the control moved
 
 
 def test_slabs_do_not_pool_across_events():
