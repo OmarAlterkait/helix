@@ -113,6 +113,33 @@ def triangulate_designs(geo, own_feats, plane, tick, wire, event, *, tbin=8):
     ``solo`` reproduces the single-plane result on the same rows, so the three
     are directly comparable. ``xwire`` replaces the partner FEATURES with their
     true mean wire — a geometric ceiling, not a model measurement.
+
+    **``cross`` is known-crippled and must not be read as a representation
+    measurement.** It forms the partner context by band-pooling and then taking a
+    slab MEAN, and the reference documents why that fails
+    (``probe_3d_select.py`` header): *"RoPE-encoded wire features do NOT average
+    (averaging rotations destroys position), so mean-pooling the slab blurred the
+    partner's wire -> only recovered u to 0.13 while the mean true-WIRE scalar
+    reached 0.70."* Our numbers reproduce that exactly — ``cross`` 0.559/0.562
+    against an ``xwire`` ceiling of 0.666 — and the residual is small enough that
+    its k30-vs-R1 ordering flips sign between runs.
+
+    The reference's fix (``probe_3d_select``: take the single drift-time-NEAREST
+    partner in each other plane of the same volume, un-averaged, full 4-band) was
+    built and RUN, and did not rescue it: ``sel`` reached 0.108/0.134 against a
+    0.624 ceiling. So the shortfall is not an artifact of pooling alone — the
+    cross-plane information is not linearly recoverable from frozen features by
+    either route. See ``pb_xattn`` for the readout that can still see it if the
+    model stored ``u`` non-locally.
+
+    ``xwire`` carries NO own-model features, matching the reference
+    (``probe_3d_triangulate.py:96``: ``np.concatenate([xw, geo], 1)``; likewise
+    ``probe_3d_select.py:84``). That is what makes it a ceiling: it is identical
+    for every checkpoint, and the reference measured literally 0.6979 in every
+    row of every jsonl across ~20 checkpoints. Including ``own`` here made it
+    model-DEPENDENT and produced an apparent k30-vs-R1 difference of 0.0248 —
+    a quantity that cannot exist for a model-free design. Verified after the
+    fix by a model-free control scoring 0.66581 vs 0.66583 for the two models.
     """
     geo = np.asarray(geo, np.float32)
     own = np.asarray(own_feats, np.float32)
@@ -129,5 +156,6 @@ def triangulate_designs(geo, own_feats, plane, tick, wire, event, *, tbin=8):
     return {
         "solo": np.concatenate([own, geo], 1),
         "cross": np.concatenate([own, ctx, hit, geo], 1),
-        "xwire": np.concatenate([own, ctxw, hit, geo], 1),
+        # NO `own`: the ceiling must not depend on the model. See the docstring.
+        "xwire": np.concatenate([ctxw, hit, geo], 1),
     }
