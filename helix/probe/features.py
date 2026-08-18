@@ -15,17 +15,29 @@ results row so the two are never silently mixed.
 
 from __future__ import annotations
 
+import os
+import warnings
+
 import numpy as np
 
 __all__ = ["load_probe_model", "features_at_layer", "gather_cell_features"]
 
 
-def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=None):
+def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=None,
+                     random_seed=0):
     """``(model, meta)`` from a converted checkpoint, trained or random-init.
 
     ``weights='ema'`` prefers ``state_dict_ema`` / the sidecar EMA and falls back
     to the raw weights ONLY if the checkpoint has none — loudly, in ``meta``, so
     a run cannot silently report EMA numbers it did not use.
+
+    ``random_seed`` seeds the ``random_init`` draw. It used to be unseeded, so the
+    control was a DIFFERENT network in every probe process, drawn from torch's
+    process-start seed — which means two arms of an A/B were compared against two
+    different nulls and nothing recorded that. The draw turns out to contribute
+    little on its own (measured sigma 0.0021 at 150 events, 0.0024 at 30, 0.0005
+    between two nets at 120), but "little" is not "nothing" and it cost nothing to
+    fix. It is recorded in ``meta`` so a results row can carry it.
     """
     import torch
     from helix.model import build_fm
@@ -33,6 +45,9 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
     from helix.model.checkpoint import is_export_dir, load_export_dir
 
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if random_init and random_seed is not None:
+        # Before build_fm, which is where every parameter is drawn.
+        torch.manual_seed(int(random_seed))
     if is_export_dir(checkpoint):
         # What WE train: a `pimm export` directory. bin_edges is persistent now,
         # so the edges arrive with the weights and nothing needs a sidecar.
@@ -42,7 +57,21 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
             fresh.to(dev).eval()
             for prm in fresh.parameters():
                 prm.requires_grad_(False)
-            return fresh, dict(meta, weights="random-init", random_init=True)
+            return fresh, dict(meta, weights="random-init", random_init=True,
+                               random_seed=random_seed)
+        # An export dir holds ONE set of weights, whatever `pimm export` was
+        # pointed at, so `weights=` cannot be honoured here. Say so loudly: the
+        # raw weights of a flat-LR WSD run sit at full LR noise for the entire
+        # stable phase, which is why the EMA exists, and silently probing them
+        # while the caller asked for the EMA compares two noisy draws rather than
+        # two models. Export from model_ema.pth to probe the EMA.
+        got = os.path.basename(meta.get("weights", "") or "")
+        if weights == "ema" and "ema" not in got.lower():
+            meta = dict(meta, warning=(
+                f"requested weights='ema' but the export contains {got!r}; an "
+                f"export dir carries one weight set. Re-export from "
+                f"model_ema.pth to probe the EMA."))
+            warnings.warn(meta["warning"], RuntimeWarning, stacklevel=2)
         return model, dict(meta, requested_weights=weights, random_init=False)
 
     blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -67,6 +96,7 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
 
     meta = dict(weights=used, requested_weights=weights,
                 random_init=bool(random_init),
+                random_seed=random_seed if random_init else None,
                 config={k: (list(v) if isinstance(v, tuple) else v)
                         for k, v in cfg.items()},
                 tokenizer=blob.get("tokenizer"),

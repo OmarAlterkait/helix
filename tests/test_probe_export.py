@@ -36,7 +36,11 @@ def test_export_round_trip_recovers_weights_and_bins(tmp_path):
     torch.testing.assert_close(back.bin_edges, m.bin_edges)
     for (k, a), (_, b) in zip(sorted(m.state_dict().items()),
                               sorted(back.state_dict().items())):
-        torch.testing.assert_close(a, b, msg=k)
+        # equal_nan: the bin CENTROID buffers are persistent but NaN until
+        # set_bins is given them, and NaN is the deliberate "absent" marker that
+        # bin_centroids_ratio falls back on. Round-tripping unset->unset must
+        # pass; a centroid that silently became a number would not.
+        torch.testing.assert_close(a, b, msg=k, equal_nan=True)
     assert meta["source"] == "pimm-export"
 
 
@@ -100,3 +104,41 @@ def test_ema_shadow_moves_to_the_model_device_on_resume():
             shadow[k] = sh
         sh.mul_(d).add_(v.float(), alpha=1.0 - d)
     torch.testing.assert_close(shadow["w"], torch.full((4,), 0.1))
+
+
+def test_random_init_control_is_seeded(tmp_path):
+    """The `random` arm's null must be reproducible and seed-controlled.
+
+    It was unseeded: `run_probe.py` builds the random net before any fit, and the
+    only manual_seed in the probe path is in `fit_probe`, so the control was drawn
+    from torch's process-start seed — a DIFFERENT network in every probe process.
+    Two arms of an A/B were therefore scored against two different nulls, with
+    nothing in the results row recording it.
+
+    Compares PARAMETERS, not the full state_dict: a fresh model's `bin_edges`
+    buffer is NaN until `set_bins`, and `torch.equal` is False for NaN, so a
+    state_dict comparison fails whether or not the seeding works.
+    """
+    from helix.probe.features import load_probe_model
+
+    m = build_fm(dict(ARCH))
+    m.set_bins(torch.linspace(-4, 4, ARCH["n_bins"] + 1).repeat(ARCH["n_band"], 1))
+    d = _export(tmp_path, m)
+
+    def params(mod):
+        return dict(mod.named_parameters())
+
+    a, meta = load_probe_model(d, random_init=True, random_seed=0, device="cpu")
+    b, _ = load_probe_model(d, random_init=True, random_seed=0, device="cpu")
+    c, _ = load_probe_model(d, random_init=True, random_seed=1, device="cpu")
+
+    pa, pb, pc = params(a), params(b), params(c)
+    assert set(pa) == set(pb) == set(pc)
+    assert all(torch.equal(pa[k], pb[k]) for k in pa), \
+        "same random_seed gave a different network"
+    assert any(not torch.equal(pa[k], pc[k]) for k in pa), \
+        "different random_seed gave the same network"
+    # The seed must reach the results row, or the fix is unauditable.
+    assert meta["random_seed"] == 0 and meta["random_init"] is True
+    # And it is genuinely a random net, not the exported weights.
+    assert any(not torch.equal(pa[k], v) for k, v in params(m).items())

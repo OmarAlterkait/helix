@@ -81,6 +81,14 @@ class FMModel(nn.Module):
             # for data and `forward` checks it.
             self.register_buffer("bin_edges",
                                  torch.full((n_band, n_bins + 1), float("nan")))
+            # PERSISTENT, for the same reason as the edges: they are training-set
+            # statistics the model cannot invent. `bin_cent_ratio` is
+            # E[coeff/sigma | bin] — the categorical head's charge read-back.
+            # These used to be non-persistent "for a read-back that was never
+            # built", and that is precisely why the read-back that WAS built
+            # reconstructed centres from edges and shipped a 31%-low charge.
+            for _nm in ("bin_cent_asinh", "bin_cent_lin", "bin_cent_ratio"):
+                self.register_buffer(_nm, torch.full((n_band, n_bins), float("nan")))
         self.dec_mode = dec_mode                  # "self" = full-attn decoder over all N; "cross" = CrossMAE (cheaper)
         # --- muP (Yang & Hu, Tensor Programs V, arXiv:2203.03466) ---
         # m = d/d_base is the width multiplier. Under muP the optimal Adam LR is
@@ -304,7 +312,7 @@ class FMModel(nn.Module):
 
     # ---- pimm integration (the documented delta; parameter tree untouched) ---
 
-    def set_bins(self, edges, cent_asinh=None, cent_lin=None):
+    def set_bins(self, edges, cent_asinh=None, cent_lin=None, cent_ratio=None):
         """Register the categorical head's bin edges, shape (n_band, n_bins+1).
 
         Required before ``forward`` when ``n_bins > 0``: ``losses_cat`` needs
@@ -320,13 +328,19 @@ class FMModel(nn.Module):
         assert edges.shape[0] == self.bin_edges.shape[0], \
             f"edges has {edges.shape[0]} bands, model has {self.bin_edges.shape[0]}"
         self.bin_edges.copy_(edges.to(self.bin_edges.device))
-        # Non-persistent, unlike the edges: nothing in helix or pimm reads these
-        # (they are carried for a charge read-back that was never built), so
-        # putting them in the state_dict would only create load asymmetries
-        # between models whose set_bins was called with and without them.
-        for nm, v in (("bin_cent_asinh", cent_asinh), ("bin_cent_lin", cent_lin)):
-            if v is not None:
-                self.register_buffer(nm, torch.as_tensor(v), persistent=False)
+        # Persistent, like the edges. An export that carries edges but not
+        # centroids forces the consumer to reconstruct centres from the edges,
+        # which is how the categorical head ended up being read back with the
+        # GAUSSIAN head's inverse. Left NaN when not supplied, so a consumer can
+        # detect absence rather than silently use a wrong number.
+        for nm, v in (("bin_cent_asinh", cent_asinh), ("bin_cent_lin", cent_lin),
+                      ("bin_cent_ratio", cent_ratio)):
+            if v is None:
+                continue
+            v = torch.as_tensor(v, dtype=self.bin_edges.dtype)
+            assert v.shape == (self.bin_edges.shape[0], self.n_bins), \
+                f"{nm} {tuple(v.shape)} != {(self.bin_edges.shape[0], self.n_bins)}"
+            getattr(self, nm).copy_(v.to(self.bin_edges.device))
         return self
 
     def make_mask(self, B, ratio=None, mode=None, n_planes=None, gen=None):
