@@ -217,6 +217,21 @@ def test_configs_bootstrap_helix_onto_sys_path():
     assert found, "no pimm configs found"
     for path in found:
         src = path.read_text()
+        # A config may INHERIT the bootstrap: pimm execs each `_base_` file
+        # before merging (Config._file2dict), so the base's sys.path statement
+        # runs and helix is importable by the time this file is read. Verified
+        # against a real load with helix off PYTHONPATH, not assumed — see
+        # test_a_derived_config_inherits_a_working_bootstrap below. Requiring
+        # every config to repeat the block would force copy-paste of the one
+        # thing that must never drift.
+        if "_base_" in src and "_sys.path." not in src:
+            # The ASSIGNMENT again, not the word: this file's own comment says
+            # custom_imports is inherited, and matching the word made the guard
+            # fire on that sentence. Exactly the trap documented four lines down.
+            assert "custom_imports = " not in src, (
+                f"{path.name} inherits its bootstrap but sets custom_imports "
+                f"itself; the two must travel together")
+            continue
         # The ASSIGNMENT, not the word — the bootstrap comment mentions
         # custom_imports and would otherwise match first, making the ordering
         # check below compare against the wrong position.
@@ -235,6 +250,43 @@ def test_configs_bootstrap_helix_onto_sys_path():
         assert "PIMM_DATA_SRC" in src, (
             f"{path.name} bootstraps helix but not pimm_data; the image's 0.3.0 "
             f"has no CoeffTPCDataset")
+
+
+@pimm_importable
+def test_a_derived_config_inherits_a_working_bootstrap(tmp_path):
+    """A `_base_` config must actually reach helix without help from the env.
+
+    The exemption above is only sound if inheritance really carries the
+    bootstrap. It does — pimm execs the base before merging — but that is a
+    property of pimm's loader, not of our config, so it is checked rather than
+    reasoned about: load a derived config in a subprocess whose PYTHONPATH has
+    NO helix, and require that helix becomes importable anyway.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    derived = [p for p in sorted((root / "configs" / "pimm").glob("coeff_fm_*.py"))
+               if "_base_" in p.read_text() and "_sys.path." not in p.read_text()]
+    if not derived:
+        pytest.skip("no _base_-derived configs")
+
+    env = {k: v for k, v in os.environ.items()}
+    env["PYTHONPATH"] = ":".join(
+        p for p in env.get("PYTHONPATH", "").split(":") if p and "helix" not in p)
+    prog = (
+        "import sys\n"
+        "assert not any('helix' in p for p in sys.path), sys.path\n"
+        "from pimm.utils.config import Config\n"
+        f"c = Config.fromfile({str(derived[0])!r})\n"
+        "import helix\n"
+        "print('OK', c.custom_imports['imports'][0])\n")
+    r = subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                       text=True, env=env, cwd=str(tmp_path))
+    assert r.returncode == 0 and "OK" in r.stdout, (
+        f"{derived[0].name} does not inherit a working bootstrap:\n"
+        f"{r.stdout}\n{r.stderr[-2000:]}")
 
 
 def test_bootstrap_configs_also_register_the_rewrite_hook():
