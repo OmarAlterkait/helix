@@ -25,17 +25,6 @@ from helix.core.provenance import BasisDescriptor
 from helix.core.wavelet import SparseResult, reconstruct, FlatBands
 
 
-def _is_device(a) -> bool:
-    """Deprecated alias — use :func:`helix.core.backend.is_device`.
-
-    Kept because ``helix.tpc.corpus`` imports it. It used to mean "is a jax
-    array", which silently sent every torch CUDA tensor down the host path and
-    straight into ``np.nonzero`` on a CUDA tensor.
-    """
-    from helix.core.backend import is_device
-    return is_device(a)
-
-
 _COMPACT = None
 _XFER_CAP = 1 << 16          # static transfer prefix; only ever grows
 # Sized to the REAL kept-coefficient count (~55k/plane at 0.65% occupancy), not a

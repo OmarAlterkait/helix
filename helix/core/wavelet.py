@@ -12,7 +12,10 @@ Threshold strategies (validated by the optical sweep + the prior handoff):
                 (best compression-vs-fidelity front on the optical data)
   - energy    : keep the smallest set of detail coeffs holding ``energy``
                 fraction of the detail energy, per signal
-The approximation band is kept untouched when ``include_approx`` is True.
+The approximation band is kept untouched unless ``threshold_approx`` is set.
+(There used to be an ``include_approx`` field beside it that did NOTHING —
+a no-op knob whose name implies the OPPOSITE polarity of the real one, so
+setting ``include_approx=False`` silently kept the approx band anyway.)
 """
 from __future__ import annotations
 
@@ -31,7 +34,6 @@ class ThresholdSpec:
     scale: float = 1.0          # universal threshold multiplier (kappa)
     keep: float = 0.01          # topk: fraction of detail coeffs to keep
     energy: float = 0.999       # energy: fraction of detail energy to keep
-    include_approx: bool = True  # (legacy/no-op) approx kept unless threshold_approx
     per_band_sigma: bool = False    # universal: per-band MAD sigma (else single finest/caller sigma)
     threshold_approx: bool = False  # universal: also threshold the approx band (else keep it)
 
