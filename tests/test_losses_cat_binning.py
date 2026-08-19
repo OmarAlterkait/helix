@@ -21,10 +21,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from helix.model.loss import losses_cat  # noqa: E402
+from helix.model.loss import bucketize_bins, losses_cat  # noqa: E402
 
 K = 16
 N_BAND = 4
+N_SLOT = 32
 
 
 def _reference_binid(tgt, band_id, edges, K):
@@ -33,15 +34,12 @@ def _reference_binid(tgt, band_id, edges, K):
     return (tgt.unsqueeze(-1) >= ec[:, None, 1:-1]).sum(-1).clamp(0, K - 1)
 
 
-def _bucketized_binid(tgt, band_id, edges, K):
-    """What losses_cat now does."""
-    out = torch.empty(tgt.shape, dtype=torch.long, device=tgt.device)
-    for b in range(edges.shape[0]):
-        sel = band_id == b
-        if sel.any():
-            out[sel] = torch.bucketize(tgt[sel], edges[b, 1:-1].contiguous(),
-                                       right=True)
-    return out.clamp(0, K - 1)
+#: The SHIPPED binning, imported — not a local copy of it. This file used to
+#: define its own `_bucketized_binid` labelled "what losses_cat now does" and
+#: compare that to the reference, so every assertion below was about a
+#: duplicate: the tie-break, the clamp and the missing-band guard could all have
+#: changed in loss.py without failing a thing.
+_bucketized_binid = bucketize_bins
 
 
 def _edges():
@@ -120,3 +118,48 @@ def test_no_large_intermediate():
     out = _bucketized_binid(tgt, band_id, e, big_K)   # must simply not blow up
     assert out.shape == (n_cells, n_slot)
     assert out.dtype == torch.long
+
+
+def test_a_band_missing_from_the_table_raises_instead_of_reading_garbage():
+    """`torch.empty` + an unwritten slot = a loss that varies between identical
+    calls. The original indexed `edges[band_id]` and raised; so must this."""
+    e = _edges()[:2]                              # a table covering only 2 bands
+    tgt = torch.randn(16, N_SLOT)
+    band_id = torch.full((16,), 3, dtype=torch.long)
+    with pytest.raises(IndexError) as ei:
+        bucketize_bins(tgt, band_id, e, K)
+    assert "band_id up to 3" in str(ei.value) and "only 2 rows" in str(ei.value)
+
+
+def test_out_of_range_targets_clamp_into_the_open_end_bins():
+    e = _edges()
+    tgt = torch.tensor([[-1e6] * N_SLOT, [1e6] * N_SLOT])
+    band_id = torch.zeros(2, dtype=torch.long)
+    got = bucketize_bins(tgt, band_id, e, K)
+    assert int(got[0].min()) == 0 and int(got[0].max()) == 0
+    assert int(got[1].min()) == K - 1 and int(got[1].max()) == K - 1
+
+
+def test_losses_cat_uses_this_function():
+    """Mutation guard: break `bucketize_bins` and the shipped loss must move."""
+    import helix.model.loss as L
+
+    torch.manual_seed(0)
+    n = 24
+    e = _edges()
+    B = dict(tgt=torch.randn(n, N_SLOT), occ=torch.ones(n, N_SLOT),
+             valid=torch.ones(n, N_SLOT, dtype=torch.bool),
+             band_id=torch.randint(0, N_BAND, (n,)))
+    mask = torch.ones(n, dtype=torch.bool)
+    logits = torch.randn(n, N_SLOT, K)
+    occ_logit = torch.randn(n, N_SLOT)
+    base = float(losses_cat(occ_logit, logits, B, mask, e)[1])
+
+    orig = L.bucketize_bins
+    try:
+        L.bucketize_bins = lambda t, b, ed, k: torch.zeros_like(orig(t, b, ed, k))
+        mutated = float(losses_cat(occ_logit, logits, B, mask, e)[1])
+    finally:
+        L.bucketize_bins = orig
+    assert abs(mutated - base) > 1e-3, \
+        "losses_cat did not route through bucketize_bins; the test pins a copy"

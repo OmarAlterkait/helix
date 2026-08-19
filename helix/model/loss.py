@@ -72,29 +72,30 @@ def losses_fused(occ, mu, logvar, B, tok_mask, vis_w=0.0, noisy=False, alpha=0.0
     return bce, val
 
 
-def losses_cat(occ, logits, B, tok_mask, edges, vis_w=0.0):
-    """Categorical (discretized-bin) value loss: CE of the true tgt-bin per masked&active slot + occ BCE.
-    logits (n_cells, n_slot, K); edges (n_band, K+1) per-band bin boundaries in tgt(asinh) space.
-    Bounded, scale-free — no 1/sigma^2 down-weighting, no log-normal-mean pathology (charge = sum p*centroid)."""
-    valid, occ_t, tgt = B["valid"], B["occ"], B["tgt"]         # dense (n_cells, n_slot)
-    mrow = tok_mask[:, None]
-    m_occ = mrow & valid
-    bce_e = F.binary_cross_entropy_with_logits(occ, occ_t, reduction="none")
-    bce = (bce_e * m_occ).sum() / m_occ.sum().clamp(min=1)
-    K = logits.shape[-1]
-    # True bin per slot. The original expression was
-    #     binid = (tgt.unsqueeze(-1) >= edges[band][:, None, 1:-1]).sum(-1)
-    # which materialises (n_cells, n_slot, K-1) — and since the comparison is
-    # bool while .sum(-1) accumulates in int64, at 8 B/element: 4.66 GiB for a
-    # 37k-cell event at K=128. That OOMs an 11 GB card mid-run; it did, on the
-    # first real FMTrainer launch, at step 4.
-    #
-    # `edges` has only n_band distinct rows, so bucketize per band gives the
-    # identical index with no intermediate at all. right=True reproduces the
-    # original's ">=" tie-break (a tgt landing exactly ON an edge goes up);
-    # tests/test_losses_cat_binning.py pins that against the old expression,
-    # ties included.
-    band_id = B["band_id"]
+def bucketize_bins(tgt, band_id, edges, K):
+    """True bin index per slot, ``(n_cells, n_slot)`` int64.
+
+    A MODULE-LEVEL function rather than a loop inside ``losses_cat`` so that the
+    test can call the shipped code. tests/test_losses_cat_binning.py used to
+    carry its own copy of this loop labelled "what losses_cat now does" and
+    compare THAT to the reference — so the tie-break and the guard below were
+    pinned on a duplicate, and changing the real one would not have failed
+    anything.
+
+    The original expression was::
+
+        binid = (tgt.unsqueeze(-1) >= edges[band][:, None, 1:-1]).sum(-1)
+
+    which materialises ``(n_cells, n_slot, K-1)`` — the comparison is bool but
+    ``.sum(-1)`` accumulates in int64, so at 8 B/element that is 4.66 GiB for a
+    37k-cell event at K=128. It OOMed an 11 GB card mid-run, on the first real
+    FMTrainer launch, at step 4.
+
+    ``edges`` has only ``n_band`` distinct rows, so bucketizing per band gives
+    the identical index with no intermediate at all. ``right=True`` reproduces
+    the original's ``>=`` tie-break: a ``tgt`` landing exactly ON an edge goes
+    up.
+    """
     # A band with no row in `edges` would leave its slots UNWRITTEN below, and
     # torch.empty returns whatever was in memory — a loss that silently varies
     # between identical calls. The original indexed `edges[band_id]` directly and
@@ -112,7 +113,20 @@ def losses_cat(occ, logits, B, tok_mask, edges, vis_w=0.0):
         if sel.any():
             binid[sel] = torch.bucketize(tgt[sel], edges[b, 1:-1].contiguous(),
                                          right=True)
-    binid = binid.clamp(0, K - 1)                              # (n_cells, n_slot)
+    return binid.clamp(0, K - 1)
+
+
+def losses_cat(occ, logits, B, tok_mask, edges, vis_w=0.0):
+    """Categorical (discretized-bin) value loss: CE of the true tgt-bin per masked&active slot + occ BCE.
+    logits (n_cells, n_slot, K); edges (n_band, K+1) per-band bin boundaries in tgt(asinh) space.
+    Bounded, scale-free — no 1/sigma^2 down-weighting, no log-normal-mean pathology (charge = sum p*centroid)."""
+    valid, occ_t, tgt = B["valid"], B["occ"], B["tgt"]         # dense (n_cells, n_slot)
+    mrow = tok_mask[:, None]
+    m_occ = mrow & valid
+    bce_e = F.binary_cross_entropy_with_logits(occ, occ_t, reduction="none")
+    bce = (bce_e * m_occ).sum() / m_occ.sum().clamp(min=1)
+    K = logits.shape[-1]
+    binid = bucketize_bins(tgt, B["band_id"], edges, K)        # (n_cells, n_slot)
     ce_e = F.cross_entropy(logits.reshape(-1, K), binid.reshape(-1), reduction="none").view_as(tgt)
     act = occ_t.bool() & valid & mrow
     val = (ce_e * act).sum() / act.sum().clamp(min=1)
