@@ -261,7 +261,15 @@ def load_export_dir(path, *, device=None):
     model.to(dev).eval()
     for prm in model.parameters():
         prm.requires_grad_(False)
+    # WHICH checkpoint these tensors came from. The exported file is always
+    # named model.safetensors / model.bin whatever it was exported FROM, so the
+    # filename carries no provenance — a consumer that pattern-matches it for
+    # "ema" gets the same answer for an EMA export and a raw one. The resolved
+    # config's `weight` is the source path pimm was pointed at, which is the
+    # only record of it that survives into the directory. None means the export
+    # did not record one, and that is reported as unknown rather than as "raw".
+    src = full.get("weight") or (full.get("model") or {}).get("checkpoint")
     meta = dict(source="pimm-export", weights=os.path.basename(wpath),
-                config=mcfg, tokenizer=tok,
+                weights_source=src, config=mcfg, tokenizer=tok,
                 patch_config=PatchConfig(**tok) if tok else None)
     return model, meta
