@@ -36,17 +36,27 @@ TRAIN_RE = re.compile(
     r"Train: \[(\d+)/(\d+)\]\[(\d+)/(\d+)\].*?"
     r"loss: ([\d.eE+-]+) bce: ([\d.eE+-]+) val: ([\d.eE+-]+) "
     r"masked_frac: ([\d.eE+-]+) Lr: ([\d.eE+-]+)")
-EVAL_RE = re.compile(
-    r"\[coeff-eval\] batches=(\d+) bce=([\d.eE+-]+) loss=([\d.eE+-]+) "
-    r"masked_frac=([\d.eE+-]+) val=([\d.eE+-]+)")
+#: The evaluator prints `sorted(avg.items())`, so a NEW metric lands in the
+#: middle of the line, not at the end. A positional regex over the whole line
+#: therefore breaks the moment a metric is added — which is exactly what
+#: happened: `charge_bias`/`charge_closure` sort between `bce` and `loss`, and
+#: the old pattern matched nothing, dropping every eval point from every plot
+#: with no error. Find the tag, then scan key=value pairs.
+EVAL_TAG = "[coeff-eval]"
+KV_RE = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)=(-?[\d.]+(?:[eE][+-]?\d+)?)")
 
 
 def parse(run_dir):
     """-> (train dict of arrays, eval dict of arrays). Steps are GLOBAL."""
     path = os.path.join(run_dir, "train.log")
     tr = dict(step=[], loss=[], bce=[], val=[], mask=[], lr=[], epoch=[])
-    ev = dict(step=[], loss=[], bce=[], val=[], mask=[])
+    # Eval keys are whatever the log carries, not a fixed list: the grid-free
+    # metrics (var_expl, charge_closure, charge_bias) only appear once a run has
+    # the centroid tables, so a run predating that has fewer columns and must
+    # still parse. `masked_frac` is renamed to `mask` to match `tr`.
+    ev = dict(step=[])
     last_step = None
+    n_eval_lines = 0
     with open(path) as fh:
         for line in fh:
             m = TRAIN_RE.search(line)
@@ -63,13 +73,31 @@ def parse(run_dir):
                     tr[k].append(float(m.group(g)))
                 last_step = step
                 continue
-            m = EVAL_RE.search(line)
-            if m and last_step is not None:
+            if EVAL_TAG in line:
+                n_eval_lines += 1
+                if last_step is None:
+                    continue           # eval before any Train line: no step to key on
+                kv = {("mask" if k == "masked_frac" else k): float(v)
+                      for k, v in KV_RE.findall(line[line.index(EVAL_TAG):])}
+                kv.pop("batches", None)          # a count, not a metric
                 ev["step"].append(last_step)
-                for k, g in (("bce", 2), ("loss", 3), ("mask", 4), ("val", 5)):
-                    ev[k].append(float(m.group(g)))
+                n = len(ev["step"])
+                for k, v in kv.items():
+                    # A key that first appears mid-run (a metric switched on at a
+                    # restart) is back-filled with NaN so every column stays the
+                    # same length as `step` and plots as a gap, not a shift.
+                    ev.setdefault(k, [float("nan")] * (n - 1)).append(v)
+                for k, col in ev.items():
+                    if k != "step" and len(col) < n:
+                        col.append(float("nan"))
     tr = {k: np.asarray(v, float) for k, v in tr.items()}
     ev = {k: np.asarray(v, float) for k, v in ev.items()}
+    if n_eval_lines and len(ev["step"]) == 0:
+        print(f"  WARNING {os.path.basename(run_dir)}: {n_eval_lines} "
+              f"'{EVAL_TAG}' line(s) found but none parsed — the log format "
+              f"moved. Eval curves will be empty.", file=sys.stderr)
+    for k in ("loss", "bce", "val", "mask"):     # what the plots below assume
+        ev.setdefault(k, np.zeros(0))
     # A resume that WARM-STARTED instead of resuming resets the counter, and the
     # curve would then silently fold back on itself. Say so rather than plot it.
     if len(tr["step"]) > 1:
@@ -127,8 +155,12 @@ def main():
             label, path = os.path.basename(spec.rstrip("/")), spec
         print(f"parsing {label}: {path}")
         tr, ev = parse(path)
+        extra = sorted(set(ev) - {"step", "loss", "bce", "val", "mask"})
         print(f"  {len(tr['step'])} train points, {len(ev['step'])} evals, "
-              f"final step {tr['step'][-1]:.0f}")
+              f"final step {tr['step'][-1]:.0f}"
+              + (f", also {', '.join(extra)}" if extra else ""))
+        if len(ev["step"]) == 0:
+            print(f"  WARNING {label}: no eval points parsed", file=sys.stderr)
         runs.append((label, tr, ev))
 
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
@@ -240,11 +272,34 @@ def main():
     print("\n%-8s %8s %10s %10s %10s %10s %9s" %
           ("run", "steps", "eval val", "eff bins", "eval bce", "vs null", "mask frac"))
     for label, tr, ev in runs:
+        if len(ev["step"]) == 0:
+            # Was an IndexError on ev[...][-1]; a run whose evaluator never fired
+            # is an ordinary state, not a crash.
+            print("%-8s %8.0f %10s %10s %10s %10s %9.4f"
+                  % (label, tr["step"][-1], "-", "-", "-", "-",
+                     tr["mask"].mean()))
+            continue
         ho = nulls.get(label, (None, None))[1]
         rel = "  n/a" if ho is None else "%4.0f%%" % (100 * (ev["bce"][-1] / ho - 1))
         print("%-8s %8.0f %10.4f %10.1f %10.4f %10s %9.4f" %
               (label, tr["step"][-1], ev["val"][-1], np.exp(ev["val"][-1]),
                ev["bce"][-1], rel, tr["mask"].mean()))
+
+    # The grid-free metrics, when the runs carry them. These are the numbers that
+    # stay comparable ACROSS bin tables and corpora — cross-entropy does not, so
+    # a k30-vs-R1 bce gap is partly a change of grid.
+    gfk = [k for k in ("var_expl", "charge_closure", "charge_bias")
+           if any(k in ev for _, _, ev in runs)]
+    if gfk:
+        print("\n%-8s %8s" % ("run", "steps")
+              + "".join("%16s" % k for k in gfk))
+        for label, tr, ev in runs:
+            cells = []
+            for k in gfk:
+                v = ev.get(k)
+                cells.append("%16s" % "-" if v is None or not len(v)
+                             else "%16.4f" % v[-1])
+            print("%-8s %8.0f" % (label, tr["step"][-1]) + "".join(cells))
 
 
 if __name__ == "__main__":

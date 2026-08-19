@@ -10,7 +10,9 @@ HELIX is a signal-processing toolkit for liquid-argon TPC detector data, organiz
 - **`helix.tpc`** — wire-plane pipeline: coherent noise removal → wavelet sparsification. Each plane is a dense `(n_wires, n_ticks)` float32 image (pedestal-subtracted ADC). Quality metric **F0** = `1 - sum|recon-clean|/sum|clean|`.
 - **`helix.optical`** — PMT optical-waveform pipeline for goop "light" files. Operates on goop's stored chunks (gap-compressed "stitches") directly; wavelet-sparsifies them for compression.
 
-Top-level modules (`helix.config`, `helix.coherent`, `helix.wavelet`, `helix.pipeline`, `helix.io`, `helix._backend`, `helix._numpy_ops`, `helix._jax_ops`, `helix._dwt_matrix`) are **back-compat shims** re-exporting from the new packages — single source of truth lives in `core`/`tpc`. Don't add logic to the shims.
+There are **no top-level shims**. `helix.config`, `helix.coherent`, `helix.wavelet`, `helix.pipeline`, `helix.io`, `helix._backend`, `helix._numpy_ops`, `helix._jax_ops` and `helix._dwt_matrix` were re-export shims and are gone — import from `helix.core.*` / `helix.tpc.*` directly. `helix/__init__.py` still resolves the common names (`sparsify`, `DetectorConfig`, `process_plane`, …) lazily, so `from helix import X` keeps working; a submodule path does not.
+
+`helix.tpc.wavelet` is **not** a shim despite having lived at `helix/wavelet.py` under that label: it is the `(image, DetectorConfig)` adapter over `helix.core.wavelet`'s keyword API, and it is the only implementation of that signature.
 
 ## Commands
 

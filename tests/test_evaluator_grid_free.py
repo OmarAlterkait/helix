@@ -238,3 +238,27 @@ def test_backfill_derives_centroids_for_a_pre_fix_checkpoint():
     assert torch.isfinite(fresh.bin_cent_ratio).all(), \
         "backfill must derive, not copy the constructor's NaN"
     assert fresh.bin_cent_measured.tolist() == [0, 0]
+
+
+def test_the_single_forward_path_still_checks_the_batch_contract():
+    """`_forward` skips `forward` to save a pass — not to skip its guard.
+
+    It reproduces the categorical branch from one `raw_heads` call, and so used
+    to reach `losses_cat` with whatever the batch happened to hold. A missing
+    `tgt` then surfaced as a bare KeyError from inside the loss, naming nothing.
+    """
+    from helix.integrations.pimm import CoeffFMEvaluator
+    edges, ca, cr = _tables()
+    core = build_fm(dict(ARCH))
+    core.set_bins(edges, cent_asinh=ca, cent_ratio=cr)
+    B = _batch()
+    B.update(inp=B["tgt"].clone(), plane_id=torch.zeros(B["tgt"].shape[0], dtype=torch.long))
+    del B["tgt"]                                  # what losses_cat needs and lacks
+    ev = CoeffFMEvaluator.__new__(CoeffFMEvaluator)
+    ev.grid_free = True
+    with pytest.raises(KeyError) as ei:
+        ev._forward(core, core, B, torch.ones(B["occ"].shape[0], dtype=torch.bool),
+                    {k: 0.0 for k in ("sse", "sy", "syy", "nv", "chg_pred",
+                                      "chg_true", "chg_pred_s", "chg_true_s")})
+    assert "tgt" in str(ei.value) and "losses_cat" in str(ei.value), \
+        f"the error must name the key and the objective, got: {ei.value}"
