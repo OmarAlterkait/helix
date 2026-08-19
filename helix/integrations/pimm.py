@@ -520,6 +520,7 @@ class HelixPathBootstrap(HookBase):
 
         if comm.get_rank() != 0:
             return
+        self._stamp_provenance()
         path = os.path.join(self.trainer.cfg.save_path, "config.py")
         try:
             with open(path) as fh:
@@ -539,6 +540,55 @@ class HelixPathBootstrap(HookBase):
             f"HelixPathBootstrap: re-added the sys.path bootstrap to {path} "
             f"(helix={helix_root!r}, pimm_data={pimm_data_root!r}) so chained "
             f"jobs can resume")
+
+    def _stamp_provenance(self):
+        """Write ``<save_path>/provenance.json``: which code produced this run.
+
+        This hook already resolves the checkouts for the resume bootstrap, so it
+        is the one place that knows them — recording them here costs one file and
+        no new hook in the config.
+
+        Nothing recorded this before. A run directory held weights, a config and
+        a log, and no statement of which helix produced them; reconstructing that
+        for m113 meant trying configurations until the goldens matched. Appends
+        rather than overwrites, so a chained/requeued job leaves a record of
+        every link — a run that was preempted and resumed from a DIFFERENT
+        working tree is exactly the case worth catching, and an overwrite would
+        hide it.
+        """
+        import json
+        import os
+
+        from helix.integrations._bootstrap import provenance
+
+        try:
+            info = provenance()
+            info["step"] = int(getattr(self.trainer, "global_step", 0) or 0)
+            path = os.path.join(self.trainer.cfg.save_path, "provenance.json")
+            log = []
+            if os.path.exists(path):
+                with open(path) as fh:
+                    log = json.load(fh)
+                if isinstance(log, dict):          # a single record from an older run
+                    log = [log]
+            log.append(info)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(log, fh, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+            h = info["helix"]
+            self.trainer.logger.info(
+                f"HelixPathBootstrap: provenance -> {path} "
+                f"(helix {(h['commit'] or '?')[:12]}"
+                f"{'-dirty' if h['dirty'] else ''} on {h['branch']})")
+            if h["dirty"]:
+                self.trainer.logger.warning(
+                    "helix working tree is DIRTY — the commit recorded in "
+                    "provenance.json does not fully describe the code that ran")
+        except Exception:
+            # Provenance is a record, not a dependency. Never take down a run.
+            self.trainer.logger.exception(
+                "HelixPathBootstrap: could not write provenance.json")
 
 
 @HOOKS.register_module()
