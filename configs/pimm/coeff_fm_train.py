@@ -310,7 +310,17 @@ hooks = [
     # Was save_freq=None -> CheckpointSaver.after_step returns early and only
     # after_train saves. On a preemptible partition a long run could never make
     # progress. Research saves every 2000 ("preemption loses <= this many").
-    dict(type="CheckpointSaver", save_freq=SAVE_EVERY),
+    #
+    # `evaluator_every_n_steps` is what makes model_best real. Without it,
+    # CheckpointSaver's `is_eval_step` is False on EVERY step, `_update_best`
+    # returns early, and model_best.pth is never written — so the run produced a
+    # `neg_val_loss` metric that selected nothing, and the only checkpoints were
+    # the rolling ones. The comment above about `every_n_steps` fixed the
+    # evaluator's half of this and left the saver's half; both are needed.
+    # It MUST equal the evaluator's cadence, or the saver consults the metric on
+    # steps where no eval ran and re-reads a stale value.
+    dict(type="CheckpointSaver", save_freq=SAVE_EVERY,
+         evaluator_every_n_steps=EVAL_EVERY),
 ]
 
 train = dict(type="FMTrainer")

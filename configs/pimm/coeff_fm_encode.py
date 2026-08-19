@@ -208,6 +208,9 @@ hooks = [
     dict(type="IterationTimer", warmup_iter=2),
     dict(type="InformationWriter"),
     dict(type="CoeffFMEvaluator", max_batches=32),
+    # No evaluator_every_n_steps: this config's evaluator has no every_n_steps
+    # either, so it fires only in after_epoch. The two must agree about whether
+    # a step is an eval step, and here the answer is "no step is".
     dict(type="CheckpointSaver", save_freq=None),
 ]
 

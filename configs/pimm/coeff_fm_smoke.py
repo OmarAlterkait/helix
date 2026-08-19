@@ -204,8 +204,11 @@ hooks = [
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),
     dict(type="InformationWriter"),
-    dict(type="CoeffFMEvaluator", max_batches=4),
-    dict(type="CheckpointSaver", save_freq=None),
+    # every_n_steps so the smoke run actually exercises the eval -> model_best
+    # path; with it unset the evaluator fires once, after_epoch, and the saver
+    # never sees an eval step.
+    dict(type="CoeffFMEvaluator", every_n_steps=5, max_batches=4),
+    dict(type="CheckpointSaver", save_freq=10, evaluator_every_n_steps=5),
 ]
 
 train = dict(type="FMTrainer")
