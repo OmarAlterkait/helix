@@ -21,7 +21,8 @@ from pathlib import Path
 import numpy as np
 
 from helix.core.wavelet import wavedec
-from helix.core.coeff_event import CoeffEvent, _is_device, _xfer_cap
+from helix.core.backend import is_device
+from helix.core.coeff_event import CoeffEvent, _xfer_cap
 from helix.core.coeff_io import write_coeff_shard, audit_shard
 from helix.tpc.config import DetectorConfig
 from helix.tpc.pipeline import process_plane, event_coeff_event, _pad_time
@@ -69,7 +70,7 @@ def clean_coeff_event(ce_noisy: CoeffEvent, clean_planes: dict, config: Detector
     from helix.core.backend import kind_of
     _first = next(iter(clean_bands.values()))[0]
     knd = kind_of(_first)
-    device = _is_device(_first)
+    device = is_device(_first)
     xp = np
     if knd == "jax":
         import jax.numpy as jnp
