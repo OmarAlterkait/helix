@@ -83,7 +83,15 @@ CORPUS = "/sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715"
 # m113's came from the old white-noise cache and are mis-sized per band here —
 # see NOISE_BANDS.md.
 # K=128 needs Ampere: the logits are (n_cells, n_slot, K), ~2.4 GB at a full event.
-BINS = "/sdf/data/neutrino/omara/archive/coeff_bins_r1_tau05_run0027575715.pt"
+#
+# _v2 re-derives the same corpus at the same --events: `edges` and `cent_asinh`
+# come out BIT-IDENTICAL, so this changes no loss and no trained weight. What it
+# adds is `cent_ratio` = E[coeff/sigma | bin], MEASURED — the charge read-back
+# table. The v1 sidecar had none, so `set_bins` derives it from the edges, and a
+# derived table under-reads sum|centroid| by ~2.7-3.0% per band (the two open
+# outer bins run ~24% low, since a closed-form centroid has to invent a finite
+# edge for them). It also drops `cent_lin`, which nothing read.
+BINS = "/sdf/data/neutrino/omara/archive/coeff_bins_r1_tau05_run0027575715_v2.pt"
 
 # ---------------------------------------------------------------------------
 # run

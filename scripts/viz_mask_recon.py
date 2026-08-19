@@ -80,19 +80,23 @@ def _load_identity(truth_path):
 def _centroids(model):
     """Per-band E[raw/sigma | bin] for the categorical head.
 
-    Prefers the model's own `bin_cent_ratio` buffer (persistent since the
-    read-back fix); falls back to the closed form for older exports, which
-    carry only the edges. NEVER build asinh centres and sinh them — the
-    categorical read-back is sum_k p_k * centroid_k, and applying sinh to that
-    mean is Jensen-biased ~31% low. Reference: fm/train.py:125, fm/viz_cat.py:25.
+    Just the buffer: `set_bins` derives `bin_cent_ratio` when a sidecar does not
+    measure it, so it is finite whenever `bin_edges` is, and a pre-fix export
+    gets it derived on load by `checkpoint._backfill_centroids`. This used to
+    carry its own fallback to the closed form, which made three copies of "how
+    do I get a centroid" across the tree — and the copy the evaluator used was
+    the one that silently returned nothing.
+
+    NEVER build asinh centres and sinh them: the categorical read-back is
+    sum_k p_k * centroid_k, and applying sinh to that mean is Jensen-biased ~31%
+    low. Reference: fm/train.py:125, fm/viz_cat.py:25.
     """
     import torch
-    from helix.model.tokenize import bin_centroids_ratio
-    cr = getattr(model, "bin_cent_ratio", None)
-    cr = None if cr is None or not torch.isfinite(cr).all() else cr.detach().cpu().numpy()
-    if cr is None:
-        print("  (export carries no bin_cent_ratio; using the closed form)", flush=True)
-    return bin_centroids_ratio(model.bin_edges.detach().float().cpu().numpy(), cr)
+    cr = model.bin_cent_ratio.detach().float().cpu()
+    assert torch.isfinite(cr).all(), (
+        "bin_cent_ratio is not finite — set_bins() was bypassed or the sidecar "
+        "carried a NaN table; refusing to decode charge through it")
+    return cr.numpy()
 
 
 def _images(ce, tok, occ_mask, values, gids, norm_sigma, pcfg, space="asinh"):

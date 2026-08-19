@@ -23,7 +23,13 @@ directly. The two are the same quantity — SIGMA cancels — and doing it this 
 means the edges are in exactly the space ``CoeffTokenize`` produces.
 
 Writes ``edges`` (n_band, K+1), ``cent_asinh`` (n_band, K) — the point estimate
-in model space — and ``cent_lin`` (n_band, K), the charge read-back centroid.
+in model space — and ``cent_ratio`` (n_band, K) = E[coeff/sigma | bin], the
+charge read-back centroid.
+
+It no longer writes ``cent_lin`` (E[raw ADC | bin]). That table pooled planes
+whose ``norm_sigma`` differ by 22%, nothing consumed it, and ``set_bins`` now
+rejects unknown centroid tables rather than let one bind to the wrong slot. An
+older sidecar that still carries the key applies fine — ``apply_bins`` ignores it.
 
 Usage::
 
@@ -73,12 +79,12 @@ def main(argv=None):
         sig = np.maximum(sigma_for_rows(gid, band, meta["gids"], meta["norm_sigma"]), 1e-6)
         t = np.arcsinh(clean / sig).astype(np.float64)
         # clean/sigma == sinh(t), the DIMENSIONLESS coefficient. This is what a
-        # read-back needs: `cent_lin` below is raw ADC pooled over planes whose
-        # norm_sigma differ by 22%, so reading back through it biases a Y-plane
-        # coefficient 13% low and a U/V one 6% high. That cancels on a random
-        # mask and does NOT cancel on a plane mask (measured 0.857 vs 1.021 on
-        # the cross-plane task) — invisible on the metric people look at, wrong
-        # on the one that matters.
+        # read-back needs. The alternative — E[raw ADC | bin] — pools planes whose
+        # norm_sigma differ by 22%, biasing a Y-plane coefficient 13% low and a
+        # U/V one 6% high. That cancels on a random mask and does NOT cancel on a
+        # plane mask (measured 0.857 vs 1.021 cross-plane): invisible on the
+        # metric people look at, wrong on the one that matters. It was written
+        # here for four commits and read nowhere; it is not written now.
         ratio = (clean / sig).astype(np.float64)
         for b in range(a.n_bands):
             sel = band == b
@@ -89,7 +95,6 @@ def main(argv=None):
     K = a.K
     edges = np.zeros((a.n_bands, K + 1), np.float32)
     cent_a = np.zeros((a.n_bands, K), np.float32)
-    cent_l = np.zeros((a.n_bands, K), np.float32)
     cent_r = np.zeros((a.n_bands, K), np.float32)   # E[coeff/sigma | bin]
     for b in range(a.n_bands):
         t = np.concatenate(vals[b])
@@ -102,7 +107,6 @@ def main(argv=None):
             m = idx == k
             if m.any():
                 cent_a[b, k] = t[m].mean()
-                cent_l[b, k] = v[m].mean()
                 # E[sinh t | bin], MEASURED. Not sinh(E[t | bin]) — the head is
                 # categorical, and a posterior spread over many bins makes
                 # sinh(mean) a 31%-low estimate of the charge (Jensen). The
@@ -113,8 +117,6 @@ def main(argv=None):
             else:                                  # empty bin: fall back to its centre
                 cent_a[b, k] = 0.5 * (e[k] + e[k + 1])
                 cent_r[b, k] = float(np.sinh(cent_a[b, k]))   # tier1_setup_bins.py:41
-                cent_l[b, k] = float(np.sinh(cent_a[b, k]) * np.median(np.abs(v)) /
-                                     max(np.median(np.abs(np.sinh(t))), 1e-6))
         empty = int((np.bincount(idx, minlength=K) == 0).sum())
         e[0], e[-1] = -1e18, 1e18                  # tails cannot fall off the grid
         edges[b] = e
@@ -122,7 +124,6 @@ def main(argv=None):
               f"empty bins={empty}  |coeff|max={np.abs(v).max():.0f}")
 
     torch.save(dict(edges=torch.tensor(edges), cent_asinh=torch.tensor(cent_a),
-                    cent_lin=torch.tensor(cent_l),
                     cent_ratio=torch.tensor(cent_r), K=K, n_bands=a.n_bands,
                     corpus=a.corpus, events=n), a.out)
     print(f"wrote {a.out}")

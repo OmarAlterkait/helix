@@ -159,7 +159,7 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
     # a bins sidecar in tier1_setup_bins.py's format
     path = tmp_path / "bins.pt"
     torch.save(dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1),
-                    cent_asinh=torch.zeros(4, 16), cent_lin=torch.zeros(4, 16),
+                    cent_asinh=torch.zeros(4, 16),
                     K=16, SIGMA=2.6), path)
 
     src = pathlib.Path(os.path.join(

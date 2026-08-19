@@ -471,20 +471,56 @@ def bin_centroids_ratio(edges, cent_ratio=None):
     measured table, which is unavoidable without the table and is why the table
     is preferred.
     """
-    e = np.array(edges, dtype=np.float64, copy=True)
     if cent_ratio is not None:
         c = np.asarray(cent_ratio, np.float64)
         if np.isfinite(c).all():
-            return c.astype(np.float32)
+            return c.astype(np.float32)   # measured beats derived; no closure needed
+    e = _close_open_edges(edges)
+    lo, hi = e[:, :-1], e[:, 1:]
+    w = np.maximum(hi - lo, 1e-12)
+    return ((np.cosh(hi) - np.cosh(lo)) / w).astype(np.float32)
+
+
+def bin_centroids_asinh(edges):
+    """Per-band bin midpoints in TOKEN space, shape (n_band, K).
+
+    The estimator for ``var_expl``, which compares a posterior mean against the
+    target in the space the target lives in — so no ``sinh`` is involved and the
+    midpoint is the right summary. Contrast ``bin_centroids_ratio``, which is an
+    expectation OF ``sinh`` and is the only correct thing for charge.
+    """
+    e = _close_open_edges(edges)
+    return (0.5 * (e[:, :-1] + e[:, 1:])).astype(np.float32)
+
+
+def _close_open_edges(edges):
+    """Replace the +-1e18 open-bin sentinels with a reflected neighbouring width.
+
+    ``derive_coeff_bins`` writes the outer edges as +-1e18 so a tail can never
+    fall off the grid. Any centroid formula has to invent a finite edge for those
+    two bins; reflecting the adjacent width is the convention, and it is why a
+    DERIVED outer centroid runs ~24% below a measured one, which costs 2.7-3.0%
+    of a band's sum|centroid| (measured on the R1 corpus).
+
+    Needs three finite interior edges to reflect from. With fewer (K < 3) there
+    is nothing to reflect and the old code raised IndexError at K=1 and returned
+    +-inf at K=2 — reachable, because the derivation runs whenever a measured
+    table is absent.
+    """
+    e = np.array(edges, dtype=np.float64, copy=True)
     BIG = 1e6                       # token space is arcsinh(); it stays single-digit
+    if e.shape[1] < 4:
+        raise ValueError(
+            f"need at least 3 bins to close an open edge, got K={e.shape[1]-1}; "
+            f"a table this small cannot have its outer centroids derived")
     for b in range(e.shape[0]):
         if abs(e[b, 0]) >= BIG:
             e[b, 0] = e[b, 1] - (e[b, 2] - e[b, 1])
         if abs(e[b, -1]) >= BIG:
             e[b, -1] = e[b, -2] + (e[b, -2] - e[b, -3])
-    lo, hi = e[:, :-1], e[:, 1:]
-    w = np.maximum(hi - lo, 1e-12)
-    return ((np.cosh(hi) - np.cosh(lo)) / w).astype(np.float32)
+    if np.abs(e).max() >= BIG:
+        raise ValueError(f"edges still hold a sentinel: max|e| = {np.abs(e).max():.3e}")
+    return e
 
 
 def decode_categorical(logits, cell_band, centroids, readout="mean"):

@@ -313,7 +313,8 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
                 f"whose converted blob carries them inline. Derive fresh edges "
                 f"for a new corpus with research tier1_setup_bins.py — the ones "
                 f"m113 shipped with came from a different noise model.")
-        model.set_bins(bins["edges"], bins.get("cent_asinh"), bins.get("cent_lin"))
+        from helix.model.checkpoint import apply_bins
+        apply_bins(model, bins)
     return model
 
 
@@ -693,6 +694,11 @@ class WeightEMA(HookBase):
             f"WeightEMA(decay={self.decay}, step={self._step}) -> {self._path()}")
 
 
+def p_dev(t):
+    """``device_type`` string for ``torch.autocast``; it rejects a full device."""
+    return t.device.type
+
+
 def _acc_grid_free(core, B, mask, logits, gf):
     """Accumulate var_expl / charge-closure sums for one eval batch.
 
@@ -707,19 +713,27 @@ def _acc_grid_free(core, B, mask, logits, gf):
         charge. Applying sinh to the asinh-space mean instead is Jensen-biased
         ~31% low; see ``tokenize.decode_categorical``.
     """
-    ca = getattr(core, "bin_cent_asinh", None)
-    cr = getattr(core, "bin_cent_ratio", None)
-    if ca is None or cr is None or not (torch.isfinite(ca).all()
-                                        and torch.isfinite(cr).all()):
-        return                                   # centroids absent: skip silently
+    # No presence/finiteness test: `set_bins` DERIVES any centroid table it is
+    # not given, so both are populated whenever `bin_edges` is. The guard that
+    # used to stand here returned silently, and when a caller passed centroids
+    # positionally into the wrong slot every charge metric vanished from the log
+    # with nothing to say it had. If a table is NaN now that is a real bug and
+    # the metrics should come out NaN and say so.
+    ca, cr = core.bin_cent_asinh, core.bin_cent_ratio
     tgt, occ_t, valid = B["tgt"], B["occ"].bool(), B["valid"].bool()
     sel = mask[:, None] & valid & occ_t
     if not bool(sel.any()):
         return
-    p = torch.softmax(logits.float(), -1)                     # (n_cells, n_slot, K)
     band = B["band_id"].long()
-    rec_a = torch.einsum("csk,ck->cs", p, ca[band].float())
-    rec_r = torch.einsum("csk,ck->cs", p, cr[band].float())
+    # `einsum` is on autocast's lower-precision list, so under the trainer's
+    # autocast context these contractions run in bf16 (~3e-3 relative) even with
+    # float32 inputs — measured on A100. The elementwise form is float32 but
+    # materialises a (n_cells, n_slot, K) product, ~17 MB more at eval shapes;
+    # disabling autocast keeps einsum's memory AND float32.
+    with torch.autocast(device_type=p_dev(logits), enabled=False):
+        p = torch.softmax(logits.float(), -1)                 # (n_cells, n_slot, K)
+        rec_a = torch.einsum("csk,ck->cs", p, ca[band].float())
+        rec_r = torch.einsum("csk,ck->cs", p, cr[band].float())
     y = tgt.float()[sel]
     d = rec_a[sel] - y
     gf["sse"] += float((d * d).sum())

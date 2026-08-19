@@ -203,7 +203,12 @@ def load_bins(path, n_bins):
     if edges.shape[1] != n_bins + 1:
         raise SystemExit(f"bins file {path}: edges {tuple(edges.shape)} inconsistent "
                          f"with n_bins={n_bins} (expected K+1 = {n_bins + 1})")
-    return {k: bd[k] for k in ("edges", "cent_asinh", "cent_lin") if k in bd}
+    # Pass the sidecar through whole. The whitelist that used to stand here
+    # named the tables by hand and so silently DROPPED `cent_ratio` — the
+    # measured charge read-back — from every blob it converted. `apply_bins`
+    # ignores keys it does not know, which is the property a whitelist was
+    # reaching for without having to be kept in sync.
+    return dict(bd)
 
 
 def convert(src, dst=None, *, use_ema=False, bins_path=None, verify=True,
@@ -342,7 +347,8 @@ def convert(src, dst=None, *, use_ema=False, bins_path=None, verify=True,
         model = build_fm(cfg, serial=is_serial)
         model.load_state_dict(sd, strict=True)     # raises on any mismatch
         if bins is not None:
-            model.set_bins(bins["edges"], bins.get("cent_asinh"), bins.get("cent_lin"))
+            from helix.model.checkpoint import apply_bins
+            apply_bins(model, bins)
 
     if dst:
         torch.save(blob, dst)

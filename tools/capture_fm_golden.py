@@ -238,9 +238,11 @@ def build(verify_against_research):
                      for k, v in ref_kw.items()})
         ref.load_state_dict({k: v for k, v in sd.items()
                              if not k.startswith("bin_")}, strict=True)
-        if blob.get("bins") is not None:
-            ref.set_bins(blob["bins"]["edges"], blob["bins"].get("cent_asinh"),
-                         blob["bins"].get("cent_lin"))
+        # No set_bins on the reference: research's SerialFMModel has no such
+        # method (its bins live in a sidecar the model never sees). This branch
+        # was dead — it would have raised AttributeError the first time a blob
+        # with bins reached it — and the comparison below does not need bins,
+        # since it checks head geometry, not decoded values.
         ref_out = model_outputs(_AsHeads(ref), cfg)
         bad = [k for k in got["model"] if got["model"][k] != ref_out[k]]
         if bad:
