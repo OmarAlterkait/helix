@@ -96,7 +96,6 @@ def load_converted(model, blob, *, prefer="raw"):
         # The converted blob may also carry the centroids; take them when
         # present, and let the backfill below supply NaN when it does not.
         for _n, _k in (("bin_cent_asinh", "cent_asinh"),
-                       ("bin_cent_lin", "cent_lin"),
                        ("bin_cent_ratio", "cent_ratio")):
             if blob["bins"].get(_k) is not None:
                 sd[_n] = torch.as_tensor(blob["bins"][_k])
@@ -105,25 +104,85 @@ def load_converted(model, blob, *, prefer="raw"):
     return used
 
 
-#: Bin-centroid buffers. Persistent since the categorical read-back was fixed,
-#: so any checkpoint written before that carries `bin_edges` without them.
-_CENT_BUFFERS = ("bin_cent_asinh", "bin_cent_lin", "bin_cent_ratio")
+#: Bin-centroid buffers, and how to derive each from the edges. Persistent since
+#: the categorical read-back was fixed, so any checkpoint written before that
+#: carries `bin_edges` without them.
+#:
+#: `bin_cent_lin` is not here: it was E[raw ADC | bin] pooled across planes with
+#: 22%-different sigmas, nothing read it, and it is gone. A checkpoint that still
+#: carries the key loads through `_drop_stale` below.
+_CENT_BUFFERS = ("bin_cent_asinh", "bin_cent_ratio")
+
+#: Buffers removed from the model that an older state_dict may still carry.
+#: Dropping them is what keeps `strict=True` an honest check on the WEIGHTS.
+_STALE_BUFFERS = ("bin_cent_lin",)
+
+
+def apply_bins(model, bins, *, log=None):
+    """Install a bin sidecar onto ``model``. The ONLY caller of ``set_bins``.
+
+    Every path that has a sidecar in hand — the trainer, the converter, the
+    golden capture — goes through here, so "how do bins reach a model" has one
+    answer. The direct calls it replaces passed centroids POSITIONALLY, and when
+    the signature grew a table one of them silently bound its argument to the
+    wrong slot; the metrics that depended on it then read NaN and reported
+    nothing. ``set_bins`` is keyword-only now, but the deeper fix is that there
+    is one call.
+
+    ``bins`` is the mapping ``derive_coeff_bins`` writes: ``edges`` required,
+    ``cent_asinh``/``cent_ratio`` optional (``set_bins`` derives what is absent).
+    Any other key — ``cent_lin``, provenance — is ignored rather than rejected,
+    so an old sidecar still applies.
+
+    When the model already holds finite edges, logs the largest disagreement
+    before overwriting: silently replacing a checkpoint's own trained edges with
+    a sidecar's is how a model gets evaluated against a grid it never saw.
+    """
+    import torch
+
+    assert "edges" in bins, f"bin sidecar has no 'edges' (keys: {sorted(bins)})"
+    prev = getattr(model, "bin_edges", None)
+    if prev is not None and torch.isfinite(prev).all():
+        d = (prev.detach().cpu() - torch.as_tensor(bins["edges"],
+                                                   dtype=prev.dtype)).abs().max()
+        msg = (f"apply_bins: overwriting existing bin_edges, max|delta| = {d:.3e}")
+        if d > 0 and log is not None:
+            log(msg)
+        elif d > 0:
+            import warnings
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
+    return model.set_bins(bins["edges"],
+                          cent_asinh=bins.get("cent_asinh"),
+                          cent_ratio=bins.get("cent_ratio"))
 
 
 def _backfill_centroids(model, sd):
-    """Add missing centroid buffers from the model's own NaN-initialised ones.
+    """Derive any centroid buffer the checkpoint predates, from its own edges.
 
     Keeps ``strict=True`` meaningful — a missing WEIGHT stays an error — while
-    letting pre-fix checkpoints load. NaN is exactly the "absent" signal
-    ``tokenize.bin_centroids_ratio`` already falls back on, so a backfilled model
-    decodes through the closed form rather than silently using a wrong table.
+    letting pre-fix checkpoints load. Deriving from ``sd["bin_edges"]`` rather
+    than copying the model's freshly-constructed NaN is what makes the loaded
+    model obey the same invariant ``set_bins`` enforces: no centroid table is
+    ever NaN, so no consumer has to test for one. A derived cent_ratio under-reads
+    sum|centroid| by 2.7-3.0% per band against a measured one (outer bins ~24%
+    low); that is the documented cost of a checkpoint that never stored them.
     """
+    import torch
+    from helix.model.tokenize import bin_centroids_asinh, bin_centroids_ratio
+
+    sd = {k: v for k, v in sd.items() if k not in _STALE_BUFFERS}
     missing = [n for n in _CENT_BUFFERS if n not in sd and hasattr(model, n)]
-    if not missing:
-        return sd
-    sd = dict(sd)
-    for n in missing:
-        sd[n] = getattr(model, n).detach().clone()
+    if missing and "bin_edges" in sd:
+        e = torch.as_tensor(sd["bin_edges"]).detach().cpu().numpy()
+        for n, fn in (("bin_cent_asinh", bin_centroids_asinh),
+                      ("bin_cent_ratio", bin_centroids_ratio)):
+            if n in missing:
+                sd[n] = torch.as_tensor(fn(e), dtype=torch.as_tensor(sd["bin_edges"]).dtype)
+    elif missing:
+        for n in missing:                      # n_bins=0: buffers are absent anyway
+            sd[n] = getattr(model, n).detach().clone()
+    if "bin_cent_measured" not in sd and hasattr(model, "bin_cent_measured"):
+        sd["bin_cent_measured"] = torch.zeros(2, dtype=torch.uint8)
     return sd
 
 

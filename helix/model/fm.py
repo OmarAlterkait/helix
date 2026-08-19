@@ -81,14 +81,25 @@ class FMModel(nn.Module):
             # for data and `forward` checks it.
             self.register_buffer("bin_edges",
                                  torch.full((n_band, n_bins + 1), float("nan")))
-            # PERSISTENT, for the same reason as the edges: they are training-set
-            # statistics the model cannot invent. `bin_cent_ratio` is
-            # E[coeff/sigma | bin] — the categorical head's charge read-back.
-            # These used to be non-persistent "for a read-back that was never
-            # built", and that is precisely why the read-back that WAS built
-            # reconstructed centres from edges and shipped a 31%-low charge.
-            for _nm in ("bin_cent_asinh", "bin_cent_lin", "bin_cent_ratio"):
+            # PERSISTENT, like the edges. `bin_cent_asinh` is the var_expl
+            # estimator (token space); `bin_cent_ratio` is E[coeff/sigma | bin],
+            # the charge read-back. `set_bins` DERIVES either one that is not
+            # supplied, so neither is ever NaN — an optional table is what let a
+            # guard silently disable the metrics that depend on it.
+            #
+            # `bin_cent_lin` is deliberately absent. It was E[raw ADC | bin]
+            # pooled across planes whose norm_sigma differ by 22%, which biases a
+            # Y-plane read-back 13% low and a U/V one 6% high — cancelling under a
+            # random mask and NOT under a plane mask. Nothing read it; it is
+            # removed rather than carried.
+            for _nm in ("bin_cent_asinh", "bin_cent_ratio"):
                 self.register_buffer(_nm, torch.full((n_band, n_bins), float("nan")))
+            # Provenance, so a checkpoint says whether its centroids were MEASURED
+            # over a corpus or derived from the edges. Measured on the R1 corpus:
+            # a derived cent_ratio under-reads sum|centroid| by 2.7-3.0% per band,
+            # with the two open outer bins ~24% low.
+            self.register_buffer("bin_cent_measured",
+                                 torch.zeros(2, dtype=torch.uint8))
         self.dec_mode = dec_mode                  # "self" = full-attn decoder over all N; "cross" = CrossMAE (cheaper)
         # --- muP (Yang & Hu, Tensor Programs V, arXiv:2203.03466) ---
         # m = d/d_base is the width multiplier. Under muP the optimal Adam LR is
@@ -312,15 +323,30 @@ class FMModel(nn.Module):
 
     # ---- pimm integration (the documented delta; parameter tree untouched) ---
 
-    def set_bins(self, edges, cent_asinh=None, cent_lin=None, cent_ratio=None):
-        """Register the categorical head's bin edges, shape (n_band, n_bins+1).
+    def set_bins(self, edges, *, cent_asinh=None, cent_ratio=None):
+        """Register the categorical head's bin edges and centroid tables.
 
-        Required before ``forward`` when ``n_bins > 0``: ``losses_cat`` needs
-        them. They are training-set statistics the model cannot invent, so they
-        are PERSISTENT buffers and travel inside the state_dict — see the
-        allocation in ``__init__`` for why. The research trainer kept them in a
-        separate sidecar the checkpoint never referenced, which is the failure
-        this closes."""
+        Required before ``forward`` when ``n_bins > 0``: ``losses_cat`` needs the
+        edges. They are training-set statistics the model cannot invent, so they
+        are PERSISTENT buffers and travel inside the state_dict — the research
+        trainer kept them in a sidecar the checkpoint never referenced, which is
+        the failure this closes.
+
+        Centroids are DERIVED from the edges when not supplied, so no centroid
+        buffer is ever NaN. That is the point: they used to be optional, and a
+        consumer then had to ask "are these present?" — three files asked, one
+        forgot, and the evaluator's charge metrics silently never ran. A measured
+        table (from ``derive_coeff_bins``) is strictly better and is recorded as
+        such in ``bin_cent_measured``, but its absence can no longer disable
+        anything.
+
+        The centroid arguments are KEYWORD-ONLY. Three call sites passed
+        ``set_bins(edges, cent_asinh, cent_lin)`` positionally; when the signature
+        grew a fourth table the third argument silently bound to the wrong one.
+        Keyword-only turns that into a TypeError.
+        """
+        from helix.model.tokenize import bin_centroids_asinh, bin_centroids_ratio
+
         assert self.n_bins > 0, "set_bins() on a model built with n_bins=0"
         edges = torch.as_tensor(edges, dtype=self.bin_edges.dtype)
         assert edges.shape[1] == self.n_bins + 1, \
@@ -328,19 +354,18 @@ class FMModel(nn.Module):
         assert edges.shape[0] == self.bin_edges.shape[0], \
             f"edges has {edges.shape[0]} bands, model has {self.bin_edges.shape[0]}"
         self.bin_edges.copy_(edges.to(self.bin_edges.device))
-        # Persistent, like the edges. An export that carries edges but not
-        # centroids forces the consumer to reconstruct centres from the edges,
-        # which is how the categorical head ended up being read back with the
-        # GAUSSIAN head's inverse. Left NaN when not supplied, so a consumer can
-        # detect absence rather than silently use a wrong number.
-        for nm, v in (("bin_cent_asinh", cent_asinh), ("bin_cent_lin", cent_lin),
-                      ("bin_cent_ratio", cent_ratio)):
-            if v is None:
-                continue
-            v = torch.as_tensor(v, dtype=self.bin_edges.dtype)
+
+        e_np = edges.detach().cpu().numpy()
+        for k, (nm, given, derive) in enumerate(
+                (("bin_cent_asinh", cent_asinh, bin_centroids_asinh),
+                 ("bin_cent_ratio", cent_ratio, bin_centroids_ratio))):
+            measured = given is not None
+            v = torch.as_tensor(given if measured else derive(e_np),
+                                dtype=self.bin_edges.dtype)
             assert v.shape == (self.bin_edges.shape[0], self.n_bins), \
                 f"{nm} {tuple(v.shape)} != {(self.bin_edges.shape[0], self.n_bins)}"
             getattr(self, nm).copy_(v.to(self.bin_edges.device))
+            self.bin_cent_measured[k] = 1 if measured else 0
         return self
 
     def make_mask(self, B, ratio=None, mode=None, n_planes=None, gen=None):
