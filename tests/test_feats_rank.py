@@ -70,3 +70,51 @@ def test_degenerate_input_does_not_raise():
     X = torch.zeros(100, 16)
     r = rankme(X)
     assert np.isfinite(r), f"zero features gave {r}"
+
+
+def test_streaming_the_gram_matches_one_pass():
+    """`main` accumulates the Gram batch by batch; it must land on the same
+    number as a single pass over the whole matrix.
+
+    `main` had its own inline copy of the centre/eigen/entropy tail, so THIS —
+    the path that actually produced every RankMe number reported in this project
+    — was never the thing under test. `rankme` was.
+    """
+    import torch
+    from feats_rank import rank_from_gram, rankme
+
+    g_ = torch.Generator().manual_seed(11)
+    X = torch.randn(4000, 24, generator=g_)
+    X[:, 3:] *= 0.05                              # a real spectrum, not white
+
+    d = X.shape[1]
+    gram = torch.zeros(d, d, dtype=torch.float64)
+    colsum = torch.zeros(d, dtype=torch.float64)
+    n = 0
+    for chunk in X.split(137):                    # deliberately uneven batches
+        gram += (chunk.T @ chunk).double()
+        colsum += chunk.sum(0).double()
+        n += chunk.shape[0]
+
+    assert n == X.shape[0]
+    streamed = rank_from_gram(gram, colsum, n)
+    assert streamed == pytest.approx(rankme(X), rel=1e-6)
+    assert streamed == pytest.approx(rankme(X, exact=True), rel=1e-3), \
+        "the streamed Gram must agree with svdvals, not just with itself"
+
+
+def test_gram_centring_is_not_a_no_op():
+    """`cov = X^T X - n mu mu^T`. Drop the correction and an offset column
+    dominates the spectrum, which is the whole reason RankMe centres."""
+    import torch
+    from feats_rank import rank_from_gram
+
+    g_ = torch.Generator().manual_seed(3)
+    X = torch.randn(2000, 12, generator=g_)
+    X += 50.0                                     # a large common offset
+    gram = (X.T @ X).double()
+    colsum = X.sum(0).double()
+    centred = rank_from_gram(gram, colsum, X.shape[0])
+    uncentred = rank_from_gram(gram, torch.zeros_like(colsum), X.shape[0])
+    assert uncentred < 2.0, "an uncentred offset collapses the rank to ~1"
+    assert centred > 10.0, f"centred rank should be near full, got {centred}"

@@ -63,7 +63,16 @@ set -euo pipefail
 # corpus build silently used superseded DSP, and nothing in the output said so.
 H=${HELIX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 SRC=${SRC_ROOT:-/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor}
-OUT=${OUT_ROOT:-/sdf/data/neutrino/omara/coeff_tpc}
+# The R1 root, matching the DEFAULT gate below. It used to name .../coeff_tpc,
+# which is the PRE-R1 corpus: `--tau` unset means DetectorConfig's 0.05, so the
+# ordinary default invocation built r1-gated shards and wrote them into the tree
+# whose shards were built with the legacy magnitude-only rule. Nothing in the
+# output said so, and the reader's cross-shard check passed — the two corpora
+# share band_lengths, gids, n_wires, norm_sigma and sigma_norm exactly, and
+# differ only in basis_digest and removal_json, which it did not compare (fixed
+# in pimm_data/readers/coeff_tpc.py). Set OUT_ROOT explicitly to extend the old
+# corpus, and pass `--tau none` when you do.
+OUT=${OUT_ROOT:-/sdf/data/neutrino/omara/coeff_tpc_r1}
 NORM=${NORM_SIGMA:-$OUT/_calib/norm_sigma_global.npy}
 EVENTS_PER_SHARD=${EVENTS_PER_SHARD:-200}   # = one source file
 SHARDS_PER_RUN=${SHARDS_PER_RUN:-100}      # = files per run
@@ -88,6 +97,12 @@ fi
 export XLA_PYTHON_CLIENT_PREALLOCATE=false     # else JAX grabs 8.4 GB and torch OOMs
 
 [ -s "$NORM" ] || { echo "FATAL: frozen norm_sigma missing at $NORM — run phase 1 first"; exit 1; }
+# Named explicitly rather than left to fail inside `mapfile`, which would print
+# a bare "no such file" naming neither the corpus nor the phase that writes it.
+# Each corpus root carries its OWN _calib: norm_sigma is computed from the GATED
+# coefficients, so coeff_tpc and coeff_tpc_r1 have genuinely different tables and
+# borrowing one for the other silently mis-normalises the whole corpus.
+[ -s "$RUNS_FILE" ] || { echo "FATAL: run list missing at $RUNS_FILE (corpus root $OUT) — run phase 1 first"; exit 1; }
 
 mapfile -t RUNS < <(tr ' ' '\n' < "$RUNS_FILE" | grep -v '^$')
 IDX=${SLURM_ARRAY_TASK_ID:-0}

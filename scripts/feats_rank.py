@@ -47,17 +47,38 @@ def rankme(X, exact=False):
     ``svdvals`` directly on small inputs.
     """
     import torch
-    X = torch.as_tensor(X)
-    X = (X - X.mean(0, keepdim=True)).float()
+    X = torch.as_tensor(X).float()
     if exact:
-        s = torch.linalg.svdvals(X)
-    else:
-        g = (X.T @ X).double()
-        ev = torch.linalg.eigvalsh(g)
-        # Tiny negatives are round-off on a PSD matrix, not signal.
-        s = torch.sqrt(torch.clamp(ev, min=0.0)).float()
+        Xc = X - X.mean(0, keepdim=True)
+        return _entropy_rank(torch.linalg.svdvals(Xc))
+    return rank_from_gram((X.T @ X).double(), X.sum(0).double(), X.shape[0])
+
+
+def _entropy_rank(s):
+    """``exp(-sum p log p)`` over ``p = s / sum(s)``. The definition itself."""
+    import torch
     p = s / (s.sum() + 1e-9)
     return float(torch.exp(-(p * torch.log(p + 1e-12)).sum()))
+
+
+def rank_from_gram(gram, colsum, n):
+    """RankMe from a STREAMED Gram matrix: ``gram = X^T X``, ``colsum = X.sum(0)``.
+
+    The seam that lets `main` and `rankme` be the same computation. `main` must
+    stream — N ~ 1.5M rows x 512 is ~3 GB of features it never needs at once —
+    so it accumulates the Gram batch by batch, and it used to finish the job with
+    its own inline copy of the centring, eigendecomposition and entropy. That
+    copy was the shipped path; `rankme` was the tested one. Verified equal here
+    instead of assumed.
+
+    Centring happens in Gram space: ``cov = X^T X - n mu mu^T``, which is exact
+    and needs only the column sums, not a second pass over X.
+    """
+    import torch
+    mu = colsum / n
+    ev = torch.linalg.eigvalsh(gram - n * torch.outer(mu, mu))
+    # Tiny negatives are round-off on a PSD matrix, not signal.
+    return _entropy_rank(torch.sqrt(torch.clamp(ev, min=0.0)).float())
 
 
 def main():
@@ -129,13 +150,7 @@ def main():
             del f
             if dev.type == "cuda":
                 torch.cuda.empty_cache()
-        # Centre in Gram space: cov = X^T X - n * mean mean^T
-        mu = colsum / n
-        gc = g - n * torch.outer(mu, mu)
-        ev_ = torch.linalg.eigvalsh(gc)
-        s = torch.sqrt(torch.clamp(ev_, min=0.0)).float()
-        p = s / (s.sum() + 1e-9)
-        rm = float(torch.exp(-(p * torch.log(p + 1e-12)).sum()))
+        rm = rank_from_gram(g, colsum, n)
         res["rank"][str(L)] = round(rm, 3)
         print(f"[{a.tag}] layer {L:>2}: RankMe={rm:8.2f}  (d={d}, N={n:,})", flush=True)
 
