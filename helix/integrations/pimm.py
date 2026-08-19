@@ -794,27 +794,77 @@ class CoeffFMEvaluator(HookBase):
         if self.every_n_steps <= 0:
             self.eval()
 
-    def eval(self):
-        """Rank 0 evaluates; the others wait at a barrier.
+    #: Sum-reduced accumulators, in a fixed order so every rank packs the same
+    #: vector. Sums, not means — a mean of per-rank means is wrong whenever the
+    #: shards differ in size, and DistributedSampler's padding makes them differ.
+    _RED_GF = ("sse", "sy", "syy", "nv", "chg_pred", "chg_true",
+               "chg_pred_s", "chg_true_s")
+    _RED_AVG = ("bce", "val", "masked_frac")
 
-        The barrier is symmetric or it deadlocks. Every non-zero rank blocks in
-        ``comm.synchronize()``, so rank 0 MUST rejoin on every exit path — the
-        try/finally, not a call at the end of the happy path. Getting this wrong
-        does not fail: the run completes training and evaluation, logs a final
-        checkpoint, and then hangs forever, because rank 0 walks into the
-        collective checkpoint save while the others are still in the barrier.
-        That is exactly what happened on the first 2-GPU run.
+    def eval(self):
+        """EVERY rank evaluates its shard; the sums are all-reduced.
+
+        This used to be "rank 0 evaluates, the others wait at a barrier", which
+        was correct about the barrier and wrong about the data: pimm builds the
+        val loader with a ``DistributedSampler`` whenever world_size > 1
+        (engines/train.py:687), so rank 0's loader yields only rank 0's SHARD.
+        Every multi-GPU eval we have logged therefore scored ~1/world_size of
+        the validation set and reported it as the validation number — that is
+        the `batches=145` in the 4-GPU logs against a 577-event val set.
+
+        Having all ranks work costs nothing: the other ranks were blocked in
+        ``synchronize()`` for the whole of rank 0's pass anyway, so wall time is
+        the same shard-sized pass it always was, now covering the whole set.
+
+        The all-reduce is itself a collective, so the symmetry the old barrier
+        needed is now structural rather than something the try/finally has to
+        maintain. That mattered: getting it wrong did not fail, it HUNG — the
+        run trained, evaluated, logged a checkpoint, and then deadlocked with
+        rank 0 inside the collective save and the others still in the barrier.
+
+        Caveat, logged rather than papered over: ``DistributedSampler`` pads the
+        last shard by repeating samples, so a val set that does not divide by
+        world_size double-counts a few events (3 of 580 at 577/4, ~0.5%).
         """
         world = comm.get_world_size()
-        if comm.get_rank() != 0:
-            if world > 1:
-                comm.synchronize()
-            return
         try:
-            self._eval_rank0()
-        finally:
-            if world > 1:
-                comm.synchronize()          # rejoin, whatever happened above
+            acc = self._eval_shard()
+        except Exception:
+            # A rank that dies before the reduce hangs every other rank inside
+            # it. Contribute zeros and let the run fail on the logged error
+            # rather than on a wedged collective.
+            self.trainer.logger.exception("CoeffFMEvaluator: shard eval failed")
+            acc = None
+        if acc is None:
+            acc = ({}, {}, {k: 0.0 for k in self._RED_GF}, 0)
+        totals, counts, gf, n = acc
+        if world > 1:
+            totals, counts, gf, n = self._all_reduce(totals, counts, gf, n)
+        self._report(totals, counts, gf, n)
+
+    def _all_reduce(self, totals, counts, gf, n):
+        """Sum every accumulator across ranks in ONE collective.
+
+        One flat tensor, not a call per key: the keys are the same on every rank
+        by construction (fixed tuples), so packing them positionally removes any
+        chance of ranks disagreeing on iteration order and reducing mismatched
+        quantities into each other — which would not raise, just produce a
+        plausible wrong number.
+        """
+        import torch.distributed as dist
+
+        device = self.trainer.parallel_context.device
+        vec = ([totals.get(k, 0.0) for k in self._RED_AVG]
+               + [counts.get(k, 0.0) for k in self._RED_AVG]
+               + [gf.get(k, 0.0) for k in self._RED_GF] + [float(n)])
+        t = torch.tensor(vec, dtype=torch.float64, device=device)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        v = t.tolist()
+        m = len(self._RED_AVG)
+        return ({k: v[i] for i, k in enumerate(self._RED_AVG)},
+                {k: v[m + i] for i, k in enumerate(self._RED_AVG)},
+                {k: v[2 * m + i] for i, k in enumerate(self._RED_GF)},
+                int(round(v[-1])))
 
     def _forward(self, model, core, B, mask, gf):
         """One forward per batch: the loss AND the grid-free metrics from the
@@ -854,14 +904,21 @@ class CoeffFMEvaluator(HookBase):
                     "masked_frac": mask.float().mean().detach()}
         return model(B, tok_mask=mask)
 
-    def _eval_rank0(self):
+    def _eval_shard(self):
+        """Score THIS rank's shard. -> (totals, counts, gf, n_batches).
+
+        Sums only; no division. Averaging is `_report`'s job, after the reduce,
+        because a mean cannot be summed across ranks.
+        """
         loader = getattr(self.trainer, "val_loader", None)
         if loader is None:
-            self.trainer.logger.info("CoeffFMEvaluator: no val_loader; skipping")
-            return
+            if comm.get_rank() == 0:
+                self.trainer.logger.info("CoeffFMEvaluator: no val_loader; skipping")
+            return None
 
         from pimm.distributed import move_batch_to_device
-        self.trainer.logger.info(">>>>>>>> Coeff FM validation >>>>>>>>")
+        if comm.get_rank() == 0:
+            self.trainer.logger.info(">>>>>>>> Coeff FM validation >>>>>>>>")
         model = self.trainer.model
         was_training = model.training
         model.eval()
@@ -877,7 +934,14 @@ class CoeffFMEvaluator(HookBase):
                     break
                 B = move_batch_to_device(input_dict, device)
                 B.setdefault("n_cells", B["plane_id"].shape[0])
-                gen = torch.Generator(device=device).manual_seed(self.mask_seed + i)
+                # Keyed on RANK as well as batch index: without the rank term
+                # every rank would mask its own (different) events with the
+                # identical pattern. Fixed for a given world_size, so the metric
+                # is reproducible eval-to-eval — but a run at a different
+                # world_size shards differently and is not mask-comparable,
+                # which was already true and is now at least deliberate.
+                gen = torch.Generator(device=device).manual_seed(
+                    self.mask_seed + 100003 * comm.get_rank() + i)
                 # mode="random" EXPLICITLY, matching research: mae_ddp.py:216
                 # passes args.mask_mode to perband_mse_cat, so the eval metric is
                 # a pure random-mask number even when plane_frac > 0 (research
@@ -919,8 +983,21 @@ class CoeffFMEvaluator(HookBase):
 
         if was_training:
             model.train()
+        return totals, counts, gf, n
+
+    def _report(self, totals, counts, gf, n):
+        """Average the reduced sums, log, and publish the selection metric.
+
+        Runs on EVERY rank, and only rank 0 prints. `current_metric_value` has
+        to be set everywhere: the checkpoint save is collective, so if the ranks
+        disagreed about which step was best they would disagree about whether to
+        save — and the values agree here precisely because they come from the
+        same reduced sums.
+        """
+        rank0 = comm.get_rank() == 0
         if not n:
-            self.trainer.logger.info("CoeffFMEvaluator: val_loader was empty")
+            if rank0:
+                self.trainer.logger.info("CoeffFMEvaluator: val_loader was empty")
             return
 
         # `loss` is rebuilt from the pooled parts, not pooled itself: it is
@@ -943,11 +1020,12 @@ class CoeffFMEvaluator(HookBase):
                 avg["charge_closure"] = gf["chg_pred"] / gf["chg_true"]
             if abs(gf["chg_true_s"]) > 1e-6 * max(gf["chg_true"], 1e-9):
                 avg["charge_bias"] = gf["chg_pred_s"] / gf["chg_true_s"]
-        self.trainer.logger.info(
-            f"   [coeff-eval] batches={n} " +
-            " ".join(f"{k}={v:.4f}" for k, v in sorted(avg.items())))
+        if rank0:
+            self.trainer.logger.info(
+                f"   [coeff-eval] batches={n} " +
+                " ".join(f"{k}={v:.4f}" for k, v in sorted(avg.items())))
         writer = getattr(self.trainer, "writer", None)
-        if writer is not None:
+        if rank0 and writer is not None:
             # GLOBAL STEP, not epoch. EVAL_EVERY (1178) does not divide
             # iters_per_epoch (4758), so ~4 evals land inside each epoch and
             # three of every four were overwritten — 100 evals collapsed to 25
