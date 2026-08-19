@@ -65,14 +65,30 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
         # stable phase, which is why the EMA exists, and silently probing them
         # while the caller asked for the EMA compares two noisy draws rather than
         # two models. Export from model_ema.pth to probe the EMA.
-        got = os.path.basename(meta.get("weights", "") or "")
-        if weights == "ema" and "ema" not in got.lower():
+        # Judge on the SOURCE path the export recorded, not on the exported
+        # filename. `pimm export` always writes model.safetensors / model.bin,
+        # so a filename test answers the same for an EMA export and a raw one —
+        # it warned on every export including correct ones, which is how a
+        # warning stops being read.
+        src = meta.get("weights_source")
+        is_ema = None if not src else ("ema" in os.path.basename(str(src)).lower())
+        if weights == "ema" and is_ema is False:
             meta = dict(meta, warning=(
-                f"requested weights='ema' but the export contains {got!r}; an "
-                f"export dir carries one weight set. Re-export from "
-                f"model_ema.pth to probe the EMA."))
+                f"requested weights='ema' but this export was written from "
+                f"{src!r}, which is not an EMA checkpoint. An export dir carries "
+                f"one weight set; re-export from model_ema.pth. The raw weights "
+                f"of a flat-LR WSD run sit at full LR noise for the whole stable "
+                f"phase — which is why the EMA exists — so probing them while "
+                f"asking for the EMA compares two noisy draws, not two models."))
             warnings.warn(meta["warning"], RuntimeWarning, stacklevel=2)
-        return model, dict(meta, requested_weights=weights, random_init=False)
+        elif weights == "ema" and is_ema is None:
+            meta = dict(meta, warning=(
+                f"requested weights='ema' but this export records no source "
+                f"checkpoint, so which weight set it holds CANNOT be determined "
+                f"from the directory. Treat the result as unattributed."))
+            warnings.warn(meta["warning"], RuntimeWarning, stacklevel=2)
+        return model, dict(meta, requested_weights=weights, random_init=False,
+                           weights_are_ema=is_ema)
 
     blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if "config" not in blob or "state_dict" not in blob:

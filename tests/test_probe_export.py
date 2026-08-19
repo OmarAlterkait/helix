@@ -1,5 +1,6 @@
 """Loading what we TRAIN: a pimm-export directory, not a converted blob."""
 import json
+import warnings
 import numpy as np
 import pytest
 
@@ -12,11 +13,13 @@ ARCH = dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1, dec_blocks=1,
             heads=4, dec_mode="cross", n_bins=16)
 
 
-def _export(tmp_path, model, safe=False, with_tokenizer=True):
+def _export(tmp_path, model, safe=False, with_tokenizer=True, weight=None):
     """Mimic `pimm export`: weights + the resolved config beside them."""
     sd = {f"module.{k}": v for k, v in model.state_dict().items()}   # DDP prefix
     torch.save(sd, tmp_path / "model.bin")
     cfg = {"model": dict(ARCH, type="Coeff-FM", bins="/some/path.pt")}
+    if weight is not None:
+        cfg["weight"] = weight          # the source checkpoint pimm exported FROM
     if with_tokenizer:
         cfg["transform"] = [{"type": "CoeffTokenize",
                              "cfg": {"cell_t": "grid_center", "pw": 16, "pt": 8}}]
@@ -75,7 +78,7 @@ def test_probe_loader_accepts_an_export_dir(tmp_path):
     from helix.probe.features import load_probe_model
     m = build_fm(dict(ARCH))
     m.set_bins(torch.linspace(-4, 4, 17).repeat(4, 1))
-    d = _export(tmp_path, m)
+    d = _export(tmp_path, m, weight="/runs/x/model/model_ema.pth")
     trained, meta = load_probe_model(d, device="cpu")
     assert meta["source"] == "pimm-export"
     rnd, rmeta = load_probe_model(d, random_init=True, device="cpu")
@@ -142,3 +145,56 @@ def test_random_init_control_is_seeded(tmp_path):
     assert meta["random_seed"] == 0 and meta["random_init"] is True
     # And it is genuinely a random net, not the exported weights.
     assert any(not torch.equal(pa[k], v) for k, v in params(m).items())
+
+
+# --------------------------------------------------------------------------
+# Which weight set an export holds is decided by the SOURCE the export
+# recorded, not by the exported filename. `pimm export` always writes
+# model.safetensors / model.bin whatever it was exported from, so a filename
+# test gives the same answer for an EMA export and a raw one — it warned on
+# every export, correct ones included, which is how a warning stops being read.
+# --------------------------------------------------------------------------
+
+def _fm(tmp_path, **kw):
+    m = build_fm(dict(ARCH))
+    m.set_bins(torch.linspace(-4, 4, ARCH["n_bins"] + 1).repeat(ARCH["n_band"], 1))
+    return _export(tmp_path, m, **kw)
+
+
+def test_an_ema_export_asked_for_ema_does_not_warn(tmp_path):
+    from helix.probe.features import load_probe_model
+    d = _fm(tmp_path, weight="/runs/x/model/model_ema.pth")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)      # any warning fails
+        _, meta = load_probe_model(d, weights="ema", device="cpu")
+    assert meta["weights_are_ema"] is True
+    assert "warning" not in meta
+
+
+def test_a_raw_export_asked_for_ema_warns_and_names_the_source(tmp_path):
+    from helix.probe.features import load_probe_model
+    d = _fm(tmp_path, weight="/runs/x/model/model_best.pth")
+    with pytest.warns(RuntimeWarning, match="model_best.pth"):
+        _, meta = load_probe_model(d, weights="ema", device="cpu")
+    assert meta["weights_are_ema"] is False
+    assert "not an EMA checkpoint" in meta["warning"]
+
+
+def test_an_export_with_no_recorded_source_reports_unknown(tmp_path):
+    """Absent provenance must read as unknown, never as "raw"."""
+    from helix.probe.features import load_probe_model
+    d = _fm(tmp_path)                                       # no `weight` key
+    with pytest.warns(RuntimeWarning, match="records no source checkpoint"):
+        _, meta = load_probe_model(d, weights="ema", device="cpu")
+    assert meta["weights_are_ema"] is None
+
+
+def test_asking_for_raw_never_warns(tmp_path):
+    from helix.probe.features import load_probe_model
+    for w in ("/runs/x/model/model_ema.pth", "/runs/x/model/model_best.pth", None):
+        p = tmp_path / f"e{abs(hash(str(w))) % 1000}"
+        p.mkdir()
+        d = _fm(p, weight=w)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            load_probe_model(d, weights="raw", device="cpu")

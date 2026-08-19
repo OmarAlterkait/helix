@@ -227,6 +227,12 @@ def main(argv=None):
                 corpus=os.path.abspath(corpus),
                 layer=a.layer, weights=meta_t["weights"],
                 requested_weights=meta_t.get("requested_weights"),
+                # What the export SAYS it holds, from the source checkpoint it
+                # recorded: True/False/None-for-unknown. `requested_weights` is
+                # only what was asked for; this is what was got, and a row with
+                # weights_are_ema=None is unattributed rather than raw.
+                weights_are_ema=meta_t.get("weights_are_ema"),
+                weights_source=meta_t.get("weights_source"),
                 weights_warning=meta_t.get("warning"),
                 random_seed=a.random_seed,
                 cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
