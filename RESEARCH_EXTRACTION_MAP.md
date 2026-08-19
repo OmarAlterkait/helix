@@ -192,7 +192,7 @@ This is the deliverable. helix EXPOSES a stable model API; pimm ADDS the loop/ev
 ```python
 # --- representation logic (stateless, numpy; called by pimm's CoeffTokenize) ---
 helix.model.tokenize.assemble(coeff_rows, patch_cfg) -> arrays  # PURE fn: rows -> token arrays
-helix.config.PatchConfig                                  # PW/PT/N_SLOT/SIGMA + band_lengths (SoT)
+helix.model.tokenize.PatchConfig                                  # PW/PT/N_SLOT/SIGMA + band_lengths (SoT)
 # --- the model (nn.Module) ---
 helix.build_fm(config) -> nn.Module                 # construct the FM (arch from config)
 model.forward(batch) -> dict(loss=…, **aux)         # flat-tensor dict in, dict-with-loss out

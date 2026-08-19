@@ -397,17 +397,20 @@ class FMModel(nn.Module):
                          self.mask_ratio if ratio is None else ratio,
                          self.n_planes if n_planes is None else n_planes, gen=gen)
 
-    def forward(self, batch, tok_mask=None):
-        """pimm Trainer contract: ``model(batch) -> dict`` carrying ``loss``.
+    def require_batch_keys(self, B):
+        """Raise a named KeyError for anything the objective needs and lacks.
 
-        The research entry point is ``raw_heads(B, tok_mask)``, which this
-        wraps: draw the mask (unless one is supplied), run the heads, then apply
-        whichever objective the head configuration implies."""
-        B = dict(batch)
-        B.setdefault("n_cells", B["plane_id"].shape[0])
-        # The two objectives read different representations of the same tokens
-        # (losses gathers sparse rows; losses_fused reads the dense grid), and a
-        # missing key otherwise surfaces as a bare KeyError from inside the loss.
+        A METHOD, not inline in ``forward``, because ``forward`` is not the only
+        entry point: the evaluator reproduces this branch from a single
+        ``raw_heads`` call (one forward instead of two) and so used to skip the
+        check entirely — a missing ``tgt`` surfaced as a bare KeyError from
+        inside ``losses_cat``, or from ``_acc_grid_free``, with no clue which
+        producer dropped it.
+
+        The two objectives read different representations of the same tokens:
+        ``losses`` gathers sparse rows, ``losses_cat``/``losses_fused`` read the
+        dense grid.
+        """
         need = ("occ", "valid", "inp")
         need += ("tgt",) if (self.loss_fused or self.n_bins > 0) else \
                 ("cell", "slot", "target")
@@ -417,6 +420,16 @@ class FMModel(nn.Module):
                 f"batch is missing {gone} required by "
                 f"{'losses_cat' if self.n_bins > 0 else 'losses_fused' if self.loss_fused else 'losses'}"
                 f"; helix.model.tokenize.to_fm() emits all of them")
+
+    def forward(self, batch, tok_mask=None):
+        """pimm Trainer contract: ``model(batch) -> dict`` carrying ``loss``.
+
+        The research entry point is ``raw_heads(B, tok_mask)``, which this
+        wraps: draw the mask (unless one is supplied), run the heads, then apply
+        whichever objective the head configuration implies."""
+        B = dict(batch)
+        B.setdefault("n_cells", B["plane_id"].shape[0])
+        self.require_batch_keys(B)
         m = self.make_mask(B) if tok_mask is None else tok_mask
         occ, val, logvar = self.raw_heads(B, m)
         if self.n_bins > 0:

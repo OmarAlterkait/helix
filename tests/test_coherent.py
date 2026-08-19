@@ -1,8 +1,8 @@
 """Tests for coherent noise removal."""
 
 import numpy as np
-from helix.config import DetectorConfig
-from helix.coherent import remove_coherent
+from helix.tpc.config import DetectorConfig
+from helix.tpc.coherent import remove_coherent
 
 
 def test_removes_coherent_noise(config, synthetic_plane):

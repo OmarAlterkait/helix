@@ -1,8 +1,8 @@
 """Tests for wavelet sparsification."""
 
 import numpy as np
-from helix.config import DetectorConfig
-from helix.wavelet import sparsify, reconstruct
+from helix.tpc.config import DetectorConfig
+from helix.tpc.wavelet import sparsify, reconstruct
 
 
 def test_sparsify_reduces_coefficients(config, synthetic_plane):

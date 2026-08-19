@@ -842,6 +842,9 @@ class CoeffFMEvaluator(HookBase):
             assert torch.isfinite(core.bin_edges).all(), \
                 ("n_bins > 0 requires set_bins(edges) before evaluation — the "
                  "edges buffer is still unset (NaN).")
+            # The same check `forward` runs. Skipping `forward` to save a second
+            # pass must not also skip its contract.
+            core.require_batch_keys(B)
             occ, val, _ = core.raw_heads(B, mask)
             bce, vloss = losses_cat(occ, val, B, mask, core.bin_edges,
                                     vis_w=core.vis_w)

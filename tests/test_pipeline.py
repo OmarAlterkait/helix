@@ -1,8 +1,8 @@
 """Tests for the end-to-end pipeline."""
 
 import numpy as np
-from helix.config import DetectorConfig
-from helix.pipeline import process_plane, process_event
+from helix.tpc.config import DetectorConfig
+from helix.tpc.pipeline import process_plane, process_event
 
 
 def test_process_plane(config, synthetic_plane):

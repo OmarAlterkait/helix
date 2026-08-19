@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from helix.config import DetectorConfig
+from helix.tpc.config import DetectorConfig
 
 
 @pytest.fixture
