@@ -1,6 +1,6 @@
 """The pimm adapter must register helix's names — without pimm knowing helix.
 
-``helix/integrations/pimm.py`` is how a pimm config reaches the coefficient FM.
+``helix/integrations/pimm/`` is how a pimm config reaches the coefficient FM.
 It lives here rather than inside pimm-private so the dependency points one way:
 helix knows how to plug into pimm, pimm knows nothing about helix. A pimm config
 pulls it in with mmcv's standard ``custom_imports`` hook, which pimm's
@@ -140,7 +140,7 @@ def test_dataset_wrapper_forwards_every_inner_parameter():
     from pimm_data.coeff import CoeffTPCDataset as Inner
 
     src = (Path(__file__).resolve().parent.parent
-           / "helix" / "integrations" / "pimm.py").read_text()
+           / "helix" / "integrations" / "pimm" / "data.py").read_text()
     wrapper = None
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.ClassDef) and node.name == "CoeffTPCDataset":

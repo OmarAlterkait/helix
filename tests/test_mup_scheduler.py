@@ -89,7 +89,10 @@ def test_trainer_wires_the_helpers():
     """FMTrainer is unimportable without pimm, so check by source that its two
     overrides are the ones described — and that neither silently no-ops."""
     import pathlib
-    src = pathlib.Path(__file__).parent.parent / "helix" / "integrations" / "pimm.py"
+    # `trainer` specifically, not the whole integration: since the split, the
+    # file that defines FMTrainer is the file this reads.
+    src = (pathlib.Path(__file__).parent.parent
+           / "helix" / "integrations" / "pimm" / "trainer.py")
     text = src.read_text()
     assert "class FMTrainer(Trainer)" in text
     assert "def build_optimizer" in text and "model.param_groups(" in text

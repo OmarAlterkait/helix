@@ -311,16 +311,25 @@ hooks = [
     # after_train saves. On a preemptible partition a long run could never make
     # progress. Research saves every 2000 ("preemption loses <= this many").
     #
-    # `evaluator_every_n_steps` is what makes model_best real. Without it,
-    # CheckpointSaver's `is_eval_step` is False on EVERY step, `_update_best`
-    # returns early, and model_best.pth is never written — so the run produced a
-    # `neg_val_loss` metric that selected nothing, and the only checkpoints were
-    # the rolling ones. The comment above about `every_n_steps` fixed the
-    # evaluator's half of this and left the saver's half; both are needed.
-    # It MUST equal the evaluator's cadence, or the saver consults the metric on
-    # steps where no eval ran and re-reads a stale value.
-    dict(type="CheckpointSaver", save_freq=SAVE_EVERY,
-         evaluator_every_n_steps=EVAL_EVERY),
+    # DELIBERATELY no `evaluator_every_n_steps`, which means model_best.pth is
+    # not written. Setting it is what would turn model_best on (CheckpointSaver's
+    # `is_eval_step` is False on every step without it), and turning it on was
+    # briefly the fix here — but the artifact it produces is not one we want:
+    #
+    #   * The schedule is WSDStableLR: FLAT, by design, for the whole run. There
+    #     is no annealing, so there is no "best step" — the plateau IS the model,
+    #     and raw val loss across ~100 evals is a plateau plus noise. Taking the
+    #     max of that is closer to picking the luckiest eval than the best model.
+    #   * It would select RAW weights, and the raw weights of a flat-LR run are
+    #     not what anything downstream reads. The EMA is (see WeightEMA above),
+    #     and `model_ema.pth` is written on its own cadence knowing nothing about
+    #     model_best — so the SELECTED artifact would not be the EVALUATED one.
+    #
+    # What a run keeps: rolling `iter_N`/`last` for resume, `model_ema.pth` for
+    # probing. When a cooldown run lands (WSDCooldownLR, planned as a separate
+    # short job off the final checkpoint) the raw weights get a real minimum and
+    # this is worth revisiting — that config should set it.
+    dict(type="CheckpointSaver", save_freq=SAVE_EVERY),
 ]
 
 train = dict(type="FMTrainer")

@@ -164,19 +164,21 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
 
     src = pathlib.Path(os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "helix", "integrations", "pimm.py")).read_text()
+        "helix", "integrations", "pimm", "model.py")).read_text()
     assert "def _load_bins" in src, "no bins loader in the adapter"
     assert "bins=None" in src, "build_coeff_fm does not accept a bins path"
     assert "TRAINING-SET STATISTICS" in src, (
         "the missing-bins error should explain WHY the model cannot supply them")
 
-    # Extract the function with ast, not a slice to EOF: the module has grown
-    # classes after it whose decorators reference pimm names, and a slice would
-    # drag them in. (The same fragility that once truncated the model extraction.)
+    # Extract the function with ast, not a slice to EOF: the module has other
+    # classes whose decorators reference pimm names, and a slice would drag them
+    # in. (The same fragility that once truncated the model extraction.) Less
+    # acute since the split put `_load_bins` in a 90-line file, but the reason
+    # the slice was wrong has not changed.
     node = next(n for n in ast.parse(src).body
                 if isinstance(n, ast.FunctionDef) and n.name == "_load_bins")
     ns = {"torch": torch}
-    exec(compile(ast.get_source_segment(src, node), "pimm.py", "exec"), ns)
+    exec(compile(ast.get_source_segment(src, node), "model.py", "exec"), ns)
     got = ns["_load_bins"](str(path))
     assert "edges" in got and got["edges"].shape == (4, 17)
 

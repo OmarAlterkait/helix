@@ -208,6 +208,11 @@ hooks = [
     # path; with it unset the evaluator fires once, after_epoch, and the saver
     # never sees an eval step.
     dict(type="CoeffFMEvaluator", every_n_steps=5, max_batches=4),
+    # `evaluator_every_n_steps` IS set here, unlike the real run: the smoke test
+    # exists to prove the wiring works, and model_best is part of the wiring even
+    # though coeff_fm_train deliberately declines to use it (a flat LR has no
+    # best step — see there). Keeping it exercised means the choice not to use it
+    # stays a choice rather than decaying into a broken path nobody would notice.
     dict(type="CheckpointSaver", save_freq=10, evaluator_every_n_steps=5),
 ]
 
