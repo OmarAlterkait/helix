@@ -71,7 +71,32 @@ set -euo pipefail
 # branch 32 commits behind, missing the MAD median fix, the packaged noise
 # spectrum, the m113 anchoring and the whole pimm integration. A default-invoked
 # corpus build silently used superseded DSP, and nothing in the output said so.
-H=${HELIX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+# Resolving the checkout: HELIX_ROOT, else the submission directory, else this
+# script's own location — in that order, and the order is the whole point.
+#
+# ${BASH_SOURCE[0]} is RIGHT under `srun bash scripts/...` and WRONG under
+# `sbatch`, which copies the script to /var/spool/slurmd/scripts/ and runs the
+# copy. `cd "$H"` then landed on /var/spool and every task died with
+#   can't open file '/var/spool/slurmd/scripts/build_coeff_corpus.py'
+# after burning its allocation. An interactive test cannot catch this: the two
+# launchers disagree about what BASH_SOURCE means. (The same trap as the pimm
+# configs' __file__, documented in coeff_fm_train.py for the same reason.)
+#
+# SLURM_SUBMIT_DIR is where `sbatch` was invoked, which for this script is the
+# checkout. It is only trusted if it actually looks like one.
+if [ -n "${HELIX_ROOT:-}" ]; then
+  H=$HELIX_ROOT
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "$SLURM_SUBMIT_DIR/scripts/build_coeff_corpus.py" ]; then
+  H=$SLURM_SUBMIT_DIR
+else
+  H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+fi
+# Checked HERE, not left to fail 100 times inside the array. The builder is the
+# one file every task needs; if it is not under $H, nothing downstream can work.
+[ -f "$H/scripts/build_coeff_corpus.py" ] || {
+  echo "FATAL: no scripts/build_coeff_corpus.py under H=$H."
+  echo "       Set HELIX_ROOT to the checkout, or sbatch from it."
+  exit 1; }
 SRC=${SRC_ROOT:-/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor}
 # The R1 root, matching the DEFAULT gate below. It used to name .../coeff_tpc,
 # which is the PRE-R1 corpus: `--tau` unset means DetectorConfig's 0.05, so the
