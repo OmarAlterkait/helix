@@ -108,6 +108,29 @@ export SINGULARITYENV_PYTHONPATH="$PYTHONPATH"
 # it for the same HDF5 page cache. Left at pimm's default otherwise.
 export HDF5_USE_FILE_LOCKING=FALSE
 
+# PREFLIGHT. A node whose GPUs are held reports healthy to SLURM and then fails
+# the job in ~60 s — and with `afterany` chaining that eats one link per minute:
+# links 2, 3 and 4 all died on sdfampere010 with
+#   torch.AcceleratorError: CUDA-capable device(s) is/are busy or unavailable
+# having consumed three links in three minutes while the node still showed
+# State=MIXED.
+#
+# So check before committing the link, and REQUEUE rather than exit: a bad node
+# then costs a trip through the queue instead of a place in the chain. The sleep
+# is not politeness — without it a requeue that lands on the same node hot-loops.
+if ! apptainer exec --nv -B /sdf,/lscratch "$IMG" /opt/pimm/.venv/bin/python -c '
+import sys, torch
+n = torch.cuda.device_count()
+assert n >= 4, f"only {n} GPU(s) visible"
+for i in range(4):
+    torch.zeros(8, device=f"cuda:{i}")      # a context, not just a count
+' 2>&1; then
+  echo "PREFLIGHT FAILED on $(hostname) — requeueing rather than burning a chain link"
+  sleep 60
+  scontrol requeue "$SLURM_JOB_ID" || exit 1
+  exit 0
+fi
+
 srun --kill-on-bad-exit=1 apptainer exec --nv -B /sdf,/lscratch "$IMG" \
   /opt/pimm/.venv/bin/python -m pimm.train \
     --config-file "$CFG" --num-gpus 4 --options $OPTS
