@@ -94,12 +94,6 @@ class FMModel(nn.Module):
             # removed rather than carried.
             for _nm in ("bin_cent_asinh", "bin_cent_ratio"):
                 self.register_buffer(_nm, torch.full((n_band, n_bins), float("nan")))
-            # Provenance, so a checkpoint says whether its centroids were MEASURED
-            # over a corpus or derived from the edges. Measured on the R1 corpus:
-            # a derived cent_ratio under-reads sum|centroid| by 2.7-3.0% per band,
-            # with the two open outer bins ~24% low.
-            self.register_buffer("bin_cent_measured",
-                                 torch.zeros(2, dtype=torch.uint8))
         self.dec_mode = dec_mode                  # "self" = full-attn decoder over all N; "cross" = CrossMAE (cheaper)
         # --- muP (Yang & Hu, Tensor Programs V, arXiv:2203.03466) ---
         # m = d/d_base is the width multiplier. Under muP the optimal Adam LR is
@@ -336,9 +330,8 @@ class FMModel(nn.Module):
         buffer is ever NaN. That is the point: they used to be optional, and a
         consumer then had to ask "are these present?" — three files asked, one
         forgot, and the evaluator's charge metrics silently never ran. A measured
-        table (from ``derive_coeff_bins``) is strictly better and is recorded as
-        such in ``bin_cent_measured``, but its absence can no longer disable
-        anything.
+        table (from ``derive_coeff_bins``) is strictly better, but its absence can
+        no longer disable anything.
 
         The centroid arguments are KEYWORD-ONLY. Three call sites passed
         ``set_bins(edges, cent_asinh, cent_lin)`` positionally; when the signature
@@ -356,16 +349,13 @@ class FMModel(nn.Module):
         self.bin_edges.copy_(edges.to(self.bin_edges.device))
 
         e_np = edges.detach().cpu().numpy()
-        for k, (nm, given, derive) in enumerate(
-                (("bin_cent_asinh", cent_asinh, bin_centroids_asinh),
-                 ("bin_cent_ratio", cent_ratio, bin_centroids_ratio))):
-            measured = given is not None
-            v = torch.as_tensor(given if measured else derive(e_np),
+        for nm, given, derive in (("bin_cent_asinh", cent_asinh, bin_centroids_asinh),
+                                  ("bin_cent_ratio", cent_ratio, bin_centroids_ratio)):
+            v = torch.as_tensor(given if given is not None else derive(e_np),
                                 dtype=self.bin_edges.dtype)
             assert v.shape == (self.bin_edges.shape[0], self.n_bins), \
                 f"{nm} {tuple(v.shape)} != {(self.bin_edges.shape[0], self.n_bins)}"
             getattr(self, nm).copy_(v.to(self.bin_edges.device))
-            self.bin_cent_measured[k] = 1 if measured else 0
         return self
 
     def make_mask(self, B, ratio=None, mode=None, n_planes=None, gen=None):

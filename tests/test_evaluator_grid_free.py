@@ -145,7 +145,6 @@ def test_edges_only_still_scores_via_derived_centroids():
     core.set_bins(edges)                          # edges only — no centroids
     assert torch.isfinite(core.bin_cent_asinh).all()
     assert torch.isfinite(core.bin_cent_ratio).all()
-    assert core.bin_cent_measured.tolist() == [0, 0], "derived, not measured"
 
     B = _batch()
     mask = torch.ones(B["tgt"].shape[0], dtype=torch.bool)
@@ -174,7 +173,6 @@ def test_measured_centroids_are_flagged_and_kept_verbatim():
     edges, ca, cr = _tables()
     core = build_fm(dict(ARCH))
     core.set_bins(edges, cent_ratio=cr)           # one measured, one derived
-    assert core.bin_cent_measured.tolist() == [0, 1]
     assert np.allclose(core.bin_cent_ratio.numpy(), cr, atol=1e-6), \
         "a measured table must not be re-derived"
     assert not np.allclose(core.bin_cent_asinh.numpy(),
@@ -205,7 +203,6 @@ def test_apply_bins_is_the_one_seam_and_tolerates_old_sidecars():
     apply_bins(core, dict(edges=edges, cent_asinh=ca, cent_ratio=cr,
                           cent_lin=np.zeros_like(ca), K=K, corpus="r1"))
     assert np.allclose(core.bin_cent_ratio.numpy(), cr, atol=1e-6)
-    assert core.bin_cent_measured.tolist() == [1, 1]
     assert not hasattr(core, "bin_cent_lin"), "the biased table must not come back"
 
 
@@ -230,14 +227,15 @@ def test_backfill_derives_centroids_for_a_pre_fix_checkpoint():
     core.set_bins(edges, cent_asinh=ca, cent_ratio=cr)
     sd = {k: v for k, v in core.state_dict().items()
           if not k.startswith("bin_cent")}
-    sd["bin_cent_lin"] = torch.zeros(N_BAND, K)     # a stale buffer to drop
+    sd["bin_cent_lin"] = torch.zeros(N_BAND, K)        # stale buffers to drop
+    sd["bin_cent_measured"] = torch.zeros(2, dtype=torch.uint8)
     out = _backfill_centroids(core, sd)
-    assert "bin_cent_lin" not in out, "a removed buffer must not reach strict load"
+    for dead in ("bin_cent_lin", "bin_cent_measured"):
+        assert dead not in out, f"{dead} must not reach a strict load"
     fresh = build_fm(dict(ARCH))
     fresh.load_state_dict(out, strict=True)         # the property that matters
     assert torch.isfinite(fresh.bin_cent_ratio).all(), \
         "backfill must derive, not copy the constructor's NaN"
-    assert fresh.bin_cent_measured.tolist() == [0, 0]
 
 
 def test_the_single_forward_path_still_checks_the_batch_contract():

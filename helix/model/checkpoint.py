@@ -115,7 +115,12 @@ _CENT_BUFFERS = ("bin_cent_asinh", "bin_cent_ratio")
 
 #: Buffers removed from the model that an older state_dict may still carry.
 #: Dropping them is what keeps `strict=True` an honest check on the WEIGHTS.
-_STALE_BUFFERS = ("bin_cent_lin",)
+#: `bin_cent_measured` was a 2-byte provenance buffer recording whether each
+#: centroid table was measured or derived. NOTHING ever read it — the same
+#: mistake as `bin_cent_lin` above, committed while removing that one. Checkpoints
+#: written between then and now carry it, including the run training right now,
+#: so it is dropped here rather than being a reason to keep the buffer.
+_STALE_BUFFERS = ("bin_cent_lin", "bin_cent_measured")
 
 
 def apply_bins(model, bins, *, log=None):
@@ -181,8 +186,6 @@ def _backfill_centroids(model, sd):
     elif missing:
         for n in missing:                      # n_bins=0: buffers are absent anyway
             sd[n] = getattr(model, n).detach().clone()
-    if "bin_cent_measured" not in sd and hasattr(model, "bin_cent_measured"):
-        sd["bin_cent_measured"] = torch.zeros(2, dtype=torch.uint8)
     return sd
 
 

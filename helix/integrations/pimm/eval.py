@@ -20,11 +20,6 @@ from pimm.engines.hooks.default import HookBase
 from pimm.utils import comm
 
 
-def p_dev(t):
-    """``device_type`` string for ``torch.autocast``; it rejects a full device."""
-    return t.device.type
-
-
 def _acc_grid_free(core, B, mask, logits, gf):
     """Accumulate var_expl / charge-closure sums for one eval batch.
 
@@ -56,7 +51,7 @@ def _acc_grid_free(core, B, mask, logits, gf):
     # float32 inputs — measured on A100. The elementwise form is float32 but
     # materialises a (n_cells, n_slot, K) product, ~17 MB more at eval shapes;
     # disabling autocast keeps einsum's memory AND float32.
-    with torch.autocast(device_type=p_dev(logits), enabled=False):
+    with torch.autocast(device_type=logits.device.type, enabled=False):
         p = torch.softmax(logits.float(), -1)                 # (n_cells, n_slot, K)
         rec_a = torch.einsum("csk,ck->cs", p, ca[band].float())
         rec_r = torch.einsum("csk,ck->cs", p, cr[band].float())
@@ -120,12 +115,12 @@ class CoeffFMEvaluator(HookBase):
         if self.every_n_steps <= 0:
             self.eval()
 
-    #: Sum-reduced accumulators, in a fixed order so every rank packs the same
-    #: vector. Sums, not means — a mean of per-rank means is wrong whenever the
-    #: shards differ in size, and DistributedSampler's padding makes them differ.
-    _RED_GF = ("sse", "sy", "syy", "nv", "chg_pred", "chg_true",
-               "chg_pred_s", "chg_true_s")
-    _RED_AVG = ("bce", "val", "masked_frac")
+    #: Every accumulator the evaluator sums. One tuple, because `_all_reduce`
+    #: packs positionally and both sides must agree on the order.
+    _RED = ("bce", "val", "masked_frac",                       # weighted means
+            "n_bce", "n_val", "n_masked_frac",                 # their weights
+            "sse", "sy", "syy", "nv",                          # var_expl
+            "chg_pred", "chg_true", "chg_pred_s", "chg_true_s")  # charge
 
     def eval(self):
         """EVERY rank evaluates its shard; the sums are all-reduced.
@@ -162,7 +157,7 @@ class CoeffFMEvaluator(HookBase):
             self.trainer.logger.exception("CoeffFMEvaluator: shard eval failed")
             acc = None
         if acc is None:
-            acc = ({}, {}, {k: 0.0 for k in self._RED_GF}, 0)
+            acc = ({}, {}, {k: 0.0 for k in self._RED[6:]}, 0)
         totals, counts, gf, n = acc
         if world > 1:
             totals, counts, gf, n = self._all_reduce(totals, counts, gf, n)
@@ -171,26 +166,25 @@ class CoeffFMEvaluator(HookBase):
     def _all_reduce(self, totals, counts, gf, n):
         """Sum every accumulator across ranks in ONE collective.
 
-        One flat tensor, not a call per key: the keys are the same on every rank
-        by construction (fixed tuples), so packing them positionally removes any
-        chance of ranks disagreeing on iteration order and reducing mismatched
-        quantities into each other — which would not raise, just produce a
-        plausible wrong number.
+        One flat tensor, not a call per key: the key set is fixed by ``_RED``, so
+        packing positionally removes any chance of ranks disagreeing on iteration
+        order and reducing mismatched quantities into each other — which would
+        not raise, just produce a plausible wrong number.
         """
         import torch.distributed as dist
 
-        device = self.trainer.parallel_context.device
-        vec = ([totals.get(k, 0.0) for k in self._RED_AVG]
-               + [counts.get(k, 0.0) for k in self._RED_AVG]
-               + [gf.get(k, 0.0) for k in self._RED_GF] + [float(n)])
-        t = torch.tensor(vec, dtype=torch.float64, device=device)
+        flat = dict(totals)
+        flat.update({f"n_{k}": v for k, v in counts.items()})
+        flat.update(gf)
+        t = torch.tensor([flat.get(k, 0.0) for k in self._RED] + [float(n)],
+                         dtype=torch.float64,
+                         device=self.trainer.parallel_context.device)
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        v = t.tolist()
-        m = len(self._RED_AVG)
-        return ({k: v[i] for i, k in enumerate(self._RED_AVG)},
-                {k: v[m + i] for i, k in enumerate(self._RED_AVG)},
-                {k: v[2 * m + i] for i, k in enumerate(self._RED_GF)},
-                int(round(v[-1])))
+        v = dict(zip(self._RED, t.tolist()))
+        return ({k: v[k] for k in ("bce", "val", "masked_frac")},
+                {k: v[f"n_{k}"] for k in ("bce", "val", "masked_frac")},
+                {k: v[k] for k in self._RED[6:]},
+                int(round(t[-1].item())))
 
     def _forward(self, model, core, B, mask, gf):
         """One forward per batch: the loss AND the grid-free metrics from the

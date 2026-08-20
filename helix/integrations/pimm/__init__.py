@@ -41,7 +41,7 @@ first, since it patches pimm before anything else touches it.
 
 from helix.integrations.pimm import _compat  # noqa: F401  (import-time patches; MUST be first)
 from helix.integrations.pimm.data import CoeffCollect, CoeffTPCDataset
-from helix.integrations.pimm.eval import CoeffFMEvaluator, _acc_grid_free, p_dev
+from helix.integrations.pimm.eval import CoeffFMEvaluator, _acc_grid_free
 from helix.integrations.pimm.hooks import HelixPathBootstrap, WeightEMA
 from helix.integrations.pimm.model import CoeffFM, build_coeff_fm, _load_bins
 from helix.integrations.pimm.trainer import (FMTrainer, WSDCooldownLR,
