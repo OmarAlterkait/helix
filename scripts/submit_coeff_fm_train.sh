@@ -66,39 +66,40 @@ echo "config: $CFG -> $SAVE, $TOTAL steps"
 # link, a wall-clock link and a fresh start all the same case — the alternative
 # is a flag the submitter has to get right on every link but the first, which is
 # a rule that holds until the one time it does not.
-# `model/last/` — a DCP DIRECTORY, not model_last.pth. Two things were wrong
-# here and each alone was enough to silently restart from scratch:
+# ASK PIMM which checkpoint to resume from. `pimm.utils.path latest-checkpoint`
+# checks `last`, `last.prev` AND `model_last.pth`, validates each properly
+# (`.complete` sentinel plus weights.pth plus a complete trainer.dcp), and picks
+# the newest by mtime.
 #
-#   * This pimm writes `model/last/{weights.pth,trainer.dcp,.complete}`. The
-#     older run in exp/helix/coeff-fm-train-r1 has a flat `model_last.pth`, and
-#     that is what this checked for. Nothing matched, so every link passed
-#     resume=False. `iter_N.pth` is no substitute — it holds `state_dict` only,
-#     with no optimizer, scheduler or step.
-#   * `resume=True` ALONE IS INERT. pimm resumes from `cfg.weight`
-#     (utils/checkpoints.py:921); with weight unset it logs "No weight found"
-#     and trains from zero. Both flags are required.
+# This replaces a hand-rolled `[ -d last ] && [ -f last/.complete ]`, which was a
+# strictly weaker subset in three ways, one of them dangerous:
+#   * it knew only `last/`, so it silently missed the flat `model_last.pth` the
+#     older run writes (that was one of two bugs that restarted a chain at step 1);
+#   * it checked only the sentinel, not that weights.pth and trainer.dcp were
+#     actually there;
+#   * with a TORN `last/` — sentinel absent mid-save — it fell through to
+#     `resume=False` and would have retrained from ZERO, where pimm falls back to
+#     `last.prev`. The comment above it claimed the opposite.
 #
-# Link 2 restarted at step 1 with 26,150 steps sitting on disk. Checked by the
-# `.complete` marker rather than the directory alone, so a link preempted MID
-# save resumes from the previous good checkpoint instead of a torn one.
-LAST="$SAVE/model/last"
-if [ -d "$LAST" ] && [ -f "$LAST/.complete" ]; then
-  OPTS="resume=True weight=$LAST"
-  # Highest iter_N.pth as the progress probe: it is a filename, so this needs no
-  # torch load, and the DCP directory cannot be read with one anyway.
+# `resume=True` still needs `weight=` beside it: pimm resumes from `cfg.weight`
+# (utils/checkpoints.py:921) and logs "No weight found" without it. That is why
+# pimm's own train.sh passes `resume=$RESUME weight=$WEIGHT` together.
+WEIGHT=$(apptainer exec -B /sdf,/lscratch "$IMG" \
+  env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python -m pimm.utils.path \
+  latest-checkpoint "$SAVE/model" 2>/dev/null || true)
+if [ -n "$WEIGHT" ]; then
+  OPTS="resume=True weight=$WEIGHT"
   DONE=$(ls "$SAVE"/model/iter_*.pth 2>/dev/null |
          sed 's/.*iter_\([0-9]*\)\.pth/\1/' | sort -n | tail -1)
   DONE=${DONE:-0}
-  # Stop the chain rather than burn a GPU-hour re-entering a finished run: later
-  # links are submitted up front, so most of them exist to be unnecessary.
-  echo "resuming from step ${DONE} of ${TOTAL}"
+  echo "resuming from $WEIGHT (step ${DONE} of ${TOTAL})"
   if [ "$DONE" -ge "$TOTAL" ]; then
     echo "training already complete (${DONE}/${TOTAL}) — nothing to do"
     exit 0
   fi
 else
   OPTS="resume=False"
-  echo "no checkpoint under $SAVE — starting fresh, target ${TOTAL} steps"
+  echo "no complete checkpoint under $SAVE/model — starting fresh, target ${TOTAL} steps"
 fi
 
 mkdir -p "$SAVE"
