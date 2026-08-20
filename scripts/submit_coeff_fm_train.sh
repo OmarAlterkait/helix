@@ -28,7 +28,11 @@
 #SBATCH --mem=200G
 #SBATCH --time=04:00:00
 #SBATCH --requeue
-#SBATCH --signal=B:USR1@300
+# NO --signal=B:USR1: SLURM delivers it, pimm installs no handler, and the
+# default disposition for SIGUSR1 is to TERMINATE. Link 1 died at 03:54:40 of a
+# 4 h limit with State=FAILED ExitCode=0:10 — signal 10 is SIGUSR1. It bought
+# nothing (there is no graceful-checkpoint path to trigger) and cost five
+# minutes plus a FAILED that reads like a crash.
 set -euo pipefail
 
 H=${HELIX_ROOT:-/sdf/group/neutrino/omara/helix-extraction}
@@ -62,20 +66,31 @@ echo "config: $CFG -> $SAVE, $TOTAL steps"
 # link, a wall-clock link and a fresh start all the same case — the alternative
 # is a flag the submitter has to get right on every link but the first, which is
 # a rule that holds until the one time it does not.
-LAST="$SAVE/model/model_last.pth"
-if [ -f "$LAST" ]; then
-  OPTS="resume=True"
+# `model/last/` — a DCP DIRECTORY, not model_last.pth. Two things were wrong
+# here and each alone was enough to silently restart from scratch:
+#
+#   * This pimm writes `model/last/{weights.pth,trainer.dcp,.complete}`. The
+#     older run in exp/helix/coeff-fm-train-r1 has a flat `model_last.pth`, and
+#     that is what this checked for. Nothing matched, so every link passed
+#     resume=False. `iter_N.pth` is no substitute — it holds `state_dict` only,
+#     with no optimizer, scheduler or step.
+#   * `resume=True` ALONE IS INERT. pimm resumes from `cfg.weight`
+#     (utils/checkpoints.py:921); with weight unset it logs "No weight found"
+#     and trains from zero. Both flags are required.
+#
+# Link 2 restarted at step 1 with 26,150 steps sitting on disk. Checked by the
+# `.complete` marker rather than the directory alone, so a link preempted MID
+# save resumes from the previous good checkpoint instead of a torn one.
+LAST="$SAVE/model/last"
+if [ -d "$LAST" ] && [ -f "$LAST/.complete" ]; then
+  OPTS="resume=True weight=$LAST"
+  # Highest iter_N.pth as the progress probe: it is a filename, so this needs no
+  # torch load, and the DCP directory cannot be read with one anyway.
+  DONE=$(ls "$SAVE"/model/iter_*.pth 2>/dev/null |
+         sed 's/.*iter_\([0-9]*\)\.pth/\1/' | sort -n | tail -1)
+  DONE=${DONE:-0}
   # Stop the chain rather than burn a GPU-hour re-entering a finished run: later
   # links are submitted up front, so most of them exist to be unnecessary.
-  DONE=$(apptainer exec -B /sdf,/lscratch "$IMG" /opt/pimm/.venv/bin/python - "$LAST" <<'PY' 2>/dev/null || echo 0
-import sys, torch
-try:
-    ck = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
-    print(int(ck.get("trainer", {}).get("global_step", 0)))
-except Exception:
-    print(0)
-PY
-)
   echo "resuming from step ${DONE} of ${TOTAL}"
   if [ "$DONE" -ge "$TOTAL" ]; then
     echo "training already complete (${DONE}/${TOTAL}) — nothing to do"
