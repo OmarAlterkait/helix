@@ -32,12 +32,22 @@
 #                        (134 s vs 149 s). jax leads only in steady state, by
 #                        1.16x, which does not repay its warmup until ~361
 #                        events. Pass --backend jax to override.
-#   800 jobs           : 8 runs x 100 files x 200 events = 160,000 events.
+#   100 jobs/run       : 100 files x 200 events = 20,000 events. Eight such
+#                        submissions (RUN_INDEX 0..7) give the 160,000-event
+#                        corpus; they cannot be one array here (see --array).
 #
 #SBATCH --job-name=coeff_corpus
 #SBATCH --output=logs/coeff_%A_%a.out
 #SBATCH --error=logs/coeff_%A_%a.out
-#SBATCH --array=0-799%32
+# 0-99, ONE RUN PER SUBMISSION — not 0-799. This cluster's MaxArraySize is 100
+# (`scontrol show config`), so an 0-799 array is rejected outright with
+# "Invalid job array specification"; it stood here unsubmittable, and run
+#_0027575715 must have been built some other way. Select the run with
+# RUN_INDEX (its 0-based position in RUNS.txt):
+#
+#   RUN_INDEX=1 sbatch --export=ALL,RUN_INDEX,CONTAINER=... scripts/submit_coeff_corpus.sh
+#
+#SBATCH --array=0-99%32
 #SBATCH --time=02:00:00
 #SBATCH --mem=12G
 #SBATCH --cpus-per-task=6
@@ -105,8 +115,16 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false     # else JAX grabs 8.4 GB and torch
 [ -s "$RUNS_FILE" ] || { echo "FATAL: run list missing at $RUNS_FILE (corpus root $OUT) — run phase 1 first"; exit 1; }
 
 mapfile -t RUNS < <(tr ' ' '\n' < "$RUNS_FILE" | grep -v '^$')
-IDX=${SLURM_ARRAY_TASK_ID:-0}
-RUN=${RUNS[$(( IDX / SHARDS_PER_RUN ))]}
+# RUN_INDEX picks the run; the array index picks the file within it. Kept as two
+# numbers rather than one flat index because MaxArraySize=100 makes the flat form
+# unsubmittable past run 0 — and because "build run 3" is the operation people
+# actually want, so it should be the thing they type.
+RUN_INDEX=${RUN_INDEX:-0}
+IDX=$(( RUN_INDEX * SHARDS_PER_RUN + ${SLURM_ARRAY_TASK_ID:-0} ))
+RI=$(( IDX / SHARDS_PER_RUN ))
+[ "$RI" -lt "${#RUNS[@]}" ] || {
+  echo "FATAL: RUN_INDEX=$RUN_INDEX resolves to run slot $RI but $RUNS_FILE lists ${#RUNS[@]} runs"; exit 1; }
+RUN=${RUNS[$RI]}
 K=$(( IDX % SHARDS_PER_RUN ))
 SHARD=$(printf "%04d" "$K")
 
