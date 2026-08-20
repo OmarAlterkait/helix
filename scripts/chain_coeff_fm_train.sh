@@ -17,6 +17,12 @@ N=${1:-4}
 H=${HELIX_ROOT:-/sdf/group/neutrino/omara/helix-extraction}
 CFG=${2:-$H/configs/pimm/coeff_fm_train_8run.py}
 ACCT=${ACCOUNT:-mli:default}
+# EXCLUDE=node[,node] for nodes known to be bad. A node whose GPUs are held
+# still reports healthy to SLURM, so it keeps being offered: sdfampere010 failed
+# links 2, 3, 4 and 5 in about a minute each with "CUDA-capable device(s) is/are
+# busy or unavailable". The launcher's preflight now requeues instead of burning
+# a link, but excluding a known-bad node saves the round trip.
+EXC=${EXCLUDE:-}
 LOGS=${LOGDIR:-/sdf/data/neutrino/omara/exp/_diag/trainlogs}
 mkdir -p "$LOGS"
 
@@ -27,7 +33,7 @@ PREV=""
 for i in $(seq 1 "$N"); do
   DEP=""
   [ -n "$PREV" ] && DEP="--dependency=afterany:$PREV"
-  JID=$(sbatch --parsable $DEP \
+  JID=$(sbatch --parsable $DEP ${EXC:+--exclude=$EXC} \
       --account="$ACCT" \
       --job-name="coeff8_$i" \
       --output="$LOGS/coeff8_${i}_%j.out" \
