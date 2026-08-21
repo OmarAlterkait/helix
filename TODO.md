@@ -1,5 +1,9 @@
 # Deferred work
 
+Standing decisions (what was chosen and the measurement behind it) are in
+`DECISIONS.md`. This file is what is NOT done.
+
+
 Things consciously left undone, with enough context to pick up cold. Ordered by
 what blocks what, not by size.
 
@@ -64,10 +68,11 @@ The 1500-step run was a demonstration: it reached bce 0.096 and categorical CE
 pretrain is a different scale of job and wants a decision on steps, LR schedule
 and corpus size.
 
-## 5. Corpus scale
+## 5. Corpus scale — DONE
 
-One run, 20k events, 45 GB. The plan was ~160k events across 8 runs. Everything
-downstream works at either size; this is a compute decision.
+All 8 runs built: 790 shards, 344 GB, ~158k events (train 150,239 / val 4,641 /
+probe 3,111). The bins were NOT re-derived — see DECISIONS.md for why, and for
+the yardstick that would overturn it.
 
 ## 6. Mirror the jax forward ops
 
@@ -78,13 +83,12 @@ imports pimm-data. torch is the production backend, so this is a loose end.
 
 ## 7. Housekeeping
 
-* `tests/test_coeff_dataset.py` in pimm-data pins the cross-repo codec golden to
-  the hardcoded path `/sdf/group/neutrino/omara/helix-consolidate`, so as
-  `extraction` diverges it compares against the wrong tree.
+* ~~`tests/test_coeff_dataset.py` pins the cross-repo golden to
+  `helix-consolidate`~~ — FIXED: it reads `HELIX_ROOT`, defaulting to
+  `helix-extraction`.
 * ~~Version split: `pyproject.toml` 0.1.0 vs `helix/__init__.py` 0.2.0~~ — FIXED (0362328): pyproject reads the module via `[tool.setuptools.dynamic]`.
-* The 10 back-compat flat shims (`helix/_backend.py`, `helix/io.py`, ...) are
-  imported only by 6 scripts and 4 tests, all internal. helix has no external
-  consumer.
+* ~~The 10 back-compat flat shims~~ — REMOVED, along with the 6 import-broken
+  scripts that were their only non-test users.
 
 ## 8. Courtesy report to pimm's author
 
