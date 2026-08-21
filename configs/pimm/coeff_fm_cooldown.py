@@ -35,7 +35,12 @@ Run (4 GPUs, as the stable phase)::
 # here. `custom_imports`, the model, the corpus, the transform pipeline and the
 # optimizer are all inherited — this file is only the delta, so the two runs
 # cannot drift apart in the parts that must match.
-_base_ = ["./coeff_fm_train.py"]
+# Derived from the EIGHT-RUN stable phase, which is the run that exists: it
+# completed 112,679 steps (3 epochs, 150,239 train events) with a final
+# var_expl 0.6507 / charge_closure 0.8397 / charge_bias 1.0000. The one-run
+# config this used to derive from was superseded before its cooldown ever ran,
+# and keeping a cooldown for a stable phase nobody will use is dead config.
+_base_ = ["./coeff_fm_train_8run.py"]
 
 # ---------------------------------------------------------------------------
 # what differs from the stable phase
@@ -52,29 +57,44 @@ _base_ = ["./coeff_fm_train.py"]
 # annealing; annealing it would apply the same correction twice, and the result
 # is neither the EMA nor a cooled model.
 #
-# That file records `trainer.global_step = 118950`, `epoch 25` — the stable phase
-# ran to completion — and `best_metric_value: -inf`, which is the diagnosis in
-# the artifact's own hand: across 118,950 steps `_update_best` never fired once,
-# because CheckpointSaver had no `evaluator_every_n_steps`. There is no
-# model_best.pth in that directory to point at even if we wanted one.
+# `model/last` is a DIRECTORY (weights.pth + trainer.dcp + .complete), which is
+# what this pimm writes; the flat `model_last.pth` belongs to the older one-run
+# job. Getting that backwards restarted a training chain from step 1 once
+# already — see scripts/submit_coeff_fm_train.sh.
 #
-# It carries `module.bin_edges` but NOT the centroid buffers: it predates their
-# becoming persistent. `checkpoint._backfill_centroids` derives them from the
-# edges on load, which is exactly the pre-fix path it exists for. The v2 sidecar
-# this config inherits has edges BIT-IDENTICAL to the v1 the run trained with, so
-# `apply_bins` reports no delta — if it ever does report one here, stop: the
-# model would be annealing against a grid it was not trained on.
-weight = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-train-r1/model/model_last.pth"
+# Loading it needs no centroid backfill: the 8-run checkpoints carry bin_edges,
+# bin_cent_asinh and bin_cent_ratio, and the v2 sidecar this config inherits is
+# the same table they were trained against, so `apply_bins` reports no delta. If
+# it ever does report one here, stop — the model would be annealing against a
+# grid it was not trained on.
+weight = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-train-r1-8run/model/last"
 resume = False
 
-# Length. The stable phase is 19,034 x 25 // 4 = 118,962 steps; this is ~12% of
-# it, which is in the usual 10-20% band for a WSD cooldown. It is the main knob
-# worth tuning and the reason to keep this file separate: a different cooldown
-# length is a different run, not a different flag on the same one.
-epoch = 3
-N_TRAIN_EVENTS = 19_034
+# Length: ONE EPOCH over the first THREE runs = 14,264 steps = 12.7% of the
+# stable phase's 112,679, which is inside the usual 10-20% band for a WSD
+# cooldown.
+#
+# A subset is needed because `epoch` is an integer and one epoch over all eight
+# runs is 37,559 steps — 33% of the stable phase, and there is no way to ask for
+# a third of an epoch. The subset is a RUN subset rather than `max_len`, which
+# would take the first N events of an index ordered by run and so anneal almost
+# entirely on run 1.
+#
+# Annealing on 3 of 8 runs is sound because those runs are the same
+# distribution, measured rather than assumed: bins derived on run 2 alone versus
+# run 1 alone, both converged, differ by 0.129% of a band's span — 0.81x the
+# sampling noise of the shipped table. A subset of an iid corpus is the same
+# corpus. See coeff_fm_train_8run.py.
+RUNS = [
+    "run_0027575715", "run_0027587651", "run_0027651463",
+]
+_over = dict(data_root="/sdf/data/neutrino/omara/coeff_tpc_r1", split=RUNS)
+data = dict(train=dict(**_over), val=dict(**_over), test=dict(**_over))
+
+epoch = 1
+N_TRAIN_EVENTS = 57_059          # resolved from the identity split over RUNS
 batch_size = 4
-STEPS = N_TRAIN_EVENTS * epoch // batch_size          # 14,275
+STEPS = N_TRAIN_EVENTS * epoch // batch_size          # 14,264
 
 # No warmup: the model is already trained. Warmup exists to keep a COLD
 # transformer stable; re-warming an annealing run just delays the anneal.
@@ -90,13 +110,13 @@ scheduler = dict(type="WSDCooldownLR", warmup=0, total_steps=STEPS, floor=1e-3)
 # two curves are read at the same resolution.
 EVAL_EVERY = max(50, round(0.0099 * STEPS))
 # NOT the stable phase's 0.0020: that rate is floored at 50 steps, and 50 on a
-# 14,275-step run is 285 saves of a 710 MB checkpoint — 200 GB to cool one model.
+# 14,264-step run is 285 saves of a 710 MB checkpoint — 200 GB to cool one model.
 # The floor exists for preemption on a very long run; here ~20 saves loses at
 # most 5% of the run to a preemption, which is the same guarantee at 1/14th the
 # disk.
 SAVE_EVERY = max(250, round(0.05 * STEPS))
 
-save_path = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-cooldown-r1"
+save_path = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-cooldown-r1-8run"
 
 # ---------------------------------------------------------------------------
 # hooks — same list as the stable phase, with model_best turned back ON
