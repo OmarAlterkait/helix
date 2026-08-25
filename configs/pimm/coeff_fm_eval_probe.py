@@ -35,7 +35,11 @@ _base_ = ["./coeff_fm_train.py"]
 weight = None                      # supplied via --options
 resume = False
 evaluate = True
-save_path = "exp/coeff_fm_eval_probe"
+# ABSOLUTE, like coeff_fm_train.py:107. A relative save_path resolves
+# against the launch cwd, so running this from the checkout writes an
+# `exp/` tree into the repo -- pimm creates it before it discovers there
+# is no checkpoint to score.
+save_path = "/sdf/data/neutrino/omara/exp/coeff_fm_eval_probe"
 
 # pimm's `batch_size` is GLOBAL across ranks, and FMTrainer requires exactly one
 # event per GPU — the model has no event separation, so a rank holding two would
