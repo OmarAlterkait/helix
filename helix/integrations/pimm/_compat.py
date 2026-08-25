@@ -56,3 +56,45 @@ def _patch_rng_restore_to_cpu():
 
 
 _patch_rng_restore_to_cpu()
+
+#: pimm internals this integration reaches for that are NOT public API.
+#: Every entry is a name helix actually IMPORTS -- _compat.py:41, trainer.py:15,
+#: hooks.py:14 / eval.py:19. Names helix only mentions in prose stay out:
+#: asserting one would make `import helix.integrations.pimm` a hard failure over
+#: an upstream rename helix does not depend on, which is the opposite of what
+#: this gate is for.
+_REQUIRED = (
+    ("pimm.engines._train_utils", "restore_rng_state"),
+    ("pimm.engines.train", "Trainer"),
+    ("pimm.engines.hooks.default", "HookBase"),
+)
+
+
+def _assert_pimm_surface():
+    """Fail at import, not at step 400,000, if pimm moved under us.
+
+    helix pins pimm by absolute path with no submodule and no dependency
+    declaration in pyproject.toml, and monkeypatches one of its privates below.
+    A rename there does not raise — `restore_distributed_rng_state` resolves the
+    name from module globals at call time, so the patch simply stops applying
+    and a preempted run silently reverts to dying on
+    `TypeError: RNG state must be a torch.ByteTensor`. provenance.json records
+    WHICH pimm produced a run; this is the only thing that checks it still fits.
+    """
+    import importlib
+    missing = []
+    for mod, attr in _REQUIRED:
+        try:
+            if not hasattr(importlib.import_module(mod), attr):
+                missing.append(f"{mod}.{attr}")
+        except Exception as exc:                     # import error is equally fatal
+            missing.append(f"{mod} ({type(exc).__name__}: {exc})")
+    if missing:
+        raise RuntimeError(
+            "helix.integrations.pimm requires pimm internals that are absent: "
+            + ", ".join(missing)
+            + ". pimm has changed in a way this integration does not survive — "
+              "check provenance.json for the commit this run expected.")
+
+
+_assert_pimm_surface()
