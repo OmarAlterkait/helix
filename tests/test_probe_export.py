@@ -14,12 +14,30 @@ ARCH = dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1, dec_blocks=1,
 
 
 def _export(tmp_path, model, safe=False, with_tokenizer=True, weight=None):
-    """Mimic `pimm export`: weights + the resolved config beside them."""
+    """What ``pimm export`` ACTUALLY writes.
+
+    `weight` and `model.checkpoint` are load-trigger keys: pimm's
+    ``_sanitize_config`` (export/api.py:58-77) NULLS any absolute-path value
+    under them before writing config.json, and nothing else records the
+    consumed checkpoint. So a real export directory ALWAYS has ``weight: None``
+    — from-scratch and warm-start alike — and other absolute paths come out as
+    ``"<redacted>"``.
+
+    This fixture used to accept a `weight=` and write it through, producing a
+    directory shape pimm cannot emit. Two tests passed against that fiction
+    while the mechanism they covered was inert in production: every real probe
+    row carries ``weights_are_ema=None``. The parameter is kept only so callers
+    can assert the sanitised outcome; a non-None value is rejected.
+    """
+    if weight is not None:
+        raise AssertionError(
+            "a real pimm export never records `weight` — it is nulled by "
+            "_sanitize_config. Do not reintroduce it; assert on "
+            "weights_digest / a helix-side sidecar instead.")
     sd = {f"module.{k}": v for k, v in model.state_dict().items()}   # DDP prefix
     torch.save(sd, tmp_path / "model.bin")
-    cfg = {"model": dict(ARCH, type="Coeff-FM", bins="/some/path.pt")}
-    if weight is not None:
-        cfg["weight"] = weight          # the source checkpoint pimm exported FROM
+    cfg = {"model": dict(ARCH, type="Coeff-FM", bins="<redacted>"),
+           "weight": None, "save_path": "<redacted>"}
     if with_tokenizer:
         cfg["transform"] = [{"type": "CoeffTokenize",
                              "cfg": {"cell_t": "grid_center", "pw": 16, "pt": 8}}]
@@ -78,7 +96,7 @@ def test_probe_loader_accepts_an_export_dir(tmp_path):
     from helix.probe.features import load_probe_model
     m = build_fm(dict(ARCH))
     m.set_bins(torch.linspace(-4, 4, 17).repeat(4, 1))
-    d = _export(tmp_path, m, weight="/runs/x/model/model_ema.pth")
+    d = _export(tmp_path, m)
     trained, meta = load_probe_model(d, device="cpu")
     assert meta["source"] == "pimm-export"
     rnd, rmeta = load_probe_model(d, random_init=True, device="cpu")
@@ -161,23 +179,27 @@ def _fm(tmp_path, **kw):
     return _export(tmp_path, m, **kw)
 
 
-def test_an_ema_export_asked_for_ema_does_not_warn(tmp_path):
-    from helix.probe.features import load_probe_model
-    d = _fm(tmp_path, weight="/runs/x/model/model_ema.pth")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)      # any warning fails
-        _, meta = load_probe_model(d, weights="ema", device="cpu")
-    assert meta["weights_are_ema"] is True
-    assert "warning" not in meta
+def test_a_real_export_can_never_attribute_its_weights(tmp_path):
+    """EMA-vs-raw is UNANSWERABLE from a pimm export, always.
 
+    Two tests here used to assert the opposite — one that an EMA export is
+    recognised, one that a raw export is recognised and named. Both drove a
+    fixture that wrote `weight` into config.json, which pimm's _sanitize_config
+    (export/api.py:58-77) nulls on every real export. So in production
+    `load_probe_model` has only ever taken the unknown branch, every probe row
+    carries weights_are_ema=None, and those tests were the reason nobody noticed.
 
-def test_a_raw_export_asked_for_ema_warns_and_names_the_source(tmp_path):
+    Attribution needs a carrier helix controls (a sidecar beside the weights)
+    plus the content digest scripts/run_probe.py now records. Until that exists,
+    the honest assertion is this one.
+    """
     from helix.probe.features import load_probe_model
-    d = _fm(tmp_path, weight="/runs/x/model/model_best.pth")
-    with pytest.warns(RuntimeWarning, match="model_best.pth"):
+    d = _fm(tmp_path)
+    with pytest.warns(RuntimeWarning, match="records no source checkpoint"):
         _, meta = load_probe_model(d, weights="ema", device="cpu")
-    assert meta["weights_are_ema"] is False
-    assert "not an EMA checkpoint" in meta["warning"]
+    assert meta["weights_are_ema"] is None, (
+        "a pimm export cannot say which checkpoint it holds; anything else "
+        "here means the fixture is writing a shape pimm does not emit")
 
 
 def test_an_export_with_no_recorded_source_reports_unknown(tmp_path):
@@ -191,10 +213,7 @@ def test_an_export_with_no_recorded_source_reports_unknown(tmp_path):
 
 def test_asking_for_raw_never_warns(tmp_path):
     from helix.probe.features import load_probe_model
-    for w in ("/runs/x/model/model_ema.pth", "/runs/x/model/model_best.pth", None):
-        p = tmp_path / f"e{abs(hash(str(w))) % 1000}"
-        p.mkdir()
-        d = _fm(p, weight=w)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            load_probe_model(d, weights="raw", device="cpu")
+    d = _fm(tmp_path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        load_probe_model(d, weights="raw", device="cpu")
