@@ -129,6 +129,13 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--weights", default="ema")
     ap.add_argument("--planes", type=int, nargs="*", default=None)
+    ap.add_argument("--mask-plane", type=int, default=None,
+                    help="mode=plane only: HIDE exactly this plane_gid instead of "
+                         "letting make_mask draw one. --planes chooses what is "
+                         "DRAWN, which is a different thing and does not control "
+                         "the mask. Sweeping --seed varies the hidden plane only "
+                         "at random -- six draws over six planes cover about four "
+                         "distinct ones -- so this is what gives every plane a turn.")
     ap.add_argument("--crop-on", default="signal", choices=["signal", "residual"])
     ap.add_argument("--zoom", action="store_true",
                     help="crop to a window instead of the whole plane; the "
@@ -198,6 +205,15 @@ def main():
             gen = torch.Generator(device=dev).manual_seed(a.seed)
             m = model.make_mask(Bt, mode=mode, ratio=a.ratio,
                                 n_planes=a.n_planes, gen=gen)
+            if mode == "plane" and a.mask_plane is not None:
+                # Deterministic override of make_mask's randperm draw. Same shape
+                # and dtype, so everything downstream is unchanged; only WHICH
+                # plane is hidden differs.
+                m = Bt["plane_id"] == int(a.mask_plane)
+                if not bool(m.any()):
+                    print(f"    plane {a.mask_plane}: absent from this event, "
+                          f"skipping", flush=True)
+                    continue
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16,
                                                  enabled=dev.type == "cuda"):
                 occ_logit, logits, _ = model.raw_heads(Bt, m)
