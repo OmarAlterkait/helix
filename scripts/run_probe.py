@@ -63,6 +63,19 @@ def _load_truth(path, corpus, strict=True):
     return cfg, aw, pix, offs, ident, problems
 
 
+def _provenance_or_none():
+    """Commit/branch/dirty for helix, pimm and pimm-data, or None.
+
+    Never fatal: a results row that exists without provenance is worth more than
+    no row at all, and this runs inside a long GPU job.
+    """
+    try:
+        from helix.integrations._bootstrap import provenance
+        return provenance()
+    except Exception:
+        return None
+
+
 def _position_of(shard, event_id):
     """Position of ``event_id`` within a shard — NOT the id itself.
 
@@ -84,6 +97,44 @@ def _position_of(shard, event_id):
             f"{shard}: no event with id {event_id} (shard holds "
             f"{len(ids)} events, {ids.min()}..{ids.max()})")
     return pos
+
+
+def _weights_digest(model):
+    """blake2b over the scored weights — the only field that identifies WHICH
+    weights produced a row.
+
+    `weights_source` is a path the export recorded and `weights_are_ema` is a
+    substring test on a filename; neither survives a file being moved, renamed,
+    or re-exported.
+
+    Same SHAPE as tools/convert_fm_ckpt.py:_digest -- blake2b over sorted keys
+    and contiguous CPU bytes -- but NOT the same value, deliberately, on two
+    counts. The dtype is hashed, because two tensors with identical bytes under
+    different dtypes are different weights. And `num_batches_tracked` /
+    `n_averaged` are excluded, because they are step counters registered as
+    persistent buffers: including them would make the digest partly a function
+    of how long training ran. Compare these digests to each other, never to a
+    convert_fm_ckpt one.
+
+    Bytes go through `flatten().view(torch.uint8)` rather than `.numpy()`:
+    `.numpy()` raises on bfloat16, and `view(torch.uint8)` raises on a 0-dim
+    tensor of a different element size, so a scalar buffer would crash the row.
+    """
+    import hashlib
+    import torch
+    h = hashlib.blake2b(digest_size=16)
+    sd = model.state_dict()
+    for k in sorted(sd):
+        if k.endswith(("num_batches_tracked", "n_averaged")):
+            continue
+        v = sd[k]
+        if not torch.is_tensor(v):
+            continue
+        h.update(k.encode())
+        h.update(str(v.dtype).encode())
+        h.update(v.detach().cpu().contiguous().flatten()
+                 .view(torch.uint8).numpy().tobytes())
+    return h.hexdigest()
 
 
 def _emit(path, row):
@@ -241,7 +292,25 @@ def main(argv=None):
                 folds=a.folds, epochs=a.epochs, seeds=a.seeds,
                 n_patch=int(len(y)), n_events=int(len(np.unique(event))),
                 truth=os.path.abspath(truth_path),
-                stale=list(stale), when=int(time.time()))
+                stale=list(stale), when=int(time.time()),
+                # --- fields that change the number and were NOT being recorded ---
+                # `--dataset-name` selects which shard files are opened (see the
+                # glob below), so two rows with different values are measuring
+                # different data. It was the clearest violation of this module's
+                # own docstring: "Everything that changes a number is echoed into
+                # every results row."
+                dataset_name=a.dataset_name,
+                # The two digests that actually pin the split. `stale` reports
+                # whether they MATCHED at load time; it does not say what they
+                # were, so a row could not be compared against another row's split
+                # after the fact.
+                holdout_sha256=str(cfg.get("holdout_json_sha256", "")),
+                corpus_ident_sha256=str(cfg.get("corpus_ident_sha256", "")),
+                # Which weights, by content rather than by filename.
+                weights_digest=_weights_digest(model_t),
+                # Which code. fisher_r's definition lives in helix/probe/, so two
+                # rows from different commits are not necessarily the same metric.
+                code=_provenance_or_none())
 
     seeds = tuple(range(a.seeds))
     out_rows = []
