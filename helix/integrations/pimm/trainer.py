@@ -155,9 +155,17 @@ class WSDCooldownLR(_LambdaLR):
     curve: at p=0.25 research gives 0.500 and PolyLR(power=0.5) gives 0.866.
     ``1 - sqrt(p)`` drops fast and early, which is what a short cooldown wants.
 
-    The warmup-then-constant STABLE phase needs no new code —
-    ``MultiStepWithWarmupLR(milestones=[])`` leaves the decay factor at 1.0
-    forever, which is exactly it.
+    The stable phase does NOT reduce to ``MultiStepWithWarmupLR(milestones=[])``,
+    despite the shapes matching. An earlier version of this docstring claimed it
+    did; measured, the two lambdas differ only by that scheduler's
+    ``warmup_scale=1e-6`` floor (integral agrees to 2e-9). But its warmup is
+    ``warmup_rate * total_steps`` — a RATIO of a number
+    ``Trainer.build_scheduler`` overwrites unconditionally with
+    ``_iters_per_epoch() * cfg.epoch`` (pimm train.py:733). So the same config
+    yields a 476-step warmup at 118,975 total steps, **17.7** at 4,425, and
+    **6.0** at 1,500 — the two incidents recorded in coeff_fm_train.py. WSDStableLR
+    takes warmup in absolute steps and is immune to that rescale, which is the
+    whole reason it exists.
 
     Being a LambdaLR, this scales each param group's own ``base_lr``, so muP's
     per-group ratios survive without the ``max_lr`` expansion OneCycleLR needs.
