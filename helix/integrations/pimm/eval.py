@@ -53,23 +53,35 @@ def _acc_grid_free(core, B, mask, logits, gf):
     # disabling autocast keeps einsum's memory AND float32.
     with torch.autocast(device_type=logits.device.type, enabled=False):
         p = torch.softmax(logits.float(), -1)                 # (n_cells, n_slot, K)
+        crb = cr[band].float()
         rec_a = torch.einsum("csk,ck->cs", p, ca[band].float())
-        rec_r = torch.einsum("csk,ck->cs", p, cr[band].float())
+        rec_r = torch.einsum("csk,ck->cs", p, crb)            # E[X]
+        rec_abs = torch.einsum("csk,ck->cs", p, crb.abs())    # E[|X|]
     y = tgt.float()[sel]
     d = rec_a[sel] - y
     gf["sse"] += float((d * d).sum())
     gf["sy"] += float(y.sum())
     gf["syy"] += float((y * y).sum())
     gf["nv"] += float(sel.sum())
-    # UNSIGNED is the primary: the signed sum of a near-symmetric coefficient
-    # distribution is a small difference of large numbers, so the signed ratio
-    # swings wildly (a perfectly-binned predictor scored 0.008 on it in test).
-    # Research reports both for exactly this reason; the signed one is kept as a
-    # bias indicator, not as a closure measure.
-    r_sel, t_sel = rec_r[sel], torch.sinh(y)
-    gf["chg_pred"] += float(r_sel.abs().sum())
+    # E[|X|], NOT |E[X]|. These are different functionals and the difference is
+    # not small: Jensen gives |E[X]| <= E[|X|], with equality only when the
+    # posterior puts no mass on both signs. Coefficients are near-symmetric about
+    # zero, so |E[X]| shrinks toward zero with posterior WIDTH and the ratio falls
+    # below 1 for a perfectly calibrated model.
+    #
+    # Measured on real checkpoints over 12 events:
+    # |E[X]| reported 0.8177 where E[|X|] gives 0.9676, against a one-hot oracle
+    # ceiling of 0.9991 -- so 83% of the apparent 19% "charge deficit" was this,
+    # and the real magnitude shortfall is ~3%. The artifact is SIGNED: it pulls
+    # every score toward zero, so it also MASKED m113 over-predicting by 46%
+    # (reported 1.2255, true 1.4627).
+    #
+    # The old test could not catch it: it only scored a ONE-HOT posterior, which
+    # is precisely where the two functionals coincide.
+    t_sel = torch.sinh(y)
+    gf["chg_pred"] += float(rec_abs[sel].sum())
     gf["chg_true"] += float(t_sel.abs().sum())
-    gf["chg_pred_s"] += float(r_sel.sum())
+    gf["chg_pred_s"] += float(rec_r[sel].sum())
     gf["chg_true_s"] += float(t_sel.sum())
 
 
@@ -328,8 +340,10 @@ class CoeffFMEvaluator(HookBase):
             # var_expl is GRID-FREE: it compares the posterior-mean asinh
             # reconstruction against the target's own measured variance, so it
             # survives a change of bin table or corpus in a way cross-entropy
-            # does not. charge_closure is Sum(pred)/Sum(true) in units of sigma,
-            # nominal 1.0. Research computes both every eval
+            # does not. charge_closure is Sum(E[|X|])/Sum(|X_true|) in units of
+            # sigma, nominal 1.0 -- the posterior expectation of MAGNITUDE,
+            # which is not |posterior mean|; see _acc_grid_free. Research
+            # computes both every eval
             # (fm/train.py:perband_mse_cat, mae_ddp.py:216-220); their absence
             # here is why a 31%-low charge read-back and a cross-table CE
             # comparison both went unnoticed.
@@ -338,8 +352,19 @@ class CoeffFMEvaluator(HookBase):
             avg["var_expl"] = 1.0 - (gf["sse"] / gf["nv"]) / var_y
             if gf["chg_true"] > 1e-9:
                 avg["charge_closure"] = gf["chg_pred"] / gf["chg_true"]
-            if abs(gf["chg_true_s"]) > 1e-6 * max(gf["chg_true"], 1e-9):
-                avg["charge_bias"] = gf["chg_pred_s"] / gf["chg_true_s"]
+                # NOT the signed RATIO. Sum(sinh(y)) is a small difference of
+                # large numbers on a near-symmetric target, so
+                # `chg_pred_s / chg_true_s` is ill-conditioned -- this file's own
+                # test recorded a perfectly-binned predictor scoring 0.008 on it.
+                # Normalising the signed RESIDUAL by the unsigned total is well
+                # conditioned and reads directly as "net over/under-prediction as
+                # a fraction of magnitude". Inside the guard because it shares
+                # the denominator.
+                # Renamed because the nominal value moves from 1.0 to 0.0: a
+                # reader seeing `charge_bias=0.02` would call it catastrophic
+                # when it is good.
+                avg["charge_resid"] = ((gf["chg_pred_s"] - gf["chg_true_s"])
+                                       / gf["chg_true"])
         if rank0:
             self.trainer.logger.info(
                 f"   [coeff-eval] batches={n} " +

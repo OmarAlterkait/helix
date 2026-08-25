@@ -24,8 +24,8 @@ _SPEC.loader.exec_module(ptp)
 TRAIN = ("Train: [1/3][{it}/100] Scan 1 Data 0.01 Batch 0.2 Remain 00:01 "
          "loss: 1.5 bce: 0.6 val: 0.9 masked_frac: 0.75 Lr: 3.0e-04")
 OLD_EVAL = "   [coeff-eval] batches=145 bce=0.5100 loss=1.4000 masked_frac=0.7500 val=0.8900"
-NEW_EVAL = ("   [coeff-eval] batches=145 bce=0.5100 charge_bias=0.9900 "
-            "charge_closure=0.9700 loss=1.4000 masked_frac=0.7500 val=0.8900 "
+NEW_EVAL = ("   [coeff-eval] batches=145 bce=0.5100 charge_closure=0.9700 "
+            "charge_resid=-0.0100 loss=1.4000 masked_frac=0.7500 val=0.8900 "
             "var_expl=0.6500")
 
 
@@ -53,6 +53,9 @@ def test_extra_columns_do_not_drop_the_eval_point(tmp_path):
     assert ev["loss"][0] == pytest.approx(1.40)
     assert ev["var_expl"][0] == pytest.approx(0.65)
     assert ev["charge_closure"][0] == pytest.approx(0.97)
+    # negative values must survive the scanner: charge_resid is signed and is
+    # normally small and negative for an under-predicting model.
+    assert ev["charge_resid"][0] == pytest.approx(-0.01)
 
 
 def test_a_metric_appearing_mid_run_is_backfilled_with_nan(tmp_path):

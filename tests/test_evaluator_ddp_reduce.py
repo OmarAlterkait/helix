@@ -99,7 +99,10 @@ def test_grid_free_metrics_come_from_the_reduced_sums():
     ev._report({"bce": 0.0, "val": 0.0}, {"bce": 1.0, "val": 1.0}, gf, 4)
     assert "var_expl=0.7500" in line["m"]          # 1 - (25/100)/1.0
     assert "charge_closure=0.9700" in line["m"]
-    assert "charge_bias=0.9000" in line["m"]
+    # (chg_pred_s - chg_true_s) / chg_true = (9 - 10) / 100. NOT the signed ratio
+    # 9/10 = 0.9: that form is a small difference of large numbers on a
+    # near-symmetric target and scored 0.008 for a perfectly-binned predictor.
+    assert "charge_resid=-0.0100" in line["m"]
 
 
 def test_report_is_a_noop_on_an_empty_val_set():

@@ -99,11 +99,55 @@ def test_perfect_prediction_scores_one():
 
     ve, cc, _ = _run(logits, B, mask)
     assert ve > 0.97, f"perfect binning should explain ~all variance, got {ve:.4f}"
-    # UNSIGNED closure. The signed ratio is meaningless on a symmetric target:
-    # Sum(sinh(y)) is a small difference of large numbers, and a perfectly-binned
-    # predictor scores ~0.008 on it. That instability is why the metric reports
-    # unsigned as the closure and signed only as a bias indicator.
+    # UNSIGNED closure: Sum(E[|X|]) / Sum(|X_true|). The signed ratio is
+    # meaningless on a symmetric target -- Sum(sinh(y)) is a small difference of
+    # large numbers, and a perfectly-binned predictor scores ~0.008 on it. That
+    # instability is why the signed direction is reported as charge_resid, a
+    # residual over the unsigned total, rather than as a ratio.
     assert 0.9 < cc < 1.1, f"perfect binning should close charge, got {cc:.4f}"
+
+
+def test_calibrated_posterior_that_STRADDLES_ZERO_still_closes_charge():
+    """Sign-ambiguous but calibrated: closure must be ~1, not ~0.
+
+    This is the case no existing test could reach, and the one the estimator bug
+    lived in. Every other test scores a posterior concentrated on ONE side of
+    zero -- a one-hot, or a spread over adjacent same-sign bins -- and there
+    |E[X]| == E[|X|], so both functionals agree and the bug is invisible.
+
+    Construction: the true value is +v or -v with equal probability, and the
+    posterior is exactly that -- 50/50 on the two bins holding +v and -v. It is
+    perfectly CALIBRATED (the truth really is drawn from it); it simply does not
+    know the sign. A magnitude closure must therefore read ~1: E[|X|] = v and the
+    truth has |X| = v.
+
+    Accumulating |E[X]| instead gives ~0, because the two centroids cancel. That
+    is the whole defect in miniature -- on real data it showed up as a milder
+    0.8177 where the correct estimator reads 0.9676.
+    """
+    B = _batch()
+    n = B["tgt"].shape[0]
+    g = np.random.default_rng(11)
+    v = 1.5
+    sign = g.choice([-1.0, 1.0], size=(n, N_SLOT))
+    B["tgt"] = torch.from_numpy((sign * v).astype(np.float32))
+    mask = torch.ones(n, dtype=torch.bool)
+
+    edges, _, _ = _tables()
+    band = B["band_id"].numpy()
+    logits = torch.full((n, N_SLOT, K), -40.0)
+    for i in range(n):
+        kp = int(np.digitize(v, edges[band[i], 1:-1]))
+        km = int(np.digitize(-v, edges[band[i], 1:-1]))
+        logits[i, :, kp] = 0.0          # equal mass on +v and -v
+        logits[i, :, km] = 0.0
+
+    _, cc, _ = _run(logits, B, mask)
+    assert 0.9 < cc < 1.1, (
+        f"a calibrated sign-ambiguous posterior must still close charge, got "
+        f"{cc:.4f}. Near 0 means the metric is accumulating |E[X]|, where the two "
+        f"centroids cancel, instead of E[|X|] -- it is measuring posterior WIDTH, "
+        f"not charge magnitude.")
 
 
 def test_uninformative_prediction_scores_zero():

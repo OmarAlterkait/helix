@@ -51,7 +51,7 @@ def parse(run_dir):
     path = os.path.join(run_dir, "train.log")
     tr = dict(step=[], loss=[], bce=[], val=[], mask=[], lr=[], epoch=[])
     # Eval keys are whatever the log carries, not a fixed list: the grid-free
-    # metrics (var_expl, charge_closure, charge_bias) only appear once a run has
+    # metrics (var_expl, charge_closure, charge_resid) only appear once a run has
     # the centroid tables, so a run predating that has fewer columns and must
     # still parse. `masked_frac` is renamed to `mask` to match `tr`.
     ev = dict(step=[])
@@ -288,7 +288,11 @@ def main():
     # The grid-free metrics, when the runs carry them. These are the numbers that
     # stay comparable ACROSS bin tables and corpora — cross-entropy does not, so
     # a k30-vs-R1 bce gap is partly a change of grid.
-    gfk = [k for k in ("var_expl", "charge_closure", "charge_bias")
+    # charge_bias is kept alongside charge_resid so runs predating the rename
+    # still tabulate; this filter is a fixed tuple, so a key absent from it
+    # parses but never prints.
+    gfk = [k for k in ("var_expl", "charge_closure", "charge_resid",
+                       "charge_bias")
            if any(k in ev for _, _, ev in runs)]
     if gfk:
         print("\n%-8s %8s" % ("run", "steps")
