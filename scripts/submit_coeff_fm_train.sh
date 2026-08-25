@@ -89,12 +89,24 @@ WEIGHT=$(apptainer exec -B /sdf,/lscratch "$IMG" \
   latest-checkpoint "$SAVE/model" 2>/dev/null || true)
 if [ -n "$WEIGHT" ]; then
   OPTS="resume=True weight=$WEIGHT"
-  DONE=$(ls "$SAVE"/model/iter_*.pth 2>/dev/null |
-         sed 's/.*iter_\([0-9]*\)\.pth/\1/' | sort -n | tail -1)
-  DONE=${DONE:-0}
-  echo "resuming from $WEIGHT (step ${DONE} of ${TOTAL})"
-  if [ "$DONE" -ge "$TOTAL" ]; then
-    echo "training already complete (${DONE}/${TOTAL}) — nothing to do"
+  # A FLOOR on progress, not the step. `iter_N.pth` is written on the
+  # CheckpointSaver's cadence, so N is always a multiple of SAVE_EVERY and the
+  # true step is somewhere in [N, N+SAVE_EVERY). The exact step lives in
+  # `last/trainer.dcp`, which cannot be read without building a trainer, and
+  # `iter_N.pth` is not the resumable artifact anyway — `last/` is.
+  #
+  # That asymmetry is what makes this safe: the floor can only UNDER-report, so
+  # the test below can miss a finished run (costing one link, which pimm itself
+  # then exits in seconds with "Training already complete") but can never skip an
+  # unfinished one. Report it as a floor rather than as the step — reading
+  # "step 112500 of 112679" as real progress is what produced a spurious
+  # "chain exhausted" on a run that had in fact completed at 112,677.
+  FLOOR=$(ls "$SAVE"/model/iter_*.pth 2>/dev/null |
+          sed 's/.*iter_\([0-9]*\)\.pth/\1/' | sort -n | tail -1)
+  FLOOR=${FLOOR:-0}
+  echo "resuming from $WEIGHT (at least step ${FLOOR} of ${TOTAL}; pimm decides)"
+  if [ "$FLOOR" -ge "$TOTAL" ]; then
+    echo "training already complete (>=${FLOOR}/${TOTAL}) — nothing to do"
     exit 0
   fi
 else
