@@ -6,6 +6,7 @@ about what a run WRITES, the evaluator about what it MEASURES.
 
 from __future__ import annotations
 
+import math
 import torch
 
 from pimm.distributed import unwrap_model
@@ -141,10 +142,13 @@ class WeightEMA(HookBase):
     optimisation, so it needs no synchronisation.
     """
 
-    def __init__(self, decay=0.9999, save_freq=None, key="state_dict_ema"):
+    def __init__(self, decay=0.9999, save_freq=None, key="state_dict_ema",
+                 max_drift=None, on_drift="discard"):
         self.decay = float(decay)
         self.save_freq = save_freq
         self.key = key
+        self.max_drift = max_drift
+        self.on_drift = on_drift
         self._shadow = None
         self._step = 0
         self._pnames = None
@@ -156,9 +160,10 @@ class WeightEMA(HookBase):
     def before_train(self):
         """Reload the shadow on resume, so preemption does not reset the average.
 
-        pimm's checkpoint payload has no slot for hook state, so nothing collects
-        `state_dict()` below. Rather than change shared infrastructure for one
-        consumer, the hook persists itself: at decay 0.9999 the half-life is
+        pimm's checkpoint payload has no slot for hook state -- nothing upstream
+        ever asks a hook to serialise itself. Rather than change shared
+        infrastructure for one consumer, the hook persists itself through
+        `_save`/`_load`: at decay 0.9999 the half-life is
         ~6,931 steps, so an EMA that restarts from the current weights on every
         requeue is meaningless on a preemptable queue.
         """
@@ -177,16 +182,66 @@ class WeightEMA(HookBase):
         # hits it, because there the shadow is cloned from the live model and is
         # already on-device. Reachable only on resume.
         blob = torch.load(path, map_location="cpu", weights_only=False)
+        saved_step = int(blob.get("step", 0))
+        saved_decay = blob.get("decay")
+        now = int(getattr(self.trainer, "global_step", 0) or 0)
+        drift = abs(now - saved_step) if now else 0
+
+        # A shadow cannot change its time constant retroactively. `_save` records
+        # `decay`; nothing used to read it back, so a sidecar written at a
+        # different decay was adopted silently.
+        if saved_decay is not None and float(saved_decay) != self.decay:
+            self.trainer.logger.warning(
+                f"WeightEMA: sidecar written with decay={saved_decay}, hook "
+                f"configured for {self.decay} — discarding; the average restarts.")
+            return
+
+        # An INTACT pair drifts by EXACTLY 0. WeightEMA precedes CheckpointSaver
+        # in cfg.hooks and both key off trainer.global_step, already advanced by
+        # _record_step_state (pimm train.py:400-402); the saver seeds step_count
+        # from the same value (pimm hooks/checkpoint.py:83-87) and increments it
+        # first. So any non-zero drift is a torn pair — the previous `> 1`
+        # tolerance had no derivation and rejected nothing reachable.
+        #
+        # Non-zero drift IS reachable: preemption between the two writes (drift =
+        # save_freq), and pimm checkpoints.py:1104-1111, which rewinds global_step
+        # to start_epoch*iter_per_epoch when the dataloader cursor is dropped
+        # (world_size or num_worker change, or a cursor-less mid-epoch save) —
+        # drift up to a full epoch, whose steps are then replayed and averaged
+        # in twice.
+        #
+        # Whether to keep a drifted shadow is set by the decay, not by taste:
+        # after K bad steps 1 - decay**K of the mass sits on wrong updates, while
+        # DISCARDING costs 100% and needs a half-life to recover. So using beats
+        # discarding right up to the half-life, ln(0.5)/ln(decay) = 6,931 steps at
+        # 0.9999. Raising instead would kill a multi-day run over an artifact this
+        # class's own docstring calls "not part of the optimisation".
+        half_life = (math.log(0.5) / math.log(self.decay)
+                     if 0.0 < self.decay < 1.0 else float("inf"))
+        limit = half_life if self.max_drift is None else float(self.max_drift)
+        if drift > limit:
+            msg = (f"WeightEMA: sidecar at step {saved_step}, training resumes at "
+                   f"{now} (drift {drift} > {limit:.0f}); "
+                   f"{1 - self.decay ** drift:.1%} of the average would be "
+                   f"duplicated or missing updates. DISCARDING — the average "
+                   f"restarts from here.")
+            if self.on_drift == "error":
+                raise RuntimeError(msg)
+            self.trainer.logger.warning(msg)
+            return                      # _shadow stays None -> fresh clone
+
         ref = next(self._model().parameters()).device
         self._shadow = {k: v.float().to(ref) for k, v in blob["state_dict"].items()}
-        self._step = int(blob.get("step", 0))
-        now = int(getattr(self.trainer, "global_step", 0) or 0)
-        self.trainer.logger.info(
-            f"WeightEMA: resumed from step {self._step} (trainer at {now})")
-        if now and abs(now - self._step) > 1:
+        self._step = saved_step
+        if drift:
             self.trainer.logger.warning(
-                f"WeightEMA: saved at step {self._step} but training resumes at "
-                f"{now} — the average is missing {abs(now - self._step)} steps")
+                f"WeightEMA: drift {drift} steps on resume (sidecar {saved_step}, "
+                f"trainer {now}); using it — {1 - self.decay ** drift:.2%} of the "
+                f"average is duplicated or missing, within the "
+                f"{limit:.0f}-step budget")
+        else:
+            self.trainer.logger.info(
+                f"WeightEMA: resumed intact at step {saved_step}")
 
     def _save(self):
         import os
@@ -252,11 +307,6 @@ class WeightEMA(HookBase):
             else:
                 sh.mul_(d).add_(v.detach().float(), alpha=1.0 - d)
         self._maybe_save()
-
-    def state_dict(self):
-        """Picked up by the checkpoint payload if the trainer collects hooks."""
-        return {} if self._shadow is None else \
-            {k: v.clone() for k, v in self._shadow.items()}
 
     def _maybe_save(self):
         if self.save_freq and self._step and self._step % int(self.save_freq) == 0:
