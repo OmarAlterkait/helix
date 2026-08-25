@@ -97,6 +97,52 @@ def test_importing_helix_does_not_import_pimm():
 
 
 @pimm_required
+def test_the_pimm_facing_surface_adds_no_dsp_dependency_of_its_own():
+    """The direction of the dependency: helix knows about pimm, never the reverse.
+
+    pimm is detector- and transform-agnostic infrastructure; WAVELETS are
+    helix's concern, and `PyWavelets` is declared in helix's own pyproject, not
+    pimm's. So a pimm environment is CORRECT to have no pywt, and
+    `helix.integrations.pimm` — the module pimm loads through `custom_imports`,
+    in every rank of every run — must import cleanly there.
+
+    It does today, but nothing pinned it, and the leak would be silent exactly
+    where it matters: helix's dev image HAS pywt, so an accidental `helix.core`
+    import at module scope would pass every local test and then fail at job
+    start on a pimm-only image, after the queue wait.
+
+    Measured as a DELTA against pimm's own imports, not as an absolute. pimm
+    itself pulls scipy and h5py (torch_geometric and its dataset stack), so
+    asserting an empty set would fail for a reason helix does not control and
+    cannot fix — it would be a test of pimm's dependency tree wearing helix's
+    name. What helix controls is what it ADDS, and that must be nothing.
+
+    `test_tokenizer_does_not_drag_in_the_tpc_stack` above asserts the same
+    invariant for `helix.model.tokenize`, which runs in DataLoader workers.
+    This is the other surface pimm actually loads.
+    """
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; "
+         "WATCH = ('pywt', 'scipy', 'h5py'); "
+         "import pimm.datasets.builder; "
+         "base = {m for m in WATCH if m in sys.modules}; "
+         "import helix.integrations.pimm; "
+         "print(sorted({m for m in WATCH if m in sys.modules} - base))"],
+        capture_output=True, text=True, cwd=root,
+        env={**os.environ,
+             "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "[]", (
+        f"helix.integrations.pimm pulled in {r.stdout.strip()} on top of pimm — "
+        f"the pimm-facing surface acquired a helix-side DSP dependency, and will "
+        f"now fail to import on any pimm environment that lacks it")
+
+
+@pimm_required
 def test_adapter_registers_all_three():
     import helix.integrations.pimm  # noqa: F401
     from pimm.datasets.builder import DATASETS
