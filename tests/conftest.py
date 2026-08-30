@@ -1,5 +1,8 @@
 """Shared test fixtures: synthetic TPC data generation."""
 
+import importlib.util
+import os
+
 import numpy as np
 import pytest
 
@@ -64,3 +67,37 @@ try:
     torch.set_num_threads(4)
 except ImportError:
     pass
+
+
+def pytest_configure(config):
+    """Refuse to pretend the pimm seam was checked when pimm is absent.
+
+    Seven test modules gate themselves on `_pimm_importable()` and skip when it
+    is False. That is correct for a DSP-only environment -- but the skip is
+    silent, and it hid FORTY tests, including every test of the pimm-facing
+    evaluator, launcher and WeightEMA code. They had never run: the containers
+    that carry the DSP dependencies do not have pimm installed, and every
+    invocation used a PYTHONPATH without a pimm checkout on it, so the guard
+    returned False every time and the suite reported a clean 287 passed.
+
+    `HELIX_REQUIRE_PIMM=1` turns that into a hard error at startup. Use it for
+    any run whose result is meant to mean "the integration is good", and put a
+    pimm checkout on PYTHONPATH:
+
+        PYTHONPATH=<pimm-checkout>:<helix> HELIX_REQUIRE_PIMM=1 pytest
+
+    See TESTING.md for the full incantation per container.
+    """
+    if os.environ.get("HELIX_REQUIRE_PIMM") != "1":
+        return
+    try:
+        if importlib.util.find_spec("pimm") is None:
+            raise ImportError("no pimm on sys.path")
+        import pimm.datasets.builder  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        raise pytest.UsageError(
+            f"HELIX_REQUIRE_PIMM=1 but pimm is not importable ({exc}). "
+            f"The pimm-facing tests would have SKIPPED silently. Put a pimm "
+            f"checkout on PYTHONPATH, or unset HELIX_REQUIRE_PIMM to accept a "
+            f"DSP-only run."
+        ) from exc
