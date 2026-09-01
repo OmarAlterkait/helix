@@ -217,3 +217,42 @@ def test_asking_for_raw_never_warns(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         load_probe_model(d, weights="raw", device="cpu")
+
+
+# ---------------------------------------------------- the results-row guards
+
+def _run_probe_module():
+    """`scripts/run_probe.py` is a script, not a package member. Load it by path."""
+    import importlib.util
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "run_probe.py"
+    spec = importlib.util.spec_from_file_location("_run_probe_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_failing_weights_digest_costs_the_field_not_the_row():
+    """`_weights_digest` is called while building the results row -- AFTER the
+    whole per-event GPU loop and BEFORE the first `_emit`. Unguarded, any
+    exception there discarded a completed extraction, which is the exact failure
+    `_emit`'s own docstring was written about. Its sibling on the next field
+    (`_provenance_or_none`) was guarded; this one was not.
+
+    Executed, and it fails if the guard is removed: the wrapper must swallow and
+    return None rather than propagate.
+    """
+    mod = _run_probe_module()
+
+    class _Exploding:
+        def state_dict(self):
+            raise RuntimeError("CUDA transfer failed")
+
+    assert mod._weights_digest_or_none(_Exploding()) is None
+
+    # and it must NOT swallow the real answer when nothing is wrong
+    model = build_fm(**ARCH)
+    got = mod._weights_digest_or_none(model)
+    assert isinstance(got, str) and got, got
+    assert got == mod._weights_digest(model), "the guard must not alter the digest"

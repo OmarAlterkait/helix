@@ -10,9 +10,11 @@ frozen features at one layer, joins them to truth through the tokenizer's own
 stopping.
 
 Everything that changes a number is echoed into every results row — the weights
-used (EMA or raw), the layer, ``cell_t``, ``qtot_min``, ``dom_threshold``, the
-fold and epoch budget. Two ``fisher_r`` values from different definitions must
-never be comparable by accident.
+used (EMA or raw) and their content digest, the layer, ``cell_t``, ``qtot_min``,
+``dom_threshold``, the fold and epoch budget, which dataset was opened
+(``dataset_name``), which split (``holdout_sha256``, ``corpus_ident_sha256``),
+and which code produced it (``code``). Two ``fisher_r`` values from different
+definitions must never be comparable by accident.
 """
 
 from __future__ import annotations
@@ -72,6 +74,28 @@ def _provenance_or_none():
     try:
         from helix.integrations._bootstrap import provenance
         return provenance()
+    except Exception:
+        return None
+
+
+def _weights_digest_or_none(model):
+    """`_weights_digest`, but never fatal -- same contract as `_provenance_or_none`.
+
+    It is called while building the results row, which happens AFTER the whole
+    per-event GPU loop and BEFORE the first `_emit`. Unguarded, any exception
+    there discards a completed extraction -- the exact failure `_emit`'s own
+    docstring was written about ("an OOM in triangulate discarded a complete
+    four-arm mlp result that had already run"). Its sibling on the very next
+    field is guarded; this one was not.
+
+    The known edge cases are already handled inside `_weights_digest` --
+    `flatten().view(torch.uint8)` copes with bfloat16 and 0-dim buffers, checked
+    against live modules -- so this catches what is left: a CUDA transfer error,
+    `state_dict()` itself raising, an exotic buffer dtype. Rare, and cheap to
+    survive: a row with a null digest beats no row.
+    """
+    try:
+        return _weights_digest(model)
     except Exception:
         return None
 
@@ -307,7 +331,7 @@ def main(argv=None):
                 holdout_sha256=str(cfg.get("holdout_json_sha256", "")),
                 corpus_ident_sha256=str(cfg.get("corpus_ident_sha256", "")),
                 # Which weights, by content rather than by filename.
-                weights_digest=_weights_digest(model_t),
+                weights_digest=_weights_digest_or_none(model_t),
                 # Which code. fisher_r's definition lives in helix/probe/, so two
                 # rows from different commits are not necessarily the same metric.
                 code=_provenance_or_none())
