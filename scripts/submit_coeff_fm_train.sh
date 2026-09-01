@@ -82,11 +82,33 @@ echo "config: $CFG -> $SAVE, $TOTAL steps"
 #     `last.prev`. The comment above it claimed the opposite.
 #
 # `resume=True` still needs `weight=` beside it: pimm resumes from `cfg.weight`
-# (utils/checkpoints.py:921) and logs "No weight found" without it. That is why
-# pimm's own train.sh passes `resume=$RESUME weight=$WEIGHT` together.
+# (utils/checkpoints.py:1088, and logs "No weight found at:" at :1109, both inside
+# `load_weight_and_resume`) without it. That is why pimm's own train.sh passes
+# `resume=$RESUME weight=$WEIGHT` together.
+#
+# The exit status is checked, and stderr is NOT discarded. `2>/dev/null || true`
+# collapsed two different outcomes into the same empty string: "no checkpoint
+# exists yet" (the resolver exits 0 and prints nothing) and "the resolver
+# CRASHED" (a rename upstream, an apptainer flake, an OOM). The second then read
+# as the first, `resume=False`, and the chain restarted from step 1 -- which is
+# the 3.9 GPU-hours this commit's own message is about. pimm's train.sh:230-235
+# runs the identical call bare and hard-errors on an empty result; this does the
+# same, while still allowing the legitimate empty case through.
+_RESOLVER_ERR=$(mktemp)
+set +e
 WEIGHT=$(apptainer exec -B /sdf,/lscratch "$IMG" \
   env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python -m pimm.utils.path \
-  latest-checkpoint "$SAVE/model" 2>/dev/null || true)
+  latest-checkpoint "$SAVE/model" 2>"$_RESOLVER_ERR")
+_RESOLVER_RC=$?
+set -e
+if [ "$_RESOLVER_RC" -ne 0 ]; then
+  echo "ERROR: checkpoint resolver exited $_RESOLVER_RC for $SAVE/model." >&2
+  echo "       Refusing to launch: an unresumed run would silently restart at step 1." >&2
+  sed 's/^/       /' "$_RESOLVER_ERR" >&2
+  rm -f "$_RESOLVER_ERR"
+  exit 2
+fi
+rm -f "$_RESOLVER_ERR"
 if [ -n "$WEIGHT" ]; then
   OPTS="resume=True weight=$WEIGHT"
   # A FLOOR on progress, not the step. `iter_N.pth` is written on the
