@@ -36,10 +36,24 @@ Run (4 GPUs, as the stable phase)::
 # optimizer are all inherited — this file is only the delta, so the two runs
 # cannot drift apart in the parts that must match.
 # Derived from the EIGHT-RUN stable phase, which is the run that exists: it
-# completed 112,679 steps (3 epochs, 150,239 train events) with a final
-# var_expl 0.6507 / charge_closure 0.8397 / charge_bias 1.0000. The one-run
-# config this used to derive from was superseded before its cooldown ever ran,
-# and keeping a cooldown for a stable phase nobody will use is dead config.
+# completed 112,679 steps (3 epochs, 150,239 train events).
+#
+# Its FINAL eval (train.log:115002, the last of 101 `[coeff-eval]` lines) reads
+#   bce 0.1037 / val 2.9488 / var_expl 0.6602 / charge_closure 0.7956 /
+#   charge_bias 0.9406
+# This comment previously quoted var_expl 0.6507 / charge_closure 0.8397 /
+# charge_bias 1.0000 as "final". That tuple is real but is train.log:60613 --
+# `Train: [2/3][21589/37559]`, about 52% through -- so it was a MID-RUN eval
+# wearing the word final, with five decimal-matched metrics giving it false
+# precision.
+#
+# Both tuples predate the charge-closure fix (E[|X|], not |E[X]|), so BOTH
+# charge_closure figures are low by that estimator artifact and neither should be
+# quoted as the model's magnitude fidelity. var_expl and bce are unaffected.
+#
+# The one-run config this used to derive from was superseded before its cooldown
+# ever ran, and keeping a cooldown for a stable phase nobody will use is dead
+# config.
 _base_ = ["./coeff_fm_train_8run.py"]
 
 # ---------------------------------------------------------------------------

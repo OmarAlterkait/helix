@@ -55,8 +55,14 @@ not assumed: run 1's counts are 19,034 / 577 / 388 with one run built and
 so no centroid buffer is ever NaN. They used to be optional, so consumers asked
 "are these present?" — three files asked, one forgot, and `var_expl` /
 `charge_closure` / `charge_bias` were absent from **every** eval log ever
-produced. Centroid args are keyword-only; `checkpoint.apply_bins` is the sole
-caller of `set_bins`.
+produced. Centroid args are keyword-only.
+
+`checkpoint.apply_bins` is the caller on the RESUME path, not the sole caller —
+`scripts/smoke_train_fm.py:88` calls `model.set_bins(edges)` directly, as do five
+test files. That distinction matters: the guarantee here comes from `set_bins`
+DERIVING any table it is not given, not from a single choke point upstream of it.
+A reader who believed the choke point existed could add a caller and expect the
+invariant to hold for free.
 
 **`cent_lin` and `bin_cent_measured` are deleted — both were tables nothing
 read.** `cent_lin` also carried a real bias (planes pooled across 22%-different
