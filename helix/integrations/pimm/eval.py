@@ -160,20 +160,28 @@ class CoeffFMEvaluator(HookBase):
         world_size double-counts a few events (3 of 580 at 577/4, ~0.5%).
         """
         world = comm.get_world_size()
+        failure = None
         try:
             acc = self._eval_shard()
-        except Exception:
+        except Exception as exc:
             # A rank that dies before the reduce hangs every other rank inside
-            # it. Contribute zeros and let the run fail on the logged error
-            # rather than on a wedged collective.
+            # it, so this rank still contributes zeros and still enters the
+            # collective. But it must then FAIL: the previous version swallowed
+            # the exception entirely, and zeros are indistinguishable from an
+            # empty val set -- `_report` printed "val_loader was empty",
+            # published no metric, and the run trained on happily. That is how a
+            # NameError in `_eval_shard_inner` survived a green test suite.
             self.trainer.logger.exception("CoeffFMEvaluator: shard eval failed")
+            failure = exc
             acc = None
         if acc is None:
             acc = ({}, {}, {k: 0.0 for k in self._RED[6:]}, 0)
         totals, counts, gf, n = acc
         if world > 1:
             totals, counts, gf, n = self._all_reduce(totals, counts, gf, n)
-        self._report(totals, counts, gf, n)
+        if failure is not None:
+            raise failure          # after the collective, so no rank is left in it
+        return self._report(totals, counts, gf, n)
 
     def _all_reduce(self, totals, counts, gf, n):
         """Sum every accumulator across ranks in ONE collective.
@@ -254,6 +262,23 @@ class CoeffFMEvaluator(HookBase):
         model = self.trainer.model
         was_training = model.training
         model.eval()
+        try:
+            return self._eval_shard_inner(model, loader, move_batch_to_device)
+        finally:
+            # MUST be a finally. `eval()` deliberately catches whatever this
+            # raises (see its handler) so that every rank still reaches the
+            # all-reduce instead of wedging the collective -- which means an
+            # exception here would otherwise skip the restore below and leave
+            # training running in eval mode for the rest of the run, silently.
+            if was_training:
+                model.train()
+
+    def _eval_shard_inner(self, model, loader, move_batch_to_device):
+        """The pass itself. `loader` and `move_batch_to_device` are
+        PARAMETERS, not closure reads: they are bound in `_eval_shard`,
+        so referencing them here resolved to module globals that do not
+        exist and raised NameError on every eval.
+        """
         core = unwrap_model(model)
         device = self.trainer.parallel_context.device
 
@@ -313,24 +338,31 @@ class CoeffFMEvaluator(HookBase):
                         counts[k] = counts.get(k, 0.0) + w
                 n += 1
 
-        if was_training:
-            model.train()
         return totals, counts, gf, n
 
     def _report(self, totals, counts, gf, n):
-        """Average the reduced sums, log, and publish the selection metric.
+        """Average the reduced sums, log, publish the selection metric, RETURN it.
 
-        Runs on EVERY rank, and only rank 0 prints. `current_metric_value` has
-        to be set everywhere: the checkpoint save is collective, so if the ranks
-        disagreed about which step was best they would disagree about whether to
-        save — and the values agree here precisely because they come from the
-        same reduced sums.
+        The returned dict is the same mapping that gets logged — it exists so a
+        caller that is not a training loop (scripts/eval_checkpoint.py) can read
+        the metrics without re-deriving them or scraping the log line. Both hook
+        callers discard it, so this is additive.
+
+        Runs on EVERY rank, and only rank 0 prints. `current_metric_value` is
+        set on every rank because the values agree — they come from the same
+        reduced sums — so no rank can disagree about which step was best.
+
+        An earlier version of this docstring justified that by saying the
+        checkpoint save is collective and would otherwise disagree. That is not
+        why: pimm gates the `model_best` write on `is_main_process()`, so a
+        divergent value could not deadlock the save. Setting it everywhere is
+        cheap insurance, not a correctness requirement.
         """
         rank0 = comm.get_rank() == 0
         if not n:
             if rank0:
                 self.trainer.logger.info("CoeffFMEvaluator: val_loader was empty")
-            return
+            return None
 
         # `loss` is rebuilt from the pooled parts, not pooled itself: it is
         # bce + val, and the two have different denominators.
@@ -382,3 +414,4 @@ class CoeffFMEvaluator(HookBase):
                 writer.add_scalar(f"val/{k}", v, step)
         self.trainer.comm_info["current_metric_value"] = -avg["loss"]   # higher is better
         self.trainer.comm_info["current_metric_name"] = "neg_val_loss"
+        return avg

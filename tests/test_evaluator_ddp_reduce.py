@@ -182,3 +182,71 @@ def test_two_real_gloo_ranks_agree_on_a_token_pooled_metric(tmp_path):
     assert abs(pooled - 0.70) > 0.1, "mean-of-means would be 0.70 here"
     assert any("batches=110" in l for l in lines0), \
         f"rank 0 must report the full count, got: {lines0}"
+
+
+def test_eval_shard_actually_ENTERS_the_loop(monkeypatch):
+    """`_eval_shard` must iterate the loader and come back with batches counted.
+
+    Nothing tested this. The suite exercised `_all_reduce`, `_report`, `_forward`
+    and `_acc_grid_free` directly, so when `_eval_shard` was split into an
+    acquire/restore wrapper and an inner pass, the inner pass referenced
+    `loader` and `move_batch_to_device` -- both LOCALS of the wrapper -- and
+    every eval died with NameError. Nothing went red: `eval()` caught it, logged
+    it, and substituted zeros, which `_report` reported as "val_loader was
+    empty". The metric silently stopped existing and `model_best` selection went
+    inert.
+
+    So this asserts the one thing the unit tests could not see: that a real pass
+    over a loader reaches the accumulate and returns a non-zero batch count.
+    """
+    import contextlib  # noqa: F401  (the loop uses it)
+    ev = _ev()
+    ev.max_batches, ev.mask_seed = None, 0
+    N = 4
+
+    class _Model:
+        training = True
+
+        def eval(self):
+            pass
+
+        def train(self):
+            pass
+
+        def make_mask(self, B, mode=None, gen=None):
+            return torch.ones(N, dtype=torch.bool)
+
+    def _batch():
+        return {"plane_id": torch.zeros(N, dtype=torch.long),
+                "valid": torch.ones(N, 3, dtype=torch.bool),
+                "occ": torch.ones(N, 3, dtype=torch.bool)}
+
+    ev.trainer.model = _Model()
+    ev.trainer.val_loader = [_batch(), _batch()]
+    ev.trainer.cfg = types.SimpleNamespace(amp_dtype="float16", enable_amp=False)
+    ev._forward = lambda model, core, B, mask, gf: {
+        "bce": torch.tensor(1.0), "val": torch.tensor(2.0)}
+
+    out = ev._eval_shard()
+    assert out is not None, "_eval_shard returned None on a loader with batches"
+    totals, counts, gf, n = out
+    assert n == 2, f"iterated {n} batches over a 2-batch loader"
+    assert totals.get("bce", 0.0) > 0, "the accumulate never ran"
+
+
+def test_a_failed_shard_is_not_reported_as_an_empty_val_set():
+    """A raising shard must FAIL the eval, not silently publish nothing.
+
+    The handler contributes zeros so no rank is left inside the collective --
+    correct -- but it used to swallow the exception entirely, making a broken
+    eval indistinguishable from an empty val set. It must re-raise AFTER the
+    reduce.
+    """
+    ev = _ev()
+
+    def boom():
+        raise RuntimeError("shard exploded")
+
+    ev._eval_shard = boom
+    with pytest.raises(RuntimeError, match="shard exploded"):
+        ev.eval()
