@@ -8,7 +8,9 @@ spectrum. The research cache defaulted to WHITE, because `star_tpc.py` called
 Everything downstream follows from that one change: the normalisation table, which
 coefficients survive thresholding, the categorical bin grid, and m113 being
 out-of-distribution on this corpus. This file records the measurement, not the
-inference — reproduce with `scripts/compare_noise_bands.py`.
+inference — reproduce with `scripts/compare_noise_bands.py` on the
+`legacy-corpus-repro` branch, which is where it lives now: it builds the same
+shard white and colored, and only the legacy builder still accepts `--white`.
 
 Band <-> frequency at 2 MHz sampling (Nyquist 1 MHz), DWT levels (4,4,3,2):
 

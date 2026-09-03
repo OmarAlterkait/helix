@@ -43,6 +43,29 @@ def _parse_tau(v):
     return float(v)
 
 
+class _RefuseWhite(argparse.Action):
+    """--white by name, for the same reason --tau none is refused by name.
+
+    White incoherent noise is the PRE-FIX forward model (the original build
+    omitted the measured spectrum and defaulted to white). Left to argparse it
+    dies as bare "unrecognized arguments", which is the silent-ish failure the
+    tau refusal exists to avoid — and it is how the removal quietly broke
+    scripts/compare_noise_bands.py, whose whole job is building one corpus each
+    way.
+    """
+
+    def __init__(self, option_strings, dest, **kw):
+        super().__init__(option_strings, dest, nargs=0, help=argparse.SUPPRESS, **kw)
+
+    def __call__(self, parser, ns, values, option_string=None):
+        raise SystemExit(
+            "--white is the PRE-FIX white-noise forward model (what corpora built "
+            "before the measured spectrum landed used). It is not available here: "
+            "use scripts/build_coeff_corpus_legacy.py on the legacy-corpus-repro "
+            "branch if you are deliberately reproducing an old vintage, or "
+            "comparing against one.")
+
+
 def _parse_kgate(text):
     """'4.0' -> 4.0 ; '4.0,3.0' -> [4.0, 3.0] (one entry per gate pass)."""
     parts = [p for p in str(text).split(",") if p.strip() != ""]
@@ -174,6 +197,7 @@ def main():
     ap.add_argument("--save-norm-sigma", default=None,
                     help="write the computed norm_sigma to .npy (build shard 0 with this, "
                          "then pass it as --norm-sigma to every other shard)")
+    ap.add_argument("--white", action=_RefuseWhite)      # refused by name; see _RefuseWhite
     ap.add_argument("--calibrate", action="store_true",
                     help="compute norm_sigma from these events and write it to "
                          "--save-norm-sigma WITHOUT writing shards. A corpus needs ONE "
@@ -353,9 +377,10 @@ def main():
     norm_in = np.load(args.norm_sigma) if args.norm_sigma else None
     if norm_in is not None:
         print(f"norm_sigma: FROZEN from {args.norm_sigma} {norm_in.shape}")
-    # Recorded into /config/noise_json. Without it, a shard built with --white is
-    # indistinguishable on disk from a colored one, so a corpus accidentally mixed
-    # across invocations is undetectable after the fact.
+    # Recorded into /config/noise_json. Without it, a white-noise shard (which only
+    # the legacy builder can still produce) is indistinguishable on disk from a
+    # colored one, so a corpus accidentally mixed across vintages is undetectable
+    # after the fact.
     # Serial mode names its output and its /ident/source_file from --file-index
     # alone, never from --shard. Omitting --file-index in a per-file job loop
     # therefore mislabels provenance AND collides on the output filename, both

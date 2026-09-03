@@ -105,8 +105,10 @@ SRC=${SRC_ROOT:-/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor}
 # output said so, and the reader's cross-shard check passed — the two corpora
 # share band_lengths, gids, n_wires, norm_sigma and sigma_norm exactly, and
 # differ only in basis_digest and removal_json, which it did not compare (fixed
-# in pimm_data/readers/coeff_tpc.py). Set OUT_ROOT explicitly to extend the old
-# corpus, and pass `--tau none` when you do.
+# in pimm_data/readers/coeff_tpc.py). To EXTEND the old corpus you need the
+# legacy gate rule, which this builder no longer offers: set OUT_ROOT explicitly
+# and build with scripts/build_coeff_corpus_legacy.py on the legacy-corpus-repro
+# branch. Extending it from here would silently mix two gate rules in one tree.
 OUT=${OUT_ROOT:-/sdf/data/neutrino/omara/coeff_tpc_r1}
 NORM=${NORM_SIGMA:-$OUT/_calib/norm_sigma_global.npy}
 EVENTS_PER_SHARD=${EVENTS_PER_SHARD:-200}   # = one source file
