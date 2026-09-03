@@ -37,8 +37,7 @@ def make_mask(B, mode, ratio, n_planes, gen=None):
         return rnd(n) < ratio
     gid = B["plane_id"]
     if mode in ("plane", "plane_any"):        # cross-plane: hide whole plane(s)
-        # Two selections, because they are two different TASKS and the difference
-        # is not visible in the loss. Measured on a real R1 event (gids 0..5 =
+        # Two selections. Coverage, measured on a real R1 event (gids 0..5 =
         # 2 volumes x 3 views), 200 draws each:
         #
         #   plane_any, n=1   16.5% of cells   punctured volume keeps 2/3 views,
@@ -46,14 +45,30 @@ def make_mask(B, mode, ratio, n_planes, gen=None):
         #   plane,     n=1   32.9% of cells   every volume down to 2/3 views
         #   plane,     n=2   66.1% of cells   every volume down to 1/3 views
         #
-        # Two views already determine a 3D point, so under `plane_any` the model
-        # can interpolate from an intact volume and is never forced to
-        # triangulate — even n_planes=3 left a volume untouched in ~90% of draws.
-        # `plane` punctures every volume, which is what the mode is FOR.
+        # DIFFICULTY, though, is set by views left IN THE PUNCTURED VOLUME, and by
+        # nothing else. Scored on the cooldown checkpoint, 388-event probe split:
+        #
+        #   random,    0.75  masked   var_expl 0.703
+        #   plane_any, n=1   0.169    var_expl 0.510
+        #   plane,     n=1   0.333    var_expl 0.506   <- 2x the cells, same score
+        #   plane,     n=2   0.665    var_expl 0.015   <- one view left: collapse
+        #
+        # So the intact OTHER volume is irrelevant — it is a different region of
+        # the detector, and the model reconstructs a plane from the two remaining
+        # views of its OWN volume. An earlier version of this comment claimed
+        # `plane_any` let the model "interpolate from an intact volume and never
+        # triangulate"; the measurement above says otherwise, and it is kept here
+        # because it is the kind of plausible story that survives if nobody scores
+        # it.
+        #
+        # What `plane` actually buys is twice the plane-reconstruction examples
+        # per step at identical difficulty — more signal, same task. Note also
+        # that hiding 17% as whole planes is far harder than hiding 75% at random
+        # (0.510 vs 0.703): cross-plane is the hard axis, not masked fraction.
         #
         # `plane_any` is kept because it is what research/train.py does and what
         # every run to date trained on, so it is the only way to reproduce or
-        # compare against them. New runs should prefer `plane`.
+        # compare against them.
         #
         # DELIBERATE DELTA from research in both: research calls randperm without
         # the generator and so draws from the GLOBAL rng — 8 draws with an
