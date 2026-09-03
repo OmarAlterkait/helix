@@ -43,7 +43,7 @@ Naming (adopted from pimm-data house style):
 |---|---|---|
 | in-memory event object | `CoeffEvent` | `helix/core/coeff_event.py` |
 | DSP compute | `process_event` / `process_plane` | `helix/tpc/pipeline.py` |
-| pure (de)serialization | `coeff_event_to_arrays` / `arrays_to_coeff_event` | `helix/core/coeff_io.py` |
+| pure (de)serialization | `arrays_to_coeff_event` (the forward `coeff_event_to_arrays` was unused and is deleted; `write_coeff_shard` builds its columns itself) | `helix/core/coeff_io.py` |
 | reference shard codec + gate | `write_coeff_shard` / `read_coeff_event` | `helix/core/coeff_io.py` |
 | basis/provenance | `basis_descriptor` / `descriptor_digest` | `helix/core/provenance.py` |
 | production corpus writer | `write_coeff_shard` (function) | pimm-data `readers/coeff_tpc.py` |
@@ -347,7 +347,7 @@ we need it (deferred), but nothing in the TPC schema blocks it.
 `helix → pimm-data` dep becomes a cycle). Resolved the same way every pimm-data
 reader already works — standalone h5py:
 
-- **helix** defines the schema-of-record: `coeff_event_to_arrays`/`arrays_to_coeff_event`
+- **helix** defines the schema-of-record: `write_coeff_shard`/`arrays_to_coeff_event`
   (pure `CoeffEvent ⇄ dict-of-arrays+attrs`) + the reference single-file codec
   `write_coeff_shard`/`read_coeff_event`. This is the **acceptance gate** (§7).
 - **pimm-data** implements the *same on-disk contract* independently and

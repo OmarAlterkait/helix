@@ -44,8 +44,8 @@ class FlatBands:
     The jax path keeps coefficients flat end to end: ``wavedec`` produces one
     array, the gate and threshold consume and return it untouched, and only the
     final sparse extraction leaves the device. Indexing yields cheap slice views,
-    so len() and integer indexing still work — but the jax
-    ops detect this type and operate on ``.flat`` directly, avoiding the
+    so len(), integer indexing and iteration still work — but the jax ops detect
+    this type and operate on ``.flat`` directly, avoiding the
     concatenate/split round trip that a real list forces (four full-array copies
     per plane, which cost more than the dispatches it saved).
     """
@@ -63,12 +63,17 @@ class FlatBands:
         return len(self.lens)
 
     def __getitem__(self, i):
-        # int only. The slice branch, __iter__ and like() had ZERO call sites
-        # (checked across helix, scripts, tests and research): every consumer
-        # either reads .flat/.lens directly, or uses len() and integer indexing,
-        # or constructs FlatBands itself. The class docstring used to promise
-        # "anything written against the band-list contract still works" -- that
-        # promise had no user and was the only reason the protocol existed.
+        # int only -- but iteration still works, and is still used. `__iter__` and
+        # like() and the slice branch were removed as uncalled; that was right for
+        # like() and the slice branch and WRONG for `__iter__`, which has live
+        # callers (tpc/pipeline.py's band_lengths, tests/test_gate_backends.py).
+        # They keep working because Python falls back to the legacy sequence
+        # protocol -- __getitem__(0), (1), ... until IndexError -- and `offs` has
+        # len(lens)+1 entries, so `offs[i + 1]` raises that IndexError at exactly
+        # the right index. Same bands, same terminator, measurably faster. Do not
+        # "fix" the missing __iter__ back in without re-checking that; and do not
+        # let `offs` lose its trailing entry, which is what makes iteration
+        # terminate.
         if i < 0:
             i += len(self)
         return self.flat[..., self.offs[i]:self.offs[i + 1]]

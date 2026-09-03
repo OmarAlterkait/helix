@@ -159,15 +159,40 @@ def test_detector_config_mirrors_the_noise_module_constants():
 
 
 def test_xblock_kernel_is_the_forward_coupling_it_claims_to_be():
-    """`xblock_kernel` is (-beta, 1, -beta) and is documented as the forward
-    adjacent-group operator the injector applies -- `w' = w - beta*(w_left +
-    w_right)`, which is `noise.coherent_noise`'s line `base - beta*(left+right)`.
+    """`xblock_kernel` documents the adjacent-group operator the INJECTOR applies.
 
-    It has no caller outside its own test, which is the point: it is provenance.
-    Pinning it to `beta` keeps the two from parting company silently.
+    So the injector is what it has to be compared against. Asserting
+    `cfg.xblock_kernel == (-cfg.beta, 1, -cfg.beta)` restates
+    `config.py`'s own return statement and cannot fail; `tests/test_pipeline.py`
+    already pins the literal. Neither notices if `noise.coherent_noise` changes
+    the coupling it applies, which is the only drift that matters.
+
+    This drives one group to a known non-zero waveform and reads the kernel back
+    off the neighbours. `coherent_noise` renormalises after coupling, but that is
+    a single global scale, so the group-to-group RATIOS survive it exactly.
     """
     from helix.tpc.config import DetectorConfig
 
+    class OneGroupRng:
+        """standard_normal -> ones for group 1's two draws, zeros for the rest."""
+
+        def __init__(self):
+            self.n = 0
+
+        def standard_normal(self, size):
+            self.n += 1
+            return (np.ones(size) if self.n in (3, 4) else np.zeros(size))
+
+    n_ticks = 64
+    out = h_noise.coherent_noise(3, n_ticks, OneGroupRng(), group_size=1)
+    mid = out[1]
+    assert np.abs(mid).max() > 0, "the driven group came out empty; the probe is wrong"
+    recovered = (float(np.dot(out[0], mid) / np.dot(mid, mid)), 1.0,
+                 float(np.dot(out[2], mid) / np.dot(mid, mid)))
+
     cfg = DetectorConfig()
-    assert cfg.xblock_kernel == (-cfg.beta, 1.0, -cfg.beta)
-    assert cfg.xblock_kernel == (-h_noise.DEFAULT_COH_BETA, 1.0, -h_noise.DEFAULT_COH_BETA)
+    for got, want in zip(recovered, cfg.xblock_kernel):
+        assert got == pytest.approx(want, abs=1e-5), (
+            f"the injector's actual coupling {recovered} is not the "
+            f"xblock_kernel {cfg.xblock_kernel} that documents it")
+    assert cfg.beta == h_noise.DEFAULT_COH_BETA

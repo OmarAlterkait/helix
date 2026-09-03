@@ -21,7 +21,7 @@ which had never run once. In `pimm-latest.sif` collection dies on `pywt`.
 H=/sdf/group/neutrino/omara/helix-extraction
 apptainer exec -B /sdf,/lscratch /sdf/group/neutrino/images/develop.sif \
   env PYTHONPATH=$H python3 -m pytest -q
-# expect: 287 passed, ~49 skipped (40 of those are the pimm seam — see below)
+# expect: 297 passed, ~49 skipped (40 of those are the pimm seam — see below)
 ```
 
 **2. pimm seam** — needs a pimm CHECKOUT on `PYTHONPATH`; pimm is not installed
