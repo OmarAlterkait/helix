@@ -106,10 +106,18 @@ class CoeffFMEvaluator(HookBase):
     """
 
     def __init__(self, every_n_steps=0, max_batches=None, mask_seed=7,
-                 grid_free=True):
+                 grid_free=True, mask_mode="random", n_planes=1):
         self.every_n_steps = int(every_n_steps)
         self.max_batches = max_batches
         self.mask_seed = int(mask_seed)
+        # DEFAULT "random", and leave it there for any number meant to be
+        # compared across runs -- see the long note at the make_mask call. The
+        # override exists so the plane-masked task can be scored as a SEPARATE
+        # number, which is what research did (a separate curve, never folded into
+        # val loss). It is reported in the log line, because a row that does not
+        # say which task it scored is not interpretable later.
+        self.mask_mode = str(mask_mode)
+        self.n_planes = int(n_planes)
         # var_expl + charge closure, computed from the SAME forward as the
         # loss (see _forward) — so this is free, not a second pass. Silently
         # inert unless the checkpoint carries the bin centroids.
@@ -299,14 +307,16 @@ class CoeffFMEvaluator(HookBase):
                 # which was already true and is now at least deliberate.
                 gen = torch.Generator(device=device).manual_seed(
                     self.mask_seed + 100003 * comm.get_rank() + i)
-                # mode="random" EXPLICITLY, matching research: mae_ddp.py:216
+                # mask_mode defaults to "random", matching research: mae_ddp.py:216
                 # passes args.mask_mode to perband_mse_cat, so the eval metric is
                 # a pure random-mask number even when plane_frac > 0 (research
                 # reports the plane-masked number as a SEPARATE curve, and only
                 # for non-categorical heads — m113 is categorical, so its eval
                 # was pure random). Without this, plane_frac makes val loss a
                 # 90/10 mixture and it stops being comparable across runs.
-                mask = core.make_mask(B, mode="random", gen=gen)   # SAME every eval
+                mask = core.make_mask(B, mode=self.mask_mode,
+                                      n_planes=self.n_planes,
+                                      gen=gen)                     # SAME every eval
                 ctx = (torch.autocast(
                            device_type=device.type,
                            dtype=(torch.bfloat16
@@ -399,7 +409,8 @@ class CoeffFMEvaluator(HookBase):
                                        / gf["chg_true"])
         if rank0:
             self.trainer.logger.info(
-                f"   [coeff-eval] batches={n} " +
+                f"   [coeff-eval] batches={n} mask={self.mask_mode}"
+                + (f"/{self.n_planes}" if self.mask_mode != "random" else "") + " " +
                 " ".join(f"{k}={v:.4f}" for k, v in sorted(avg.items())))
         writer = getattr(self.trainer, "writer", None)
         if rank0 and writer is not None:

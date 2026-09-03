@@ -304,3 +304,50 @@ def test_the_single_forward_path_still_checks_the_batch_contract():
                                       "chg_true", "chg_pred_s", "chg_true_s")})
     assert "tgt" in str(ei.value) and "losses_cat" in str(ei.value), \
         f"the error must name the key and the objective, got: {ei.value}"
+
+
+def test_eval_mask_mode_defaults_to_random_and_is_honoured():
+    """The eval mask must stay `random` by default, and say so when it is not.
+
+    `random` is deliberate and load-bearing: with `plane_frac > 0` a
+    mixed-mode eval would make val loss a 90/10 blend and stop being comparable
+    across runs, which is why research reported the plane-masked number as a
+    SEPARATE curve. The override exists to produce that separate number, so the
+    two things worth pinning are that the default did not move and that an
+    override actually reaches `make_mask` (rather than being stored and
+    ignored, which is how `WeightEMA(key=)` spent its whole life).
+    """
+    from helix.integrations.pimm.eval import CoeffFMEvaluator
+
+    assert CoeffFMEvaluator().mask_mode == "random", \
+        "the default eval mask changed — every historical val number assumes random"
+    assert CoeffFMEvaluator().n_planes == 1
+
+    ev = CoeffFMEvaluator(mask_mode="plane", n_planes=2)
+    assert (ev.mask_mode, ev.n_planes) == ("plane", 2)
+
+    # the override must reach the model's make_mask, with the mode AND n_planes
+    model = build_fm(dict(ARCH))
+    seen = {}
+    orig = model.make_mask
+
+    def spy(B, ratio=None, mode=None, n_planes=None, gen=None):
+        seen.update(mode=mode, n_planes=n_planes)
+        return orig(B, ratio=ratio, mode=mode, n_planes=n_planes, gen=gen)
+
+    model.make_mask = spy
+    # _batch() carries the loss-side keys only; make_mask needs the geometry.
+    n = 24
+    B = dict(n_cells=n,
+             plane_id=torch.arange(n) % ARCH["n_plane"],
+             wire_pos=torch.arange(n, dtype=torch.float32))
+    m = model.make_mask(B, mode=ev.mask_mode, n_planes=ev.n_planes,
+                        gen=torch.Generator().manual_seed(0))
+    assert seen == dict(mode="plane", n_planes=2)
+    # and it really is the plane task: whole planes, every volume punctured
+    gid = B["plane_id"]
+    for g in gid[m].unique():
+        assert bool(m[gid == g].all()), f"gid {int(g)} only partly masked"
+    vols = torch.div(gid.unique(), 3, rounding_mode="floor").unique()
+    hit_vols = torch.div(gid[m].unique(), 3, rounding_mode="floor").unique()
+    assert len(hit_vols) == len(vols), "a volume escaped the eval plane mask"
