@@ -27,6 +27,22 @@ import numpy as np
 from pathlib import Path
 
 
+def _parse_tau(v):
+    """Occupancy tolerance. Refuses the legacy 'none' spelling by name.
+
+    'none' meant the pre-2026-08-16 magnitude-only refusal rule. Silently
+    accepting it here would let a legacy-rule corpus be built by the primary
+    builder and be indistinguishable at the call site from a current one.
+    """
+    if str(v).lower() == "none":
+        raise SystemExit(
+            "--tau none is the LEGACY magnitude-only gate rule (what corpora "
+            "built before 2026-08-16 used). It is not available here: use "
+            "scripts/build_coeff_corpus_legacy.py on the legacy-corpus-repro "
+            "branch if you are deliberately reproducing an old vintage.")
+    return float(v)
+
+
 def _parse_kgate(text):
     """'4.0' -> 4.0 ; '4.0,3.0' -> [4.0, 3.0] (one entry per gate pass)."""
     parts = [p for p in str(text).split(",") if p.strip() != ""]
@@ -142,9 +158,10 @@ def main():
                     help="occupancy tolerance on the gate's REFUSAL: refuse only "
                          "when |M| is large AND more than this fraction of the "
                          "block's wires were flagged. Default (unset) is "
-                         "DetectorConfig's 0.05 = 3 of 64. Pass 'none' for the "
-                         "legacy magnitude-only rule, which is what corpora built "
-                         "before 2026-08-16 used. Recorded in removal_json.")
+                         "DetectorConfig's 0.05 = 3 of 64. Recorded in "
+                         "removal_json. The legacy magnitude-only rule ('none', "
+                         "what pre-2026-08-16 corpora used) lives on the "
+                         "legacy-corpus-repro branch, not here.")
     ap.add_argument("--run", default="")
     ap.add_argument("--file-index", type=int, default=0)
     ap.add_argument("--events", type=int, default=100)
@@ -157,7 +174,6 @@ def main():
     ap.add_argument("--save-norm-sigma", default=None,
                     help="write the computed norm_sigma to .npy (build shard 0 with this, "
                          "then pass it as --norm-sigma to every other shard)")
-    ap.add_argument("--white", action="store_true", help="use white incoherent noise (old bug)")
     ap.add_argument("--calibrate", action="store_true",
                     help="compute norm_sigma from these events and write it to "
                          "--save-norm-sigma WITHOUT writing shards. A corpus needs ONE "
@@ -214,21 +230,20 @@ def main():
     from helix.tpc.geometry import load_plane_registry
     from helix.tpc.noise import generate_noise, digitize
 
-    noise_spec = None
-    if not args.white:
-        npz = np.load(args.npz, allow_pickle=True)
-        noise_spec = (npz["spectrum_freqs_hz"], npz["spectrum_shape"])
+    # Always the MEASURED spectrum. White incoherent noise was an acknowledged
+    # bug; the switch that reproduced it now lives only on legacy-corpus-repro.
+    npz = np.load(args.npz, allow_pickle=True)
+    noise_spec = (npz["spectrum_freqs_hz"], npz["spectrum_shape"])
     reg = load_plane_registry(args.geom)
     base = config_from_file(args.shard)
     cfg = DetectorConfig(num_time_steps=base.num_time_steps,
                          plane_labels=base.plane_labels, pedestals=base.pedestals,
                          **({} if args.kgate is None else dict(gate_kgate=_parse_kgate(args.kgate))),
                          **({} if args.tau is None else
-                            dict(gate_tau=None if str(args.tau).lower() == "none"
-                                 else float(args.tau))))
+                            dict(gate_tau=_parse_tau(args.tau))))
     print(f"n_time={cfg.num_time_steps} planes={len(cfg.plane_labels)} "
           f"wavelet={cfg.wavelet} L{cfg.dwt_level} removal={cfg.removal} "
-          f"k{cfg.gate_kgate}/np{cfg.gate_npass}/tau{cfg.gate_tau} noise={'white' if args.white else 'colored'}")
+          f"k{cfg.gate_kgate}/np{cfg.gate_npass}/tau{cfg.gate_tau} noise=colored")
 
     use_jax = args.backend == "jax"
     use_torch = args.backend == "torch"
@@ -378,7 +393,7 @@ def main():
     provenance_meta = dict(
         geom=os.path.basename(str(_geom_path)), geom_sha256=_sha256(_geom_path),
         spectrum=os.path.basename(args.npz),
-        spectrum_sha256=None if args.white else _sha256(args.npz),
+        spectrum_sha256=_sha256(args.npz),
         seed_formula=("loader:content_seed(name|0|0|0)" if args.mode == "loader"
                       else "serial:blake2b(run/source_file/ev{n})"),
         builder="build_coeff_corpus.py",
@@ -398,10 +413,10 @@ def main():
         # corpus spanning generations is not one corpus.
         device=_device_name(args.backend))
 
-    noise_meta = dict(kind="white" if args.white else "colored",
+    noise_meta = dict(kind="colored",
                       incoherent=True, coherent=True,
                       group_size=int(cfg.group_size),
-                      spectrum=None if args.white else os.path.basename(args.npz),
+                      spectrum=os.path.basename(args.npz),
                       mode=args.mode, backend=args.backend)
     t0 = time.perf_counter()
     if args.mode == "loader":
