@@ -35,22 +35,45 @@ def grouped_cross(q, k, v, oq, ok, g):
     out = o.new_empty(Tq, h, hd); out[oq] = o; return out
 
 
-def _self(blk, x, at, aw, order, g):
-    T, d = x.shape; hh = blk.n1(x)
+def _self(blk, x, at, aw, order, g, c=None):
+    """Block.forward re-implemented over grouped attention. It MUST mirror every
+    branch Block has, AdaLN included — a missing branch here is silently dead
+    conditioning, not an error."""
+    T, d = x.shape
+    if blk.adaln:
+        sa, ba, ga, sm, bm, gm = blk.ada(c).chunk(6, -1)
+        hh = blk.n1(x) * (1 + sa) + ba
+    else:
+        hh = blk.n1(x)
     q, k, v = blk.qkv(hh).chunk(3, -1)
     q = apply_rope(q.view(T, blk.h, blk.hd), at, aw)
     k = apply_rope(k.view(T, blk.h, blk.hd), at, aw)
     o = uniform_attn(q, k, v.view(T, blk.h, blk.hd), order, g)
-    x = x + blk.proj(o.reshape(T, d)); return x + blk.mlp(blk.n2(x))
+    ao = blk.proj(o.reshape(T, d))
+    x = x + (ga * ao if blk.adaln else ao)
+    if blk.adaln:
+        return x + gm * blk.mlp(blk.n2(x) * (1 + sm) + bm)
+    return x + blk.mlp(blk.n2(x))
 
 
-def _cross(blk, q, kv, qat, qaw, kat, kaw, oq, okv, g):
+def _cross(blk, q, kv, qat, qaw, kat, kaw, oq, okv, g, c=None):
+    """CrossBlock.forward re-implemented over grouped attention — same mirroring
+    obligation as _self."""
     Tq, Tk = q.shape[0], kv.shape[0]
-    qh = apply_rope(blk.q(blk.nq(q)).view(Tq, blk.h, blk.hd), qat, qaw)
+    if blk.adaln:
+        sa, ba, ga, sm, bm, gm = blk.ada(c).chunk(6, -1)
+        hq = blk.nq(q) * (1 + sa) + ba
+    else:
+        hq = blk.nq(q)
+    qh = apply_rope(blk.q(hq).view(Tq, blk.h, blk.hd), qat, qaw)
     k, v = blk.kv(blk.nk(kv)).chunk(2, -1)
     kh = apply_rope(k.view(Tk, blk.h, blk.hd), kat, kaw)
     o = grouped_cross(qh, kh, v.view(Tk, blk.h, blk.hd), oq, okv, g)
-    q = q + blk.proj(o.reshape(Tq, blk.h * blk.hd)); return q + blk.mlp(blk.n2(q))
+    ao = blk.proj(o.reshape(Tq, blk.h * blk.hd))
+    q = q + (ga * ao if blk.adaln else ao)
+    if blk.adaln:
+        return q + gm * blk.mlp(blk.n2(q) * (1 + sm) + bm)
+    return q + blk.mlp(blk.n2(q))
 
 
 class SerialFMModel(FMModel):
@@ -71,6 +94,8 @@ class SerialFMModel(FMModel):
         band, plane = B["band_id"], B["plane_id"]
         sel = slice(None) if idx is None else idx
         x = self.embed(torch.cat([B["inp"][sel], B["occ"][sel]], -1))
+        if self.cond == "adaln":
+            return x                       # identity enters through AdaLN, not additively
         if self.film is not None:
             g, b = self.film(band[sel], plane[sel], B["wirefeat"][sel]); x = g * x + b
         return x + self.band_emb(band[sel]) + self.plane_emb(plane[sel])
@@ -79,16 +104,18 @@ class SerialFMModel(FMModel):
         at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
         aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w)
         x = self._emb(B); sched = self._sched(B["plane_id"], B["t_phys"], B["wire_pos"])
+        c = self._cond(B) if self.cond == "adaln" else None
         for blk, (o, g, uw) in zip(self.enc, sched):
-            x = _self(blk, x, at, aw if uw else None, o, g)
+            x = _self(blk, x, at, aw if uw else None, o, g, c)
         return x
 
     def encode_layers(self, B, layers):
         at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
         aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w)
         x = self._emb(B); sched = self._sched(B["plane_id"], B["t_phys"], B["wire_pos"]); out = {}
+        c = self._cond(B) if self.cond == "adaln" else None
         for i, (blk, (o, g, uw)) in enumerate(zip(self.enc, sched), 1):
-            x = _self(blk, x, at, aw if uw else None, o, g)
+            x = _self(blk, x, at, aw if uw else None, o, g, c)
             if i in layers: out[i] = x
         return out
 
@@ -99,20 +126,26 @@ class SerialFMModel(FMModel):
         vis = ~tok_mask; vis_idx = vis.nonzero(as_tuple=True)[0]; mask_idx = tok_mask.nonzero(as_tuple=True)[0]
         xv = self._emb(B, vis_idx); atv, awv = at[vis], aw[vis]
         sched = self._sched(B["plane_id"][vis], B["t_phys"][vis], B["wire_pos"][vis])
+        c = self._cond(B) if self.cond == "adaln" else None
+        cv = c[vis] if c is not None else None
         for blk, (o, g, uw) in zip(self.enc, sched):
-            xv = _self(blk, xv, atv, awv if uw else None, o, g)
+            xv = _self(blk, xv, atv, awv if uw else None, o, g, cv)
         # CrossMAE decoder (grouped, drift-time): masked queries x-attend visible
         qm = self.mask_tok.expand(mask_idx.numel(), self.d)
-        if self.film is not None:
-            g_, b_ = self.film(B["band_id"][tok_mask], B["plane_id"][tok_mask], B["wirefeat"][tok_mask]); qm = g_ * qm + b_
-        qm = (qm + self.band_emb(B["band_id"][tok_mask]) + self.plane_emb(B["plane_id"][tok_mask])).to(xv.dtype)
+        if c is not None:
+            qm = qm.to(xv.dtype)                # identity enters through AdaLN, not additively
+        else:
+            if self.film is not None:
+                g_, b_ = self.film(B["band_id"][tok_mask], B["plane_id"][tok_mask], B["wirefeat"][tok_mask]); qm = g_ * qm + b_
+            qm = (qm + self.band_emb(B["band_id"][tok_mask]) + self.plane_emb(B["plane_id"][tok_mask])).to(xv.dtype)
         atm, awm = at[tok_mask], aw[tok_mask]
         oq = torch.argsort(B["t_phys"][tok_mask].double()); okv = torch.argsort(B["t_phys"][vis].double())
         # Decoder ALWAYS keeps axial (wire) RoPE: it needs the wire address to know which wire it
         # reconstructs -- dropping it froze recon (var_expl ~2%, same as wire_rope=0). rope_split
         # only affects the ENCODER cross-plane (drift-order) layers, via `dw` in _sched.
+        cm = c[tok_mask] if c is not None else None
         for blk in self.dec:
-            qm = _cross(blk, qm, xv, atm, awm, atv, awv, oq, okv, self.gd)
+            qm = _cross(blk, qm, xv, atm, awm, atv, awv, oq, okv, self.gd, cm)
         x = torch.zeros(N, self.d, dtype=xv.dtype, device=xv.device)
         x = x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm)
         return (self.dec_norm(x), xv) if return_ctx else self.dec_norm(x)

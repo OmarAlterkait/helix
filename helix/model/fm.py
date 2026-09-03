@@ -120,7 +120,7 @@ class FMModel(nn.Module):
         self.mask_tok = nn.Parameter(torch.zeros(d))
         self.enc = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale) for _ in range(blocks))
         if dec_mode == "cross":
-            self.dec = nn.ModuleList(CrossBlock(d, heads, ffn_mult, attn_scale) for _ in range(dec_blocks))
+            self.dec = nn.ModuleList(CrossBlock(d, heads, ffn_mult, attn_scale, adaln) for _ in range(dec_blocks))
         else:
             self.dec = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale) for _ in range(dec_blocks))
         self.dec_norm = nn.LayerNorm(d)
@@ -284,8 +284,9 @@ class FMModel(nn.Module):
                 qm = qm + cond[tok_mask]                          # mask queries carry pos/response
             qm = qm.to(xv.dtype)
             atm, awm = at[tok_mask], (aw[tok_mask] if aw is not None else None)
+            cm = c[tok_mask] if adaln else None                   # AdaLN on the mask queries
             for blk in self.dec:
-                qm = blk(qm, xv, atm, awm, atv, awv)              # masked x-attend visible (full set, RoPE both sides)
+                qm = blk(qm, xv, atm, awm, atv, awv, cm)          # masked x-attend visible (full set, RoPE both sides)
             x = torch.zeros(N, self.d, dtype=xv.dtype, device=xv.device)
             x = x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm)   # visible=encoder feats, masked=decoded
             return (self.dec_norm(x), xv) if return_ctx else self.dec_norm(x)

@@ -105,22 +105,36 @@ class CrossBlock(nn.Module):
     NOTE: queries see the FULL visible set (not a latent summary) — unlike the
     Perceiver bottleneck that capped masked prediction at ~33%."""
 
-    def __init__(self, d, heads, ffn_mult=4, attn_scale=None):
+    def __init__(self, d, heads, ffn_mult=4, attn_scale=None, adaln=False):
         super().__init__()
         self.h, self.hd = heads, d // heads
         self.attn_scale = attn_scale          # muP: 1/head_dim (else None => SDPA default)
-        self.nq = nn.LayerNorm(d); self.nk = nn.LayerNorm(d)
+        self.adaln = adaln
+        # AdaLN modulates the QUERY stream only. Keys/values are encoder output, already
+        # conditioned encoder-side; re-modulating them here would double-apply.
+        self.nq = nn.LayerNorm(d, elementwise_affine=not adaln); self.nk = nn.LayerNorm(d)
         self.q = nn.Linear(d, d); self.kv = nn.Linear(d, 2 * d); self.proj = nn.Linear(d, d)
-        self.n2 = nn.LayerNorm(d)
+        self.n2 = nn.LayerNorm(d, elementwise_affine=not adaln)
         self.mlp = nn.Sequential(nn.Linear(d, ffn_mult * d), nn.GELU(), nn.Linear(ffn_mult * d, d))
+        if adaln:                              # AdaLN-Zero, mirroring Block: zero-init = identity
+            self.ada = nn.Linear(d, 6 * d)
+            nn.init.zeros_(self.ada.weight); nn.init.zeros_(self.ada.bias)
 
-    def forward(self, q, kv, qa_t, qa_w, ka_t, ka_w):
+    def forward(self, q, kv, qa_t, qa_w, ka_t, ka_w, c=None):
         Tq, Tk = q.shape[0], kv.shape[0]
-        qh = apply_rope(self.q(self.nq(q)).view(Tq, self.h, self.hd), qa_t, qa_w)
+        if self.adaln:
+            sa, ba, ga, sm, bm, gm = self.ada(c).chunk(6, -1)     # each (Tq, d), query-side
+            hq = self.nq(q) * (1 + sa) + ba
+        else:
+            hq = self.nq(q)
+        qh = apply_rope(self.q(hq).view(Tq, self.h, self.hd), qa_t, qa_w)
         k, v = self.kv(self.nk(kv)).chunk(2, -1)
         kh = apply_rope(k.view(Tk, self.h, self.hd), ka_t, ka_w)
         vh = v.view(Tk, self.h, self.hd)
         o = F.scaled_dot_product_attention(qh.transpose(0, 1)[None], kh.transpose(0, 1)[None],
                                            vh.transpose(0, 1)[None], scale=self.attn_scale)[0].transpose(0, 1)
-        q = q + self.proj(o.reshape(Tq, self.h * self.hd))
+        ao = self.proj(o.reshape(Tq, self.h * self.hd))
+        q = q + (ga * ao if self.adaln else ao)
+        if self.adaln:
+            return q + gm * self.mlp(self.n2(q) * (1 + sm) + bm)
         return q + self.mlp(self.n2(q))
