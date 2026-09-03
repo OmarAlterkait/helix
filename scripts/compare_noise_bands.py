@@ -41,7 +41,7 @@ import sys
 import numpy as np
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUILDER = os.path.join(HERE, "scripts", "build_coeff_corpus.py")
+BUILDER = os.path.join(HERE, "scripts", "build_coeff_corpus_legacy.py")
 SPECTRUM = "/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz"
 NYQ = 1.0e6
 BANDS = [("0 A4", 0, NYQ / 16), ("1 D4", NYQ / 16, NYQ / 8),
