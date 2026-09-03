@@ -19,7 +19,7 @@ from helix.core.provenance import BasisDescriptor, derive_band_lengths, descript
 from helix.core.coeff_event import CoeffEvent
 from helix.core.coeff_io import (
     write_coeff_shard, read_coeff_event, read_coeff_shard, n_events,
-    coeff_event_to_arrays, arrays_to_coeff_event,
+    arrays_to_coeff_event,
 )
 
 __all__ = [
@@ -28,5 +28,5 @@ __all__ = [
     "BasisDescriptor", "derive_band_lengths", "descriptor_digest",
     "CoeffEvent",
     "write_coeff_shard", "read_coeff_event", "read_coeff_shard", "n_events",
-    "coeff_event_to_arrays", "arrays_to_coeff_event",
+    "arrays_to_coeff_event",
 ]

@@ -59,22 +59,6 @@ def ops(base: str):
     return import_backend_module(base, get_backend())
 
 
-def array_namespace():
-    """Return the array module (np / jnp / torch) for the active backend.
-
-    Imports the framework lazily — only call when you actually need it.
-    """
-    backend = get_backend()
-    if backend == "numpy":
-        import numpy as np
-        return np
-    if backend == "jax":
-        import jax.numpy as jnp
-        return jnp
-    import torch
-    return torch
-
-
 # ── per-VALUE dispatch ───────────────────────────────────────────────────────
 # The functions above dispatch on the ACTIVE BACKEND. These dispatch on an array
 # ITSELF, which is what the pipeline needs: a stage receives whatever the stage
@@ -108,14 +92,6 @@ def is_device(a) -> bool:
     if k == "torch":
         return a.device.type != "cpu"
     return False
-
-
-def to_numpy(a, dtype=None):
-    """Host numpy copy of ``a``, whatever owns it (torch needs detach+cpu)."""
-    import numpy as np
-    if kind_of(a) == "torch":
-        a = a.detach().cpu().numpy()
-    return np.asarray(a, dtype) if dtype is not None else np.asarray(a)
 
 
 #: reduction length above which q50 sorts instead of selecting. 4096 sits well

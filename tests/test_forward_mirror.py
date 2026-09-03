@@ -132,3 +132,42 @@ def test_torch_dense_ops_bit_identical():
     db = p_d.digitize({k: v.clone() for k, v in nb.items()}, peds, n_bits=12)
     for k in da:
         assert torch.equal(da[k], db[k]), f"digitize differs on plane {k}"
+
+
+def test_detector_config_mirrors_the_noise_module_constants():
+    """DetectorConfig carries a THIRD copy of the forward-model constants.
+
+    `test_defaults_match` above pins helix.tpc.noise against pimm_data.noise --
+    two of the three copies. DetectorConfig has its own `noise_enc_x/y/z` and
+    `beta`, and nothing pinned them, so the copy that the corpus builder reads
+    could drift from the copy the injector uses without any test noticing.
+
+    These fields are deliberately unused by removal (their docstrings say so:
+    kept as "a documented mirror of the forward model for provenance /
+    model-based estimators"). A mirror that nothing checks is not a mirror, it is
+    a stale duplicate -- which is exactly what this asserts against.
+    """
+    from helix.tpc.config import DetectorConfig
+
+    cfg = DetectorConfig()
+    assert (cfg.noise_enc_x, cfg.noise_enc_y, cfg.noise_enc_z) == h_noise.DEFAULT_ENC, (
+        "DetectorConfig's ENC triple has drifted from helix.tpc.noise.DEFAULT_ENC; "
+        "the config is what the corpus builder reads, the module is what injects")
+    assert cfg.beta == h_noise.DEFAULT_COH_BETA, (
+        "DetectorConfig.beta has drifted from noise.DEFAULT_COH_BETA -- it is the "
+        "mirror of the injector's adjacent-group anti-correlation coefficient")
+
+
+def test_xblock_kernel_is_the_forward_coupling_it_claims_to_be():
+    """`xblock_kernel` is (-beta, 1, -beta) and is documented as the forward
+    adjacent-group operator the injector applies -- `w' = w - beta*(w_left +
+    w_right)`, which is `noise.coherent_noise`'s line `base - beta*(left+right)`.
+
+    It has no caller outside its own test, which is the point: it is provenance.
+    Pinning it to `beta` keeps the two from parting company silently.
+    """
+    from helix.tpc.config import DetectorConfig
+
+    cfg = DetectorConfig()
+    assert cfg.xblock_kernel == (-cfg.beta, 1.0, -cfg.beta)
+    assert cfg.xblock_kernel == (-h_noise.DEFAULT_COH_BETA, 1.0, -h_noise.DEFAULT_COH_BETA)

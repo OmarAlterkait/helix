@@ -44,7 +44,7 @@ class FlatBands:
     The jax path keeps coefficients flat end to end: ``wavedec`` produces one
     array, the gate and threshold consume and return it untouched, and only the
     final sparse extraction leaves the device. Indexing yields cheap slice views,
-    so anything written against the band-list contract still works — but the jax
+    so len() and integer indexing still work — but the jax
     ops detect this type and operate on ``.flat`` directly, avoiding the
     concatenate/split round trip that a real list forces (four full-array copies
     per plane, which cost more than the dispatches it saved).
@@ -63,18 +63,15 @@ class FlatBands:
         return len(self.lens)
 
     def __getitem__(self, i):
-        if isinstance(i, slice):
-            return [self[k] for k in range(*i.indices(len(self)))]
+        # int only. The slice branch, __iter__ and like() had ZERO call sites
+        # (checked across helix, scripts, tests and research): every consumer
+        # either reads .flat/.lens directly, or uses len() and integer indexing,
+        # or constructs FlatBands itself. The class docstring used to promise
+        # "anything written against the band-list contract still works" -- that
+        # promise had no user and was the only reason the protocol existed.
         if i < 0:
             i += len(self)
         return self.flat[..., self.offs[i]:self.offs[i + 1]]
-
-    def __iter__(self):
-        for i in range(len(self)):
-            yield self[i]
-
-    def like(self, flat):
-        return FlatBands(flat, self.lens)
 
 
 @dataclass

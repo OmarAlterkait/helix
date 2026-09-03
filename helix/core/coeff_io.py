@@ -91,17 +91,12 @@ def _basis_from_config(cfg) -> BasisDescriptor:
 
 # ---- pure per-event (de)serialization — the read contract -----------------
 
-def coeff_event_to_arrays(ce: CoeffEvent) -> dict:
-    """One CoeffEvent → a flat dict of arrays+scalars (what the reader emits)."""
-    return dict(
-        band=ce.band, plane_gid=ce.plane_gid, wire=ce.wire, tau=ce.tau, value=ce.value,
-        gids=ce.gids, n_wires=ce.n_wires, sigma_threshold=ce.sigma_threshold,
-        run=ce.run, source_file=ce.source_file, event=ce.event,
-    )
-
-
 def arrays_to_coeff_event(d: dict, basis: BasisDescriptor) -> CoeffEvent:
-    """Flat dict + basis → CoeffEvent (inverse of `coeff_event_to_arrays`)."""
+    """Flat dict + basis → CoeffEvent (what `read_coeff_event` builds).
+
+    Its forward twin `coeff_event_to_arrays` is deleted: it had no caller, while
+    `write_coeff_shard` builds its columns with np.concatenate itself.
+    """
     return CoeffEvent(
         band=np.asarray(d["band"], np.uint8), plane_gid=np.asarray(d["plane_gid"], np.int32),
         wire=np.asarray(d["wire"], np.int32), tau=np.asarray(d["tau"], np.int32),
