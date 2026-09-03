@@ -27,9 +27,9 @@ def test_patch_config_reads_a_pimm_export_directory(tmp_path):
     pc = patch_config_from_checkpoint(str(d))
     assert pc is not None, "export dir returned no patch config"
     assert pc.cell_t == "grid_center", (
-        f"cell_t must come from the export, got {pc.cell_t!r} - falling back to "
-        f"PatchConfig()'s 'centroid' default silently feeds the model a time "
-        f"coordinate it never trained on")
+        f"cell_t must come from the export, got {pc.cell_t!r} - reading it from "
+        f"anywhere else silently feeds the model a time coordinate it never "
+        f"trained on (this is what PatchConfig()'s old 'centroid' default did)")
 
 
 def test_patch_config_export_without_tokenizer_returns_none(tmp_path):

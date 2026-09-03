@@ -106,9 +106,10 @@ def tokenizer_outputs(tok_cfg=None):
 
     `tok_cfg` is the converted checkpoint's `tokenizer` block, so the golden
     freezes the geometry the WEIGHTS were trained with. It used to be a bare
-    PatchConfig(), whose cell_t default is 'centroid' — while m113 trained with
-    research's 'canonical' (= helix 'grid_center'). Nothing recorded that, so
-    the golden pinned a tokenizer the checkpoint had never seen."""
+    PatchConfig(), which then defaulted cell_t to 'centroid' — while m113 trained
+    with research's 'canonical' (= helix 'grid_center'). Nothing recorded that, so
+    the golden pinned a tokenizer the checkpoint had never seen. PatchConfig has
+    no cell_t default any more, so that particular bare call no longer builds."""
     import glob
     from helix.core.coeff_io import read_coeff_event
     from helix.model.tokenize import assemble, to_fm, PatchConfig

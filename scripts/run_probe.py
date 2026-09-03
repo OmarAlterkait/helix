@@ -219,18 +219,19 @@ def main(argv=None):
         print("WARNING (--allow-stale):", "; ".join(stale), flush=True)
 
     # The tokenizer geometry comes from the CHECKPOINT, never from the default.
-    pcfg = patch_config_from_checkpoint(a.checkpoint)
+    pcfg = patch_config_from_checkpoint(a.checkpoint, cell_t=a.cell_t)
+    src = "checkpoint" if pcfg is not None else "--cell-t"
     if pcfg is None:
         if getattr(a, "cell_t", None) is None:
             raise SystemExit(
                 f"{a.checkpoint} records no tokenizer, and --cell-t was not given.\n"
                 "Refusing to guess. The old fallback was `... or PatchConfig()`, which\n"
                 "silently chose cell_t='centroid' while every helix config trains\n"
-                "'grid_center' -- they differ on 94.06%% of cells (mean |delta| 19.5\n"
+                "'grid_center' -- they differ on 94.06% of cells (mean |delta| 19.5\n"
                 "ticks), so the model would be scored on a time coordinate it never saw.\n"
                 "Pass --cell-t grid_center, or read `cell_t` out of the run's config.py.")
         pcfg = PatchConfig(cell_t=a.cell_t)
-    print(f"tokenizer: cell_t={pcfg.cell_t} pw={pcfg.pw} pt={pcfg.pt}", flush=True)
+    print(f"tokenizer: cell_t={pcfg.cell_t} pw={pcfg.pw} pt={pcfg.pt} (from {src})", flush=True)
 
     n_ev = len(ident) if not a.max_events else min(a.max_events, len(ident))
     print(f"{n_ev} probe events from {os.path.basename(truth_path)}", flush=True)

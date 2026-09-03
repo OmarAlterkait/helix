@@ -235,10 +235,13 @@ transform = [
     # helix's "grid_center" (identical formula; helix renamed it). The two differ
     # on ~94% of cells, so this is not a detail.
     #
-    # PatchConfig's default is "centroid", which research measured as the better
-    # probing representation (3D probe 0.60 vs 0.42). That makes centroid worth
-    # an ablation once probes exist — but it is not what the reference run did,
-    # so it is not the default here.
+    # "centroid" is the other option, and research measured it as the better
+    # probing representation (3D probe 0.60 vs 0.42). Do not read that as better
+    # REPRESENTATION: under centroid a cell's t_phys is an amplitude-weighted
+    # summary of its own coefficients, and t_phys is fed as RoPE position to the
+    # MASKED tokens — so the number is inflated by leakage of the very thing the
+    # probe reads. PatchConfig has no cell_t default at all now, precisely so this
+    # choice cannot be made by omission.
     dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
          cfg=dict(cell_t="grid_center"),
          fm_names=True),

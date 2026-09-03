@@ -207,17 +207,19 @@ def main():
     from run_probe import _load_truth, _position_of
 
     cfg, aw, pix, offs, ident, stale = _load_truth(a.truth, a.corpus, strict=False)
-    pcfg = patch_config_from_checkpoint(a.checkpoint)
+    pcfg = patch_config_from_checkpoint(a.checkpoint, cell_t=a.cell_t)
+    src = "checkpoint" if pcfg is not None else "--cell-t"
     if pcfg is None:
         if getattr(a, "cell_t", None) is None:
             raise SystemExit(
                 f"{a.checkpoint} records no tokenizer, and --cell-t was not given.\n"
                 "Refusing to guess. The old fallback was `... or PatchConfig()`, which\n"
                 "silently chose cell_t='centroid' while every helix config trains\n"
-                "'grid_center' -- they differ on 94.06%% of cells (mean |delta| 19.5\n"
+                "'grid_center' -- they differ on 94.06% of cells (mean |delta| 19.5\n"
                 "ticks), so the model would be scored on a time coordinate it never saw.\n"
                 "Pass --cell-t grid_center, or read `cell_t` out of the run's config.py.")
         pcfg = PatchConfig(cell_t=a.cell_t)
+    print(f"tokenizer: cell_t={pcfg.cell_t} pw={pcfg.pw} pt={pcfg.pt} (from {src})", flush=True)
     n_ev = min(a.max_events, len(ident))
     models = {}
     models["trained"], meta = load_probe_model(a.checkpoint, weights=a.weights)

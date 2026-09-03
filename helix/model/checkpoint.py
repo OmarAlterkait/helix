@@ -10,44 +10,72 @@ subprocess test enforces it.
 
 from __future__ import annotations
 
-def patch_config_from_checkpoint(checkpoint):
+def patch_config_from_checkpoint(checkpoint, cell_t=None):
     """The ``PatchConfig`` a converted checkpoint was TRAINED with.
 
     The blob records ``tokenizer`` (pw, pt, cell_t) because none of it is
     recoverable from the weights. Nothing read it: ``build_coeff_fm`` took only
     config/state_dict/bins, and every recipe built ``CoeffTokenize`` with no
-    ``cfg=``, falling through to ``PatchConfig()`` — whose ``cell_t`` default is
-    ``centroid`` while m113 trained on ``grid_center``. Measured on corpus event
+    ``cfg=``, falling through to a then-defaulted ``PatchConfig()`` — whose
+    ``cell_t`` was ``centroid`` while m113 trained on ``grid_center``. That
+    fallback is gone (``cell_t`` is required now); this records why it had to be. Measured on corpus event
     0, ``t_phys`` differs on 94.06% of 30976 cells, mean |delta| 19.5. So the
     encode recipe restored real trained weights and then fed them a time
     coordinate the model had never seen.
 
     Returns ``None`` when the checkpoint records no tokenizer, so a caller can
     tell "not recorded" from "recorded as the default".
+
+    ``cell_t`` fills the field in for a checkpoint that does not record it, and is
+    CROSS-CHECKED against one that does — see :func:`_patch_config_from_tok`.
     """
     import torch
-    from helix.model.tokenize import PatchConfig
 
     # A `pimm export` DIRECTORY is a valid checkpoint here too. It was not
     # handled: load_probe_model learned about export dirs but this did not, so
     # probing a pimm-trained model died on `IsADirectoryError` in torch.load
     # before it reached the loader that would have coped.
     if is_export_dir(checkpoint):
-        tok = _export_tokenizer_cfg(checkpoint)
-        if not tok:
-            return None
-        kw = {k: tok[k] for k in ("pw", "pt", "cell_t") if k in tok}
-        if tok.get("n_bands"):
-            kw["n_bands"] = int(tok["n_bands"])
-        return PatchConfig(**kw)
+        return _patch_config_from_tok(_export_tokenizer_cfg(checkpoint),
+                                      cell_t, checkpoint)
 
     blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    tok = blob.get("tokenizer")
+    return _patch_config_from_tok(blob.get("tokenizer"), cell_t, checkpoint)
+
+
+def _patch_config_from_tok(tok, cell_t, where):
+    """Build a :class:`PatchConfig` from a recorded tokenizer block.
+
+    Three cases callers must not conflate:
+
+    * **no block** -> ``None``. "Not recorded"; the caller asks the user.
+    * **block without cell_t** -> filled from ``cell_t``, or refused. The block's
+      ``pw``/``pt`` are real information, so returning ``None`` here would be
+      wrong twice over: it would discard them AND silently substitute the
+      ``PatchConfig`` defaults in their place.
+    * **block with cell_t, plus a conflicting ``cell_t``** -> refused. Letting the
+      file quietly win is the same failure this function exists to prevent, only
+      pointed the other way; the four probe scripts used to do exactly that.
+    """
     if not tok:
         return None
+    from helix.model.tokenize import PatchConfig
     kw = {k: tok[k] for k in ("pw", "pt", "cell_t") if k in tok}
     if tok.get("n_bands"):
         kw["n_bands"] = int(tok["n_bands"])
+    rec = kw.get("cell_t")
+    if rec is None:
+        if cell_t is None:
+            raise ValueError(
+                f"{where} records a tokenizer (pw={kw.get('pw')}, pt={kw.get('pt')}) "
+                "but no cell_t, so the time coordinate it trained on is unknown. "
+                "Supply it (--cell-t on the probe scripts).")
+        kw["cell_t"] = cell_t
+    elif cell_t is not None and cell_t != rec:
+        raise ValueError(
+            f"{where} records cell_t={rec!r}, but cell_t={cell_t!r} was requested. "
+            "Refusing to override: one of the two is wrong, and picking either "
+            "silently is how a model gets scored on a coordinate it never saw.")
     return PatchConfig(**kw)
 
 
@@ -217,7 +245,6 @@ def load_export_dir(path, *, device=None):
     import os
     import torch
     from helix.model import build_fm
-    from helix.model.tokenize import PatchConfig
 
     cfg_path = next((os.path.join(path, c) for c in _EXPORT_CONFIGS
                      if os.path.exists(os.path.join(path, c))), None)
@@ -274,5 +301,5 @@ def load_export_dir(path, *, device=None):
     src = full.get("weight") or (full.get("model") or {}).get("checkpoint")
     meta = dict(source="pimm-export", weights=os.path.basename(wpath),
                 weights_source=src, config=mcfg, tokenizer=tok,
-                patch_config=PatchConfig(**tok) if tok else None)
+                patch_config=_patch_config_from_tok(tok, None, wpath))
     return model, meta

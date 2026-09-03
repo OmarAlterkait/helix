@@ -64,12 +64,15 @@ def main(argv=None):
 
     from pimm_data import CoeffTPCDataset
     from helix.model import build_fm
-    from helix.model.tokenize import CoeffTokenize
+    from helix.model.tokenize import CoeffTokenize, PatchConfig
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     ds = CoeffTPCDataset(data_root=a.corpus, dataset_name="sim_wire",
                          modalities=("coeff", "coeff_clean"), transform=None)
-    tk = CoeffTokenize(part="coeff", clean_part="coeff_clean")
+    # cell_t is explicit for the same reason rope_split is below: it leaves no
+    # trace in the weights. 'grid_center' is what every helix config trains.
+    tk = CoeffTokenize(part="coeff", clean_part="coeff_clean",
+                       cfg=PatchConfig(cell_t="grid_center"))
 
     def batch(i):
         B = tk(ds.get_data(i))["coeff"]

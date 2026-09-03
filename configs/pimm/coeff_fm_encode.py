@@ -69,6 +69,9 @@ custom_imports = dict(
 
 CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
 CKPT = "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt"
+# The time coordinate to use when CKPT records no tokenizer block, and to
+# cross-check against when it does. Every helix config trains grid_center.
+CELL_T = "grid_center"
 
 from helix.model.checkpoint import patch_config_from_checkpoint  # noqa: E402
 # Bin edges derived FROM THIS CORPUS (scripts/derive_coeff_bins.py). m113's were
@@ -154,13 +157,18 @@ scheduler = dict(type="OneCycleLR", max_lr=3e-4, pct_start=0.05,
 transform = [
     # cfg= is NOT optional here. This recipe restores real trained weights, and
     # the tokenizer geometry they were trained with is recorded in the checkpoint
-    # (m113: cell_t='grid_center', from research cellt='canonical'). Omitting it
-    # falls through to PatchConfig(), whose cell_t default is 'centroid' — a
+    # (m113: cell_t='grid_center', from research cellt='canonical'). It used to
+    # fall through to PatchConfig(), which then defaulted cell_t to 'centroid' — a
     # different time coordinate on 94.06% of cells (mean |delta| 19.5 on corpus
-    # event 0). The model would be fed coordinates it had never seen, and every
-    # array would still have the right shape.
+    # event 0). The model was fed coordinates it had never seen, and every array
+    # still had the right shape.
+    #
+    # CELL_T is the answer for a checkpoint too old to record a tokenizer (the
+    # 8-run and cooldown checkpoints are). It is CROSS-CHECKED, not preferred: a
+    # checkpoint that does record one and disagrees raises rather than letting
+    # either side win quietly.
     dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
-         fm_names=True, cfg=patch_config_from_checkpoint(CKPT)),
+         fm_names=True, cfg=patch_config_from_checkpoint(CKPT, cell_t=CELL_T)),
     # Terminal per-event step. Not optional and not cosmetic: it flattens the
     # part to the top level, and converts numpy -> torch so pimm's collate takes
     # its CONCATENATE path. Left as numpy, collate sends the arrays to

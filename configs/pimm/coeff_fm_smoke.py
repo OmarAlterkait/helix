@@ -167,10 +167,11 @@ scheduler = dict(type="OneCycleLR", max_lr=3e-4, pct_start=0.25,
 # data — a handful of events, so the run is minutes not hours
 # ---------------------------------------------------------------------------
 transform = [
-    # Pin cell_t explicitly. The default is 'centroid', which research measured
-    # as the better probing representation (3D probe 0.60 vs 0.42) — but a run
-    # that means to be comparable with m113 must say which one it chose, because
-    # the two differ on ~94% of cells and nothing downstream reports it.
+    # cell_t is REQUIRED — PatchConfig has no default, because a run that means
+    # to be comparable with m113 must say which one it chose: the two differ on
+    # ~94% of cells and nothing downstream reports it. ('centroid' is the other
+    # option; research's 3D probe 0.60 vs 0.42 for it is inflated by leakage, see
+    # coeff_fm_train.py.)
     dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
          cfg=dict(cell_t="grid_center"),   # as the long run (m113) did
          fm_names=True),
