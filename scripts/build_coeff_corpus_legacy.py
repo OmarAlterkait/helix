@@ -1,0 +1,478 @@
+"""Rebuild corpora the way they were built BEFORE the fixes — legacy only.
+
+This is a snapshot of `build_coeff_corpus.py` taken at the point the two
+reproduce-the-old-behaviour switches were removed from it, and it exists ONLY on
+this branch. It is deliberately not on `extraction`: reproducing an
+acknowledged-buggy vintage is not something the primary builder should offer by
+default, because the flags sat in the same argparse as the live parameters and
+nothing distinguished them at the call site.
+
+The two switches, and what each reproduces:
+
+  --white      incoherent noise drawn WHITE instead of from the measured
+               spectrum. The commit that made the measured spectrum the default
+               calls this an old bug. It also nulls the spectrum provenance
+               (`spectrum`/`spectrum_sha256` in noise_json), so a shard built
+               this way is self-identifying.
+
+  --tau none   the legacy magnitude-only gate refusal rule, i.e. no occupancy
+               tolerance. This is what every corpus built before 2026-08-16 used.
+               Recorded in removal_json.
+
+Use this only to reproduce a specific historical corpus for comparison. Anything
+destined to be trained on should be built with `build_coeff_corpus.py` on
+`extraction`.
+
+Original module docstring follows.
+Build the coeff corpus from real doraemon sensor shards (the production plane_fn).
+
+Composes pimm-data (geometry + noise — the COLORED incoherent spectrum the old
+build omitted, which defaulted to white) with helix (process_plane gate +
+build_corpus). This is a BUILD-TIME composer: it imports both helix and pimm-data
+(allowed at build time; the read path never does). Not part of the helix package.
+
+plane_fn(event) -> (noisy_planes, clean_planes):
+  noisy = digitize( clean_image + incoherent(colored) + coherent )
+  clean = the noise-free digitized image (co-supported target at the noisy mask)
+
+Usage:
+  python build_coeff_corpus.py --shard <sensor.h5> --out <dir> --events 100 \
+      --npz <noise_spectrum.npz> --geom cubic_wireplane_geometry.json --run <run>
+
+Verified on run_0027575715: ~39k coeffs/plane, D1 ~1.8%, coeff+coeff_clean
+co-supported, reads back through pimm_data.CoeffTPCDataset.
+"""
+import argparse
+import hashlib
+import os
+import sys
+import time
+
+import numpy as np
+from pathlib import Path
+
+
+def _parse_kgate(text):
+    """'4.0' -> 4.0 ; '4.0,3.0' -> [4.0, 3.0] (one entry per gate pass)."""
+    parts = [p for p in str(text).split(",") if p.strip() != ""]
+    vals = [float(p) for p in parts]
+    return vals[0] if len(vals) == 1 else vals
+
+
+def _add_repo_paths(helix_root, pimm_src):
+    for p in (helix_root, pimm_src):
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+
+
+def _loader_stream(args, cfg, reg, noise_spec):
+    """Mode A: pimm-data DataLoader workers + the torch dense tail -> dlpack -> jax.
+
+    The head (`Collect`) runs per-event in worker PROCESSES on sparse COO, so the
+    HDF5 decode overlaps GPU work (measured DataLoader wait: 2.5 ms/event). The
+    tail densifies/noises/digitizes on-device with pimm-data's tested torch ops;
+    the grids cross to jax zero-copy via dlpack.
+
+    Densify runs BEFORE AddNoise, so the clean target is simply the densified
+    image captured before noise is added — no second pass over the event.
+    """
+    import jax
+    import torch
+    from torch.utils.data import DataLoader, Subset
+    from pimm_data import JAXTPCDataset
+    from pimm_data.collate import collate_fn
+    from pimm_data.batch_transforms import content_seed
+    from pimm_data.transform import Compose
+
+    # --shard locates the RUN here, not a file: the sensor reader globs every
+    # shard of the run and builds ONE joint index over all of them. Naming a
+    # different shard of the same run therefore reads exactly the same events.
+    root = args.data_root or str(Path(args.shard).parents[2])
+    split = args.split or Path(args.shard).parent.name
+    head = [dict(type="Collect", parts={"sensor": dict(
+        keys=("wire", "time", "value", "plane_gid"))})]
+    dense = Compose([dict(type="ToDevice", device="cuda"),
+                     dict(type="Densify", geom=reg, modality="sensor")])
+    noise = Compose([dict(type="AddNoise", geom=reg, modality="sensor", coherent=True,
+                          incoherent=True, series_spectrum=noise_spec,
+                          wire_lengths_m=2.33),
+                     dict(type="Digitize", geom=reg, modality="sensor", n_bits=12)])
+    ds = JAXTPCDataset(data_root=root, split=split, dataset_name=args.dataset_name,
+                       modalities=("sensor",), transform=head)
+    # Slice the joint index HERE. --event-start used to be ignored in this mode,
+    # so every invocation re-read the front of the run: a per-shard build loop
+    # produced byte-identical duplicate events in every output shard (noise is
+    # seeded from the event NAME, so even the noise repeated).
+    n_total = len(ds)
+    sel = list(range(min(args.event_start, n_total),
+                     min(args.event_start + args.events, n_total)))
+    if not sel:
+        raise SystemExit(
+            f"--event-start {args.event_start} is past the end of the joint index "
+            f"({n_total} events in {root}/{split}); nothing to build.")
+    ds = Subset(ds, sel)
+    # spawn, NOT fork: DataLoader workers fork while jax is initialised in the
+    # parent, and jax warns that fork + its threads "will likely lead to a
+    # deadlock". spawn re-imports cleanly in each worker.
+    dl = DataLoader(ds, batch_size=1, num_workers=args.workers, collate_fn=collate_fn,
+                    persistent_workers=args.workers > 0,
+                    multiprocessing_context="spawn" if args.workers > 0 else None,
+                    prefetch_factor=2 if args.workers > 0 else None)
+    for b in dl:
+        b = dense(b)
+        grids = b["sensor_dense"]
+        clean = {int(g): jax.dlpack.from_dlpack(t[0].clone().contiguous())
+                 for g, t in grids.items()}            # capture BEFORE noise
+        b = noise(b)
+        noisy = {int(g): jax.dlpack.from_dlpack(t[0].contiguous())
+                 for g, t in b["sensor_dense"].items()}
+        # Carry the TRUE identity ("<file>_evt<NNN>"), which the batch already
+        # holds. The builder used to fabricate provenance from --file-index, so a
+        # shard recorded source_file="..._0001.h5" over bytes read from _0000.h5.
+        nm = b["name"]
+        nm = nm[0] if isinstance(nm, (list, tuple)) else str(nm)
+        src, sep, ev = str(nm).rpartition("_evt")
+        # Resolve the SAME seed AddNoise derived internally, so the one baked-in
+        # noise realisation is recorded and reproducible. AddNoise seeds from
+        # batch['name'] via content_seed with base_seed/epoch/rank all 0 here.
+        seed = content_seed(str(nm), 0, 0, 0)
+        yield (((src, int(ev), seed) if sep and ev.isdigit() else (str(nm), -1, seed)),
+               noisy, clean)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--shard", required=True,
+                    help="sensor HDF5 shard. serial mode reads exactly this file; "
+                         "loader mode uses it only to locate the RUN (it reads the "
+                         "run-wide joint index) -- use --event-start to select within it")
+    ap.add_argument("--out", required=True, help="output corpus dir (<root>/coeff_tpc/<run>/)")
+    ap.add_argument("--npz", default="/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz",
+                    help="colored incoherent series spectrum (freqs_hz, shape)")
+    ap.add_argument("--geom", default="cubic_wireplane_geometry.json",
+                    help="plane registry (pimm_data.geometry.load_plane_registry)")
+    ap.add_argument("--dataset-name", default="wire_test_00_00_02")
+    ap.add_argument("--kgate", type=str, default=None,
+                    help="coherent-gate threshold in units of the per-band coherent "
+                         "scale. None -> DetectorConfig's default (3.0), which is "
+                         "what run_0027575715 was built with. The research figures "
+                         "and evals all used 4.0; at 3.0 genuine coherent excursions "
+                         "are misclassified as signal and survive as block-wide "
+                         "strips (~15x more off-signal residual, and slightly WORSE "
+                         "F0). Recorded in removal_json either way. Accepts a "
+                         "comma-separated PER-PASS sequence too (npass=2), e.g. "
+                         "'4.0,3.0' = aggressive first pass then a permissive "
+                         "second; gate_band already indexes kgate by pass.")
+    ap.add_argument("--tau", type=str, default=None,
+                    help="occupancy tolerance on the gate's REFUSAL: refuse only "
+                         "when |M| is large AND more than this fraction of the "
+                         "block's wires were flagged. Default (unset) is "
+                         "DetectorConfig's 0.05 = 3 of 64. Pass 'none' for the "
+                         "legacy magnitude-only rule, which is what corpora built "
+                         "before 2026-08-16 used. Recorded in removal_json.")
+    ap.add_argument("--run", default="")
+    ap.add_argument("--file-index", type=int, default=0)
+    ap.add_argument("--events", type=int, default=100)
+    ap.add_argument("--event-start", type=int, default=0)
+    ap.add_argument("--cal-events", type=int, nargs="*", default=None,
+                    help="event indices for the normalization table; default = ALL events")
+    ap.add_argument("--norm-sigma", default=None,
+                    help="load a FROZEN global norm_sigma .npy — use this for every shard "
+                         "of a corpus so normalization is identical across shards")
+    ap.add_argument("--save-norm-sigma", default=None,
+                    help="write the computed norm_sigma to .npy (build shard 0 with this, "
+                         "then pass it as --norm-sigma to every other shard)")
+    ap.add_argument("--white", action="store_true", help="use white incoherent noise (old bug)")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="compute norm_sigma from these events and write it to "
+                         "--save-norm-sigma WITHOUT writing shards. A corpus needs ONE "
+                         "frozen table shared by every shard of every run, so calibrate "
+                         "across a sample spanning the runs, average, then pass the "
+                         "result as --norm-sigma to every build job.")
+    ap.add_argument("--allow-index-mismatch", action="store_true",
+                    help="serial mode: permit --file-index to disagree with --shard's "
+                         "numeric suffix (mislabels provenance; use only deliberately)")
+    ap.add_argument("--backend", choices=["numpy", "torch", "jax"], default="torch",
+                    help="GPU DSP backend. torch is the DEFAULT: it measured 10.6 ms "
+                         "vs jax 8.5 ms for DWT+threshold on a real plane (jax is 1.25x "
+                         "faster), which does not pay for a second GPU runtime in the "
+                         "same process — jax alongside torch forces "
+                         "XLA_PYTHON_CLIENT_PREALLOCATE, spawn-only DataLoader workers, "
+                         "and a dlpack bridge. jax stays selectable for that 25%.")
+    ap.add_argument("--mode", choices=["serial", "loader"], default="serial",
+                    help="loader: pimm-data DataLoader workers + the torch dense tail "
+                         "(ToDevice/Densify/AddNoise/Digitize) handed to jax via dlpack. "
+                         "Fastest measured path (181 vs 536 ms/event); read overlaps the GPU.")
+    ap.add_argument("--workers", type=int, default=4, help="DataLoader workers (loader mode)")
+    ap.add_argument("--split", default=None, help="run dir under data_root (loader mode)")
+    ap.add_argument("--data-root", default=None, help="dataset root (loader mode)")
+    # Default to the tree THIS script lives in, not a hardcoded worktree. The
+    # old default (/sdf/group/neutrino/omara/helix-consolidate) was inserted at
+    # sys.path[0], so running the builder from any other checkout silently used
+    # helix-consolidate's code instead — including over PYTHONPATH.
+    ap.add_argument("--helix-root",
+                    default=str(Path(__file__).resolve().parent.parent))
+    ap.add_argument("--pimm-src", default="/sdf/group/neutrino/omara/pimm-data/src")
+    args = ap.parse_args()
+
+    if args.backend == "jax":                    # keep XLA from grabbing the whole card
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    _add_repo_paths(args.helix_root, args.pimm_src)
+    from helix.core import backend
+    backend.set_backend(args.backend)
+    from helix.tpc.io import (config_from_file, read_sensor_event,
+                              read_sensor_event_coo, count_events, list_events)
+    from helix.core.coeff_io import _code_version
+
+    def _device_name(backend):
+        if backend != "torch":
+            return backend
+        try:
+            import torch
+            return (f"torch:{torch.cuda.get_device_name(0)}"
+                    if torch.cuda.is_available() else "torch:cpu")
+        except Exception:
+            return "torch:unknown"
+    from helix.tpc.config import DetectorConfig
+    from helix.tpc.pipeline import canonical_plane_gid
+    from helix.tpc.corpus import build_corpus
+    from helix.tpc.geometry import load_plane_registry
+    from helix.tpc.noise import generate_noise, digitize
+
+    noise_spec = None
+    if not args.white:
+        npz = np.load(args.npz, allow_pickle=True)
+        noise_spec = (npz["spectrum_freqs_hz"], npz["spectrum_shape"])
+    reg = load_plane_registry(args.geom)
+    base = config_from_file(args.shard)
+    cfg = DetectorConfig(num_time_steps=base.num_time_steps,
+                         plane_labels=base.plane_labels, pedestals=base.pedestals,
+                         **({} if args.kgate is None else dict(gate_kgate=_parse_kgate(args.kgate))),
+                         **({} if args.tau is None else
+                            dict(gate_tau=None if str(args.tau).lower() == "none"
+                                 else float(args.tau))))
+    print(f"n_time={cfg.num_time_steps} planes={len(cfg.plane_labels)} "
+          f"wavelet={cfg.wavelet} L{cfg.dwt_level} removal={cfg.removal} "
+          f"k{cfg.gate_kgate}/np{cfg.gate_npass}/tau{cfg.gate_tau} noise={'white' if args.white else 'colored'}")
+
+    use_jax = args.backend == "jax"
+    use_torch = args.backend == "torch"
+    if use_torch:
+        import torch
+        from helix.tpc import dense_ops as _dops
+    if use_jax:
+        import jax
+        import jax.numpy as jnp
+        from pimm_data.noise_jax import generate_noise_jax
+        from pimm_data.dense_ops_jax import densify_plane_jax
+
+    _src_name = Path(args.shard).name
+
+    def _seed(ev):
+        """Noise seed for event ``ev`` of THIS shard.
+
+        The shard name is load-bearing. Seeding on the event index alone means
+        every per-file job — each of which starts at event 0 — draws the SAME
+        noise realisations, so a 500-shard corpus would contain 500 copies of
+        each of 200 noise patterns. That is a learnable artefact for a denoising
+        or MAE model, and every check we have is blind to it: the corpus is
+        deterministic and internally consistent, sigma varies healthily, and the
+        coord_digest pairing is correct. Loader mode never had this (it seeds
+        from the event NAME, which carries the file); serial mode did.
+        """
+        return int.from_bytes(
+            hashlib.blake2b(f"{args.run}/{_src_name}/ev{ev}".encode(),
+                            digest_size=8).digest(), "little") & 0xFFFFFFFF
+
+    def _digitize_jax(x, ped, n_bits=12):
+        """On-device twin of pimm_data.noise.digitize (round -> clip -> unpedestal)."""
+        adc_max = (1 << n_bits) - 1
+        return jnp.clip(jnp.round(x + ped), 0, adc_max) - ped
+
+    def _plane_fn_torch(ev):
+        """Torch: densify + noise + digitize ON DEVICE, same ops as loader mode.
+
+        Without this the torch backend read a dense NUMPY image and noised it on
+        the host before handing it to the GPU DSP — 19.6 s/event against jax's
+        9.1, which made torch look slow when what was slow was the host prologue.
+        Uses pimm-data's batched dense ops with B=1; those are the same
+        implementations the loader tail runs, and the bounds-guarded ones.
+        """
+        spec = read_sensor_event_coo(args.shard, ev, cfg)
+        seed = _seed(ev)
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        w_l, t_l, v_l, p_l = [], [], [], []
+        gmap = {}
+        for label, (w, t, v, nw, nt) in spec.items():
+            gid = canonical_plane_gid(label)
+            gmap[gid] = label
+            w_l.append(torch.as_tensor(np.asarray(w), dtype=torch.long, device=dev))
+            t_l.append(torch.as_tensor(np.asarray(t), dtype=torch.long, device=dev))
+            v_l.append(torch.as_tensor(np.asarray(v), dtype=torch.float32, device=dev))
+            p_l.append(torch.full((len(w),), gid, dtype=torch.long, device=dev))
+        wire = torch.cat(w_l); time_ = torch.cat(t_l)
+        val = torch.cat(v_l); pid = torch.cat(p_l)
+        offset = torch.tensor([wire.numel()], dtype=torch.long, device=dev)
+        grids = _dops.densify(wire, time_, val, pid, offset, reg)
+        clean = {int(g): x[0].clone() for g, x in grids.items()}   # BEFORE noise
+        grids = _dops.add_intrinsic_noise(
+            grids, reg, seeds=[seed], incoherent=True, coherent=True,
+            series_spectrum=noise_spec, group_size=cfg.group_size)
+        peds = {int(g): cfg.pedestals.get(gmap[int(g)].split("_")[-1], 0) for g in grids}
+        grids = _dops.digitize(grids, peds, n_bits=12)
+        return {int(g): x[0] for g, x in grids.items()}, clean
+
+    def plane_fn(ev):
+        if use_torch:
+            return _plane_fn_torch(ev)
+        # jax path reads SPARSE COO and densifies ON DEVICE — building the dense
+        # image on the CPU and copying it across was pure overhead.
+        planes = (read_sensor_event_coo(args.shard, ev, cfg) if use_jax
+                  else read_sensor_event(args.shard, ev, cfg))
+        seed = _seed(ev)
+        rng = None if use_jax else np.random.default_rng(seed)
+        key = jax.random.PRNGKey(seed) if use_jax else None
+        noisy, clean = {}, {}
+        for i, (label, spec) in enumerate(planes.items()):
+            gid = canonical_plane_gid(label)
+            if use_jax:
+                w, t, v, nw, nt = spec
+                img = densify_plane_jax(w, t, v, nw, nt)      # on GPU
+            else:
+                img = spec
+                nw = img.shape[0]
+            wl = np.asarray(reg.get(gid, {}).get("wire_lengths", []), np.float64)
+            if wl.size != nw:
+                wl = np.full(nw, 2.33, np.float64)
+            ped = cfg.pedestals.get(label.split("_")[-1], 0)
+            if use_jax:                                   # noise + digitize on GPU
+                k = jax.random.fold_in(key, i)            # per-plane substream
+                noise = generate_noise_jax(
+                    k, img.shape, wire_lengths_m=wl, incoherent=True, coherent=True,
+                    series_spectrum=noise_spec, group_size=cfg.group_size)
+                noisy[gid] = _digitize_jax(img + noise, ped)
+                clean[gid] = img
+            else:
+                noise = generate_noise(img.shape, rng=rng, wire_lengths_m=wl,
+                                       incoherent=True, coherent=True,
+                                       series_spectrum=noise_spec, group_size=cfg.group_size)
+                noisy[gid] = digitize(img + noise, ped)
+                clean[gid] = img.astype(np.float32)
+        return noisy, clean
+
+    norm_in = np.load(args.norm_sigma) if args.norm_sigma else None
+    if norm_in is not None:
+        print(f"norm_sigma: FROZEN from {args.norm_sigma} {norm_in.shape}")
+    # Recorded into /config/noise_json. Without it, a shard built with --white is
+    # indistinguishable on disk from a colored one, so a corpus accidentally mixed
+    # across invocations is undetectable after the fact.
+    # Serial mode names its output and its /ident/source_file from --file-index
+    # alone, never from --shard. Omitting --file-index in a per-file job loop
+    # therefore mislabels provenance AND collides on the output filename, both
+    # silently. Require the two to agree when --shard carries a numeric suffix.
+    if args.mode == "serial":
+        _stem = Path(args.shard).stem
+        _suf = _stem.rsplit("_", 1)[-1]
+        if _suf.isdigit() and int(_suf) != args.file_index and not args.allow_index_mismatch:
+            raise SystemExit(
+                f"--shard {Path(args.shard).name} is shard {int(_suf)} but --file-index is "
+                f"{args.file_index}. Serial mode derives BOTH /ident/source_file and the "
+                f"output filename from --file-index, so this would label the data as shard "
+                f"{args.file_index} and overwrite that shard's output. Pass "
+                f"--file-index {int(_suf)} (or override deliberately with --allow-index-mismatch).")
+
+    def _sha256(path):
+        try:
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return None
+
+    # Pin the EXTERNAL inputs the DSP consumed but does not contain. basis_digest
+    # covers the wavelet/gate/threshold; it says nothing about the plane geometry
+    # or the noise spectrum, so without these a change to either makes old and new
+    # shards silently incomparable.
+    from helix.tpc.geometry import _resolve as _resolve_geom
+    try:
+        _geom_path = str(_resolve_geom(args.geom))   # registry resolves a bare name
+    except Exception:
+        _geom_path = args.geom
+    provenance_meta = dict(
+        geom=os.path.basename(str(_geom_path)), geom_sha256=_sha256(_geom_path),
+        spectrum=os.path.basename(args.npz),
+        spectrum_sha256=None if args.white else _sha256(args.npz),
+        seed_formula=("loader:content_seed(name|0|0|0)" if args.mode == "loader"
+                      else "serial:blake2b(run/source_file/ev{n})"),
+        builder="build_coeff_corpus.py",
+        # Stamped HERE, by the composer, not only inside helix's writer. This
+        # script sys.path-injects a --helix-root and a --pimm-src, so the tree
+        # that runs is chosen at the command line; the writer can only report
+        # the helix it was imported from, and only if it is recent enough to try.
+        # run_0027575715 shows why: 0 of its 100 shards carry `code`, so
+        # verify_corpus skipped its mixed-tree check and reported the corpus
+        # clean, while a surviving build log shows 12 shards imported corpus.py
+        # from a different worktree.
+        code=_code_version(),
+        pimm_data_src=os.path.abspath(args.pimm_src),
+        # The GPU generation is part of the build, not the environment: the
+        # torch DSP path is architecture-sensitive (turing vs A100 differ on
+        # 0.016% of surviving coefficients for identical code and input), so a
+        # corpus spanning generations is not one corpus.
+        device=_device_name(args.backend))
+
+    noise_meta = dict(kind="white" if args.white else "colored",
+                      incoherent=True, coherent=True,
+                      group_size=int(cfg.group_size),
+                      spectrum=None if args.white else os.path.basename(args.npz),
+                      mode=args.mode, backend=args.backend)
+    t0 = time.perf_counter()
+    if args.mode == "loader":
+        from helix.tpc.corpus import build_corpus_stream
+        stream = _loader_stream(args, cfg, reg, noise_spec)
+        noisy, clean, norm = build_corpus_stream(
+            stream, cfg, args.out, dataset_name=args.dataset_name, run=args.run,
+            file_index=args.file_index, norm_sigma=norm_in, noise=noise_meta,
+            provenance=provenance_meta, write=not args.calibrate,
+            with_clean=not args.calibrate,
+            cal_events=tuple(args.cal_events) if args.cal_events else None)
+    else:
+        # Select from the ids that EXIST, not from range(count): production files
+        # can omit an id in the middle, so a count-derived range asks for a
+        # missing event (hard failure) and drops a real one off the tail.
+        # --event-start/--events stay positional into this list, so shards
+        # partition the file without overlap however the ids are numbered.
+        _ids = list_events(args.shard)
+        _evs = _ids[args.event_start:args.event_start + args.events]
+        if len(_ids) != (_ids[-1] - _ids[0] + 1 if _ids else 0):
+            _absent = sorted(set(range(_ids[0], _ids[-1] + 1)) - set(_ids))
+            print(f"note: {Path(args.shard).name} has non-contiguous event ids — "
+                  f"{len(_absent)} absent in {_ids[0]}..{_ids[-1]}: {_absent[:10]}"
+                  f"{'...' if len(_absent) > 10 else ''}", flush=True)
+        # carry (source_file, event, resolved_seed) so /ident records the true
+        # origin AND the one noise realisation this shard bakes in
+        events = [(_src_name, e, _seed(e)) for e in _evs]
+        noisy, clean, norm = build_corpus(events, plane_fn, cfg, args.out,
+                                          dataset_name=args.dataset_name, run=args.run,
+                                          file_index=args.file_index, norm_sigma=norm_in,
+                                          noise=noise_meta,
+                                          provenance=provenance_meta,
+                                          write=not args.calibrate,
+                                          with_clean=not args.calibrate,
+                                          cal_events=tuple(args.cal_events) if args.cal_events else None)
+    dt = time.perf_counter() - t0
+    print(f"built {len(noisy)} events in {dt:.1f}s ({dt/max(len(noisy),1):.1f}s/ev); "
+          f"coeffs/event={[ce.n_coeff for ce in noisy]}")
+    if args.save_norm_sigma and norm is not None:
+        Path(args.save_norm_sigma).parent.mkdir(parents=True, exist_ok=True)
+        np.save(args.save_norm_sigma, norm)
+        print(f"saved norm_sigma -> {args.save_norm_sigma}")
+    print(f"norm_sigma {None if norm is None else norm.shape}"
+          f"{' (frozen/global)' if norm_in is not None else ' (derived from this shard)'}"
+          f"; wrote -> {args.out}")
+
+
+if __name__ == "__main__":
+    main()
