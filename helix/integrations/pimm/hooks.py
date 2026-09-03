@@ -142,11 +142,10 @@ class WeightEMA(HookBase):
     optimisation, so it needs no synchronisation.
     """
 
-    def __init__(self, decay=0.9999, save_freq=None, key="state_dict_ema",
+    def __init__(self, decay=0.9999, save_freq=None,
                  max_drift=None, on_drift="discard"):
         self.decay = float(decay)
         self.save_freq = save_freq
-        self.key = key
         self.max_drift = max_drift
         self.on_drift = on_drift
         self._shadow = None

@@ -103,10 +103,30 @@ MicroBooNE spectrum) + flat white noise + coherent group noise.
 
 ## Scripts
 
-- `scripts/run_metrics.py` -- Run 200-event metrics (3 modes x 5 seeds)
-- `scripts/plot_metrics.py` -- Key metrics plots from run_metrics output
-- `scripts/plot_steps.py` -- Step-by-step pipeline visualization
-- `scripts/plot_gallery.py` -- Multi-event before/after gallery
-- `scripts/plot_wavelet_levels.py` -- Per-level DWT band visualization
-- `scripts/plot_wavelet_coeffs.py` -- 2D wavelet coefficient maps
-- `scripts/passes_sweep.py` -- Sweep n_passes for different sigma/dilation
+Corpus:
+
+- `scripts/build_coeff_corpus.py` -- build coefficient shards from sensor shards
+- `scripts/submit_coeff_corpus.sh` -- the Slurm job array around it
+- `scripts/calibrate_norm_sigma.sh` -- the one frozen norm_sigma table a corpus shares
+- `scripts/derive_coeff_bins.py` -- the categorical bin grid
+- `scripts/viz_2x2_corpus.py` -- raw/clean/gated/residual panels for one event
+
+Training:
+
+- `scripts/submit_coeff_fm_train.sh` / `scripts/chain_coeff_fm_train.sh` -- launch, and chain across the wall-clock limit
+- `scripts/smoke_train_fm.py` -- does the loop run at all
+- `scripts/plot_train_progress.py` -- loss/bce/grid-free curves across runs
+
+Evaluation:
+
+- `scripts/eval_checkpoint.py` -- score a checkpoint on the held-out split
+- `scripts/dump_probe_truth.py` -- freeze the probe's truth arrays
+- `scripts/run_probe.py` -- the 3D deconvolution probe
+- `scripts/feats_rank.py` -- per-layer feature rank (RankMe)
+- `scripts/probe_xattn.py` -- decoder cross-attention maps
+- `scripts/viz_mask_recon.py` -- masked reconstructions
+
+The seven scripts this section used to list were all deleted long before; only
+`plot_metrics.py` still existed, and it read the output of `run_metrics.py`,
+which did not. The white-vs-colored noise comparison lives on the
+`legacy-corpus-repro` branch, with the only builder that can still run it.

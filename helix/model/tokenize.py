@@ -56,14 +56,15 @@ def sigma_for_rows(plane_gid, band, gids, norm_sigma):
     return ns[gid_rows(plane_gid, gids), b]
 
 
-def normalize_values(value, plane_gid, band, gids, norm_sigma, *, sigma_norm=1.0,
-                     eps=1e-6):
+def normalize_values(value, plane_gid, band, gids, norm_sigma, *, eps=1e-6):
     """``arcsinh(value / sigma)`` with the per-(plane, band) sigma.
 
-    ``sigma_norm`` is carried for provenance only: the old pipeline stored
-    ``value * SIGMA/sigma`` and then took ``arcsinh(v / SIGMA)``, so SIGMA
-    cancels. Storing RAW values makes that cancellation explicit — the scalar
-    does not affect the result and defaults to 1.
+    There used to be a ``sigma_norm=`` here, its own docstring explaining that it
+    "does not affect the result": the old pipeline stored ``value * SIGMA/sigma``
+    and then took ``arcsinh(v / SIGMA)``, so SIGMA cancels. Storing RAW values
+    makes that cancellation explicit. No caller ever passed it and the body never
+    read it — an argument that is provenance for a cancellation is a comment, so
+    it is one now. The value itself still travels on disk, in ``/config``.
     """
     sig = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), eps)
     return np.arcsinh(np.asarray(value, np.float32) / sig).astype(np.float32)
@@ -84,10 +85,11 @@ from dataclasses import dataclass
 class PatchConfig:
     """Patch geometry + time-coordinate constants of the FM tokenizer.
 
-    Defaults reproduce ``research/coeff_foundation_model/vit_tpc.py`` exactly:
-    PW=16 wires x PT=8 band-ticks -> 128 slots, over the first 4 bands
+    The GEOMETRY defaults reproduce ``research/coeff_foundation_model/vit_tpc.py``
+    exactly: PW=16 wires x PT=8 band-ticks -> 128 slots, over the first 4 bands
     (A4, D4, D3, D2 — the FM dropped D1). ``FM_PW``/``FM_PT`` env-var mutation of
-    module globals is replaced by explicit fields.
+    module globals is replaced by explicit fields. ``cell_t`` deliberately has NO
+    default and so does not reproduce research's — see the field below.
     """
     pw: int = 16
     pt: int = 8
@@ -680,13 +682,12 @@ class CoeffTokenize:
 
     scope = "sample"
 
-    def __init__(self, part="coeff", clean_part="coeff_clean", out_part=None,
+    def __init__(self, part="coeff", clean_part="coeff_clean",
                  cfg=None, dead_frac=0.0, seed=None, gids=None, n_wires=None,
                  band_lengths=None, norm_sigma=None, fm_names=True):
         cfg = _require_cfg(cfg)
         self.part = part
         self.clean_part = clean_part
-        self.out_part = out_part or part
         self.cfg = cfg if isinstance(cfg, PatchConfig) else PatchConfig(**(cfg or {}))
         self.dead_frac = float(dead_frac)
         self.seed = seed
@@ -736,7 +737,7 @@ class CoeffTokenize:
         # `B["plane_id"].shape[0]` (the cell row-space length), and a python int
         # would not survive collate as a per-event value anyway.
         out["_meta"] = dict(n_cells=n_cells, n_slot=self.cfg.n_slot)
-        data[self.out_part] = out
-        if self.clean_part in data and self.clean_part != self.out_part:
+        data[self.part] = out
+        if self.clean_part in data and self.clean_part != self.part:
             del data[self.clean_part]        # its values are folded into tgt
         return data

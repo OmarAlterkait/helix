@@ -49,7 +49,7 @@ def mlp_designs(geo, arms):
     return out
 
 
-def slab_context(plane, tick, feats, wire, event, *, tbin=8, n_planes=6):
+def slab_context(plane, tick, feats, wire, event, *, tbin=8):
     """Drift-time-matched context from the other two planes of the same volume.
 
     A "slab" is one ``(EVENT, volume, plane, tick // tbin)`` cell. For each row we

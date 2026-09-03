@@ -2,8 +2,9 @@
 
 The wavelet path operates on the STORED chunks (goop's gap-compressed
 "stitches") directly — no deslicing — since each chunk is already a contiguous,
-pedestal-baselined active segment. ``deslice_side`` is kept only for
-visualization / dense views.
+pedestal-baselined active segment. There was a ``deslice_side`` here that
+rebuilt the dense view "for visualization"; nothing called it, in helix or in
+pimm-data, so it went with the rest of the unused surface.
 
 NOTE: this reads the east/west schema (event_NNN/{east,west}/{adc,offsets,
 t0_ns,pmt_id} + pe_counts_{side}); the upstream goop loader expects label_N
@@ -130,22 +131,3 @@ def pad_batch(chunks: list[np.ndarray], level: int) -> tuple[np.ndarray, np.ndar
     for i, c in enumerate(chunks):
         batch[i, :len(c)] = c
     return batch, lengths
-
-
-def deslice_side(path: str | Path, event_key: str, side: str, config: OpticalConfig):
-    """Dense (n_pmts, n_bins) pedestal-subtracted array for one side (viz only)."""
-    with h5py.File(path, "r") as f:
-        g = f[event_key][side]
-        adc = g["adc"][:].astype(np.float32)
-        offsets = g["offsets"][:]
-        t0_ns = g["t0_ns"][:].astype(np.float64)
-        pmt_id = g["pmt_id"][:]
-    lens = np.diff(offsets)
-    t0 = t0_ns.min()
-    start = np.round((t0_ns - t0) / config.tick_ns).astype(np.int64)
-    n_bins = int((start + lens).max())
-    dense = np.full((config.n_pmts_per_side, n_bins), config.pedestal, np.float32)
-    for k in range(len(pmt_id)):
-        d = adc[offsets[k]:offsets[k + 1]]
-        dense[int(pmt_id[k]), start[k]:start[k] + len(d)] = d
-    return dense - config.pedestal, float(t0)
