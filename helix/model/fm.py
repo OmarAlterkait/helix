@@ -42,7 +42,8 @@ from helix.model.mask import make_mask
 # existing consumer is the wrong place to express a per-run choice, so the
 # training recipe opts in explicitly instead.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
-                   plane_frac=0.0, loss_fused=False, vis_w=0.0, noisy=False,
+                   plane_frac=0.0, plane_mode="plane",
+                   loss_fused=False, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None)
 
 
@@ -363,11 +364,14 @@ class FMModel(nn.Module):
         """Draw a token mask for this batch under the model's configured policy.
 
         ``plane_frac`` mixes the two modes PER STEP: with that probability the
-        step masks whole planes, otherwise it uses ``mask_mode``. That mix is the
-        point — a run that only ever masks randomly never has to reconstruct a
-        plane it cannot see, so nothing forces cross-plane triangulation, and a
-        run that only ever masks planes never learns the within-plane task.
-        m113 trained at 0.1 (research mae_ddp.py:187).
+        step masks whole planes (``plane_mode``, default ``"plane"``), otherwise
+        it uses ``mask_mode``. That mix is the point — a run that only ever masks
+        randomly never has to reconstruct a plane it cannot see, so nothing forces
+        cross-plane triangulation, and a run that only ever masks planes never
+        learns the within-plane task. m113 trained at 0.1 (research
+        mae_ddp.py:187), with ``plane_mode="plane_any"`` semantics — set that to
+        reproduce it, since ``"plane"`` punctures every volume and is a harder
+        task.
 
         An explicit ``mode=`` overrides the policy and skips the draw, so callers
         that want one specific mode (evaluation, tests) are unaffected.
@@ -383,7 +387,7 @@ class FMModel(nn.Module):
                  if (gen is not None and gen.device.type == dev.type)
                  else torch.rand((), device=dev))
             if float(r) < self.plane_frac:
-                m = "plane"
+                m = self.plane_mode
         return make_mask(B, m,
                          self.mask_ratio if ratio is None else ratio,
                          self.n_planes if n_planes is None else n_planes, gen=gen)

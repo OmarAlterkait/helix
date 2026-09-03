@@ -123,7 +123,8 @@ def main():
     ap.add_argument("--dataset-name", default="sim_wire")
     ap.add_argument("--tag", default="model")
     ap.add_argument("--events", type=int, nargs="+", default=[0])
-    ap.add_argument("--mode", default="both", choices=["random", "plane", "both"])
+    ap.add_argument("--mode", default="both",
+                    choices=["random", "plane", "plane_any", "both"])
     ap.add_argument("--ratio", type=float, default=0.75)
     ap.add_argument("--n-planes", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)

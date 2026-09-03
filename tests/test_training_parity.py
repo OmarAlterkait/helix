@@ -116,12 +116,18 @@ def test_mask_draw_is_identical():
     # generator), so this is the training-relevant comparison. The global seed is
     # pinned around each call because 'plane' mode draws its permutation from the
     # global rng.
-    for mode, ratio, n_planes in (("random", 0.5, 1), ("plane", 0.5, 2),
+    # research's 'plane' is helix's 'plane_any' -- helix's 'plane' is the
+    # per-volume variant (a deliberate divergence, pinned by
+    # test_plane_mask_punctures_every_volume). 'plane_any' exists precisely so
+    # the historical selection stays reproducible, so it must still be
+    # byte-identical here.
+    for mode, ratio, n_planes in (("random", 0.5, 1), ("plane_any", 0.5, 2),
                                   ("block", 0.3, 1)):
         torch.manual_seed(11)
         a = helix_mask(B, mode, ratio, n_planes)
         torch.manual_seed(11)
-        b = research_mask(B, mode, ratio, n_planes)
+        b = research_mask(B, "plane" if mode == "plane_any" else mode,
+                          ratio, n_planes)
         assert torch.equal(a, b), f"mask differs for mode={mode} (gen=None)"
     # and with an explicit generator, for the modes that honour it identically
     for mode, ratio, n_planes in (("random", 0.5, 1), ("block", 0.3, 1)):
@@ -132,15 +138,16 @@ def test_mask_draw_is_identical():
 
 @research_required
 def test_plane_mask_is_reproducible_here_but_not_in_research():
-    """The one deliberate behavioural delta from research.
+    """One of two deliberate deltas from research in 'plane' mode.
 
     research/train.py calls `torch.randperm(len(gids), device=dev)` with no
     generator, so 'plane' mode draws from the GLOBAL rng and a caller-supplied
     `gen` does nothing — research's own perband_mse builds a seeded generator per
     batch for reproducible eval and never got it. helix threads `gen` through.
 
-    Training is unaffected: mae_ddp calls make_mask with gen=None, where the two
-    are byte-identical (pinned above)."""
+    The second delta is per-volume selection (see
+    test_plane_mask_punctures_every_volume), so unlike the other modes 'plane' is
+    no longer byte-identical to research even at gen=None."""
     import ast
     from helix.model.mask import make_mask as helix_mask
     src = pathlib.Path(RESEARCH, "train.py").read_text()
@@ -151,10 +158,12 @@ def test_plane_mask_is_reproducible_here_but_not_in_research():
     research_mask = ns["make_mask"]
 
     B = _batch(ARCH["n_slot"], ARCH["n_band"], ARCH["n_plane"])
-    draw = lambda fn: {fn(B, "plane", 0.5, 2, torch.Generator().manual_seed(5))
-                       .numpy().tobytes() for _ in range(8)}
-    assert len(draw(helix_mask)) == 1, "helix plane mask is not gen-reproducible"
-    assert len(draw(research_mask)) > 1, (
+    draw = lambda fn, mode: {fn(B, mode, 0.5, 2, torch.Generator().manual_seed(5))
+                             .numpy().tobytes() for _ in range(8)}
+    for mode in ("plane", "plane_any"):
+        assert len(draw(helix_mask, mode)) == 1, \
+            f"helix {mode} mask is not gen-reproducible"
+    assert len(draw(research_mask, "plane")) > 1, (
         "research plane mask became reproducible — this test documents a defect "
         "that apparently no longer exists; delete it")
 
@@ -366,3 +375,99 @@ def test_multi_step_trajectory_is_identical(mode):
             assert torch.equal(sn["exp_avg_sq"], sr["exp_avg_sq"]), f"group {gi}: exp_avg_sq"
 
     assert len(set(losses_seen)) > 1, "loss never changed — the step is a no-op"
+
+
+def test_plane_mask_punctures_every_volume():
+    """'plane' hides n_planes views PER VOLUME, leaving no volume intact.
+
+    The point of the mode is to force cross-plane triangulation, and the global
+    selection it replaces did not. Measured on a real R1 event (gids 0..5 = two
+    volumes x three views), `n_planes=1` masked 16.5% of cells and left the
+    punctured volume two of three views in EVERY draw while the other volume
+    stayed fully sighted; two views already determine a 3D point, so the model
+    could interpolate. Even `n_planes=3` left a volume untouched in ~90% of
+    draws.
+
+    This is a deliberate divergence from research/train.py, which is why 'plane'
+    is excluded from the byte-identity parity above.
+    """
+    from helix.model.mask import make_mask, VIEWS_PER_VOLUME
+
+    B = _batch(ARCH["n_slot"], ARCH["n_band"], ARCH["n_plane"])
+    gid = B["plane_id"]
+    gids = gid.unique()
+    vols = torch.div(gids, VIEWS_PER_VOLUME, rounding_mode="floor").unique()
+    assert len(vols) > 1, "fixture must span >1 volume or this proves nothing"
+
+    for n_planes in (1, 2):
+        for seed in range(25):
+            m = make_mask(B, "plane", 0.5, n_planes,
+                          torch.Generator().manual_seed(seed))
+            hit = gid[m].unique()
+            # whole planes, never partial ones
+            for g in hit:
+                assert bool(m[gid == g].all()), f"gid {int(g)} only partly masked"
+            # every volume punctured, exactly n_planes of its views
+            per_vol = torch.div(hit, VIEWS_PER_VOLUME, rounding_mode="floor")
+            for v in vols:
+                k = int((per_vol == v).sum())
+                assert k == n_planes, (
+                    f"volume {int(v)} lost {k} planes, expected {n_planes} — a "
+                    f"fully sighted volume lets the model interpolate instead of "
+                    f"triangulating")
+
+
+def test_plane_any_leaves_a_volume_intact_and_plane_does_not():
+    """The two selections are two different TASKS; pin the difference.
+
+    `plane_any` is the historical/research selection: n_planes from the whole
+    event, so with two volumes one of them routinely survives untouched. Two
+    views already determine a 3D point, so an intact volume lets the model
+    interpolate instead of triangulating -- which is why `plane` exists and why
+    `plane_any` is kept only for reproducing the runs that used it.
+    """
+    from helix.model.mask import make_mask, VIEWS_PER_VOLUME
+
+    B = _batch(ARCH["n_slot"], ARCH["n_band"], ARCH["n_plane"])
+    gid = B["plane_id"]
+    vol_of = lambda g: torch.div(g, VIEWS_PER_VOLUME, rounding_mode="floor")
+    vols = vol_of(gid.unique()).unique()
+    assert len(vols) > 1, "fixture must span >1 volume or this proves nothing"
+
+    intact = {"plane": 0, "plane_any": 0}
+    for mode in intact:
+        for seed in range(50):
+            hit = gid[make_mask(B, mode, 0.5, 1,
+                                torch.Generator().manual_seed(seed))].unique()
+            if len(vol_of(hit).unique()) < len(vols):
+                intact[mode] += 1
+    assert intact["plane"] == 0, (
+        f"'plane' left a volume fully sighted in {intact['plane']}/50 draws")
+    assert intact["plane_any"] > 0, (
+        "'plane_any' never left a volume intact -- it is supposed to be the "
+        "selection that can, so either the fixture or the mode is wrong")
+
+
+def test_plane_frac_mixer_honours_plane_mode():
+    """`plane_frac` steps must use the selection the run asked for.
+
+    The mixer hardcoded "plane". A run set up to reproduce m113 needs those steps
+    to be `plane_any`, and nothing in the loss would show the difference.
+    """
+    from helix.model import build_fm
+
+    B = _batch(ARCH["n_slot"], ARCH["n_band"], ARCH["n_plane"])
+    gid = B["plane_id"]
+    vol_of = lambda g: torch.div(g, 3, rounding_mode="floor")
+    vols = vol_of(gid.unique()).unique()
+
+    seen = {}
+    for pm in ("plane", "plane_any"):
+        model = build_fm(dict(ARCH), plane_frac=1.0, plane_mode=pm, n_planes=1)
+        torch.manual_seed(0)
+        seen[pm] = sum(len(vol_of(gid[model.make_mask(B)].unique()).unique())
+                       < len(vols) for _ in range(50))
+    assert seen["plane"] == 0, "plane_mode='plane' still left a volume intact"
+    assert seen["plane_any"] > 0, (
+        "plane_mode='plane_any' never left one intact — the mixer is ignoring "
+        "plane_mode and hardcoding a selection again")
