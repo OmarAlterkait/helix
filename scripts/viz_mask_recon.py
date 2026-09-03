@@ -146,6 +146,9 @@ def main():
                          "what the reference reports; 'mode' is the reference's "
                          "bright-pixel-fidelity read-out.")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--cell-t", default=None, choices=("grid_center", "centroid"),
+                    help="tokenizer cell_t, REQUIRED when the checkpoint records no "
+                         "tokenizer. helix configs train grid_center.")
     a = ap.parse_args()
 
     import torch
@@ -159,7 +162,17 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     corpus = os.path.abspath(a.corpus)
     ident = _load_identity(a.truth)
-    pcfg = patch_config_from_checkpoint(a.checkpoint) or PatchConfig()
+    pcfg = patch_config_from_checkpoint(a.checkpoint)
+    if pcfg is None:
+        if getattr(a, "cell_t", None) is None:
+            raise SystemExit(
+                f"{a.checkpoint} records no tokenizer, and --cell-t was not given.\n"
+                "Refusing to guess. The old fallback was `... or PatchConfig()`, which\n"
+                "silently chose cell_t='centroid' while every helix config trains\n"
+                "'grid_center' -- they differ on 94.06%% of cells (mean |delta| 19.5\n"
+                "ticks), so the model would be scored on a time coordinate it never saw.\n"
+                "Pass --cell-t grid_center, or read `cell_t` out of the run's config.py.")
+        pcfg = PatchConfig(cell_t=a.cell_t)
     print(f"tokenizer: cell_t={pcfg.cell_t} pw={pcfg.pw} pt={pcfg.pt} "
           f"n_bands={pcfg.n_bands}", flush=True)
 

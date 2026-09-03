@@ -77,7 +77,10 @@ def sample():
 
     ds = CoeffTPCDataset(data_root=CORPUS, dataset_name="sim_wire",
                          modalities=("coeff", "coeff_clean"), transform=None)
-    tok = CoeffTokenize(part="coeff", clean_part="coeff_clean")(ds.get_data(0))
+    # cell_t is explicit: PatchConfig has no default, and grid_center is what
+    # every helix config trains.
+    tok = CoeffTokenize(part="coeff", clean_part="coeff_clean",
+                        cfg=dict(cell_t="grid_center"))(ds.get_data(0))
     # CoeffCollect without importing helix.integrations.pimm (which needs pimm):
     # exercise the same logic the registered transform applies.
     out = {k: torch.from_numpy(np.ascontiguousarray(v))

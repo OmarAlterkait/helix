@@ -151,12 +151,12 @@ def test_duplicate_coordinates_are_rejected_not_silently_overwritten():
     with pytest.raises(ValueError, match="duplicate coefficient coordinates"):
         assemble(band, gid, wire, tau, np.array([1., 2., 3.], np.float32),
                  gids=gids, n_wires=np.array([64]), band_lengths=LENS_T,
-                 norm_sigma=np.ones((1, 4), np.float32))
+                 norm_sigma=np.ones((1, 4), np.float32), cfg=PatchConfig(cell_t="grid_center"))
     # and the de-duplicated version tokenizes cleanly, with the gather holding
     out = assemble(band[1:], gid[1:], wire[1:], tau[1:],
                    np.array([2., 3.], np.float32), gids=gids,
                    n_wires=np.array([64]), band_lengths=LENS_T,
-                   norm_sigma=np.ones((1, 4), np.float32))
+                   norm_sigma=np.ones((1, 4), np.float32), cfg=PatchConfig(cell_t="grid_center"))
     np.testing.assert_allclose(out["inp"][out["cell"], out["slot"]], out["val"])
 
 
@@ -166,7 +166,7 @@ def test_cell_t_modes_differ_and_centroid_is_occupancy_sensitive():
     gids = np.array([0, 1])
     band, gid, wire, tau, raw, _, sigma = _rows(seed=17, gids=(0, 1), nw=256)
     kw = dict(gids=gids, n_wires=np.full(2, 256), band_lengths=LENS_T,
-              norm_sigma=sigma)
+              norm_sigma=sigma)   # cfg passed per-call: these tests compare cell_t modes
     a = assemble(band, gid, wire, tau, raw, cfg=PatchConfig(cell_t="grid_center"), **kw)
     b = assemble(band, gid, wire, tau, raw, cfg=PatchConfig(cell_t="centroid"), **kw)
     assert not np.allclose(a["cell_t"], b["cell_t"])
@@ -180,7 +180,14 @@ def test_cell_t_modes_differ_and_centroid_is_occupancy_sensitive():
     d = assemble(band, gid, wire, tau, raw * np.linspace(0.1, 4.0, raw.size).astype(np.float32),
                  cfg=PatchConfig(cell_t="grid_center"), **kw)
     np.testing.assert_array_equal(a["cell_t"], d["cell_t"])
-    assert PatchConfig().cell_t == "centroid", "production default must match the live run"
+    # cell_t is REQUIRED and has no default. It used to default to 'centroid'
+    # while every helix config trains 'grid_center' -- a default wrong for every
+    # real caller, which fired once (the encode recipe scored a grid_center model
+    # on centroid times, 94.06% of cells). A default is not the fix: 'centroid'
+    # leaks the target into masked-token positions, and 'grid_center' would be
+    # wrong for anyone reproducing research. So there is none.
+    with pytest.raises(ValueError, match="cell_t is REQUIRED"):
+        PatchConfig()
     with pytest.raises(ValueError, match="cell_t must be"):
         PatchConfig(cell_t="survivor_max")
 
@@ -197,7 +204,7 @@ def test_drops_d1_like_the_fm():
     tau = np.array([rng.integers(0, bl[b]) for b in band])
     out = assemble(band, gid, wire, tau, rng.standard_normal(n).astype(np.float32),
                    gids=gids, n_wires=np.full(2, 100), band_lengths=bl,
-                   norm_sigma=np.ones((2, 5), np.float32))
+                   norm_sigma=np.ones((2, 5), np.float32), cfg=PatchConfig(cell_t="grid_center"))
     assert out["band"].max() < 4 and (out["cell_band"] < 4).all()
     assert out["band"].size == int((band < 4).sum())
 
@@ -206,8 +213,8 @@ def test_shapes_and_slot_bounds():
     gids = np.array([0, 1, 2])
     band, gid, wire, tau, raw, _, sigma = _rows(seed=5, gids=(0, 1, 2))
     out = assemble(band, gid, wire, tau, raw, gids=gids,
-                   n_wires=np.full(3, 1969), band_lengths=LENS_T, norm_sigma=sigma)
-    cfg = PatchConfig()
+                   n_wires=np.full(3, 1969), band_lengths=LENS_T, norm_sigma=sigma, cfg=PatchConfig(cell_t="grid_center"))
+    cfg = PatchConfig(cell_t="grid_center")
     assert out["inp"].shape == (out["n_cells"], cfg.n_slot)
     assert out["occ"].shape == out["inp"].shape == out["tgt"].shape
     assert out["valid"].shape == out["inp"].shape
@@ -222,7 +229,7 @@ def test_dead_wire_augmentation_zeroes_input_not_target():
     band, gid, wire, tau, raw, raw_clean, sigma = _rows(seed=9, gids=(0,), nw=512)
     out = assemble(band, gid, wire, tau, raw, gids=gids, n_wires=np.array([512]),
                    band_lengths=LENS_T, norm_sigma=sigma, value_clean=raw_clean,
-                   dead_frac=0.5, rng=np.random.default_rng(0))
+                   dead_frac=0.5, rng=np.random.default_rng(0), cfg=PatchConfig(cell_t="grid_center"))
     assert out["dead"].sum() > 0, "no wires were killed"
     ks = np.repeat(out["dead"].astype(bool), PT, axis=1)
     assert np.all(out["inp"][ks] == 0.0)          # input zeroed
@@ -242,7 +249,7 @@ def test_non_contiguous_gids_use_row_lookup():
     tau = np.array([rng.integers(0, LENS_T[b]) for b in band])
     out = assemble(band, gid, wire, tau, rng.standard_normal(n).astype(np.float32),
                    gids=gids, n_wires=nw, band_lengths=LENS_T,
-                   norm_sigma=np.ones((5, 4), np.float32))
+                   norm_sigma=np.ones((5, 4), np.float32), cfg=PatchConfig(cell_t="grid_center"))
     # every occupied slot lies inside its plane's true wire count
     for c in range(out["n_cells"]):
         g = int(out["cell_gid"][c])
@@ -287,14 +294,14 @@ def test_transform_is_pimm_data_compatible_without_importing_it():
         "coeff_clean": dict(band=band, plane_gid=gid, wire=wire, tau=tau,
                             value=rng.standard_normal((n, 1)).astype(np.float32)),
     }
-    out = CoeffTokenize()(dict(sample))
-    cfg = PatchConfig()
+    out = CoeffTokenize(cfg=dict(cell_t="grid_center"))(dict(sample))
+    cfg = PatchConfig(cell_t="grid_center")
     assert out["coeff"]["inp"].shape[1] == cfg.n_slot
     assert out["coeff"]["_meta"]["n_slot"] == cfg.n_slot
     assert "coeff_clean" not in out          # folded into tgt
     assert out["coeff"]["tgt"].any()
     # constructor overrides win over the sample's _meta
-    o2 = CoeffTokenize(cfg=dict(pw=8, pt=4), gids=gids, n_wires=np.array([64, 64]),
+    o2 = CoeffTokenize(cfg=dict(pw=8, pt=4, cell_t="grid_center"), gids=gids, n_wires=np.array([64, 64]),
                        band_lengths=bl, norm_sigma=np.ones((2, 4), np.float32))(dict(sample))
     assert o2["coeff"]["inp"].shape[1] == 32
 
@@ -305,7 +312,7 @@ def test_transform_reports_missing_metadata_clearly():
                             wire=np.array([0]), tau=np.array([0]),
                             value=np.zeros((1, 1), np.float32))}
     with pytest.raises(KeyError, match="gids"):
-        CoeffTokenize()(sample)
+        CoeffTokenize(cfg=dict(cell_t="grid_center"))(sample)
 
 
 def test_to_fm_supplies_every_key_the_model_gathers():
@@ -318,7 +325,7 @@ def test_to_fm_supplies_every_key_the_model_gathers():
     gids = np.array([0, 1])
     band, gid, wire, tau, raw, raw_clean, sigma = _rows(seed=21, gids=(0, 1), nw=512)
     tok = assemble(band, gid, wire, tau, raw, gids=gids, n_wires=np.full(2, 512),
-                   band_lengths=LENS_T, norm_sigma=sigma, value_clean=raw_clean)
+                   band_lengths=LENS_T, norm_sigma=sigma, value_clean=raw_clean, cfg=PatchConfig(cell_t="grid_center"))
     B = to_fm(tok)
 
     needed = {"band_id", "plane_id", "t_phys", "wire_pos", "wirefeat",

@@ -95,7 +95,33 @@ class PatchConfig:
     lev: tuple = (4, 4, 3, 2)                         # DWT level per band
     delta: tuple = (-2.38, 0.62, 0.75, 0.50)          # per-band tick offset
     toff: tuple = (-17.4, 2.6, 5.5)                   # U,V,Y sensor->drift (pb_labels.TOFF)
-    cell_t: str = "centroid"                          # 'centroid' | 'grid_center'
+    # REQUIRED. No default, because every possible default is wrong for someone
+    # and the failure mode is SILENT.
+    #
+    #   'grid_center' — geometric centre of the patch's tick range. Depends only
+    #     on WHICH cell it is, never on its contents.
+    #   'centroid'    — amplitude-weighted mean of the cell's own surviving
+    #     coefficient times. DERIVED FROM THE CELL'S CONTENTS.
+    #
+    # That difference is not cosmetic under masking. `t_phys` is fed as RoPE
+    # position to the MASKED tokens (fm.py: `atm = at[tok_mask]`), and it is
+    # computed in the DataLoader transform, before masking. So under 'centroid' a
+    # masked cell's POSITION already encodes an amplitude-weighted summary of the
+    # contents the model is asked to predict — label leakage in the MAE objective.
+    # It also inflates the probe: sub-patch timing is exactly what cross-plane
+    # triangulation reads, so the research "3D probe 0.60 vs 0.42 for grid_center"
+    # is not safe to read as better REPRESENTATION.
+    #
+    # 'grid_center' is what every helix config trains, and it is right on the
+    # merits, not only for m113 comparability. 'centroid' is retained to
+    # reproduce research, and is a deletion candidate.
+    #
+    # It used to default to 'centroid' while every helix config overrode it to
+    # 'grid_center' — a default that was wrong for every real caller and right
+    # for none. It fired: the encode recipe built CoeffTokenize with no cfg=,
+    # got 'centroid', and fed a grid_center-trained model a time coordinate it
+    # had never seen on 94.06% of 30,976 cells (mean |delta| 19.5 ticks).
+    cell_t: str = None                                # REQUIRED: 'centroid' | 'grid_center'
     sigma_norm: float = 2.6                           # research SIGMA; only the
     # centroid weight sees it, and only through its 1e-6 floor (it cancels in the
     # weighted mean). Kept so the weight matches vit_tpc bit for bit.
@@ -105,10 +131,33 @@ class PatchConfig:
         return self.pw * self.pt
 
     def __post_init__(self):
+        if self.cell_t is None:
+            raise ValueError(
+                "cell_t is REQUIRED and has no default: pass 'grid_center' (what "
+                "every helix config trains, and the only content-independent "
+                "choice) or 'centroid' (research's, which leaks the target into "
+                "masked-token positions). A silent default here already fed a "
+                "trained model the wrong time coordinate on 94% of cells.")
         if self.cell_t not in ("centroid", "grid_center"):
             raise ValueError(
                 f"cell_t must be 'centroid' or 'grid_center', got {self.cell_t!r}")
 
+
+
+def _require_cfg(cfg):
+    """No silent `PatchConfig()` fallback anywhere in this module.
+
+    `PatchConfig` has no `cell_t` default (see its field comment), so there is no
+    safe zero-argument config to fall back to. These call sites used to spell
+    `cfg = cfg or PatchConfig()`, which quietly chose 'centroid' — the leaking
+    mode — for any caller that forgot to pass one.
+    """
+    if cfg is None:
+        raise ValueError(
+            "cfg is REQUIRED: PatchConfig has no cell_t default, so there is no "
+            "safe PatchConfig() to fall back to. Pass the config the model was "
+            "trained with (helix configs train cell_t='grid_center').")
+    return cfg
 
 
 # --------------------------------------------------------------------------
@@ -140,7 +189,7 @@ def cell_key(plane_gid, band, wire, tau, cfg=None):
     caller never has to know ``pw``/``pt``. Returns int64, directly comparable
     against the keys :func:`assemble` builds.
     """
-    cfg = cfg or PatchConfig()
+    cfg = _require_cfg(cfg)
     plane_gid = np.asarray(plane_gid, np.int64)
     band = np.asarray(band, np.int64)
     wb = np.asarray(wire, np.int64) // cfg.pw
@@ -184,7 +233,7 @@ def tick_of_tau(tau, plane_gid, band, cfg=None):
     ``assemble`` uses it for both ``cell_t`` modes, and :func:`tau_of_tick`
     inverts it.
     """
-    cfg = cfg or PatchConfig()
+    cfg = _require_cfg(cfg)
     band = np.asarray(band, np.int64)
     dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float32)
     delta = np.asarray(cfg.delta, np.float32)
@@ -207,7 +256,7 @@ def tau_of_tick(tick, plane_gid, band, band_lengths, cfg=None):
     drifted copy makes a probe gather the WRONG cell's features, which does not
     crash — it returns a number near the geometry null that looks like a result.
     """
-    cfg = cfg or PatchConfig()
+    cfg = _require_cfg(cfg)
     band = np.asarray(band, np.int64)
     dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float64)
     delta = np.asarray(cfg.delta, np.float64)
@@ -226,7 +275,7 @@ def pixel_cells(plane_gid, wire, tick, band_lengths, cfg=None):
     :func:`assemble` on which cell a pixel lands in, and the only way to agree is
     to run the same arithmetic. Returns ``(len(pixels), n_bands)`` int64.
     """
-    cfg = cfg or PatchConfig()
+    cfg = _require_cfg(cfg)
     plane_gid = np.asarray(plane_gid, np.int64)
     wire = np.asarray(wire, np.int64)
     out = np.empty((plane_gid.size, cfg.n_bands), np.int64)
@@ -237,7 +286,7 @@ def pixel_cells(plane_gid, wire, tick, band_lengths, cfg=None):
 
 
 def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
-             norm_sigma, cfg=PatchConfig(), value_clean=None, dead_frac=0.0,
+             norm_sigma, cfg=None, value_clean=None, dead_frac=0.0,
              rng=None):
     """Coefficient rows -> per-band 2-D patch tokens (stateless, pure numpy).
 
@@ -251,6 +300,7 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     Returns numpy arrays; converting to tensors is the caller's job (the pimm
     transform), keeping this importable without torch.
     """
+    cfg = _require_cfg(cfg)
     band = np.asarray(band, np.int64); plane_gid = np.asarray(plane_gid, np.int64)
     wire = np.asarray(wire, np.int64); tau = np.asarray(tau, np.int64)
     value = np.asarray(value, np.float32)
@@ -391,6 +441,7 @@ def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *,
     between the two public entry points is only WHERE the mask comes from: known
     occupancy (``detokenize``) or predicted occupancy (``decode_prediction``).
     """
+    cfg = _require_cfg(cfg)
     pw, pt = cfg.pw, cfg.pt
     cell, slot = np.nonzero(np.asarray(occ_mask))
     band = np.asarray(cell_band, np.int64)[cell]
@@ -409,7 +460,7 @@ def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *,
                 wire=wire.astype(np.int32), tau=tau.astype(np.int32), value=value)
 
 
-def detokenize(tok, *, gids, norm_sigma, cfg=PatchConfig(), values_key="inp"):
+def detokenize(tok, *, gids, norm_sigma, cfg=None, values_key="inp"):
     """Exact inverse of :func:`assemble` — tokens back to coefficient rows.
 
     Returns ``{band, plane_gid, wire, tau, value}``, the same columns a
@@ -424,6 +475,7 @@ def detokenize(tok, *, gids, norm_sigma, cfg=PatchConfig(), values_key="inp"):
     Exact only for ``dead_frac == 0``: the wire-kill augmentation zeroes ``inp``
     and clears ``occ``, which is deliberately destructive.
     """
+    cfg = _require_cfg(cfg)
     return _rows_from_grid(np.asarray(tok["occ"]).astype(bool), tok[values_key],
                            tok["cell_band"], tok["cell_gid"],
                            tok["cell_wb"], tok["cell_tb"],
@@ -431,7 +483,7 @@ def detokenize(tok, *, gids, norm_sigma, cfg=PatchConfig(), values_key="inp"):
 
 
 def decode_prediction(occ_logit, values, tok, *, gids, norm_sigma,
-                      cfg=PatchConfig(), threshold=0.0, respect_valid=True,
+                      cfg=None, threshold=0.0, respect_valid=True,
                       space="asinh"):
     """Model output -> coefficient rows.
 
@@ -446,6 +498,7 @@ def decode_prediction(occ_logit, values, tok, *, gids, norm_sigma,
     that applies ``sinh`` to a posterior mean over many bins and reads back ~31%
     of the charge. For a GAUSSIAN head, pass ``mu`` with ``space="asinh"``.
     """
+    cfg = _require_cfg(cfg)
     occ = np.asarray(occ_logit) > threshold
     if respect_valid and "valid" in tok:
         occ = occ & np.asarray(tok["valid"]).astype(bool)
@@ -630,6 +683,7 @@ class CoeffTokenize:
     def __init__(self, part="coeff", clean_part="coeff_clean", out_part=None,
                  cfg=None, dead_frac=0.0, seed=None, gids=None, n_wires=None,
                  band_lengths=None, norm_sigma=None, fm_names=True):
+        cfg = _require_cfg(cfg)
         self.part = part
         self.clean_part = clean_part
         self.out_part = out_part or part
