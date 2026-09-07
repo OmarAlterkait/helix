@@ -72,7 +72,7 @@ def pimm_to_device():
 def sample():
     """One real corpus event through tokenize + the collect adapter."""
     pytest.importorskip("pimm_data")
-    from pimm_data import CoeffTPCDataset
+    from helix.data import CoeffTPCDataset
     from helix.model.tokenize import CoeffTokenize
 
     ds = CoeffTPCDataset(data_root=CORPUS, dataset_name="sim_wire",

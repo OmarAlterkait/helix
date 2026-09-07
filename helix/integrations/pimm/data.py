@@ -95,7 +95,7 @@ class CoeffCollect:
 class CoeffTPCDataset(Dataset):
     """The wavelet-coefficient corpus as a pimm dataset.
 
-    Wraps ``pimm_data.CoeffTPCDataset`` as a pure reader (``transform=None``) and
+    Wraps ``helix.data.CoeffTPCDataset`` as a pure reader (``transform=None``) and
     runs pimm's own transform pipeline on the raw nested sample — the same shape
     pimm's ``lucid_event_ssl.py`` already uses to consume pimm-data, so a config
     author sees one transform registry.
@@ -118,10 +118,7 @@ class CoeffTPCDataset(Dataset):
                  max_len=-1, strict_lengths=True, event_range=None,
                  exclude_range=None, holdout=None, split_role=None):
         super().__init__()
-        try:
-            from pimm_data import CoeffTPCDataset as _DS
-        except ImportError:                       # older layout / partial install
-            from pimm_data.coeff import CoeffTPCDataset as _DS
+        from helix.data import CoeffTPCDataset as _DS
         # Split parameters must be FORWARDED. This wrapper re-declares the inner
         # dataset's signature, so anything added there is invisible here until
         # it is listed — and configs resolve THIS class, not the inner one.

@@ -183,7 +183,7 @@ def test_dataset_wrapper_forwards_every_inner_parameter():
     import inspect
 
     pimm_data = pytest.importorskip("pimm_data")
-    from pimm_data.coeff import CoeffTPCDataset as Inner
+    from helix.data.coeff_dataset import CoeffTPCDataset as Inner
 
     src = (Path(__file__).resolve().parent.parent
            / "helix" / "integrations" / "pimm" / "data.py").read_text()
