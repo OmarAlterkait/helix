@@ -36,7 +36,7 @@ Registered in :data:`pimm_data.DATASETS`.
 import numpy as np
 
 from pimm_data.builder import DATASETS
-from pimm_data._dataset_base import ShardEventDataset
+from pimm_data import ShardEventDataset
 
 from helix.core.coeff_io import coord_digest
 from helix.data.coeff_reader import CoeffTPCReader

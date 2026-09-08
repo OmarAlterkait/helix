@@ -62,7 +62,7 @@ def main(argv=None):
     ap.add_argument("--wd", type=float, default=0.05)
     a = ap.parse_args(argv)
 
-    from pimm_data import CoeffTPCDataset
+    from helix.data import CoeffTPCDataset
     from helix.model import build_fm
     from helix.model.tokenize import CoeffTokenize, PatchConfig
 

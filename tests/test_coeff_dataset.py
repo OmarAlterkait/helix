@@ -13,7 +13,8 @@ import pytest
 
 from helix.data.coeff_reader import CoeffTPCReader, write_coeff_shard
 from helix.data.coeff_dataset import CoeffTPCDataset
-from pimm_data.transform import Compose
+pytest.importorskip("pimm_data")          # the framework this family plugs into
+from pimm_data.transform import Compose   # noqa: E402
 from helix.data.coeff_verify import verify_corpus
 
 BAND_LENGTHS = [8, 8, 16]

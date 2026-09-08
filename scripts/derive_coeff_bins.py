@@ -58,7 +58,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     import torch
-    from pimm_data import CoeffTPCDataset
+    from helix.data import CoeffTPCDataset
     from helix.model.tokenize import sigma_for_rows
 
     ds = CoeffTPCDataset(data_root=a.corpus, dataset_name=a.dataset_name,

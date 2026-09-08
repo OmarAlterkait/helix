@@ -33,8 +33,7 @@ import os
 import numpy as np
 import h5py
 
-from pimm_data._shard_meta import read_shard_meta
-from pimm_data.readers._base import ShardReaderBase
+from pimm_data import read_shard_meta, ShardReaderBase
 
 from helix.core.coeff_io import coord_digest
 

@@ -53,6 +53,11 @@ _LAZY = {
     "build_fm": "helix.model",
     "FMModel": "helix.model",
     "CoeffTokenize": "helix.model.tokenize",
+    # -- data: the coeff corpus as a pimm-data family. Importing these pulls
+    #    pimm_data (and so torch); they are lazy for the same reason the model
+    #    entries are, which is what keeps a numpy-only DSP install working.
+    "CoeffTPCDataset": "helix.data",
+    "CoeffTPCReader": "helix.data",
 }
 
 __all__ = sorted(_LAZY)
