@@ -68,7 +68,9 @@ custom_imports = dict(
     allow_failed_imports=False,
 )
 
-CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
+# r1 (tau=0.05), like every other training config. coeff_fm_encode.py stays on
+# the pre-tau vintage deliberately -- it restores m113, which trained there.
+CORPUS = "/sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715"
 # K=32 rather than the corpus default K=128. Not a wiring choice — a memory one:
 # the categorical head's logits are (n_cells, n_slot, K), so at a full 31-40k-cell
 # event K=128 is ~2.4 GB of logits before gradients, which does not fit an 11 GB

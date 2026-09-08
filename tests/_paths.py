@@ -23,6 +23,8 @@ unless an env var is set.
 
 import os
 
+from helix import paths as _hpaths
+
 #: Research tree (``coeff_foundation_model``). The FM tests use the ``fm``
 #: subdirectory; ``test_legacy_parity`` uses the parent.
 RESEARCH_ROOT = os.environ.get(
@@ -34,8 +36,14 @@ RESEARCH_FM = os.path.join(RESEARCH_ROOT, "fm")
 PIMM_ROOT = os.environ.get("HELIX_PIMM_ROOT", "/sdf/group/neutrino/omara/pimm-fm")
 
 #: A built coefficient corpus (noisy + clean shard families).
-CORPUS = os.environ.get("HELIX_CORPUS",
-                        "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715")
+#
+#: Resolved by :mod:`helix.paths`, not redeclared here. This used to carry its
+#: OWN default -- and a different one: the pre-tau `coeff_tpc` vintage, while
+#: helix.paths said `coeff_tpc_r1`. One env var, two values, and two KINDS of
+#: value (a run dir here, a corpus root there). Both corpora are real, both read
+#: cleanly, and they differ in the coherent-removal gate (r1 records tau=0.05),
+#: so the wrong one is a plausible wrong answer rather than a crash.
+CORPUS = str(_hpaths.root("HELIX_CORPUS"))
 
 #: Root of the real sensor shards. Each test picks its own run/shard beneath it
 #: (they deliberately use different runs), so this is a ROOT, not one file.
