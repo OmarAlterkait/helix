@@ -27,7 +27,15 @@ import sys
 import numpy as np
 import pytest
 
-from _paths import RESEARCH_ROOT as RESEARCH, sensor_shard     # noqa: E402
+from _paths import sensor_shard                                # noqa: E402
+
+#: The OLD chain, frozen. It was a live import of `measure_coeffs` from an
+#: UNVERSIONED external checkout — so the reference this test called
+#: authoritative was working-tree state on one machine, and its own
+#: `model.py`/`train.py` were found uncommitted. Captured by
+#: tools/capture_legacy_golden.py while research was still reachable.
+GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "goldens_legacy_dsp.npz")
 
 SHARD = sensor_shard("run_0027575766", "sim_wire_sensor_0000.h5")
 KGATE, KSIG, KAPPA, GS, NB_OLD = 4.0, 3.0, 1.0, 64, 4
@@ -37,14 +45,19 @@ def _deps():
     """(ok, reason) — GPU + shard + research reference + pimm-data all reachable."""
     if not os.path.exists(SHARD):
         return False, "production shard not reachable"
-    if not os.path.isdir(RESEARCH):
-        return False, "research reference tree not reachable"
+    if not os.path.exists(GOLDEN):
+        return False, "legacy golden absent (tools/capture_legacy_golden.py)"
     try:
-        import torch
-        if not torch.cuda.is_available():
-            return False, "no CUDA GPU"
+        import pywt  # noqa: F401
     except ImportError:
-        return False, "torch not installed"
+        # The NEW chain imports pywt at module scope (wavelet_ops_numpy.py:12),
+        # so without this the test ERRORS mid-body instead of skipping. The old
+        # gate checked shard/research/CUDA/pimm_data and not this.
+        return False, "pywt not installed"
+    # No CUDA gate any more. The GPU was needed only by the OLD side, which ran
+    # measure_coeffs' torch _wavedec on device; that side is frozen now, and the
+    # NEW chain is pure numpy. This test used to skip on every CPU node --
+    # i.e. almost everywhere -- for a dependency it no longer has.
     try:
         import pimm_data  # noqa: F401
     except ImportError:
@@ -68,10 +81,7 @@ def _rows(bands, nb):
 
 
 def test_legacy_parity_vs_old_reference():
-    import torch
-    if RESEARCH not in sys.path:
-        sys.path.insert(0, RESEARCH)
-    import measure_coeffs as M
+    g = np.load(GOLDEN, allow_pickle=True)
 
     from helix.core import backend
     from helix.core.wavelet import wavedec, threshold_bands
@@ -98,16 +108,6 @@ def test_legacy_parity_vs_old_reference():
             img.shape, rng=np.random.default_rng(12345), wire_lengths_m=wl,
             incoherent=True, coherent=True, series_spectrum=None, group_size=GS), ped)
 
-        backend.set_backend("torch")                       # OLD reference, on GPU
-        ops = backend.ops("helix.core.wavelet_ops")
-        xt = torch.as_tensor(noisy, device="cuda")
-        npad = (-noisy.shape[-1]) % (1 << M.LEVEL)
-        if npad:
-            xt = torch.nn.functional.pad(xt, (0, npad))
-        old = M.prod_threshold(
-            M.smart_gate_bands(ops._wavedec(xt, M.WAVELET, M.LEVEL),
-                               kgate=KGATE, ksig=KSIG), KAPPA)
-
         backend.set_backend("numpy")                       # NEW packaged chain
         nb, _ = wavedec(_pad_time(noisy, cfg.dwt_level), wavelet=cfg.wavelet,
                         level=cfg.dwt_level, mode=cfg.dwt_mode)
@@ -115,7 +115,10 @@ def test_legacy_parity_vs_old_reference():
                                             npass=1, sigc_mode="median"),
                               cfg.threshold_spec())[0]
 
-        o, n = _rows(old, NB_OLD), _rows(new, NB_OLD)
+        o = {(int(b), int(w), int(t)): float(v) for b, w, t, v in zip(
+            g[f"{label}/band"], g[f"{label}/wire"],
+            g[f"{label}/tau"], g[f"{label}/value"])}
+        n = _rows(new, NB_OLD)
         inter = set(o) & set(n)
         support = len(inter) / max(len(set(o) | set(n)), 1)
         rel = np.array([abs(o[k] - n[k]) / max(abs(o[k]), 1e-9) for k in inter])

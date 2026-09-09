@@ -27,6 +27,51 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _check_corpus(cfg, weight, *, strict):
+    """Compare the corpus about to be read against the one the run recorded.
+
+    The record lives in ``<run>/provenance.json``, written by HelixPathBootstrap
+    and appended once per chain link; the LAST entry is the live one. Runs that
+    predate the stamp carry none, and are reported as unchecked rather than
+    refused -- failing them would make the guard unadoptable on every existing
+    checkpoint.
+    """
+    import json
+    from helix.data.identity import corpus_identity, check_corpus_matches
+
+    d = (cfg.data or {}).get("val", {}) or (cfg.data or {}).get("train", {})
+    root = d.get("data_root")
+    if not root:
+        return
+    split = d.get("split")
+    if isinstance(split, (list, tuple)):
+        split = split[0] if split else None
+    actual = corpus_identity(root, dataset_name=d.get("dataset_name", "sim_wire"),
+                             split=split)
+
+    recorded, run_dir = None, os.path.dirname(os.path.dirname(str(weight)))
+    pj = os.path.join(run_dir, "provenance.json")
+    if os.path.exists(pj):
+        try:
+            with open(pj) as fh:
+                blob = json.load(fh)
+            entries = blob if isinstance(blob, list) else [blob]
+            for e in reversed(entries):             # last link wins
+                if isinstance(e, dict) and e.get("corpus"):
+                    recorded = e["corpus"]
+                    break
+        except Exception:
+            recorded = None
+    try:
+        print(f"[corpus] {check_corpus_matches(recorded, actual, where=weight)}",
+              flush=True)
+    except ValueError as e:
+        if strict:
+            raise SystemExit(f"{e}\n\nPass --allow-corpus-mismatch if this is "
+                             f"deliberate (e.g. a cross-corpus study).")
+        print(f"[corpus] WARNING (--allow-corpus-mismatch): {e}", flush=True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
@@ -35,6 +80,10 @@ def main(argv=None):
     ap.add_argument("--tag", default=None,
                     help="label recorded in the emitted row (default: basename of weight)")
     ap.add_argument("--out", default=None, help="append one JSON row here")
+    ap.add_argument("--allow-corpus-mismatch", action="store_true",
+                    help="score a checkpoint against a corpus it did NOT train "
+                         "on. Refused by default because the result is a "
+                         "plausible wrong number rather than an error.")
     a = ap.parse_args(argv)
 
     from pimm.engines.defaults import default_config_parser, default_setup
@@ -58,6 +107,15 @@ def main(argv=None):
             "no `weight` and no `model.checkpoint`. This script scores a "
             "CHECKPOINT; without one it would silently report a randomly "
             "initialised model, which looks like a valid row.")
+
+    # Does this checkpoint belong to this corpus?
+    #
+    # Nothing checked. Each corpus is internally consistent, so a reader pointed
+    # at the WRONG one is satisfied and the only validation here was that the
+    # split name exists -- which every corpus satisfies. Two corpora differing
+    # only in the coherent-removal gate (tau) read identically and score
+    # differently, so the failure mode was a plausible number, not a crash.
+    _check_corpus(cfg, src, strict=not a.allow_corpus_mismatch)
 
     trainer = TRAINERS.build(dict(type=cfg.train.type, cfg=cfg))
 

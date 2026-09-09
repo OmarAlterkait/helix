@@ -74,6 +74,32 @@ class HelixPathBootstrap(HookBase):
             f"(helix={helix_root!r}, pimm_data={pimm_data_root!r}) so chained "
             f"jobs can resume")
 
+    def _corpus_identity(self):
+        """The DSP identity of the corpus this run is training on, or None.
+
+        The code provenance beside it answers "what produced this run"; without
+        this, nothing answers "on WHAT DATA". Two corpora differing only in the
+        coherent-removal gate read identically and score differently, so the
+        digest is what lets an evaluator refuse a mismatch instead of returning a
+        plausible number -- see helix.data.identity.
+
+        Best-effort by design: a run must not die because provenance could not be
+        read. An unstamped run degrades to the pre-existing behaviour (unchecked),
+        which is what every checkpoint trained before this already is.
+        """
+        try:
+            from helix.data.identity import corpus_identity
+            d = (self.trainer.cfg.data or {}).get("train", {})
+            root, name = d.get("data_root"), d.get("dataset_name", "sim_wire")
+            if not root:
+                return None
+            split = d.get("split")
+            if isinstance(split, (list, tuple)):
+                split = split[0] if split else None
+            return corpus_identity(root, dataset_name=name, split=split)
+        except Exception as e:                      # never fail a run over this
+            return {"error": f"{type(e).__name__}: {e}"}
+
     def _stamp_provenance(self):
         """Write ``<save_path>/provenance.json``: which code produced this run.
 
@@ -97,6 +123,7 @@ class HelixPathBootstrap(HookBase):
         try:
             info = provenance()
             info["step"] = int(getattr(self.trainer, "global_step", 0) or 0)
+            info["corpus"] = self._corpus_identity()
             path = os.path.join(self.trainer.cfg.save_path, "provenance.json")
             log = []
             if os.path.exists(path):
