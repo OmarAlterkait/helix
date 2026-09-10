@@ -76,13 +76,18 @@ repositories. Every field pimm's Trainer reads is therefore set here, and
 source so a missing field fails in CI rather than ten minutes into a launch.
 """
 
+# This config has no sys.path bootstrap (unlike coeff_fm_train.py): it is run
+# with helix already on PYTHONPATH. The external paths below therefore come
+# from the one table in helix/paths.py.
+from helix.paths import root as _root                            # noqa: E402
+
 custom_imports = dict(
     imports=["helix.integrations.pimm"],
     allow_failed_imports=False,          # fail loudly: a silent miss = "type not found"
 )
 
-CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
-CKPT = "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt"
+CORPUS = str(_root("HELIX_LEGACY_CORPUS"))     # m113 trained pre-tau
+CKPT = str(_root("HELIX_ARCHIVE") / "fm_m113_converted.pt")
 # The time coordinate to use when CKPT records no tokenizer block, and to
 # cross-check against when it does. Every helix config trains grid_center.
 CELL_T = "grid_center"
@@ -92,7 +97,7 @@ from helix.model.checkpoint import patch_config_from_checkpoint  # noqa: E402
 # derived from the old white-noise cache and are mis-sized per band against this
 # data: measured overflow 0.016/0.010/0.022/0.218% against a ~0.1% design target,
 # vs 0.145/0.124/0.138/0.126% for these.
-BINS = "/sdf/data/neutrino/omara/archive/coeff_bins_run0027575715.pt"
+BINS = str(_root("HELIX_ARCHIVE") / "coeff_bins_run0027575715.pt")
 
 # ---------------------------------------------------------------------------
 # run
@@ -240,3 +245,12 @@ hooks = [
 # model.param_groups(), which pimm's keyword-matching param_dicts cannot express,
 # and the scheduler needs a per-group max_lr list or it flattens them.
 train = dict(type="FMTrainer")
+
+# BOTH module-level imports must go, not just _root. Config._file2dict keeps
+# every module-level name not starting with `__`, so `patch_config_from_checkpoint`
+# was rendered by Config.dump as `<function ...>` and yapf rejected it:
+#   YapfError: <unknown>:7:30: invalid syntax
+# This config has therefore NEVER survived default_config_parser -- a pre-existing
+# bug, found while routing its paths through helix.paths. It was invisible because
+# the config is run through pimm's own entry point, which dumps later.
+del _root, patch_config_from_checkpoint

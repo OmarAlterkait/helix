@@ -1,0 +1,21 @@
+{
+  "created_at": "2026-09-10T05:16:28.331197+00:00",
+  "launch_command": null,
+  "command": [
+    "-c"
+  ],
+  "cwd": "/sdf/group/neutrino/omara/helix-extraction",
+  "host": "sdfiana007",
+  "config_file": "/sdf/group/neutrino/omara/helix-extraction/configs/pimm/coeff_fm_encode.py",
+  "config_file_abs": "/sdf/group/neutrino/omara/helix-extraction/configs/pimm/coeff_fm_encode.py",
+  "cli_options": {},
+  "cli_option_keys": [],
+  "save_path": "exp/coeff_fm_encode",
+  "resume": false,
+  "git": {
+    "commit": "996e7271c6c4951e6328509faf92a3794a14051d",
+    "branch": "extraction",
+    "is_dirty": true,
+    "dirty_check": "tracked_files_only"
+  }
+}

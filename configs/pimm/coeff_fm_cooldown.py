@@ -54,6 +54,14 @@ Run (4 GPUs, as the stable phase)::
 # The one-run config this used to derive from was superseded before its cooldown
 # ever ran, and keeping a cooldown for a stable phase nobody will use is dead
 # config.
+# A derived config runs BEFORE pimm processes `_base_`, so the base's sys.path
+# bootstrap has not happened yet. It does NOT get its own: a config that touches
+# sys.path must also register HelixPathBootstrap so a RESUMED job can still
+# import helix (tests/test_pimm_config_contract.py pins that pairing), and the
+# hook belongs to the base. So this relies on helix already being importable --
+# which it is, because the launcher exports PYTHONPATH -- and fails loudly if not.
+from helix.paths import root as _root                          # noqa: E402
+
 _base_ = ["./coeff_fm_train_8run.py"]
 
 # ---------------------------------------------------------------------------
@@ -81,7 +89,7 @@ _base_ = ["./coeff_fm_train_8run.py"]
 # the same table they were trained against, so `apply_bins` reports no delta. If
 # it ever does report one here, stop — the model would be annealing against a
 # grid it was not trained on.
-weight = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-train-r1-8run/model/last"
+weight = str(_root("HELIX_EXP") / "coeff-fm-train-r1-8run" / "model" / "last")
 resume = False
 
 # Length: ONE EPOCH over the first THREE runs = 14,264 steps = 12.7% of the
@@ -102,7 +110,7 @@ resume = False
 RUNS = [
     "run_0027575715", "run_0027587651", "run_0027651463",
 ]
-_over = dict(data_root="/sdf/data/neutrino/omara/coeff_tpc_r1", split=RUNS)
+_over = dict(data_root=str(_root("HELIX_CORPUS").parent), split=RUNS)
 data = dict(train=dict(**_over), val=dict(**_over), test=dict(**_over))
 
 epoch = 1
@@ -130,7 +138,7 @@ EVAL_EVERY = max(50, round(0.0099 * STEPS))
 # disk.
 SAVE_EVERY = max(250, round(0.05 * STEPS))
 
-save_path = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-cooldown-r1-8run"
+save_path = str(_root("HELIX_EXP") / "coeff-fm-cooldown-r1-8run")
 
 # ---------------------------------------------------------------------------
 # hooks — same list as the stable phase, with model_best turned back ON
@@ -155,3 +163,5 @@ hooks = [
     dict(type="CheckpointSaver", save_freq=SAVE_EVERY,
          evaluator_every_n_steps=EVAL_EVERY),
 ]
+
+del _root

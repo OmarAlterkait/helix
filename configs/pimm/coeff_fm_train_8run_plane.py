@@ -50,6 +50,14 @@ mixture. Score the cross-plane number separately with scripts/eval_checkpoint.py
 and `--options hooks.4.mask_mode=plane`, which is how the table above was made.
 """
 
+# A derived config runs BEFORE pimm processes `_base_`, so the base's sys.path
+# bootstrap has not happened yet. It does NOT get its own: a config that touches
+# sys.path must also register HelixPathBootstrap so a RESUMED job can still
+# import helix (tests/test_pimm_config_contract.py pins that pairing), and the
+# hook belongs to the base. So this relies on helix already being importable --
+# which it is, because the launcher exports PYTHONPATH -- and fails loudly if not.
+from helix.paths import root as _root                          # noqa: E402
+
 _base_ = ["./coeff_fm_train_8run.py"]
 
 # `plane_mode` is stated even though it is the default, for the reason the base
@@ -57,4 +65,6 @@ _base_ = ["./coeff_fm_train_8run.py"]
 # cannot record which selection it trained on.
 model = dict(plane_frac=0.25, plane_mode="plane", n_planes=1)
 
-save_path = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-train-r1-8run-plane25"
+save_path = str(_root("HELIX_EXP") / "coeff-fm-train-r1-8run-plane25")
+
+del _root

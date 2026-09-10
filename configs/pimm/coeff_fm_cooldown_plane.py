@@ -26,9 +26,19 @@ weights, both at 112,677 steps):
     plane_any n=1     0.4169   0.5428     +0.126
 """
 
+# A derived config runs BEFORE pimm processes `_base_`, so the base's sys.path
+# bootstrap has not happened yet. It does NOT get its own: a config that touches
+# sys.path must also register HelixPathBootstrap so a RESUMED job can still
+# import helix (tests/test_pimm_config_contract.py pins that pairing), and the
+# hook belongs to the base. So this relies on helix already being importable --
+# which it is, because the launcher exports PYTHONPATH -- and fails loudly if not.
+from helix.paths import root as _root                          # noqa: E402
+
 _base_ = ["./coeff_fm_cooldown.py"]
 
 model = dict(plane_frac=0.25, plane_mode="plane", n_planes=1)
 
-weight = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-train-r1-8run-plane25/model/last"
-save_path = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-cooldown-r1-8run-plane25"
+weight = str(_root("HELIX_EXP") / "coeff-fm-train-r1-8run-plane25" / "model" / "last")
+save_path = str(_root("HELIX_EXP") / "coeff-fm-cooldown-r1-8run-plane25")
+
+del _root

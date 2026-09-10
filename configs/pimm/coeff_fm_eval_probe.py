@@ -27,6 +27,8 @@ in for an annealed model. `model_ema.pth` is `{"state_dict", "decay", "step"}`,
 which is the shape pimm's weight loader reads.
 """
 
+from helix.paths import root as _root  # noqa: E402
+
 _base_ = ["./coeff_fm_train.py"]
 
 # Weights only — this is a measurement, not a continuation. `resume=True` would
@@ -39,7 +41,7 @@ evaluate = True
 # against the launch cwd, so running this from the checkout writes an
 # `exp/` tree into the repo -- pimm creates it before it discovers there
 # is no checkpoint to score.
-save_path = "/sdf/data/neutrino/omara/exp/coeff_fm_eval_probe"
+save_path = str(_root("HELIX_EXP") / "coeff_fm_eval_probe")
 
 # pimm's `batch_size` is GLOBAL across ranks, and FMTrainer requires exactly one
 # event per GPU — the model has no event separation, so a rank holding two would
@@ -89,3 +91,5 @@ hooks = [
     # which is the defect this config exists to remove.
     dict(type="CoeffFMEvaluator", max_batches=None),
 ]
+
+del _root

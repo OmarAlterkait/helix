@@ -26,6 +26,14 @@ considered and rejected — the runs are the same distribution (measured above),
 it would test nothing extra while coupling the split to run composition.
 """
 
+# A derived config runs BEFORE pimm processes `_base_`, so the base's sys.path
+# bootstrap has not happened yet. It does NOT get its own: a config that touches
+# sys.path must also register HelixPathBootstrap so a RESUMED job can still
+# import helix (tests/test_pimm_config_contract.py pins that pairing), and the
+# hook belongs to the base. So this relies on helix already being importable --
+# which it is, because the launcher exports PYTHONPATH -- and fails loudly if not.
+from helix.paths import root as _root                          # noqa: E402
+
 _base_ = ["./coeff_fm_train.py"]
 
 # ---------------------------------------------------------------------------
@@ -35,7 +43,7 @@ _base_ = ["./coeff_fm_train.py"]
 # _find_files): it globs each run's directory in turn and records which run each
 # shard came from. The base points `data_root` at ONE run directory, which is why
 # this cannot be expressed as a bare data_root change.
-CORPUS_ROOT = "/sdf/data/neutrino/omara/coeff_tpc_r1"
+CORPUS_ROOT = str(_root("HELIX_CORPUS").parent)
 RUNS = [
     "run_0027575715", "run_0027587651", "run_0027651463", "run_0027654870",
     "run_0027663748", "run_0027668746", "run_0027670361", "run_0027719646",
@@ -79,7 +87,7 @@ EVAL_EVERY = max(50, round(0.0099 * STEPS))
 SAVE_EVERY = max(50, round(0.0020 * STEPS))
 scheduler = dict(type="WSDStableLR", warmup=WARMUP)
 
-save_path = "/sdf/data/neutrino/omara/exp/helix/coeff-fm-train-r1-8run"
+save_path = str(_root("HELIX_EXP") / "coeff-fm-train-r1-8run")
 
 # The hook list is re-stated because the cadences above are new values, and a
 # `_base_` merge would otherwise keep the base's numbers inside the hook dicts.
@@ -95,3 +103,5 @@ hooks = [
     dict(type="CoeffFMEvaluator", every_n_steps=EVAL_EVERY, max_batches=200),
     dict(type="CheckpointSaver", save_freq=SAVE_EVERY),
 ]
+
+del _root
