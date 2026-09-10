@@ -75,6 +75,12 @@ for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix-extraction"),
 # `_os = <module 'os' ...>` and yapf rejects it —
 # `YapfError: <unknown>:1:5: invalid syntax` — killing the run during setup,
 # before step 1. Observed on the first launch after the bootstrap was added.
+# helix is importable now (the block above put it on sys.path), so external
+# paths come from the ONE table in helix/paths.py rather than from literals
+# repeated across seven configs. Values stay plain strings: pimm dumps this
+# config and re-reads the dump, and a PosixPath would not survive that.
+from helix.paths import root as _root                      # noqa: E402
+
 del _os, _sys, _v, _p
 
 custom_imports = dict(
@@ -84,13 +90,13 @@ custom_imports = dict(
 
 # r1 (tau=0.05), like every other training config. coeff_fm_encode.py stays on
 # the pre-tau vintage deliberately -- it restores m113, which trained there.
-CORPUS = "/sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715"
+CORPUS = str(_root("HELIX_CORPUS"))
 # K=32 rather than the corpus default K=128. Not a wiring choice — a memory one:
 # the categorical head's logits are (n_cells, n_slot, K), so at a full 31-40k-cell
 # event K=128 is ~2.4 GB of logits before gradients, which does not fit an 11 GB
 # Turing card. The real training run wants K=128 on Ampere; this exercises the
 # same code path at a size Turing can hold.
-BINS = "/sdf/data/neutrino/omara/archive/coeff_bins_K32_smoke.pt"
+BINS = str(_root("HELIX_ARCHIVE") / "coeff_bins_K32_smoke.pt")
 
 # ---------------------------------------------------------------------------
 # run
@@ -103,7 +109,7 @@ seed = 0
 # SHARED storage, not /lscratch: that is node-local, so a checkpoint written
 # there by a compute node is gone the moment the job ends — the save succeeds and
 # logs, and the artifact simply is not there afterwards.
-save_path = "/sdf/data/neutrino/omara/exp/coeff_fm_smoke"
+save_path = str(_root("HELIX_EXP") / "coeff_fm_smoke")
 
 # pimm's `batch_size` is the GLOBAL batch across all ranks — default_config_parser
 # asserts `batch_size % world_size == 0` and derives batch_size_per_gpu from it.
@@ -234,3 +240,9 @@ hooks = [
 ]
 
 train = dict(type="FMTrainer")
+
+# _root is used above and must NOT survive into the config dict: Config._file2dict
+# keeps every module-level name not starting with `__`, and Config.dump then
+# renders it as a function repr that yapf rejects -- the same failure the
+# `del _os, _sys` above exists for.
+del _root

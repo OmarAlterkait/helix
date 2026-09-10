@@ -14,7 +14,23 @@
 set -euo pipefail
 
 N=${1:-4}
-H=${HELIX_ROOT:-/sdf/group/neutrino/omara/helix-extraction}
+# Locating the checkout: NOT by name. Three helix checkouts have existed side by
+# side, and an old hardcoded default of `helix-consolidate` silently ran code "32
+# commits behind, missing the MAD median fix, the packaged noise spectrum, the
+# m113 anchoring and the whole pimm integration" (see build_coeff_corpus.py).
+#
+# ${BASH_SOURCE[0]} is RIGHT under `srun bash scripts/...` and WRONG under
+# `sbatch`, which copies the script to /var/spool/slurmd/scripts/ and runs the
+# copy — so it cannot be the only source. SLURM_SUBMIT_DIR is where sbatch was
+# invoked, trusted only if it actually looks like a checkout.
+if [ -n "${HELIX_ROOT:-}" ]; then
+  H=$HELIX_ROOT
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "$SLURM_SUBMIT_DIR/scripts/build_coeff_corpus.py" ]; then
+  H=$SLURM_SUBMIT_DIR
+else
+  H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+fi
+[ -f "$H/helix/paths.py" ] || { echo "FATAL: $H is not a helix checkout (set HELIX_ROOT)"; exit 1; }
 CFG=${2:-$H/configs/pimm/coeff_fm_train_8run.py}
 ACCT=${ACCOUNT:-mli:default}
 # EXCLUDE=node[,node] for nodes known to be bad. A node whose GPUs are held

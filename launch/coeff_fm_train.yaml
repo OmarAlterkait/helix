@@ -1,3 +1,7 @@
+# Paths here are SITE DEFAULTS, not constants. A yaml cannot read env vars,
+# so a different site edits this file or passes overrides on the launcher's
+# command line. The env names that mean the same thing elsewhere in helix are
+# noted per key -- see helix/paths.py for the one table.
 # `pimm submit` recipe for the coefficient-FM pretraining run.
 #
 #   PIMM=/sdf/group/neutrino/omara/pimm-fm
@@ -30,10 +34,10 @@ run:
 paths:
   # Absolute: the rendered sbatch body does `cd <repo_root>` and the default "."
   # would land wherever sbatch happened to be invoked from.
-  repo_root: /sdf/group/neutrino/omara/pimm-fm
+  repo_root: /sdf/group/neutrino/omara/pimm-fm   # = HELIX_PIMM_ROOT
   # NOT the default {repo_root}/exp — that would write a multi-GB experiment
   # tree into the pimm checkout.
-  exp_root: /sdf/data/neutrino/omara/exp
+  exp_root: /sdf/data/neutrino/omara/exp        # = HELIX_EXP_ROOT
 
 resources:
   scheduler: slurm
@@ -56,7 +60,7 @@ resources:
 
 container:
   runtime: singularity
-  image: /sdf/data/neutrino/youngsam/images/pimm-latest.sif
+  image: /sdf/data/neutrino/youngsam/images/pimm-latest.sif  # = HELIX_PIMM_IMAGE
   binds:
     - /sdf
     - /lscratch

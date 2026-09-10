@@ -58,9 +58,9 @@
 
 set -uo pipefail
 
-IMAGE=/sdf/data/neutrino/youngsam/images/pimm-latest.sif
-PIMM=/sdf/group/neutrino/omara/pimm-fm
-EXP_ROOT=/sdf/data/neutrino/omara/exp
+IMAGE=${HELIX_PIMM_IMAGE:-/sdf/data/neutrino/youngsam/images/pimm-latest.sif}
+PIMM=${HELIX_PIMM_ROOT:-/sdf/group/neutrino/omara/pimm-fm}
+EXP_ROOT=${HELIX_EXP_ROOT:-/sdf/data/neutrino/omara/exp}
 # Overridable, because EXP_DIR is derived from it: reusing a name silently
 # points a NEW run at a FINISHED run's directory.
 RUN_NAME=${RUN_NAME:-coeff-fm-train}
