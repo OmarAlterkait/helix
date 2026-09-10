@@ -202,15 +202,17 @@ def main():
                     help="R1 occupancy tolerance: subtract a large |M| when at most "
                          "this FRACTION of the block's wires were flagged. 0.0 = "
                          "'subtract unless the mask fired at all'.")
-    ap.add_argument("--removal", choices=("corpus", "de2", "r1"), default="corpus",
-                    help="'corpus' reads the stored coefficients. 'de2' recomputes "
-                         "the removed image with de2_clamp (research/coherent_coeffs/"
-                         "induction.py) from the regenerated noisy, then applies the "
-                         "SAME threshold+reconstruct, so the panel is comparable to a "
-                         "corpus one. de2 is sample-space, so there is no corpus to "
-                         "read it from until it is ported.")
-    ap.add_argument("--de2-clamp", type=float, default=4.0,
-                    help="clamp to the smart anchor, ADC (DE2_CLAMP.md default 4)")
+    ap.add_argument("--removal", choices=("corpus", "r1"), default="corpus",
+                    help="'corpus' reads the stored coefficients. 'r1' recomputes "
+                         "the R1-gated removal from the regenerated noisy image.")
+    # 'de2' was a third mode: recompute with de2_clamp via
+    # research/coherent_coeffs/induction.py:final_removal. It was the only runtime
+    # importer of research/ anywhere in helix, reached by a sys.path.insert of an
+    # absolute path into this checkout. research/ is retired; de2 is an
+    # alternative removal the corpus builder never offered, so it goes with it
+    # rather than porting ~100 lines (final_removal -> iterate -> mask_hysteresis
+    # -> estimate -> smart_baseline -> dilate_t) to keep one viz option alive.
+    # Recoverable: archive/retirement-backups/helix-research_2026-09-09/.
     ap.add_argument("--clean-source", choices=("corpus", "true"), default="corpus",
                     help="'corpus' = the stored coeff_clean, i.e. the CO-SUPPORTED "
                          "target the FM regresses onto (clean restricted to the "
@@ -313,35 +315,7 @@ def main():
                                    _cfg.num_time_steps)
         kg_lbl = f"R1(tau={a.r1_tau:g})"
 
-    if a.removal == "de2":
-        import sys as _s
-        _s.path.insert(0, "/sdf/group/neutrino/omara/helix-extraction/research/coherent_coeffs")
-        from helix.core import backend as _bk
-        from helix.core.wavelet import (SparseResult, reconstruct as _rec,
-                                        threshold_bands as _thr, wavedec as _wd)
-        from helix.tpc.config import DetectorConfig
-        from helix.tpc.io import config_from_file
-        from helix.tpc.pipeline import _pad_time
-        _bk.set_backend("numpy")
-        import induction as _ind
-        _base = config_from_file(sensor_shard)
-        _cfg = DetectorConfig(num_time_steps=_base.num_time_steps,
-                              plane_labels=_base.plane_labels, pedestals=_base.pedestals)
-        removed_all = {}
-        for _g, _img in noisy_all.items():
-            _i = _img.astype(np.float32)
-            _cleaned, _ = _ind.final_removal(_i, clamp=a.de2_clamp, n_iter=4,
-                                             klo=0.7, khi=3.5, dilate=15, seed="amp")
-            _co, _lev = _wd(_pad_time(_cleaned, _cfg.dwt_level), wavelet=_cfg.wavelet,
-                            level=_cfg.dwt_level, mode=_cfg.dwt_mode)
-            _o, _nk, _nt2, _bs = _thr(_co, _cfg.threshold_spec())
-            removed_all[_g] = _rec(SparseResult(coeffs=_o, n_kept=_nk, n_total=_nt2,
-                                                sigma_per_band=_bs, wavelet=_cfg.wavelet,
-                                                level=_lev, mode=_cfg.dwt_mode),
-                                   _cfg.num_time_steps)
-        kg_lbl = f"de2_clamp({a.de2_clamp:g})"
-
-    REMOVED_TITLE = {"de2": "removed: de2_clamp -> DWT recon",
+    REMOVED_TITLE = {
                      "r1": "removed: R1 gate -> DWT recon"}.get(
                          a.removal, "removed: corpus coeff -> DWT recon")
     CLEAN_TITLE = ("clean (TRUE noise-free image)" if a.clean_source == "true"

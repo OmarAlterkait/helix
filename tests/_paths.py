@@ -15,7 +15,6 @@ pimm-data solved this with ``*_DATA_ROOT`` env vars plus a collection-time skip;
 this mirrors it. Defaults preserve today's behaviour exactly, so nothing changes
 unless an env var is set.
 
-    HELIX_RESEARCH_ROOT   the research tree the parity tests diff against
     HELIX_PIMM_ROOT       the pimm checkout the config/step contracts import
     HELIX_CORPUS          a built coeff corpus
     HELIX_SENSOR_ROOT     root of the real sensor shards
@@ -24,13 +23,6 @@ unless an env var is set.
 import os
 
 from helix import paths as _hpaths
-
-#: Research tree (``coeff_foundation_model``). The FM tests use the ``fm``
-#: subdirectory; ``test_legacy_parity`` uses the parent.
-RESEARCH_ROOT = os.environ.get(
-    "HELIX_RESEARCH_ROOT",
-    "/sdf/group/neutrino/omara/helix/research/coeff_foundation_model")
-RESEARCH_FM = os.path.join(RESEARCH_ROOT, "fm")
 
 #: pimm checkout providing the trainer/registry the contract tests import.
 PIMM_ROOT = os.environ.get("HELIX_PIMM_ROOT", "/sdf/group/neutrino/omara/pimm-fm")
@@ -60,6 +52,5 @@ def sensor_shard(run, name):
 def describe():
     """``{name: (path, exists)}`` — so a skip can say WHICH input was missing."""
     return {n: (p, os.path.exists(p)) for n, p in (
-        ("RESEARCH_ROOT", RESEARCH_ROOT), ("RESEARCH_FM", RESEARCH_FM),
         ("PIMM_ROOT", PIMM_ROOT), ("CORPUS", CORPUS),
         ("SENSOR_ROOT", SENSOR_ROOT))}
