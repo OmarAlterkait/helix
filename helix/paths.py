@@ -32,6 +32,10 @@ vocabulary rather than two.
     HELIX_IMAGE                   container with pywt + torch, no pimm
     HELIX_PIMM_IMAGE              container with pimm's full dependency set
     HELIX_JAXTPC_ROOT             JAXTPC checkout (noise spectrum, geometry)
+    HELIX_LEGACY_CORPUS           the pre-tau corpus, for m113 only
+    HELIX_OPTICAL_DATA            the goop PMT light file
+    HELIX_ROOT                    this checkout (DERIVED; override only to
+                                  pin a resumed job to link 1's tree)
     ============================  ==========================================
 """
 from __future__ import annotations
@@ -56,7 +60,31 @@ _ROOTS = (
     ("HELIX_PIMM_IMAGE",    "/sdf/data/neutrino/youngsam/images/pimm-latest.sif",
                                                                         "pimm container"),
     ("HELIX_JAXTPC_ROOT",   "/sdf/group/neutrino/omara/JAXTPC",         "JAXTPC checkout"),
+    ("HELIX_LEGACY_CORPUS",  "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715",
+                                                                        "pre-tau corpus (m113 only)"),
+    ("HELIX_OPTICAL_DATA",  "/sdf/home/y/youngsam/sw/dune/sim/goop/data/light_output.h5",
+                                                                        "goop PMT light file"),
 )
+
+
+def repo() -> Path:
+    """This checkout, located from THIS file -- never from a name.
+
+    Three helix checkouts have existed side by side (`helix`, `helix-consolidate`,
+    `helix-extraction`), and hardcoding one is not a portability problem but a
+    CORRECTNESS one: `scripts/build_coeff_corpus.py` records that an old default
+    of `helix-consolidate` was inserted at ``sys.path[0]``, so running the builder
+    from any other checkout silently used that tree's code -- "32 commits behind,
+    missing the MAD median fix, the packaged noise spectrum, the m113 anchoring
+    and the whole pimm integration" -- and produced corpora with stale DSP and no
+    error.
+
+    ``HELIX_ROOT`` still overrides, for the resume case where a job must re-enter
+    the checkout link 1 used rather than wherever the code happens to be read
+    from. But the DEFAULT is derived, so it cannot name a directory that has been
+    renamed or that never existed on this machine.
+    """
+    return Path(os.environ.get("HELIX_ROOT", Path(__file__).resolve().parent.parent))
 
 
 def root(name: str) -> Path:

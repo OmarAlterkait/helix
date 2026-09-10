@@ -6,7 +6,6 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
-OUT = "/sdf/group/neutrino/omara/helix/temp/figures"
 D = json.load(open(f"{OUT}/big/active_vs_kept.json"))
 OPS, data = D["ops"], D["data"]
 

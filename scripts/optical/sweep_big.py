@@ -17,8 +17,7 @@ import sys, os, json, time, math
 import numpy as np
 import torch.multiprocessing as mp
 
-PATH = "/sdf/home/y/youngsam/sw/dune/sim/goop/data/light_output.h5"
-OUT = "/sdf/group/neutrino/omara/helix/temp/figures/big"
+PATH = LIGHT
 NOISE = 2.566
 REF_WL, REF_LEVEL, REF_KAPPA = "coif3", 10, 1.0   # common denoised reference
 COMMON_PAD = 65536                                 # all events padded to this length

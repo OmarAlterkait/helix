@@ -8,7 +8,6 @@ import numpy as np
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUT = "/sdf/group/neutrino/omara/helix/temp/figures"
 D = json.load(open(f"{OUT}/big/coeffs_per_level.json"))
 rows, KAP = D["rows"], D["kappa"]
 names = rows[0]["names"]; nb = len(names)

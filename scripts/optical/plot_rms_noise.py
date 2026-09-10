@@ -6,7 +6,6 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
-OUT = "/sdf/group/neutrino/omara/helix/temp/figures"
 D = json.load(open(f"{OUT}/big/abs_rms.json"))
 rows, NOISE = D["rows"], D["noise"]
 

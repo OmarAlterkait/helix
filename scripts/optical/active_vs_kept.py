@@ -7,10 +7,9 @@ from __future__ import annotations
 import sys, os, json
 import numpy as np
 import torch.multiprocessing as mp
-sys.path.insert(0, "/sdf/group/neutrino/omara/helix/scripts/optical")
+from _optical_paths import LIGHT, OUT          # resolves via helix.paths
 
-PATH = "/sdf/home/y/youngsam/sw/dune/sim/goop/data/light_output.h5"
-OUT = "/sdf/group/neutrino/omara/helix/temp/figures/big"
+PATH = LIGHT
 LEVEL = 10
 # (label, noise-multiple, compression, wavelet, kappa)
 OPS = [("1x", 1, 33, "coif3", 1.2), ("2x", 2, 49, "sym6", 1.75), ("3x", 3, 85, "coif3", 2.5)]

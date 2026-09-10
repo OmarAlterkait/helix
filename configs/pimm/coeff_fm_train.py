@@ -53,6 +53,20 @@ import sys as _sys
 for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix-extraction"),
                ("PIMM_DATA_SRC", "/sdf/group/neutrino/omara/pimm-data/src")):
     _p = _os.environ.get(_v) or _p
+    # Cannot self-locate here: pimm copies the config to a temp file before
+    # executing it, so __file__ is the copy, and helix is not importable yet --
+    # putting it on the path is this block's whole job. So the default is a
+    # literal, and the only defence is to REFUSE a path that is not there.
+    # Without this, a wrong or absent checkout surfaces much later as a bare
+    # ImportError from custom_imports with the real ModuleNotFoundError
+    # swallowed by import_modules_from_strings -- after a job has queued and
+    # started.
+    if not _os.path.isdir(_p):
+        raise SystemExit(
+            f"{_v} does not exist: {_p}\n"
+            f"  Set {_v} to your checkout. This config cannot derive it: pimm\n"
+            f"  executes a temp copy, so __file__ points at the copy, and helix\n"
+            f"  is not importable until this block puts it on sys.path.")
     if _p not in _sys.path:
         _sys.path.insert(1, _p)
 # REQUIRED, not tidiness. Config._file2dict keeps every module-level name that

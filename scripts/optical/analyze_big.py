@@ -6,7 +6,6 @@ Usage: python scripts/optical/analyze_big.py <stage>
 import sys, json, glob, os
 import numpy as np
 
-OUT = "/sdf/group/neutrino/omara/helix/temp/figures/big"
 stage = sys.argv[1] if len(sys.argv) > 1 else "breadth"
 DIST = sys.argv[2] if len(sys.argv) > 2 else "rms_vs_ref"   # distortion metric
 
