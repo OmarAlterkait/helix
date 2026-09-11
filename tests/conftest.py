@@ -101,3 +101,43 @@ def pytest_configure(config):
             f"checkout on PYTHONPATH, or unset HELIX_REQUIRE_PIMM to accept a "
             f"DSP-only run."
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# jaxtpc fixtures for the dense-chain tests
+#
+# tests/test_dense_chain.py exercises Densify (pimm-data) -> AddNoise/Digitize
+# (helix) end to end, so it needs a jaxtpc sample. These are SYNTHETIC --
+# pimm_data.testing builds a minimal cross-modality-consistent v3 dataset from
+# numpy + h5py -- so this is a code dependency helix already has (helix.data
+# imports pimm_data), not a data dependency on the simulator.
+#
+# The *_DATA_ROOT env vars point at real shards when set, matching pimm-data's
+# own conftest so the same command means the same thing in both repos.
+# ---------------------------------------------------------------------------
+
+def _jaxtpc_root(env, factory, maker, name):
+    import os
+    real = os.environ.get(env)
+    if real:
+        return real
+    root = factory.mktemp(name)
+    maker(str(root))
+    return str(root)
+
+
+@pytest.fixture(scope="session")
+def jaxtpc_data_root(tmp_path_factory):
+    testing = pytest.importorskip("pimm_data.testing")
+    return _jaxtpc_root("JAXTPC_DATA_ROOT", tmp_path_factory,
+                        testing.make_jaxtpc_sample, "jaxtpc_synth")
+
+
+@pytest.fixture(scope="session")
+def jaxtpc_pixel_data_root(tmp_path_factory):
+    testing = pytest.importorskip("pimm_data.testing")
+    maker = getattr(testing, "make_jaxtpc_pixel_sample", None)
+    if maker is None:
+        pytest.skip("pimm_data.testing has no pixel sample builder")
+    return _jaxtpc_root("JAXTPC_PIXEL_DATA_ROOT", tmp_path_factory,
+                        maker, "jaxtpc_pixel_synth")

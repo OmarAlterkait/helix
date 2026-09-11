@@ -24,9 +24,11 @@ pins them with a reconciliation test. The grouping convention
 helix ``broadcast_groups`` — that single integer is the whole "don't drift"
 contract between forward injection and inverse removal.
 
-MIRROR of ``pimm_data.noise``, copied verbatim below the docstring and pinned by
-``tests/test_forward_mirror.py``, which compares the two implementations
-numerically on fixed seeds.
+The LArTPC forward model. This used to be a MIRROR of ``pimm_data.noise``,
+kept in step by tests/test_forward_mirror.py -- pimm-data needed it for
+load-time augmentation and helix for the corpus builder, and neither could
+depend on the other. The boundary moved: the forward model is helix's, the
+densification that consumes it is pimm-data's, and there is one copy.
 
 The duplication is deliberate, and is the same arrangement as the shard codec:
 pimm-data must run with no helix installed (it serves every detector, not only

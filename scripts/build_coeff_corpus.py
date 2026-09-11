@@ -274,10 +274,11 @@ def main():
     if use_torch:
         import torch
         from helix.tpc import dense_ops as _dops
+        from pimm_data.dense_ops import densify as _densify  # going to dense
     if use_jax:
         import jax
         import jax.numpy as jnp
-        from pimm_data.noise_jax import generate_noise_jax
+        from helix.tpc.noise_jax import generate_noise_jax
         from pimm_data.dense_ops_jax import densify_plane_jax
 
     _src_name = Path(args.shard).name
@@ -299,7 +300,7 @@ def main():
                             digest_size=8).digest(), "little") & 0xFFFFFFFF
 
     def _digitize_jax(x, ped, n_bits=12):
-        """On-device twin of pimm_data.noise.digitize (round -> clip -> unpedestal)."""
+        """On-device twin of helix.tpc.noise.digitize (round -> clip -> unpedestal)."""
         adc_max = (1 << n_bits) - 1
         return jnp.clip(jnp.round(x + ped), 0, adc_max) - ped
 
@@ -327,7 +328,7 @@ def main():
         wire = torch.cat(w_l); time_ = torch.cat(t_l)
         val = torch.cat(v_l); pid = torch.cat(p_l)
         offset = torch.tensor([wire.numel()], dtype=torch.long, device=dev)
-        grids = _dops.densify(wire, time_, val, pid, offset, reg)
+        grids = _densify(wire, time_, val, pid, offset, reg)
         clean = {int(g): x[0].clone() for g, x in grids.items()}   # BEFORE noise
         grids = _dops.add_intrinsic_noise(
             grids, reg, seeds=[seed], incoherent=True, coherent=True,

@@ -286,7 +286,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
     """
     pytest.importorskip("pimm_data")
     from pimm_data.geometry import load_plane_registry
-    from pimm_data.noise import generate_noise, digitize
+    from helix.tpc.noise import generate_noise, digitize
     from helix.tpc.io import config_from_file, read_sensor_event
     from helix.tpc.pipeline import canonical_plane_gid
 
