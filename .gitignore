@@ -12,28 +12,26 @@ figures/
 !helix/tpc/data/*.npz
 temp/
 
-# ── research/report tracking (2026-07-23): track the text/code record, not artifacts ──
+# ── retired trees (2026-09-09) ──
+# research/ and report/ were the exploratory record. They are purged from this
+# history and archived under $HELIX_ARCHIVE/retirement-backups/ as
+# research-fm-code_2026-09-09/, helix-research_2026-09-09/, report_2026-09-09/.
+# Working copies still sit beside some checkouts, so ignore them outright --
+# a stale index in the main worktree had all 668 files staged to come back.
+research/
+report/
+
 .pylibs/
 .claude/
-research/**/artifacts/
-research/coeff_foundation_model/fm/slurm_logs/
-research/coeff_foundation_model/fm/broken_wr0_backup/
-research/coeff_foundation_model/fm/undertuned_lr4e4_backup/
+
+# Artifacts: never in git, whatever produced them.
 *.pt
 *.pth
 *.npy
 *.h5
+*.png
 *.zip
 *.out
 *.err
 *.log
-research/**/*.png
-# report figures ARE the record (small, referenced by the tex):
-!report/figures/
-!report/figures/**
 *.done
-
-# Live-append run logs (churned by in-flight training; commit a final snapshot
-# when the run ends — see FREEZE_LIST.md). Static result jsonls stay tracked.
-research/coeff_foundation_model/fm/fm_curve.jsonl
-research/coeff_foundation_model/fm/probe_wsd.jsonl
