@@ -27,7 +27,7 @@ strengthens both — the model names below resolve only when touched.
 ``__version__`` stays eager: ``helix.core.coeff_io`` stamps it into every corpus
 shard, and that must not depend on attribute-access order.
 """
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 #: Public name -> the module that defines it. Three tiers: the coefficient
 #: codec (the cross-repo contract pimm-data reads), the DSP, and the model.

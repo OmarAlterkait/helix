@@ -25,6 +25,23 @@ dependencies = [
 # /usr/local/hdf5/lib/plugin" on read — it worked in one container by accident.
 probe = ["hdf5plugin>=4.0"]
 
+# helix.data and helix.integrations are the ONLY subpackages that may import
+# pimm_data (7 modules do). helix.core and helix.tpc must never touch it, and
+# tests/test_boundary.py enforces that by importing each in a clean subprocess.
+#
+# That asymmetry is why this is an extra and not a dependency: pimm-data
+# requires torch>=2.5 and hdf5plugin UNCONDITIONALLY, while helix's base install
+# is numpy/h5py/PyWavelets/scipy and torch is optional. Making pimm-data a hard
+# dependency would drag torch into every DSP-only install — including the
+# corpus-builder container, which deliberately has pywt and torch but NO
+# pimm-data, while the training container has pimm-data but NO pywt.
+#
+# pimm-data is not on PyPI. It resolves from whatever git source or editable
+# checkout the consumer configures (see pimm-fm's uv.lock, or
+# `pip install -e ../pimm-data`), so no URL is pinned here — a URL in this file
+# would be a second place to get the revision wrong.
+pimm = ["pimm-data>=0.4.0"]
+
 # Backend frameworks are optional: helix.core imports only the selected one
 # lazily. NumPy (base dep) is always available; add jax and/or torch as needed.
 jax-cpu = ["jax[cpu]>=0.4.20"]
