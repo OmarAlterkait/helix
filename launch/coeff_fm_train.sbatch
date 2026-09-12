@@ -22,6 +22,18 @@
 # The recipe in launch/coeff_fm_train.yaml stays as the source of these values
 # and remains usable the moment a host-side pimm environment exists.
 
+# THE THREE SITE-SPECIFIC VALUES ARE HERE: --account, --output and --partition.
+# #SBATCH directives cannot read shell variables, so they cannot be resolved
+# through helix.paths the way every other external path is. They are overridable
+# on the command line instead, and sbatch's later flag wins:
+#
+#   sbatch --account=<facility>:<repo> --output=<your log dir>/coeff-fm-%j.out \
+#          launch/coeff_fm_train.sbatch
+#
+# launch/chain_submit.sh forwards "$@" to every link of the chain, so the same
+# two flags work there. Both defaults below point into one person's allocation
+# and one person's directory: a different account fails at submission, and an
+# unwritable --output fails the job with no log to say why.
 #SBATCH --job-name=coeff-fm-train
 #SBATCH --account=mli:cider-ml
 #SBATCH --partition=ampere
@@ -61,6 +73,49 @@ set -uo pipefail
 IMAGE=${HELIX_PIMM_IMAGE:-/sdf/data/neutrino/youngsam/images/pimm-latest.sif}
 PIMM=${HELIX_PIMM_ROOT:-/sdf/group/neutrino/omara/pimm-fm}
 EXP_ROOT=${HELIX_EXP_ROOT:-/sdf/data/neutrino/omara/exp}
+
+# Resolving the checkout: HELIX_ROOT, else the submission directory, else this
+# script's own location — the same order, and for the same reason, as
+# scripts/submit_coeff_corpus.sh. ${BASH_SOURCE[0]} is RIGHT under `srun bash`
+# and WRONG under `sbatch`, which copies the script to
+# /var/spool/slurmd/scripts/ and runs the copy.
+if [ -n "${HELIX_ROOT:-}" ]; then
+  H=$HELIX_ROOT
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "$SLURM_SUBMIT_DIR/helix/paths.py" ]; then
+  H=$SLURM_SUBMIT_DIR
+else
+  H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+fi
+[ -f "$H/helix/paths.py" ] || {
+  echo "FATAL: no helix/paths.py under H=$H."
+  echo "       Set HELIX_ROOT to the checkout, or sbatch from it."
+  exit 1; }
+
+# pimm's train.sh takes `-c helix/coeff_fm_train` and resolves it under its OWN
+# configs/, with no absolute-config option — so the configs must be reachable
+# from there, and helix stays the single source of truth by linking rather than
+# copying. This link used to be made BY HAND and left untracked, pointing at one
+# person's worktree by absolute path; it did not exist in any fresh checkout and
+# nothing recorded that it should. Deriving it from the running checkout is what
+# makes that reproducible.
+CFG_LINK="${PIMM}/configs/helix"
+CFG_WANT="${H}/configs/pimm"
+[ -d "$CFG_WANT" ] || {
+  echo "FATAL: no configs/pimm under H=$H — cannot link pimm's configs/helix."
+  exit 1; }
+if [ ! -e "$CFG_LINK" ] && [ ! -L "$CFG_LINK" ]; then
+  ln -s "$CFG_WANT" "$CFG_LINK"
+  echo "[wrapper] linked ${CFG_LINK} -> ${CFG_WANT}"
+elif [ -L "$CFG_LINK" ] && [ "$(readlink "$CFG_LINK")" != "$CFG_WANT" ]; then
+  # Repointed, not left alone: a stale link silently trains from ANOTHER
+  # checkout's configs, which is the failure this whole block exists to stop.
+  echo "[wrapper] configs/helix pointed at $(readlink "$CFG_LINK"), repointing to ${CFG_WANT}"
+  ln -sfn "$CFG_WANT" "$CFG_LINK"
+elif [ ! -L "$CFG_LINK" ]; then
+  echo "FATAL: ${CFG_LINK} exists and is not a symlink. Remove it, or set" >&2
+  echo "       HELIX_PIMM_ROOT to a pimm checkout that does not have one." >&2
+  exit 1
+fi
 # Overridable, because EXP_DIR is derived from it: reusing a name silently
 # points a NEW run at a FINISHED run's directory.
 RUN_NAME=${RUN_NAME:-coeff-fm-train}
@@ -106,9 +161,8 @@ fi
 echo "[wrapper] job ${SLURM_JOB_ID:-?} restart count ${SLURM_RESTART_COUNT:-0}"
 
 # `-c helix/coeff_fm_train` resolves to <pimm>/configs/helix/coeff_fm_train.py,
-# a symlink into helix's configs/pimm. train.sh has no absolute-config path, so
-# the config must be reachable from pimm's configs/; the symlink keeps helix the
-# single source of truth. It points into /sdf, which is bound below.
+# the symlink established above into THIS checkout's configs/pimm. It points
+# into /sdf, which is bound below.
 #
 # checkpoint_format=legacy is NOT a preference. pimm defaults a multi-GPU run to
 # DCP, whose save planner calls dist.gather_object on the default process group,
