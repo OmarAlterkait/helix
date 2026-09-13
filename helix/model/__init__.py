@@ -1,6 +1,6 @@
 """helix.model — the FM MAE and its tokenizer: the interface pimm trains against.
 
-See RESEARCH_EXTRACTION_MAP section 5a. helix PROVIDES the model; pimm owns the
+helix PROVIDES the model; pimm owns the
 loop and the probes.
 
 The tokenizer lives here because the patch geometry IS a property of the model —

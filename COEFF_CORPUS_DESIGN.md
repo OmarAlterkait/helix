@@ -381,7 +381,7 @@ Two levels, both bit-identical:
    joins onto coeff by identity with correct key-alignment.
 3. **cross-repo**: helix-written shard ↔ pimm-data-read (and reverse) agree.
 
-Build order (per CONSOLIDATION_PLAN §5, revised): **schema + codec + identity test
+Build order (the order actually followed): **schema + codec + identity test
 FIRST**, before `process_plane`/gate rewiring, so the whole architecture has a
 green acceptance gate from step 1.
 

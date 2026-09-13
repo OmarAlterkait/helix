@@ -141,7 +141,7 @@ def torch_q50(x, dim: int):
     # clean (0 of 11.7M hit values), the 1000-event pilot is clean (0 of 565M
     # coefficients), and the two zero-length wires per induction plane still give
     # a finite ENC. The frozen research gate has no NaN guard at all; ours came
-    # from CONSOLIDATION_PLAN as a defensive item. This is here so the backends
+    # from the consolidation plan as a defensive item. This is here so the backends
     # cannot DISAGREE on an input they might both meet, not because that input
     # occurs. One extra device pass, no sync.
     nan = torch.isnan(x).any(dim=dim)

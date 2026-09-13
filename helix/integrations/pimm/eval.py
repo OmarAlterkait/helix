@@ -1,6 +1,6 @@
 """Validation for the coefficient FM.
 
-Kept in helix rather than pimm, against ``RESEARCH_EXTRACTION_MAP.md``'s "EVAL
+Kept in helix rather than pimm, against the extraction map's "EVAL
 is pimm's job": that line was written when eval meant downstream probes and
 baselines, which do belong there. This is the TRAINING metric, and it reaches
 into helix internals no framework should know about — ``core.raw_heads``, the

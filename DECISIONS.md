@@ -1,5 +1,13 @@
 # Decisions
 
+Standing decisions live here; the measurements behind them are in
+`docs/SCIENCE.md`, and the shape of the code they apply to is in
+`docs/ARCHITECTURE.md`. Two documents referenced by older entries --
+`RESEARCH_EXTRACTION_MAP.md` (the research-tree extraction map) and
+`CONSOLIDATION_PLAN.md` -- described work that is now finished and were retired
+on 2026-09-12; they remain in git history and in
+`$HELIX_ARCHIVE/retirement-backups/superseded-docs_2026-09-12/`.
+
 Standing decisions for the coefficient FM, each with the evidence behind it and
 what would overturn it. The commit log has the narrative; this is the state.
 
@@ -109,7 +117,7 @@ concern: `_compat` (import-time pimm patches, must import first), `data`,
 *measures*). The module path is unchanged, so `imports=["helix.integrations.pimm"]`
 and every symbol import still work.
 
-**Eval stays in helix**, against `RESEARCH_EXTRACTION_MAP.md`'s "EVAL is pimm's
+**Eval stays in helix**, against the extraction map's "EVAL is pimm's
 job". That line was written when eval meant downstream probes and baselines,
 which do belong there. This is the *training* metric and it reaches into helix
 internals no framework should know about — `core.raw_heads`, the bin buffers,

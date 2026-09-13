@@ -2,18 +2,89 @@
 
 **hierarchical encoding for learned inference on experimental data**
 
-Signal processing pipeline for liquid argon TPC wire data: coherent noise removal followed by wavelet sparsification.
+A foundation model for liquid-argon TPC wire data, and the signal processing that
+produces what it trains on. helix covers the whole path: raw wire ADC -> coherent
+noise removal and wavelet sparsification -> a coefficient corpus -> a masked
+autoencoder over those coefficients -> a 3D probe that asks whether the learned
+representation knows where charge is.
 
-## Installation
+## Start here
 
-```bash
-pip install -e .            # CPU only (numpy + pywt)
-pip install -e ".[gpu]"     # with JAX GPU acceleration
-```
+| you want to | read |
+|---|---|
+| run something | **[docs/RUNBOOK.md](docs/RUNBOOK.md)** |
+| know why it is shaped this way | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| know what was measured | [docs/SCIENCE.md](docs/SCIENCE.md) |
+| run the tests | [TESTING.md](TESTING.md) |
 
-## Usage
+First command in a new environment:
 
-### Python API
+    python -m helix.paths
+
+It prints every external path, whether it came from the environment or a
+default, and whether it exists. The defaults are where things live on the machine
+helix was developed on — they are defaults, not truths.
+
+## Install
+
+    pip install -e .                 # DSP only: numpy, h5py, PyWavelets, scipy
+    pip install -e ".[pimm]"         # + the data layer, for the corpus and training
+    pip install -e ".[gpu]"          # + jax and torch
+    pip install -e ".[probe]"        # + hdf5plugin, needed to read doraemon shards
+
+Or skip all of it and use the image, which has everything:
+
+    /sdf/data/neutrino/omara/images/helix-train.sif
+
+torch and jax are **optional**. `helix.core` and `helix.tpc` import with neither,
+and a test enforces it — that is what lets the DSP half run where the training
+stack does not exist.
+
+## The two packages
+
+helix works with **pimm-data**, a generic data layer serving several detector
+families. The split: helix owns LArTPC physics; pimm-data owns everything
+detector-agnostic.
+
+The forward model (intrinsic noise, coherent noise, digitization) is helix's.
+Going-to-dense is pimm-data's. They are **lockstep** — the transform registry
+raises on duplicate registration, so the two must move together and the image
+must be rebuilt when pimm-data changes. `docs/ARCHITECTURE.md` §3 has the detail.
+
+## Pipeline
+
+### 1. Coherent noise removal
+
+Multi-pass mask accumulation. Each pass detects additional sub-threshold signal
+on the cleaned output, augments the mask, then re-estimates coherent noise from
+the **original** image:
+
+| Pass | Operation |
+|------|-----------|
+| 1 | group_median -> residual -> mask(3 sigma) -> dilate(11) -> masked_mean -> alpha x subtract |
+| 2-3 | detect on cleaned -> augment mask -> re-estimate from original -> alpha x subtract |
+
+`alpha = n_unflagged / group_size` scales subtraction by estimation confidence.
+
+The production gate also applies an occupancy tolerance, `tau = 0.05` — 3 wires
+of 64. Measured over 1,200 (event, plane) pairs it gives **5.32x lower stripe
+residual** and **2.61x fewer off-signal pixels above 5 ADC**. It is the only
+difference between the two corpus generations, and mixing them is the failure
+`helix/data/identity.py` exists to prevent.
+
+### 2. Wavelet sparsification
+
+Per-wire coif3 DWT (level 4) with Donoho-Johnstone universal hard threshold
+(kappa = 1.0). GPU paths use matmul-based DWT/IDWT.
+
+### 3. The model
+
+A masked autoencoder over the surviving coefficients. Masking whole planes rather
+than random cells buys **+0.160** on the cross-plane task and takes the 3D probe
+from **0.53 to 0.85**, at a cost on random masking within noise of zero. See
+`docs/SCIENCE.md` §2, including a hypothesis that measurement refuted.
+
+## Python API
 
 ```python
 from helix import DetectorConfig, process_plane, process_event
@@ -26,59 +97,21 @@ result.reconstructed    # wavelet-denoised reconstruction
 result.sparse.sparsity  # fraction of zero coefficients
 ```
 
-### CLI
+## CLI
 
 ```bash
 helix --input sensor.h5 --output processed.h5
 helix --input sensor.h5 --output processed.h5 --events 0-19
-helix --input sensor.h5 --output processed.h5 --removal gate   # coherent removal: gate|multipass|none
-helix --input sensor.h5 --output processed.h5 --to-coeffs     # write a coefficient shard
-helix --input sensor.h5 --output processed.h5 --backend jax  # force JAX/GPU
+helix --input sensor.h5 --output processed.h5 --removal gate   # gate|multipass|none
+helix --input sensor.h5 --output processed.h5 --to-coeffs      # write a coefficient shard
+helix --input sensor.h5 --output processed.h5 --backend jax
 ```
 
-## Pipeline
+## DSP performance
 
-Two sequential stages, each derived from first principles:
-
-### 1. Coherent noise removal
-
-Multi-pass mask-accumulation algorithm. Each pass detects additional
-sub-threshold signal on the cleaned output, augments the mask, then
-re-estimates coherent noise from the **original** image:
-
-| Pass | Operation |
-|------|-----------|
-| 1 | group_median -> residual -> mask(3 sigma) -> dilate(11) -> masked_mean -> alpha x subtract |
-| 2-3 | detect on cleaned -> augment mask -> re-estimate from original -> alpha x subtract |
-
-The linear alpha = n_unflagged / group_size scales subtraction by estimation confidence.
-
-### 2. Wavelet sparsification
-
-Per-wire coif3 DWT (level 4) with Donoho-Johnstone universal hard threshold (kappa=1.0).
-GPU path uses matmul-based DWT/IDWT for full pipeline acceleration.
-
-## Configuration
-
-```python
-DetectorConfig(
-    group_size=64,              # wires per coherent group
-    mask_threshold_nsigma=3.0,  # signal detection threshold
-    temporal_dilation_ticks=11, # mask dilation along time axis
-    n_passes=3,                 # coherent removal passes
-    wavelet="coif3",
-    dwt_level=4,
-    threshold_kappa=1.0,
-)
-```
-
-## Performance
-
-Measured on 200 edepsim events (SBND geometry, 1969/1443 wires x 4321 ticks,
-5 noise seeds). Noise model matches JAXTPC: FFT-shaped series noise (empirical
-MicroBooNE spectrum) + flat white noise + coherent group noise.
-
-### Full pipeline (coherent removal + wavelet)
+200 edepsim events (SBND geometry, 1969/1443 wires x 4321 ticks, 5 noise seeds).
+Noise model matches JAXTPC: FFT-shaped series noise (empirical MicroBooNE
+spectrum) + flat white noise + coherent group noise.
 
 | Plane | F0 (median) | Bias (ADC/pixel) | RMS (ADC) | Coefficients |
 |-------|-------------|------------------|-----------|--------------|
@@ -86,47 +119,34 @@ MicroBooNE spectrum) + flat white noise + coherent group noise.
 | V (induction) | 0.8884 | -0.190 | 2.496 | 46.3k |
 | Y (collection) | 0.9567 | -0.282 | 2.566 | 50.7k |
 
-### Mode comparison
-
 | Mode | F0 (U) | F0 (V) | F0 (Y) |
 |------|--------|--------|--------|
 | Coherent removal only | 0.899 | 0.898 | 0.963 |
 | Wavelet only | 0.845 | 0.832 | 0.933 |
 | Full pipeline | 0.902 | 0.888 | 0.957 |
 
-### Timing
-
 | Backend | Per plane | Per event (6 planes) |
 |---------|-----------|---------------------|
 | NumPy (CPU) | 176 ms | 1.1 s |
 | JAX (GPU) | 1.5 ms | 9 ms |
 
+The corpus builder defaults to `--backend torch` (10.6 ms/plane), which is what
+built the current corpus.
+
 ## Scripts
 
-Corpus:
+**Corpus** — `build_coeff_corpus.py` (shards), `submit_coeff_corpus.sh` (the
+Slurm array), `calibrate_norm_sigma.sh` (the frozen norm_sigma table),
+`derive_coeff_bins.py` (the categorical bin grid), `viz_2x2_corpus.py`.
 
-- `scripts/build_coeff_corpus.py` -- build coefficient shards from sensor shards
-- `scripts/submit_coeff_corpus.sh` -- the Slurm job array around it
-- `scripts/calibrate_norm_sigma.sh` -- the one frozen norm_sigma table a corpus shares
-- `scripts/derive_coeff_bins.py` -- the categorical bin grid
-- `scripts/viz_2x2_corpus.py` -- raw/clean/gated/residual panels for one event
+**Training** — `launch/coeff_fm_train.sbatch`, `launch/chain_submit.sh` (chain
+across the wall-clock limit), `smoke_train_fm.py`, `plot_train_progress.py`.
 
-Training:
+**Evaluation** — `eval_checkpoint.py` (score a frozen checkpoint),
+`dump_probe_truth.py` + `run_probe.py` (the 3D probe, two stages),
+`feats_rank.py`, `probe_xattn.py`, `viz_mask_recon.py`.
 
-- `scripts/submit_coeff_fm_train.sh` / `scripts/chain_coeff_fm_train.sh` -- launch, and chain across the wall-clock limit
-- `scripts/smoke_train_fm.py` -- does the loop run at all
-- `scripts/plot_train_progress.py` -- loss/bce/grid-free curves across runs
-
-Evaluation:
-
-- `scripts/eval_checkpoint.py` -- score a checkpoint on the held-out split
-- `scripts/dump_probe_truth.py` -- freeze the probe's truth arrays
-- `scripts/run_probe.py` -- the 3D deconvolution probe
-- `scripts/feats_rank.py` -- per-layer feature rank (RankMe)
-- `scripts/probe_xattn.py` -- decoder cross-attention maps
-- `scripts/viz_mask_recon.py` -- masked reconstructions
-
-The seven scripts this section used to list were all deleted long before; only
-`plot_metrics.py` still existed, and it read the output of `run_metrics.py`,
-which did not. The white-vs-colored noise comparison lives on the
-`legacy-corpus-repro` branch, with the only builder that can still run it.
+**Tools** — `tools/convert_fm_ckpt.py` turns a research checkpoint into one
+self-contained file. Research checkpoints kept their bin edges in a separate
+sidecar named only on the command line, so one that outlived its sidecar cannot
+be evaluated at all.
