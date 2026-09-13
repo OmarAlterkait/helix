@@ -1,0 +1,115 @@
+# helix training image: the pimm environment, corrected.
+#
+# Built FROM youngsam's pimm image rather than from scratch, because that image
+# carries a large amount of CUDA work worth keeping -- torch 2.10+cu126 and the
+# prebuilt torch_scatter / torch_sparse / spconv / flash-attn wheels that cannot
+# be compiled on a login node with no CUDA toolkit.
+#
+# It fixes exactly two things, both of which were live defects:
+#
+#   1. pimm_data was baked in at 0.3.0 -- which still REGISTERS AddNoise and
+#      Digitize. helix registers both of those now, so the stale copy plus a
+#      current helix double-registers and pimm_data/_registry.py raises KeyError.
+#      The boundary move is lockstep and this image was on the wrong side of it.
+#
+#      It is also why configs/pimm/coeff_fm_train.py carries an elaborate
+#      sys.path.insert(1) dance: the comment there says the checkout "has to WIN
+#      over site-packages, not merely be present". With the right version
+#      installed, that requirement disappears.
+#
+#   2. PyWavelets was absent, so this image could not run helix's DSP at all and
+#      a SECOND image was needed just to build corpora. One correct image does
+#      both.
+#
+# What is deliberately NOT baked in: pimm and helix themselves. They are the code
+# under active development and arrive by bind mount / PYTHONPATH, so a change to
+# either does not need an image rebuild. Only DEPENDENCIES are installed here.
+#
+# Build (needs no root; ~2 minutes since only two packages are added):
+#
+#   APPTAINER_TMPDIR=$LSCRATCH apptainer build --fakeroot \
+#     /sdf/data/neutrino/omara/images/helix-train.sif container/helix-train.def
+#
+# Rebuild whenever pimm-data changes, and record the revision: the image is part
+# of the lockstep pair with helix.
+
+Bootstrap: localimage
+From: /sdf/data/neutrino/youngsam/images/pimm-latest.sif
+
+%files
+    /sdf/group/neutrino/omara/pimm-data /opt/build/pimm-data
+
+%post
+    set -e
+    VENV=/opt/pimm/.venv
+    UV=/usr/local/uv/bin/uv
+
+    # uv installs by hardlinking out of its cache, and in the build sandbox those
+    # links do not materialise: a cached package "installs" in 99 ms and then
+    # imports as ModuleNotFoundError: No module named 'pywt.version'. The first
+    # build passed only because nothing was cached yet and it downloaded fresh,
+    # which makes this fail on the REBUILD -- the worst time to discover it.
+    #
+    # link-mode=copy alone was not enough: by then the cache held half-written
+    # entries from the failed attempts, and copying a corrupt entry reproduces
+    # the corruption (pywt recovered, pytest failed identically). A build should
+    # not depend on cache state at all, so it is bypassed outright. The cost is
+    # one download of four small pure-Python packages.
+    export UV_LINK_MODE=copy
+    export UV_NO_CACHE=1
+
+    # Replace the stale 0.3.0 rather than shadow it. An editable .pth or a
+    # PYTHONPATH entry would leave two copies resolvable and make which one wins
+    # depend on sys.path order -- exactly the fragility this image exists to end.
+    $UV pip uninstall --python $VENV/bin/python pimm-data || true
+    $UV pip install --python $VENV/bin/python --no-deps /opt/build/pimm-data
+
+    # helix's DSP half: PyWavelets is helix's only dependency not already here.
+    $UV pip install --python $VENV/bin/python PyWavelets
+
+    # pytest, because the first thing anyone does with a new environment is ask
+    # whether it works, and the base image has no test runner at all. These are
+    # helix's [dev] extra.
+    $UV pip install --python $VENV/bin/python pytest pytest-benchmark
+
+    # jax CPU, deliberately NOT jax[cuda12]. helix has a JAX GPU DSP backend, but
+    # the corpus builder DEFAULTS to torch ("measured 10.6 ms") and
+    # submit_coeff_corpus.sh passes --backend torch, so jax is an override and
+    # not the production path. A CUDA jax would install its own nvidia-* wheels
+    # beside torch 2.10+cu126's, which is how a carefully pinned CUDA stack gets
+    # broken. CPU jax costs nothing and lets the jax-parametrised tests actually
+    # run: without it 19 of them skip rather than fail, which is honest but blind.
+    $UV pip install --python $VENV/bin/python "jax[cpu]"
+
+    rm -rf /opt/build
+
+    # Fail the BUILD, not a training run six hours in.
+    $VENV/bin/python - <<'PYCHECK'
+import pywt, pimm_data
+from pimm_data.transform import TRANSFORMS
+names = set(TRANSFORMS.module_dict)
+assert pimm_data.__version__ >= "0.4.0", f"stale pimm_data {pimm_data.__version__}"
+assert "Densify" in names, "pimm_data lost Densify"
+for gone in ("AddNoise", "Digitize"):
+    assert gone not in names, f"pimm_data still registers {gone}: lockstep violated"
+import pytest as _pt, jax as _jx, torch as _t
+assert not _jx.devices("cpu")[0].platform.startswith("gpu")
+print(f"OK: pywt {pywt.__version__}, pimm_data {pimm_data.__version__}, "
+      f"pytest {_pt.__version__}, jax {_jx.__version__} (cpu), "
+      f"torch {_t.__version__}, {len(names)} transforms, "
+      f"forward model absent as expected")
+PYCHECK
+
+%labels
+    helix.purpose  corpus building and FM training in one image
+    helix.base     pimm_v0.5.1.sif
+
+%help
+    One image for both halves of the helix workflow.
+
+      corpus:  apptainer exec -B /sdf <img> python scripts/build_coeff_corpus.py ...
+      train:   see launch/coeff_fm_train.sbatch
+
+    pimm and helix are NOT installed here; they come from binds/PYTHONPATH.
+    pimm-data IS installed, and must match helix -- the AddNoise/Digitize
+    registration is lockstep across the two.

@@ -14,6 +14,11 @@ import numpy as np
 import pytest
 
 h5py = pytest.importorskip("h5py")
+# identity.py itself imports no pimm_data -- it is pure h5py -- but
+# helix/data/__init__.py eagerly imports coeff_reader and coeff_dataset, which
+# do. So importing any helix.data submodule requires the optional [pimm] extra,
+# and without this guard the module raised at collection and failed the suite.
+pytest.importorskip("pimm_data")
 
 from helix.data.identity import corpus_identity, check_corpus_matches  # noqa: E402
 

@@ -11,11 +11,18 @@ import sys
 import numpy as np
 import pytest
 
-from helix.data.coeff_reader import CoeffTPCReader, write_coeff_shard
-from helix.data.coeff_dataset import CoeffTPCDataset
+# BEFORE the helix.data imports, not after: helix/data/__init__.py eagerly
+# imports coeff_reader and coeff_dataset, both of which import pimm_data, so
+# ANY helix.data.* import needs it. Guarding afterwards collected a
+# ModuleNotFoundError instead of a skip, and pytest treats a collection error as
+# a failure -- so the whole suite refused to run without the optional [pimm]
+# extra rather than skipping the parts that need it.
 pytest.importorskip("pimm_data")          # the framework this family plugs into
+
+from helix.data.coeff_reader import CoeffTPCReader, write_coeff_shard  # noqa: E402
+from helix.data.coeff_dataset import CoeffTPCDataset  # noqa: E402
 from pimm_data.transform import Compose   # noqa: E402
-from helix.data.coeff_verify import verify_corpus
+from helix.data.coeff_verify import verify_corpus  # noqa: E402
 
 BAND_LENGTHS = [8, 8, 16]
 GIDS = [0, 1]
