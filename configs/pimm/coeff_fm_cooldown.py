@@ -26,7 +26,7 @@ Run (4 GPUs, as the stable phase)::
     srun --partition=ampere --account=mli:cider-ml --gpus=4 --ntasks=4 \\
          --cpus-per-task=8 --mem=256G --time=4:00:00 \\
          singularity exec --nv -B /sdf,/lscratch \\
-         /sdf/data/neutrino/youngsam/images/pimm-latest.sif \\
+         /sdf/data/neutrino/omara/images/helix-train.sif \\
          bash -lc 'python3 -m pimm.train --config-file .../coeff_fm_cooldown.py'
 """
 

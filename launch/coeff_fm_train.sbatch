@@ -70,7 +70,7 @@
 
 set -uo pipefail
 
-IMAGE=${HELIX_PIMM_IMAGE:-/sdf/data/neutrino/youngsam/images/pimm-latest.sif}
+IMAGE=${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}
 PIMM=${HELIX_PIMM_ROOT:-/sdf/group/neutrino/omara/pimm-fm}
 EXP_ROOT=${HELIX_EXP_ROOT:-/sdf/data/neutrino/omara/exp}
 

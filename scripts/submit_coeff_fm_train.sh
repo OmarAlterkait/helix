@@ -53,7 +53,7 @@ else
 fi
 [ -f "$H/helix/paths.py" ] || { echo "FATAL: $H is not a helix checkout (set HELIX_ROOT)"; exit 1; }
 CFG=${CFG:-$H/configs/pimm/coeff_fm_train_8run.py}
-IMG=${IMG:-/sdf/data/neutrino/youngsam/images/pimm-latest.sif}
+IMG=${IMG:-${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}}
 PIMM=${PIMM_ROOT:-/sdf/group/neutrino/omara/pimm-fm}
 PDATA=${PIMM_DATA_SRC:-/sdf/group/neutrino/omara/pimm-data/src}
 

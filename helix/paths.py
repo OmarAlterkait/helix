@@ -29,8 +29,7 @@ vocabulary rather than two.
     HELIX_SCRATCH                 node-local/temporary space
     HELIX_PIMM_ROOT               a pimm checkout (the trainer)
     HELIX_PIMM_DATA_SRC           a pimm-data checkout's src/
-    HELIX_IMAGE                   container with pywt + torch, no pimm
-    HELIX_PIMM_IMAGE              container with pimm's full dependency set
+    HELIX_IMAGE                   the container: DSP and training both
     HELIX_JAXTPC_ROOT             JAXTPC checkout (noise spectrum, geometry)
     HELIX_LEGACY_CORPUS           the pre-tau corpus, for m113 only
     HELIX_OPTICAL_DATA            the goop PMT light file
@@ -56,9 +55,15 @@ _ROOTS = (
     ("HELIX_SCRATCH",       os.environ.get("SCRATCH", "/tmp"),          "temporary space"),
     ("HELIX_PIMM_ROOT",     "/sdf/group/neutrino/omara/pimm-fm",        "pimm checkout"),
     ("HELIX_PIMM_DATA_SRC", "/sdf/group/neutrino/omara/pimm-data/src",  "pimm-data src/"),
-    ("HELIX_IMAGE",         "/sdf/group/neutrino/images/develop.sif",   "DSP container"),
-    ("HELIX_PIMM_IMAGE",    "/sdf/data/neutrino/youngsam/images/pimm-latest.sif",
-                                                                        "pimm container"),
+    # ONE image now. It was two -- a DSP container with pywt but no pimm-data,
+    # and a pimm container with pimm-data but no pywt -- and both were broken:
+    # the pimm one baked pimm_data 0.3.0, which still registers the forward model
+    # helix registers now, and the DSP one had no pimm-data at all (the corpus
+    # builder needs it) and only ever worked through an editable .pth in one
+    # developer's home. Built by container/helix-train.def; see
+    # docs/ARCHITECTURE.md section 4.
+    ("HELIX_IMAGE",         "/sdf/data/neutrino/omara/images/helix-train.sif",
+                                                                        "the container"),
     ("HELIX_JAXTPC_ROOT",   "/sdf/group/neutrino/omara/JAXTPC",         "JAXTPC checkout"),
     ("HELIX_LEGACY_CORPUS",  "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715",
                                                                         "pre-tau corpus (m113 only)"),

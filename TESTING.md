@@ -1,60 +1,55 @@
-# Running the tests
+# Testing
 
-There is no single environment that runs everything. Two containers each hold
-half of what the suite needs, and the halves do not overlap:
+One image, one command:
 
-| container | has | lacks |
-|---|---|---|
-| `/sdf/group/neutrino/images/develop.sif` | `pywt`, torch, the DSP stack | pimm and its deps |
-| `/sdf/data/neutrino/youngsam/images/pimm-latest.sif` | pimm's full dependency set | `pywt` |
+    IMG=${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}
 
-A plain `pytest` in either one is **green and misleading**. In `develop.sif` the
-seven pimm-facing modules skip themselves silently — that hid forty tests,
-including every test of the pimm-facing evaluator, launcher and WeightEMA code,
-which had never run once. In `pimm-latest.sif` collection dies on `pywt`.
+    cd $HELIX_ROOT
+    apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python -m pytest -q
 
-## The two runs, together, are the check
+Expect **386 passed, 50 skipped**. In pimm-data, **360 passed, 8 skipped**.
 
-**1. DSP half** — the default suite, no pimm:
+## Run it in a clean environment
 
-```bash
-H=/sdf/group/neutrino/omara/helix-extraction
-apptainer exec -B /sdf,/lscratch /sdf/group/neutrino/images/develop.sif \
-  env PYTHONPATH=$H python3 -m pytest -q
-# expect: 297 passed, ~49 skipped (40 of those are the pimm seam — see below)
-```
+    apptainer exec -B /sdf,/lscratch $IMG \
+      env PYTHONNOUSERSITE=1 /opt/pimm/.venv/bin/python -m pytest -q
 
-**2. pimm seam** — needs a pimm CHECKOUT on `PYTHONPATH`; pimm is not installed
-in either container, so pointing at the venv interpreter alone is not enough:
+`PYTHONNOUSERSITE=1` is worth using deliberately. `-B /sdf` remounts home, so
+anything pip-installed under `~/.local` is visible inside the container. That is
+how the old DSP image appeared to have pimm-data: an editable `.pth` in one
+developer's home pointed at their checkout, and test results measured that way
+were partly an artifact of whose shell ran them.
 
-```bash
-H=/sdf/group/neutrino/omara/helix-extraction
-P=<a pimm checkout>          # e.g. /sdf/group/neutrino/omara/pimm-evalcontract
-PYX=/sdf/data/neutrino/omara/exp/_diag/pyx     # staged pytest
-apptainer exec -B /sdf,/lscratch /sdf/data/neutrino/youngsam/images/pimm-latest.sif \
-  env PYTHONPATH=$PYX:$H:$P HELIX_REQUIRE_PIMM=1 \
-  /opt/pimm/.venv/bin/python -m pytest -q --ignore=tests/test_optical.py
-```
+If a run passes for you and fails for a colleague, this is the first thing to
+check.
 
-`HELIX_REQUIRE_PIMM=1` makes the run **abort** if pimm is not importable,
-instead of skipping the seam and reporting success. Always set it for a run
-whose result is meant to mean "the integration is good".
+## Reading the output
 
-`--ignore=tests/test_optical.py` and the ~50 `No module named 'pywt'` failures
-in that container are the missing DSP half, covered by run 1.
+* **A collection ERROR means the environment is wrong**, not the code. pytest
+  counts it as a failure and the whole suite stops. The usual cause is a missing
+  optional dependency reaching a module-scope import before its `importorskip`.
+* **Skips are informative.** `pytest -q -rs` prints the reason for each. Most are
+  "needs real production data" or "needs the `pimm` framework", both expected.
+* Tests that need real doraemon shards skip when the data is unreachable rather
+  than failing, so a green run on a machine without `/sdf/data` mounted is not
+  the same claim as a green run with it.
 
-## Known failures, not yours
+## What the suite guards that is easy to break
 
-- `test_integration_pimm.py::test_dataset_wrapper_forwards_every_inner_parameter`
-  fails against both the current pimm branch and pimm's `origin/main`.
-- `test_model_fm.py::test_matches_frozen_golden` fails in `pimm-latest.sif`
-  (a `pywt`-dependent golden).
+`tests/test_boundary.py` enforces that `helix.core` and `helix.tpc` never import
+`pimm_data` — the property that lets helix's DSP half run where pimm-data does
+not exist. It has three parts because no single check is sufficient; see
+`docs/ARCHITECTURE.md` §6. If you move code between subpackages and this fails,
+the test is right and the move is wrong.
 
-## GPU
+`tests/test_pimm_config_contract.py` checks the training configs' `sys.path` /
+`custom_imports` pairing. It catches breakage that would otherwise appear only on
+a requeue, hours into a run.
 
-A handful of tests need a CUDA device and skip without one. For those:
+## Deferred tests
 
-```bash
-sbatch --partition=ampere --account=neutrino:ml-dev --gpus=1 \
-       --cpus-per-task=8 --mem=48G --time=01:00:00 <script>
-```
+`tests/_deferred/` holds tests that are written but not collected, each with a
+reason in `tests/_deferred/README.md`. `test_dense_chain.py.wip` is 32 tests for
+the full sparse → densify → noise → digitize chain, which now spans the
+helix/pimm-data boundary and needs fixtures from both trees. They are deliberate
+follow-up work, not forgotten.

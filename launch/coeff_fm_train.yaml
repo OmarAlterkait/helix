@@ -10,7 +10,7 @@
 #     --recipe /sdf/group/neutrino/omara/helix-extraction/launch/coeff_fm_train.yaml
 #
 # Why the driver runs from a venv on /sdf/data rather than the image or the host
-# python: `pimm submit` shells out to sbatch, which is NOT in pimm-latest.sif
+# python: `pimm submit` shells out to sbatch, which is NOT in the image
 # (and the bound host binary cannot reach the configless controller from inside
 # the container — its DNS SRV lookup fails). The host python is 3.6.8, too old
 # for tyro and for the modern package index. So the driver gets its own
@@ -60,7 +60,7 @@ resources:
 
 container:
   runtime: singularity
-  image: /sdf/data/neutrino/youngsam/images/pimm-latest.sif  # = HELIX_PIMM_IMAGE
+  image: /sdf/data/neutrino/omara/images/helix-train.sif  # = HELIX_IMAGE
   binds:
     - /sdf
     - /lscratch

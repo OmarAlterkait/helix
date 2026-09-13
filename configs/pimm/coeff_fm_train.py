@@ -15,7 +15,7 @@ Run (Turing, 1 GPU)::
 
     srun --partition=turing --account=mli:cider-ml --gpus=1 --cpus-per-task=4 \\
          --mem=16384M --time=0:30:00 singularity exec --nv -B /sdf,/lscratch \\
-         /sdf/data/neutrino/youngsam/images/pimm-latest.sif \\
+         /sdf/data/neutrino/omara/images/helix-train.sif \\
          bash -lc 'python3 -m pimm.train --config-file .../coeff_fm_smoke.py'
 """
 

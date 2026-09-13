@@ -120,9 +120,14 @@ RUNS_FILE=${RUNS_FILE:-$OUT/_calib/RUNS.txt}
 KGATE=${KGATE:-}
 KG_ARG=""; [ -n "$KGATE" ] && KG_ARG="--kgate $KGATE"
 # The build needs torch/pywt/h5py, which the bare login/compute python does not
-# have. Set CONTAINER to run each task inside an image instead; unset keeps the
-# original bare-metal behaviour.
-CONTAINER=${CONTAINER:-}
+# have -- so the image is the DEFAULT, not an opt-in. It used to default to bare
+# metal, which meant the documented command failed for anyone whose python was
+# not already special.
+#
+# `${CONTAINER-...}` without the colon on purpose: an explicitly empty
+# CONTAINER= still selects bare metal, for an environment that genuinely has the
+# stack installed. Only an UNSET variable takes the default.
+CONTAINER=${CONTAINER-${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}}
 if [ -n "$CONTAINER" ]; then
   PY=(singularity exec --nv -B /sdf,/lscratch "$CONTAINER" python3)
   export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$H:${PIMM_DATA_SRC:-/sdf/group/neutrino/omara/pimm-data/src}"
