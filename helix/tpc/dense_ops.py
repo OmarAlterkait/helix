@@ -21,15 +21,12 @@ Three ops, used post-collate by :mod:`pimm_data.batch_transforms`:
   loop + H2D copy). Uses ``std(unbiased=False)`` to match the numpy ddof=0 renorm.
 * ``digitize`` — quantize to ADC codes (the ADC quantisation for these grids).
 
-MIRROR of ``pimm_data.dense_ops``, copied verbatim below the docstring and pinned by
-``tests/test_forward_mirror.py``, which compares the two implementations
-numerically on fixed seeds.
-
-The duplication is deliberate, and is the same arrangement as the shard codec:
-pimm-data must run with no helix installed (it serves every detector, not only
-the coefficient pipeline) and helix must build a corpus with no pimm-data
-installed, so neither may depend on the other. The shared concern is mirrored and
-held together by a test rather than by an import.
+These used to MIRROR ``pimm_data.dense_ops``, pinned by
+``tests/test_forward_mirror.py``. The boundary moved: ``add_intrinsic_noise`` and
+``digitize`` are helix's and exist only here; ``densify`` is pimm-data's and does
+not. There is one copy of each, and the mirror test retired with the mirror.
+(``offset2batch`` is still duplicated across the two — see
+``docs/ARCHITECTURE.md`` section 8.)
 
 Note this is the FORWARD model — noise injection and digitisation, what the
 detector does to a signal. ``helix.tpc.coherent`` is the INVERSE (coherent-noise

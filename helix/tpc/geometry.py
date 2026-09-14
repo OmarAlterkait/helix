@@ -1,7 +1,11 @@
 """Plane geometry registry — the detector description the forward model needs.
 
-MIRROR of ``pimm_data.geometry``. The two are kept identical by
-``tests/test_forward_mirror.py``, which compares them element by element.
+DUPLICATE of ``pimm_data.geometry`` -- byte-identical loader, and the bundled
+``cubic_wireplane_geometry.json`` is byte-identical too. ``test_forward_mirror.py``
+used to compare them element by element; it was deleted with the forward model,
+which means this duplication is currently pinned by NOTHING. See
+``docs/ARCHITECTURE.md`` section 8: geometry did not move and the test should not
+have gone with it.
 
 The duplication is deliberate and is the same arrangement as the shard codec:
 pimm-data must run with no helix installed (it serves every detector, not just

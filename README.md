@@ -30,7 +30,7 @@ helix was developed on — they are defaults, not truths.
     pip install -e .                 # DSP only: numpy, h5py, PyWavelets, scipy
     pip install -e ".[pimm]"         # + the data layer, for the corpus and training
     pip install -e ".[gpu]"          # + jax and torch
-    pip install -e ".[probe]"        # + hdf5plugin, needed to read doraemon shards
+    pip install -e ".[probe]"        # + hdf5plugin and torch, to read shards and fit
 
 Or skip all of it and use the image, which has everything:
 

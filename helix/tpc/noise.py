@@ -18,8 +18,12 @@ Two additive components, selected by tags:
   inverse (``helix.tpc.remove_coherent``'s per-group median) is built to kill.
 
 Parameters are **inline defaults** documented to match JAXTPC's
-``config/noise_spectrum.npz`` + the YAML coherent block; ``tests/test_noise.py``
-pins them with a reconciliation test. The grouping convention
+``config/noise_spectrum.npz`` + the YAML coherent block.
+``tests/test_forward_noise.py`` pins them: the ENC formula, and the fact that
+``DetectorConfig``'s third copy of the same constants agrees with DEFAULT_ENC.
+(This used to cite ``tests/test_noise.py``, which exists in neither repo — the
+reconciliation against JAXTPC's own config now survives only in the parked
+``tests/_deferred/test_dense_chain.py.wip``.) The grouping convention
 (``arange(n) // group_size``) is identical to JAXTPC ``broadcast_to_wires`` and
 helix ``broadcast_groups`` — that single integer is the whole "don't drift"
 contract between forward injection and inverse removal.
@@ -29,12 +33,6 @@ kept in step by tests/test_forward_mirror.py -- pimm-data needed it for
 load-time augmentation and helix for the corpus builder, and neither could
 depend on the other. The boundary moved: the forward model is helix's, the
 densification that consumes it is pimm-data's, and there is one copy.
-
-The duplication is deliberate, and is the same arrangement as the shard codec:
-pimm-data must run with no helix installed (it serves every detector, not only
-the coefficient pipeline) and helix must build a corpus with no pimm-data
-installed, so neither may depend on the other. The shared concern is mirrored and
-held together by a test rather than by an import.
 
 Note this is the FORWARD model — noise injection and digitisation, what the
 detector does to a signal. ``helix.tpc.coherent`` is the INVERSE (coherent-noise

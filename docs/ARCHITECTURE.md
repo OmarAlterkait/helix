@@ -102,7 +102,7 @@ A registered transform is inherently a pimm-data object; a noise kernel is not.
 
 No environment may straddle it. Both containers must be rebuilt together.
 This is why `pimm-fm`'s lock had to be repointed: it pinned pimm-data at
-`aea39aff`, 26 commits behind, a revision that still defines `AddNoise`.
+`aea39aff`, 27 commits behind as of pimm-data 0.4.0, a revision that still defines `AddNoise`.
 
 ---
 
@@ -196,14 +196,14 @@ Rebuild whenever pimm-data changes: the image is part of the lockstep pair.
   doraemon sensor shards  (HDF5, raw wire ADC)
             |
             |  helix.tpc: coherent gate -> DWT -> threshold
-            |  scripts/build_coeff_corpus.py          [develop.sif]
+            |  scripts/build_coeff_corpus.py
             v
   coefficient corpus      (HDF5 shards: value + coord/{band,plane_gid,wire,tau}
                            + ident/{event,run,source_file,noise_seed}
                            + config attrs incl. basis_digest, removal_json)
             |
             |  helix.data: reader -> dataset -> CoeffTokenize
-            |  pimm training loop via helix.integrations.pimm   [pimm-latest.sif]
+            |  pimm training loop via helix.integrations.pimm
             v
   foundation model        (masked autoencoding over wavelet coefficients)
             |
@@ -212,9 +212,11 @@ Rebuild whenever pimm-data changes: the image is part of the lockstep pair.
 ```
 
 Each stage stamps provenance, and the next stage checks it. `helix/data/identity.py`
-compares a checkpoint's recorded corpus identity (`basis_digest`, `removal_json`,
-`sigma_norm`) against the corpus actually being read: it REFUSES on mismatch and
-WARNS when a corpus is unstamped. That guard is why the retired 540 GB
+compares a checkpoint's recorded `basis_digest` against the corpus actually
+being read: it REFUSES on mismatch and WARNS when a corpus is unstamped.
+`corpus_identity()` returns `removal_json` and `sigma_norm` too, and the refusal
+message prints them, but `basis_digest` is the only field COMPARED — its
+docstring says it is "the one field worth carrying". That guard is why the retired 540 GB
 `fm_cache_tpc` could never have been used again — it carried no stamps at all.
 
 ---

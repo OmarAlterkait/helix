@@ -7,7 +7,7 @@ One image, one command:
     cd $HELIX_ROOT
     apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python -m pytest -q
 
-Expect **386 passed, 50 skipped**. In pimm-data, **360 passed, 8 skipped**.
+Expect **395 passed, 50 skipped**. In pimm-data, **360 passed, 8 skipped**.
 
 ## Run it in a clean environment
 
@@ -38,8 +38,8 @@ check.
 
 `tests/test_boundary.py` enforces that `helix.core` and `helix.tpc` never import
 `pimm_data` — the property that lets helix's DSP half run where pimm-data does
-not exist. It has three parts because no single check is sufficient; see
-`docs/ARCHITECTURE.md` §6. If you move code between subpackages and this fails,
+not exist. It has three parts because no single check is sufficient (plus a fourth that
+keeps the allowed-side list honest); see `docs/ARCHITECTURE.md` §6. If you move code between subpackages and this fails,
 the test is right and the move is wrong.
 
 `tests/test_pimm_config_contract.py` checks the training configs' `sys.path` /

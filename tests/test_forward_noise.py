@@ -140,3 +140,45 @@ def test_torch_digitize_matches_the_numpy_formula():
     out = dense_ops.digitize(g, ped, n_bits=12)[0].numpy()
     want = np.clip(np.rint(g[0].numpy() + 400), 0, (1 << 12) - 1) - 400
     np.testing.assert_allclose(out, want)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Recovered from tests/test_forward_mirror.py, which was deleted with the
+# forward-model move. Its SUBJECT did not move: DetectorConfig carries a third
+# independent copy of the ENC constants and the coherent beta, and the only test
+# that pinned them against helix/tpc/noise.py went with the mirror file. From
+# then until this was restored, the two copies could drift with nothing failing.
+#
+# This is intra-helix. It has nothing to do with pimm-data and should not have
+# been deleted alongside the cross-repo tests.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_detector_config_matches_the_noise_module_constants():
+    """DetectorConfig's ENC triple IS helix.tpc.noise.DEFAULT_ENC.
+
+    config.py:75-77 restates (0.90, 0.79, 0.22) as three separate fields. If
+    someone retunes the forward model in noise.py, wire_sigma_intrinsic keeps
+    computing the old sigma and the corpus builder and the config disagree
+    silently.
+    """
+    from helix.tpc.config import DetectorConfig
+    cfg = DetectorConfig()
+    assert (cfg.noise_enc_x, cfg.noise_enc_y, cfg.noise_enc_z) == DEFAULT_ENC
+
+
+def test_detector_config_sigma_matches_the_forward_model_formula():
+    """The two copies must also AGREE NUMERICALLY, not merely hold equal floats."""
+    from helix.tpc.config import DetectorConfig
+    cfg = DetectorConfig()
+    x, y, z = DEFAULT_ENC
+    for L in (0.0, 2.33, 4.7):
+        assert np.isclose(cfg.wire_sigma_intrinsic(L),
+                          np.sqrt(x**2 + (y + z * L) ** 2), rtol=1e-6)
+
+
+def test_detector_config_beta_matches_the_noise_module():
+    """xblock_kernel is (-beta, 1, -beta) built from a beta restated in config.py."""
+    from helix.tpc.config import DetectorConfig
+    from helix.tpc.noise import DEFAULT_COH_BETA
+    k = DetectorConfig().xblock_kernel
+    assert k == (-DEFAULT_COH_BETA, 1.0, -DEFAULT_COH_BETA)

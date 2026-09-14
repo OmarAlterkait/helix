@@ -24,8 +24,8 @@ defaults, not truths.
 
 Then the suites, which need no data:
 
-    cd $HELIX_ROOT     && $PY -m pytest -q     # expect 386 passed, 50 skipped
-    cd $PIMM_DATA_ROOT && $PY -m pytest -q     # expect 360 passed,  8 skipped
+    cd <your helix checkout>     && $PY -m pytest -q   # 395 passed, 50 skipped
+    cd <your pimm-data checkout> && $PY -m pytest -q   # 360 passed,  8 skipped
 
 If you see fewer passes and more skips, something optional is missing and the
 skip reasons say which (`pytest -q -rs`). If you see a COLLECTION ERROR, the
@@ -47,7 +47,8 @@ will fail rather than produce a mismatched image.
 Input: doraemon sensor shards (`HELIX_SENSOR_ROOT`).
 Output: sharded HDF5 under `HELIX_CORPUS_ROOT/<run>/`.
 
-    sbatch scripts/submit_coeff_corpus.sh
+    SRC_ROOT=<sensor shards> OUT_ROOT=<corpus parent> \
+        sbatch scripts/submit_coeff_corpus.sh
 
 That is the production path: a Slurm job array, `--backend torch` (the default —
 measured 10.6 ms/plane, vs 176 ms on numpy), one GPU per task, `turing`
@@ -73,8 +74,11 @@ stages check it, and a corpus without it cannot be used (§5).
 
 **Verify before using:**
 
-    $PY -c "from helix.data.coeff_verify import verify_corpus; \
-            print(verify_corpus('<corpus dir>'))"
+    $PY -m helix.data.coeff_verify <corpus dir> --dataset-name sim_wire
+
+(`verify_corpus(data_root, dataset_name, *, split=...)` takes the dataset name
+as a required second argument; calling it with the directory alone is a
+TypeError.)
 
 It fails a corpus that records no builder, that mixes helix versions across
 shards, or that was built from a dirty working tree.
