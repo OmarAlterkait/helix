@@ -171,7 +171,10 @@ def test_dataset_collect(tmp_path):
 # it skipped — silently, since a skip for "helix not importable" is
 # indistinguishable from a machine that simply has no helix. Overridable so this
 # does not rot again the next time the checkout moves.
-_HELIX = os.environ.get("HELIX_ROOT", "/sdf/group/neutrino/omara/helix-extraction")
+# Default: the checkout this test file lives in, not a named directory.
+_HELIX = os.environ.get(
+    "HELIX_ROOT",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _import_helix():

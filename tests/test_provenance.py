@@ -76,7 +76,8 @@ def test_a_gitdir_FILE_is_still_a_repo(tmp_path):
 
     A worktree (and a submodule) has `.git` as a FILE pointing at the real
     gitdir, so `os.path.isdir(root/'.git')` is False for a perfectly good
-    checkout — which is exactly what helix-extraction is.
+    checkout. This was found on a real run from a git WORKTREE, which is how the
+    consolidation was done.
     """
     d = tmp_path / "repo"
     d.mkdir()
@@ -113,7 +114,13 @@ def test_provenance_covers_helix_and_pimm_data():
     p = provenance()
     for k in ("helix", "pimm_data", "python", "hostname"):
         assert k in p, f"provenance is missing {k}"
-    assert p["helix"]["root"].endswith("helix-extraction") or p["helix"]["commit"]
+    # NOT a check on the directory's NAME. This used to assert
+    # endswith("helix-extraction") -- one developer's worktree -- so it passed
+    # for the wrong reason there and would have failed in any other checkout.
+    # What matters is that provenance RESOLVED something: a real commit, or at
+    # least a root that exists.
+    assert p["helix"]["commit"] or os.path.isdir(p["helix"]["root"]), \
+        f"provenance recorded neither a commit nor a real root: {p['helix']}"
 
 
 @needs_pimm

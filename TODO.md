@@ -85,7 +85,7 @@ imports pimm-data. torch is the production backend, so this is a loose end.
 
 * ~~`tests/test_coeff_dataset.py` pins the cross-repo golden to
   `helix-consolidate`~~ — FIXED: it reads `HELIX_ROOT`, defaulting to
-  `helix-extraction`.
+  a git worktree of it.
 * ~~Version split: `pyproject.toml` 0.1.0 vs `helix/__init__.py` 0.2.0~~ — FIXED (0362328): pyproject reads the module via `[tool.setuptools.dynamic]`.
 * ~~The 10 back-compat flat shims~~ — REMOVED, along with the 6 import-broken
   scripts that were their only non-test users.

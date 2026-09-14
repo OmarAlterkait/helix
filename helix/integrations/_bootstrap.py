@@ -134,7 +134,7 @@ def describe_checkout(root):
 
     # Ask git where the repo is instead of testing for a `.git` DIRECTORY. That
     # test was wrong twice over and produced an all-null record from a real run:
-    # helix-extraction's `.git` is a FILE (a gitdir pointer, as any worktree or
+    # A worktree's `.git` is a FILE (a gitdir pointer, as any worktree or
     # submodule has), and a src-layout package resolves `root` to `<repo>/src`,
     # which is inside the repo but does not contain `.git` at all. `rev-parse`
     # answers both, and answers "not a repo" by failing.

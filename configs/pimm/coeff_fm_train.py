@@ -50,7 +50,7 @@ Run (Turing, 1 GPU)::
 import os as _os
 import sys as _sys
 
-for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix-extraction"),
+for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix"),
                ("PIMM_DATA_SRC", "/sdf/group/neutrino/omara/pimm-data/src")):
     _p = _os.environ.get(_v) or _p
     # Cannot self-locate here: pimm copies the config to a temp file before

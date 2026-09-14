@@ -1,7 +1,7 @@
 #!/bin/bash
 # Coefficient-FM pretraining: 25 epochs / 118,962 steps on 4 A100s (~7 h).
 #
-#   sbatch /sdf/group/neutrino/omara/helix-extraction/launch/coeff_fm_train.sbatch
+#   sbatch /sdf/group/neutrino/omara/helix/launch/coeff_fm_train.sbatch
 #
 # This exists because `pimm submit` cannot run on this cluster. It needs ONE
 # environment with both a working sbatch and the ability to import the training

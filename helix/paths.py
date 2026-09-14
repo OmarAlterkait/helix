@@ -76,7 +76,7 @@ def repo() -> Path:
     """This checkout, located from THIS file -- never from a name.
 
     Three helix checkouts have existed side by side (`helix`, `helix-consolidate`,
-    `helix-extraction`), and hardcoding one is not a portability problem but a
+    a worktree), and hardcoding one is not a portability problem but a
     CORRECTNESS one: `scripts/build_coeff_corpus.py` records that an old default
     of `helix-consolidate` was inserted at ``sys.path[0]``, so running the builder
     from any other checkout silently used that tree's code -- "32 commits behind,

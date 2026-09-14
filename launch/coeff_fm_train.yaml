@@ -7,7 +7,7 @@
 #   PIMM=/sdf/group/neutrino/omara/pimm-fm
 #   PYTHONPATH=$PIMM /sdf/data/neutrino/omara/venvs/pimm-launch/bin/python \
 #     -m pimm.cli.submit --site s3df-container \
-#     --recipe /sdf/group/neutrino/omara/helix-extraction/launch/coeff_fm_train.yaml
+#     --recipe /sdf/group/neutrino/omara/helix/launch/coeff_fm_train.yaml
 #
 # Why the driver runs from a venv on /sdf/data rather than the image or the host
 # python: `pimm submit` shells out to sbatch, which is NOT in the image
