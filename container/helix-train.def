@@ -34,7 +34,14 @@
 # of the lockstep pair with helix.
 
 Bootstrap: localimage
-From: /sdf/data/neutrino/youngsam/images/pimm-latest.sif
+# The CONCRETE image, not the `pimm-latest.sif` symlink beside it. That symlink
+# lives in a third party's directory and can be repointed at any time, which
+# would silently change this image's base between two builds of the same
+# definition file. Verified 2026-09-13:
+#   pimm-latest.sif -> pimm_v0.5.1.sif
+#   md5 f4ed3cfd8479734757bcd9981750e9b5, 8,886,087,680 bytes, mtime Jul 20
+# Check the digest before trusting a rebuild to be equivalent to this one.
+From: /sdf/data/neutrino/youngsam/images/pimm_v0.5.1.sif
 
 %files
     /sdf/group/neutrino/omara/pimm-data /opt/build/pimm-data
@@ -122,6 +129,8 @@ PYCHECK
 %labels
     helix.purpose  corpus building and FM training in one image
     helix.base     pimm_v0.5.1.sif
+    helix.base_md5 f4ed3cfd8479734757bcd9981750e9b5
+    helix.built    2026-09-13
 
 %help
     One image for both halves of the helix workflow.
