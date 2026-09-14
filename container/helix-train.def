@@ -61,6 +61,16 @@ From: /sdf/data/neutrino/youngsam/images/pimm-latest.sif
     # Replace the stale 0.3.0 rather than shadow it. An editable .pth or a
     # PYTHONPATH entry would leave two copies resolvable and make which one wins
     # depend on sys.path order -- exactly the fragility this image exists to end.
+    # Delete any stale build tree BEFORE installing. setuptools copies sources
+    # into build/lib and never prunes, so a build/ left from before the forward
+    # model moved re-ships every module that was deleted since. It did: the
+    # previous image had pimm_data.{noise,noise_jax,coeff,coeff_verify} and
+    # readers.coeff_tpc importable, and that coeff_verify was an OLDER copy
+    # missing the source_root gap fix (74cfe5f) -- silently wrong answers from a
+    # module that is supposed to be gone. build/ is gitignored, so it is
+    # invisible to every check that looks at the repo.
+    rm -rf /opt/build/pimm-data/build /opt/build/pimm-data/*.egg-info
+
     $UV pip uninstall --python $VENV/bin/python pimm-data || true
     $UV pip install --python $VENV/bin/python --no-deps /opt/build/pimm-data
 
@@ -88,12 +98,21 @@ From: /sdf/data/neutrino/youngsam/images/pimm-latest.sif
 import pywt, pimm_data
 from pimm_data.transform import TRANSFORMS
 names = set(TRANSFORMS.module_dict)
-assert pimm_data.__version__ >= "0.4.0", f"stale pimm_data {pimm_data.__version__}"
+assert tuple(int(x) for x in pimm_data.__version__.split(".")[:2]) >= (0, 4), \
+    f"stale pimm_data {pimm_data.__version__}"  # tuple, not string: "0.10" < "0.4" lexically
 assert "Densify" in names, "pimm_data lost Densify"
 for gone in ("AddNoise", "Digitize"):
     assert gone not in names, f"pimm_data still registers {gone}: lockstep violated"
-import pytest as _pt, jax as _jx, torch as _t
+import pytest as _pt, jax as _jx, torch as _t, importlib.util as _iu
 assert not _jx.devices("cpu")[0].platform.startswith("gpu")
+
+# Modules the boundary move DELETED. The registry check above cannot see these:
+# they register nothing, so it passed while the image shipped all five.
+for _gone in ("pimm_data.noise", "pimm_data.noise_jax", "pimm_data.coeff",
+              "pimm_data.coeff_verify", "pimm_data.readers.coeff_tpc"):
+    assert _iu.find_spec(_gone) is None, (
+        f"{_gone} was deleted from pimm-data but is installed -- a stale "
+        f"build/lib leaked into the wheel")
 print(f"OK: pywt {pywt.__version__}, pimm_data {pimm_data.__version__}, "
       f"pytest {_pt.__version__}, jax {_jx.__version__} (cpu), "
       f"torch {_t.__version__}, {len(names)} transforms, "

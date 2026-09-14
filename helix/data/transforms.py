@@ -15,6 +15,8 @@ A config reaches these with ``custom_imports=["helix.data.transforms"]``.
 """
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import torch
 
@@ -120,8 +122,6 @@ class AddNoise:
         """Post-collate path: add fresh per-event noise to the collated grids
         ``batch[<mod>_dense]`` (torch, on the inputs' device). Seeds self-derive
         from ``batch['name']`` folded with base_seed/_epoch/_rank."""
-        from . import dense_ops
-        from .batch_transforms import _seeds_for, content_seed
         grids = batch[pfx + self.dense_key]
         seeds = _seeds_for(batch, self.base_seed)
         if seeds is None:                              # no 'name' -> position fallback
@@ -236,7 +236,6 @@ class Digitize:
         """Post-collate path: quantize the collated grids ``batch[<mod>_dense]``
         (torch, on the inputs' device) via dense_ops. Pedestal: the ``pedestal``
         arg wins, else per-plane from ``geom``."""
-        from . import dense_ops
         ped = self.pedestal
         if ped is None:
             ped = {gid: e.get('pedestal', 0) for gid, e in self.geom.items()}
@@ -287,5 +286,5 @@ def build_sensor_gpu_stages(geom, *, modality=None, **kw):
     noise self-seeds). Default ``modality=None`` (bare-batch); pass ``modality=
     'sensor'`` for flat ``sensor_*``.
     """
-    from .transform import Compose
+    from pimm_data.transform import Compose
     return Compose(sensor_dense_cfg(geom, modality=modality, **kw))

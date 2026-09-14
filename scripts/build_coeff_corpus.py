@@ -97,6 +97,11 @@ def _loader_stream(args, cfg, reg, noise_spec):
     from pimm_data.collate import collate_fn
     from pimm_data.batch_transforms import content_seed
     from pimm_data.transform import Compose
+    # Registers AddNoise/Digitize, which the Compose below names by string.
+    # Before the forward model moved, `from pimm_data.transform import Compose`
+    # registered them transitively via pimm_data/__init__.py; it no longer does,
+    # and the Compose then raised "AddNoise is not in the transforms registry".
+    import helix.data.transforms  # noqa: F401
 
     # --shard locates the RUN here, not a file: the sensor reader globs every
     # shard of the run and builds ONE joint index over all of them. Naming a

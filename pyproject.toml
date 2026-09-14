@@ -23,7 +23,21 @@ dependencies = [
 # Stage-1 probe truth reads the doraemon hits/step shards, which are written
 # with a compression plugin. Without this h5py raises "can't open directory
 # /usr/local/hdf5/lib/plugin" on read — it worked in one container by accident.
-probe = ["hdf5plugin>=4.0"]
+# (hdf5plugin's actual importers are helix/tpc/io.py, guarded, and
+# scripts/dump_probe_truth.py — not helix/probe/ itself.)
+#
+# torch is here because helix/probe/{features,fit}.py import it at module scope:
+# without it `pip install helix-tpc[probe]` produced an environment in which
+# helix.probe.fit could not run at all.
+probe = ["hdf5plugin>=4.0", "torch>=2.0"]
+
+# Lazy imports that raise a clear error when absent, so they are opt-in rather
+# than base dependencies — but they were declared NOWHERE, which made them
+# undiscoverable. helix/model/checkpoint.py needs safetensors to read a
+# .safetensors export (it SystemExits telling you to install it);
+# helix/optical/viz.py needs matplotlib for plot_decomposition.
+export = ["safetensors>=0.4"]
+viz = ["matplotlib>=3.6"]
 
 # helix.data and helix.integrations are the ONLY subpackages that may import
 # pimm_data (7 modules do). helix.core and helix.tpc must never touch it, and
@@ -40,6 +54,11 @@ probe = ["hdf5plugin>=4.0"]
 # checkout the consumer configures (see pimm-fm's uv.lock, or
 # `pip install -e ../pimm-data`), so no URL is pinned here — a URL in this file
 # would be a second place to get the revision wrong.
+# NOTE this covers the DATA layer only. helix/integrations/pimm/* also imports
+# the `pimm` training framework itself (7 modules do), which is not declared
+# here because it is not on PyPI either and its version is pinned by pimm-fm's
+# uv.lock, not by helix. Installing this extra does NOT give you a working
+# training integration; use the container (docs/ARCHITECTURE.md section 4).
 pimm = ["pimm-data>=0.4.0"]
 
 # Backend frameworks are optional: helix.core imports only the selected one

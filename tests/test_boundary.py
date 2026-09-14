@@ -52,8 +52,15 @@ CLEAN = ["helix", "helix.core", "helix.tpc", "helix.model.tokenize",
 #: The two entries need different environments, which is the split itself: the
 #: corpus-builder image can import helix.data, but only the training image has
 #: ``pimm``, so the hooks check runs there and skips here.
+#: helix.data.transforms is listed SEPARATELY from helix.data on purpose.
+#: helix/data/__init__.py imports only coeff_reader and coeff_dataset, so
+#: importing the package never executes transforms.py -- and transforms.py is
+#: reached by STRING through the transform registry, so no other test named it
+#: either. It shipped with four broken code paths and both suites stayed green.
+#: A module addressed only by string has to be imported somewhere on purpose.
 MAY_IMPORT_PIMM_DATA = [
     ("helix.data", ["pimm_data"]),
+    ("helix.data.transforms", ["pimm_data", "torch"]),
     ("helix.integrations.pimm.hooks", ["pimm_data", "pimm"]),
 ]
 

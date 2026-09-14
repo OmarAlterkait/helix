@@ -162,7 +162,17 @@ deserves a reason that survives.
 
 It was superseded by `coeff_tpc_r1` on four independent counts:
 
-1. **Smaller, not extra** — 199,990 events against the corpus's 315,982.
+1. **MORE events, and this is the one reason that does NOT hold.** The cache
+   held 199,990 events against the corpus's 157,991. An earlier version of this
+   document claimed the opposite, from a count that summed each shard's
+   `n_events` attribute — but `coeff_tpc_r1` writes TWO coeff shards per source
+   file (100 source files -> 200 shards per run), so that sum double-counts.
+   Counting distinct `(source_file, event)` pairs gives 19,999 per run and
+   157,991 across the 8 runs, which is exactly what
+   `configs/pimm/coeff_fm_train_8run.py` records as its split
+   (150,239 + 4,641 + 3,111). The cache was the larger set of events. It was
+   still unusable, for the three reasons below, but "it was smaller" was not one
+   of them and should not have been offered as one.
 2. **Wrong noise model** — white, where the corpus is colored with coherent and
    incoherent components. helix's own `scripts/derive_coeff_bins.py` says so:
    "the edges shipped with m113 were derived from the old cache, which used a

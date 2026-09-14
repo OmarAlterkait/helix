@@ -61,6 +61,11 @@ Single-shard, interactively, to check the chain end to end:
 The builder is a BUILD-TIME composer: it is the one place that imports both
 helix and pimm-data. The read path never does.
 
+**Counting events.** Do NOT sum each shard's `n_events`: the builder writes
+TWO coeff shards per source file, so that double-counts. Count distinct
+`(ident/source_file, ident/event)` pairs — 19,999 per run, 157,991 over the 8
+runs, matching the split in `configs/pimm/coeff_fm_train_8run.py`.
+
 **What a corpus records.** Every shard carries `basis_digest`, `removal_json`
 (including `tau`), `sigma_norm`, `noise_json`, `provenance_json`, and
 `ident/{event,run,source_file,noise_seed}`. This is not decoration — the next two
@@ -190,7 +195,7 @@ Corpora currently on disk:
 
 | corpus | gate | use |
 |---|---|---|
-| `coeff_tpc_r1` (8 runs, 315,982 events, 345 GB) | `tau=0.05` | **current** |
+| `coeff_tpc_r1` (8 runs, 157,991 events, 345 GB) | `tau=0.05` | **current** |
 | `coeff_tpc` | pre-tau | `m113` only (`HELIX_LEGACY_CORPUS`) |
 
 ---
