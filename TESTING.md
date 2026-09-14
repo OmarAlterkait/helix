@@ -9,6 +9,31 @@ One image, one command:
 
 Expect **395 passed, 50 skipped**. In pimm-data, **360 passed, 8 skipped**.
 
+## Testing a change to pimm-data
+
+**The container INSTALLS pimm-data.** A plain `pytest` in the pimm-data checkout
+imports the installed copy from `/opt/pimm/.venv/...`, not your working tree —
+so your edits are not what gets tested, and the suite passes for the wrong
+reason. This is not hypothetical; it silently green-lit several pimm-data edits
+during the consolidation.
+
+Put the working tree ahead of site-packages:
+
+    cd <pimm-data checkout>
+    apptainer exec -B /sdf,/lscratch $IMG env PYTHONNOUSERSITE=1 \
+      PYTHONPATH=$PWD/src /opt/pimm/.venv/bin/python -m pytest -q
+
+Check which copy you got before trusting a result:
+
+    ... python -c "import pimm_data; print(pimm_data.__file__)"
+
+helix is NOT installed in the image, so helix's own suite always tests the
+working tree and needs no such care. The asymmetry is the trap.
+
+The same `PYTHONPATH=<pimm-data>/src` is needed for helix's
+`tests/test_cross_repo_duplication.py` to compare against your pimm-data edits
+rather than the installed copy.
+
 ## Run it in a clean environment
 
     apptainer exec -B /sdf,/lscratch $IMG \
