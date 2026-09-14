@@ -47,8 +47,27 @@ will fail rather than produce a mismatched image.
 Input: doraemon sensor shards (`HELIX_SENSOR_ROOT`).
 Output: sharded HDF5 under `HELIX_CORPUS_ROOT/<run>/`.
 
-    SRC_ROOT=<sensor shards> OUT_ROOT=<corpus parent> \
-        sbatch scripts/submit_coeff_corpus.sh
+    # Phase 2 is EIGHT submissions, not one: this cluster's MaxArraySize is 100,
+    # so an 0-799 array is rejected outright. RUN_INDEX picks the run.
+    for i in 0 1 2 3 4 5 6 7; do
+      RUN_INDEX=$i sbatch --account=<facility>:<repo> \
+        --export=ALL,RUN_INDEX,SRC_ROOT=<sensor shards>,OUT_ROOT=<corpus parent> \
+        scripts/submit_coeff_corpus.sh
+    done
+
+**The account is not the same as the training job's.** Accounts are authorised
+per partition. The corpus build pins `--partition=turing` (the DSP is
+architecture-sensitive — the same shard gives 58,411,720 surviving coefficients
+on a 2080 Ti and 58,421,269 on an A100, and a corpus built across both is
+incoherent), and on S3DF `mli:cider-ml` does NOT cover turing while `mli:default`
+does. Training runs on ampere, where `mli:cider-ml` is correct.
+`sacctmgr -n show assoc user=$USER format=Account,Partition` lists yours.
+
+**Some tasks may report a missing source file, and that is normal.** The array is
+0-99 but the simulator does not guarantee 100 contiguous files — `run_0027670361`
+is missing indices 51-56 and 94-97, so it yields 180 shards and 17,999 events,
+in production too. Those tasks skip with a message and exit 0. A task that FAILS
+is a real failure.
 
 That is the production path: a Slurm job array, `--backend torch` (the default —
 measured 10.6 ms/plane, vs 176 ms on numpy), one GPU per task, `turing`

@@ -64,6 +64,21 @@
 # say so. run_0027575715 was built entirely on turing and reproduces
 # bit-for-bit there, which is the only reason that corpus is coherent.
 #SBATCH --partition=turing
+# NO --account here, deliberately: the right one is site- and partition-specific
+# and a wrong default fails at submission with a message that does not say why.
+# It MUST be supplied on the command line:
+#
+#   RUN_INDEX=0 sbatch --account=<facility>:<repo> --export=ALL,RUN_INDEX \
+#       scripts/submit_coeff_corpus.sh
+#
+# And note it is NOT necessarily the account the TRAINING job uses. On S3DF the
+# accounts are authorised per partition: `mli:cider-ml` covers ampere and milano
+# but NOT turing, which this job pins for the architecture reason above, so the
+# corpus build needs `mli:default` while launch/coeff_fm_train.sbatch correctly
+# defaults to `mli:cider-ml` on ampere. `sacctmgr -n show assoc user=$USER
+# format=Account,Partition` lists what you may use where. Submitting without an
+# account gives "you must specify a valid account"; submitting with one that is
+# not valid for turing gives "Invalid account or account/partition combination".
 set -euo pipefail
 
 # Default to THIS checkout, resolved from the script's own location. It used to
@@ -159,12 +174,31 @@ RI=$(( IDX / SHARDS_PER_RUN ))
 RUN=${RUNS[$RI]}
 K=$(( IDX % SHARDS_PER_RUN ))
 SHARD=$(printf "%04d" "$K")
+SHARD_FILE="$SRC/$RUN/sim_wire_sensor_$SHARD.h5"
+
+# A PRODUCTION RUN MAY HAVE GAPS. The array is 0-99 because that is the maximum
+# this cluster allows, but the simulator does not guarantee 100 contiguous files:
+# run_0027670361 is missing indices 51-56 and 94-97, so it has 90. Those ten
+# tasks used to die on h5py's FileNotFoundError and show as FAILED, which reads
+# like a broken build — it is not, and the production corpus has exactly the same
+# 180 shards / 17,999 events for that run.
+#
+# Exit 0 with a clear line instead, so a genuinely failed task still stands out.
+# Do NOT silently skip anything else: a file that is missing for any other reason
+# would be a real problem, and this only covers absence.
+if [ ! -f "$SHARD_FILE" ]; then
+  echo "task $IDX -> run=$RUN source file $SHARD DOES NOT EXIST — skipping."
+  echo "  This run has a gap in its source files; that is a property of the"
+  echo "  simulation output, not a build failure. Expect fewer shards for it,"
+  echo "  and pass the real count to coeff_verify --expect."
+  exit 0
+fi
 
 echo "task $IDX -> run=$RUN source file $SHARD (all $EVENTS_PER_SHARD events)"
 
 cd "$H"
 "${PY[@]}" scripts/build_coeff_corpus.py \
-  --shard "$SRC/$RUN/sim_wire_sensor_$SHARD.h5" \
+  --shard "$SHARD_FILE" \
   --out   "$OUT/$RUN" \
   --dataset-name sim_wire --run "$RUN" \
   --file-index "$K" --event-start 0 --events "$EVENTS_PER_SHARD" \
