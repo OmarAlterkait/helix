@@ -54,11 +54,20 @@ class AddNoise:
 
     scope = 'sample'  # per-event independent; placeable pre- OR post-collate
 
-    def __init__(self, incoherent=False, coherent=True, group_size=64,
+    # The defaults come FROM helix.tpc.noise, not from literals repeating it.
+    # This signature imported all five of these constants and then re-typed their
+    # values inline (group_size=64, coh_rms=2.5, 20000.0, 1.5, beta=0.15). They
+    # agreed, so nothing failed -- but retuning the forward model in noise.py
+    # would have left the registered transform silently on the old values. Same
+    # drift that DetectorConfig's third copy of the ENC triple allowed.
+    def __init__(self, incoherent=False, coherent=True,
+                 group_size=DEFAULT_GROUP_SIZE,
                  wire_lengths_m=None, enc=DEFAULT_ENC,
                  series_spectrum=DEFAULT_SERIES_SPECTRUM,
-                 sampling_rate_hz=DEFAULT_SAMPLING_RATE_HZ, coh_rms=2.5,
-                 coh_corner_freq_hz=20000.0, coh_spectral_slope=1.5, beta=0.15,
+                 sampling_rate_hz=DEFAULT_SAMPLING_RATE_HZ,
+                 coh_rms=DEFAULT_COH_RMS_ADC,
+                 coh_corner_freq_hz=DEFAULT_COH_CORNER_FREQ_HZ,
+                 coh_spectral_slope=DEFAULT_COH_SLOPE, beta=DEFAULT_COH_BETA,
                  base_seed=0, dense_key='dense', planes=None, name_key='name',
                  geom=None, modality=None, coherent_numpy=False, offset_key='offset'):
         self.incoherent = bool(incoherent)

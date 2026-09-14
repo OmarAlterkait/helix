@@ -92,3 +92,24 @@ def test_the_builder_registers_before_it_composes():
     i_use = src.find('type="AddNoise"')
     assert i_import != -1, "builder composes AddNoise but never registers it"
     assert i_use == -1 or i_import < i_use, "registration must precede the Compose"
+
+
+def test_addnoise_defaults_come_from_the_noise_module():
+    """Not literals repeating it.
+
+    The signature imported five constants from helix.tpc.noise and then re-typed
+    their values inline. They agreed, so nothing failed -- but retuning the
+    forward model would have left the registered transform on the old values,
+    with the corpus builder and the trainer disagreeing silently. Same drift as
+    DetectorConfig's third copy of the ENC triple (test_forward_noise.py).
+    """
+    import inspect
+    from helix.tpc import noise as N
+    d = {k: v.default for k, v in
+         inspect.signature(T.AddNoise.__init__).parameters.items()}
+    assert d["group_size"] == N.DEFAULT_GROUP_SIZE
+    assert d["coh_rms"] == N.DEFAULT_COH_RMS_ADC
+    assert d["coh_corner_freq_hz"] == N.DEFAULT_COH_CORNER_FREQ_HZ
+    assert d["coh_spectral_slope"] == N.DEFAULT_COH_SLOPE
+    assert d["beta"] == N.DEFAULT_COH_BETA
+    assert d["enc"] == N.DEFAULT_ENC
