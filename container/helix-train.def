@@ -44,7 +44,18 @@ Bootstrap: localimage
 From: /sdf/data/neutrino/youngsam/images/pimm_v0.5.1.sif
 
 %files
-    /sdf/group/neutrino/omara/pimm-data /opt/build/pimm-data
+    # RELATIVE to the directory you run `apptainer build` from, which must be the
+    # parent holding BOTH checkouts side by side:
+    #
+    #   <parent>/helix/       <- this definition lives here
+    #   <parent>/pimm-data/
+    #   cd <parent> && apptainer build --fakeroot <out>.sif helix/container/helix-train.def
+    #
+    # This used to name /sdf/group/neutrino/omara/pimm-data outright, so the
+    # image always baked ONE developer's working checkout no matter whose clone
+    # the definition came from -- including when the point of the build was to
+    # test the published code. Found by doing exactly that.
+    pimm-data /opt/build/pimm-data
 
 %post
     set -e
