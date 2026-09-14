@@ -1,16 +1,34 @@
-"""The dense chain end to end: Densify (pimm-data) -> AddNoise/Digitize (helix).
+"""The dense chain end to end: Densify -> AddNoise -> Digitize.
 
-These tests came from pimm-data when the forward model moved here. They live in
-helix because the chain does: scattering sparse rows into per-key grids is a
-data-layer operation any detector family wants and stays in pimm-data; the
-LArTPC forward model applied to those grids is physics and is helix's. Only
-helix can import both halves -- helix.data may depend on pimm_data, not the
-reverse.
+These 33 tests were cut from five pimm-data test files when the forward model
+moved to helix, and parked unfinished as `_deferred/test_dense_chain.py.wip`.
+They are enabled now. What was actually wrong with them was not the boundary:
 
-The jaxtpc fixtures they use are SYNTHETIC (pimm_data.testing builds them from
-numpy + h5py), so this is the code dependency helix already has, not a
-dependency on simulator output.
+  * The file was CONCATENATED from five sources without reconciling duplicate
+    helpers. `_import_jaxtpc` was defined THREE times, `_sensor_sample` and
+    `_densify_addnoise` twice each, and `test_jaxtpc_sensor_dense_gpu_recipe`
+    twice. Python keeps the last definition, so tests silently ran against a
+    helper they were not written for -- and the surviving `_import_jaxtpc`
+    returned a bare module where the callers unpacked `(cn, nz, root)`. The
+    duplicate test was shadowed and never ran at all. All the duplicates were
+    byte-identical except `_import_jaxtpc`, where the three-tuple version is the
+    correct one.
+  * Two `@pytest.mark.parametrize("T", ...)` decorators were lost in the cut,
+    leaving `T` as an undeclared fixture.
+  * Three tests allocate on `device='cuda'` and their skipif guards were dropped.
+
+The real blocker was elsewhere: `helix/data/transforms.py` shipped with four
+broken code paths (fc4f707), so anything touching AddNoise or
+build_sensor_gpu_stages failed on import. These are exactly the tests that would
+have caught that, which is the argument for enabling them rather than leaving
+them parked.
+
+The JAXTPC reconciliation tests here are the ONLY place that pins helix's
+DEFAULT_ENC and the coherent implementation against JAXTPC's own
+`noise_spectrum.npz` and `tools/coherent_noise.py`. They skip when JAXTPC is not
+importable (`JAXTPC_ROOT`, else the S3DF default).
 """
+
 
 import os
 
@@ -46,29 +64,43 @@ from pimm_data.detector_transforms import Densify
 from helix.data.transforms import Digitize
 
 def _import_jaxtpc():
+    """Import JAXTPC's `tools.{coherent_noise,noise}` WITHOUT leaving a trace.
+
+    This used to insert JAXTPC's root at sys.path[0] and evict every cached
+    `tools.*` module, then return. Both effects were permanent for the rest of
+    the session, so `tools` stopped meaning helix's own `tools/` package and
+    three tests in test_model_fm.py failed with
+    `ModuleNotFoundError: No module named 'tools.convert_fm_ckpt'` -- but only
+    when the whole suite ran, and only in file order. In isolation they passed.
+
+    The namespace collision it guards against is real (pimm also ships a `tools`),
+    so the eviction stays; it is the FAILURE TO RESTORE that was the bug. The
+    returned module objects stay valid after being removed from sys.modules.
+    """
     for root in (os.environ.get('JAXTPC_ROOT'),
                  '/sdf/group/neutrino/omara/JAXTPC'):
-        if root and os.path.isdir(os.path.join(root, 'tools')):
-            if root not in sys.path:
-                sys.path.insert(0, root)
-            # Namespace-collision guard: another `tools` package on sys.path
-            # (e.g. pimm's) may already be cached in sys.modules, shadowing
-            # JAXTPC's. Evict any cached `tools[.*]` not loaded from this root so
-            # the import below resolves to JAXTPC's (the parity oracle). Without
-            # this the comparison silently ran against the wrong module.
+        if not (root and os.path.isdir(os.path.join(root, 'tools'))):
+            continue
+        saved_path = list(sys.path)
+        saved_mods = {k: v for k, v in sys.modules.items()
+                      if k == 'tools' or k.startswith('tools.')}
+        sys.path.insert(0, root)
+        for m in list(saved_mods):
+            del sys.modules[m]
+        try:
+            import tools.coherent_noise as cn
+            import tools.noise as nz
+            if not (getattr(cn, '__file__', '') or '').startswith(root):
+                return None          # got a foreign `tools`
+            return cn, nz, root
+        except Exception:
+            return None
+        finally:
             for m in [k for k in list(sys.modules)
                       if k == 'tools' or k.startswith('tools.')]:
-                f = getattr(sys.modules[m], '__file__', None) or ''
-                if not f.startswith(root):
-                    del sys.modules[m]
-            try:
-                import tools.coherent_noise as cn
-                import tools.noise as nz
-            except Exception:
-                return None
-            if not (getattr(cn, '__file__', '') or '').startswith(root):
-                return None  # got a foreign `tools`, treat as unavailable
-            return cn, nz, root
+                del sys.modules[m]
+            sys.modules.update(saved_mods)
+            sys.path[:] = saved_path
     return None
 
 import torch
@@ -186,14 +218,6 @@ def test_densify_pixel_skip(jaxtpc_pixel_data_root):
 # AddNoise
 # --------------------------------------------------------------------------
 
-def _densify_addnoise(sub, **addnoise_kw):
-    pipe = Compose([dict(type='Apply', on='sensor', transforms=[
-        dict(type='Densify'),
-        dict(type='AddNoise', **addnoise_kw),
-    ])])
-    return pipe(deepcopy({'sensor': sub}))['sensor']
-
-
 def test_addnoise_requires_densify(jaxtpc_data_root):
     sub = _sensor_sample(jaxtpc_data_root)
     pipe = Compose([dict(type='Apply', on='sensor',
@@ -269,33 +293,6 @@ def test_no_double_digitize(jaxtpc_data_root):
         Digitize(pedestal=0)(sub)
 
 
-def _import_jaxtpc():
-    for root in (os.environ.get('JAXTPC_ROOT'),
-                 '/sdf/group/neutrino/omara/JAXTPC'):
-        if root and os.path.isdir(os.path.join(root, 'tools')):
-            if root not in sys.path:
-                sys.path.insert(0, root)
-            # Namespace-collision guard: another `tools` package on sys.path
-            # (e.g. pimm's) may already be cached in sys.modules, shadowing
-            # JAXTPC's. Evict any cached `tools[.*]` not loaded from this root so
-            # the import below resolves to JAXTPC's (the parity oracle). Without
-            # this the comparison silently ran against the wrong module.
-            for m in [k for k in list(sys.modules)
-                      if k == 'tools' or k.startswith('tools.')]:
-                f = getattr(sys.modules[m], '__file__', None) or ''
-                if not f.startswith(root):
-                    del sys.modules[m]
-            try:
-                import tools.coherent_noise as cn
-                import tools.noise as nz
-            except Exception:
-                return None
-            if not (getattr(cn, '__file__', '') or '').startswith(root):
-                return None  # got a foreign `tools`, treat as unavailable
-            return cn, nz, root
-    return None
-
-
 def test_dense_chain_end_to_end(jaxtpc_data_root):
     ds, batch = _sensor_batch(jaxtpc_data_root, B=2)
     geom = ds.plane_geometry()
@@ -324,6 +321,7 @@ def test_dense_per_event_reproducible(jaxtpc_data_root):
     assert not torch.equal(a['dense'][g0], c['dense'][g0])
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 def test_end_to_end_on_cuda(jaxtpc_data_root):
     ds, batch = _sensor_batch(jaxtpc_data_root, B=2)
     geom = ds.plane_geometry()
@@ -390,12 +388,6 @@ def test_coherent_adjacent_group_anticorrelation():
 # --------------------------------------------------------------------------
 # Densify
 # --------------------------------------------------------------------------
-
-def _sensor_sample(root, **kw):
-    ds = JAXTPCDataset(data_root=root, split='', dataset_name='sim',
-                       modalities=('sensor',), max_len=2, **kw)
-    return ds.get_data(0)['sensor']
-
 
 def test_reconcile_enc_params_with_npz():
     """pimm-data's inline ENC defaults must equal JAXTPC's noise_spectrum.npz."""
@@ -504,35 +496,14 @@ def test_move_to_device_idempotent():
 # invariant: pimm-data never imports torch.cuda
 # --------------------------------------------------------------------------
 
-def _import_jaxtpc():
-    import sys
-    for root in (os.environ.get('JAXTPC_ROOT'), '/sdf/group/neutrino/omara/JAXTPC'):
-        if root and os.path.isdir(os.path.join(root, 'tools')):
-            if root not in sys.path:
-                sys.path.insert(0, root)
-            # evict a foreign cached `tools` (namespace collision) so this
-            # resolves to JAXTPC's parity oracle regardless of import order.
-            for m in [k for k in list(sys.modules)
-                      if k == 'tools' or k.startswith('tools.')]:
-                f = getattr(sys.modules[m], '__file__', None) or ''
-                if not f.startswith(root):
-                    del sys.modules[m]
-            try:
-                import tools.coherent_noise as cn
-            except Exception:
-                return None
-            if not (getattr(cn, '__file__', '') or '').startswith(root):
-                return None
-            return cn
-    return None
-
-
 # --------------------------------------------------------------------------
 # de-tautologized: BATCHED coherent path vs JAXTPC (not the pimm-data oracle)
 # --------------------------------------------------------------------------
 
+@pytest.mark.parametrize("T", [2048, 2049])
 def test_coherent_batched_matches_jaxtpc(T):
-    cn = _import_jaxtpc()
+    jx = _import_jaxtpc()
+    cn = jx[0] if jx else None
     if cn is None:
         pytest.skip("JAXTPC not importable")
     W, gid, seed = 200, 0, 777
@@ -550,6 +521,7 @@ def test_coherent_batched_matches_jaxtpc(T):
     assert np.allclose(grids[gid][0].numpy(), expected, atol=1e-5)
 
 
+@pytest.mark.parametrize("T", [4096, 4097])
 def test_incoherent_rms_at_odd_and_even_T(T):
     W, gid = 48, 0
     L = np.linspace(0.42, 4.63, W).astype(np.float32)
@@ -582,6 +554,7 @@ def test_within_batch_events_differ_by_seed():
 # canonical plane_id: stable under volume filter / empty plane; densify guards
 # --------------------------------------------------------------------------
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 def test_coherent_cpu_matches_cuda():
     # Only the numpy oracle (coherent_numpy=True) is device-independent. The default
     # torch coherent uses torch RNG, whose CPU/CUDA streams differ by design, so it
@@ -597,6 +570,7 @@ def test_coherent_cpu_matches_cuda():
     assert torch.allclose(out['cpu'], out['cuda'], atol=1e-5)  # numpy oracle -> device-independent
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 def test_incoherent_rms_on_cuda():
     W, T, gid = 48, 4096, 0
     L = np.linspace(0.42, 4.63, W).astype(np.float32)
@@ -679,41 +653,6 @@ def test_dense_stage_scoped_to_namespaced_modality(jaxtpc_data_root):
 # --- Phase 5: codec transcode must preserve the holdout identity (F1) -----
 
 
-# The sensor_dense_gpu recipe moved to helix/configs/jaxtpc/; its
-# config-builds test comes with it.
-def test_jaxtpc_sensor_dense_gpu_recipe(jaxtpc_data_root):
-    """One transform list, split at Collect: the head Collects sparse sensor COO
-    per-event; the dataset exposes the post-collate tail as batch_transform
-    ([ToDevice, Densify, AddNoise, Digitize]). Running the tail (synthetic geom,
-    CPU) densifies+noises+digitizes -> sensor_dense {plane_gid: (B, W, T)}."""
-    from pimm_data.transform import Compose
-    from pimm_data._dataset_base import ShardEventDataset
-    ns = runpy.run_path(os.path.join(_CONFIGS, 'jaxtpc/sensor_dense_gpu.py'))
-    spec = dict(copy.deepcopy(ns['data']['train']))
-    spec.update(data_root=jaxtpc_data_root, split='', dataset_name='sim')
-    ds = build_dataset(spec)
-    assert ds.batch_transform is not None            # tail split off at Collect
-    ds.get_data(0)                                   # populate reader geometry
-    geom = ds.plane_geometry()
-    batch = collate_fn([ds[0], ds[1]])               # head -> sparse sensor_*
-    assert {'sensor_wire', 'sensor_time', 'sensor_value', 'sensor_plane_gid',
-            'sensor_offset'} <= {k for k in batch if k != '_roles'}
-    # the recipe's post-collate tail, run with the SYNTHETIC geom + on CPU
-    _, tail = ShardEventDataset._split_at_collect(ns['transform'])
-    assert [t['type'] for t in tail] == ['ToDevice', 'Densify', 'AddNoise', 'Digitize']
-    tail = copy.deepcopy(tail)
-    for t in tail:
-        if 'geom' in t:
-            t['geom'] = geom
-        if t['type'] == 'ToDevice':
-            t['device'] = 'cpu'
-    out = Compose(tail)(batch)
-    grids = out['sensor_dense']
-    assert isinstance(grids, dict) and len(grids) >= 1
-    for g in grids.values():
-        assert g.ndim == 3 and g.shape[0] == 2       # (B, n_wires, n_ticks)
-
-
 def test_digitize_matches_production_formula():
     """digitize == round(x + ped).clip(0, 4095) - ped (doraemon/JAXTPC path)."""
     rng = np.random.default_rng(0)
@@ -722,14 +661,6 @@ def test_digitize_matches_production_formula():
     out = digitize(x, ped)  # default n_bits=12 -> adc_max=4095, gain=1
     expected = np.round(x + ped).clip(0, 4095).astype(np.float32) - ped
     assert np.array_equal(out, expected)
-
-
-def _densify_addnoise(sub, **addnoise_kw):
-    pipe = Compose([dict(type='Apply', on='sensor', transforms=[
-        dict(type='Densify'),
-        dict(type='AddNoise', **addnoise_kw),
-    ])])
-    return pipe(deepcopy({'sensor': sub}))['sensor']
 
 
 def test_addnoise_changes_dense_and_keeps_clean_copy(jaxtpc_data_root):

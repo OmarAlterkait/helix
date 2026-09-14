@@ -46,10 +46,15 @@ the test is right and the move is wrong.
 `custom_imports` pairing. It catches breakage that would otherwise appear only on
 a requeue, hours into a run.
 
-## Deferred tests
+## The dense-chain tests
 
-`tests/_deferred/` holds tests that are written but not collected, each with a
-reason in `tests/_deferred/README.md`. `test_dense_chain.py.wip` is 32 tests for
-the full sparse → densify → noise → digitize chain, which now spans the
-helix/pimm-data boundary and needs fixtures from both trees. They are deliberate
-follow-up work, not forgotten.
+`tests/test_dense_chain.py` covers the full Densify -> AddNoise -> Digitize
+chain, which spans the helix/pimm-data boundary. Three of its tests need a CUDA
+device and skip without one; the JAXTPC reconciliation tests skip unless
+`JAXTPC_ROOT` (or the S3DF default) is importable.
+
+Those reconciliation tests are the only thing pinning helix's `DEFAULT_ENC` and
+its coherent implementation against JAXTPC's own `noise_spectrum.npz` and
+`tools/coherent_noise.py`. If they start skipping everywhere, that agreement is
+unverified — the forward model would be free to drift from the simulator it is
+supposed to reproduce.

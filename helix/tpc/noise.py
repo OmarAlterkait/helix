@@ -22,8 +22,8 @@ Parameters are **inline defaults** documented to match JAXTPC's
 ``tests/test_forward_noise.py`` pins them: the ENC formula, and the fact that
 ``DetectorConfig``'s third copy of the same constants agrees with DEFAULT_ENC.
 (This used to cite ``tests/test_noise.py``, which exists in neither repo — the
-reconciliation against JAXTPC's own config now survives only in the parked
-``tests/_deferred/test_dense_chain.py.wip``.) The grouping convention
+reconciliation against JAXTPC's own config lives in
+``tests/test_dense_chain.py``, which skips when JAXTPC is not importable.) The grouping convention
 (``arange(n) // group_size``) is identical to JAXTPC ``broadcast_to_wires`` and
 helix ``broadcast_groups`` — that single integer is the whole "don't drift"
 contract between forward injection and inverse removal.

@@ -143,10 +143,6 @@ weights, bins and provenance in one file.
 **Charge R2 is unrun.** It is the metric that would separate "the model
 represents charge" from "the model represents where charge is".
 
-**The deferred dense-chain tests.** 32 tests for sparse -> densify -> noise ->
-digitize, parked in `tests/_deferred/` because the chain now spans the
-helix/pimm-data boundary and needs fixtures from both trees.
-
 **Bins are per-corpus-generation and this is a trap.** The edges shipped with
 `m113` were derived from an old cache built with a WHITE noise model; the current
 corpus is colored, coherent + incoherent. Bins are training-set statistics.
