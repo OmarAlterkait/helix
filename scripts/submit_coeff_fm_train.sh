@@ -126,6 +126,60 @@ if [ "$_RESOLVER_RC" -ne 0 ]; then
 fi
 rm -f "$_RESOLVER_ERR"
 if [ -n "$WEIGHT" ]; then
+  # WHOSE run is this? Resume is decided purely by "a checkpoint exists at
+  # $SAVE/model", so pointing this launcher at a save_path that already belongs
+  # to another experiment silently CONTINUES that experiment's weights under this
+  # config. save_path comes from a config whose run name is a LITERAL, so a new
+  # HELIX_EXP with an unchanged name lands on an existing run -- and if HELIX_EXP
+  # fails to reach the job at all, on the production one.
+  #
+  # launch/coeff_fm_train.sbatch has an ALLOW_RESUME guard for exactly this and
+  # this launcher, the one the chain actually uses, had none.
+  #
+  # pimm dumps the RESOLVED config to <save_path>/config.py, so the check is
+  # cheap and exact: if the run already there was produced by a different config,
+  # refuse. Comparing the resolved dumps (not the source files) means a config
+  # reached through different _base_ paths still compares equal.
+  _PREV_CFG="$SAVE/config.py"
+  if [ -f "$_PREV_CFG" ] && [ "${ALLOW_RESUME:-0}" != "1" ]; then
+    _MINE=$(apptainer exec -B /sdf,/lscratch "$IMG" \
+      env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python - "$CFG" <<'PY' 2>/dev/null
+import sys, hashlib, re
+from pimm.utils.config import Config
+def _fingerprint(path):
+    c = Config.fromfile(path)
+    t = c.pretty_text
+    # save_path is excluded BY DESIGN: two configs that differ only in where they
+    # write are the same experiment, and resuming one from the other is correct.
+    t = re.sub(r"^save_path\s*=.*$", "", t, flags=re.M)
+    return hashlib.sha256(t.encode()).hexdigest()[:16]
+print(_fingerprint(sys.argv[1]))
+PY
+)
+    _THEIRS=$(apptainer exec -B /sdf,/lscratch "$IMG" \
+      env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python - "$_PREV_CFG" <<'PY' 2>/dev/null
+import sys, hashlib, re
+from pimm.utils.config import Config
+def _fingerprint(path):
+    c = Config.fromfile(path)
+    t = c.pretty_text
+    # save_path is excluded BY DESIGN: two configs that differ only in where they
+    # write are the same experiment, and resuming one from the other is correct.
+    t = re.sub(r"^save_path\s*=.*$", "", t, flags=re.M)
+    return hashlib.sha256(t.encode()).hexdigest()[:16]
+print(_fingerprint(sys.argv[1]))
+PY
+)
+    if [ -n "$_MINE" ] && [ -n "$_THEIRS" ] && [ "$_MINE" != "$_THEIRS" ]; then
+      echo "ERROR: $SAVE already holds a run from a DIFFERENT config." >&2
+      echo "         there: $_THEIRS" >&2
+      echo "         here : $_MINE" >&2
+      echo "       Resuming would continue THAT run's weights under THIS config." >&2
+      echo "       Use a distinct run name, or set ALLOW_RESUME=1 if this is" >&2
+      echo "       deliberate." >&2
+      exit 2
+    fi
+  fi
   OPTS="resume=True weight=$WEIGHT"
   # A FLOOR on progress, not the step. `iter_N.pth` is written on the
   # CheckpointSaver's cadence, so N is always a multiple of SAVE_EVERY and the
