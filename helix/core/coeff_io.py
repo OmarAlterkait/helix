@@ -123,13 +123,23 @@ def _code_version():
     out = {"version": getattr(helix, "__version__", "unknown")}
     try:
         root = os.path.dirname(os.path.dirname(os.path.abspath(helix.__file__)))
+        # ATOMIC: both fields or neither. This used to assign out["git"] and
+        # THEN run `git status`, so a timeout on the second call left the commit
+        # recorded with no dirtiness -- a PARTIAL record. Two shards of one
+        # corpus then serialised differently ({git, git_dirty} vs {git}) and
+        # coeff_verify reported "shards were built by DIFFERENT helix versions"
+        # for shards built by the SAME commit. Observed under a 32-way array all
+        # running `git status` against one NFS checkout.
         r = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
-            out["git"] = r.stdout.strip()
             d = subprocess.run(["git", "-C", root, "status", "--porcelain"],
-                               capture_output=True, text=True, timeout=5)
-            out["git_dirty"] = bool(d.stdout.strip())
+                               capture_output=True, text=True, timeout=30)
+            if d.returncode == 0:
+                # Only now is the pair complete. A commit without dirtiness does
+                # not describe the code, so it is not worth recording alone.
+                out["git"] = r.stdout.strip()
+                out["git_dirty"] = bool(d.stdout.strip())
     except Exception:                       # not a checkout, no git, timeout
         pass
     return out

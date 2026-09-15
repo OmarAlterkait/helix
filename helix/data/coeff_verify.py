@@ -164,13 +164,37 @@ def verify_corpus(data_root, dataset_name, *, split="", expect_events=None,
             f"undetectable. Rebuild with a current builder, or record the "
             f"provenance alongside the shards.")
     if known:
-        seen = {json.dumps(c, sort_keys=True) for _, c in known}
-        if len(seen) > 1:
+        # Compare FIELD BY FIELD over the keys a pair of records actually share,
+        # not by serialising the whole dict. A record that omits `git_dirty`
+        # because `git status` timed out is INCOMPLETE, not DIFFERENT: it does
+        # not contradict a record that has it. Comparing json.dumps() treated
+        # {"git": X, "git_dirty": false} and {"git": X} as two versions and
+        # failed a corpus built entirely by commit X -- which is a false refusal,
+        # and the worst kind, because the fix looks like "rebuild 344 GB".
+        conflicts = {}
+        for key in {k for _, c in known for k in c}:
+            vals = {json.dumps(c[key], sort_keys=True) for _, c in known if key in c}
+            if len(vals) > 1:
+                conflicts[key] = sorted(vals)
+        if conflicts:
             probs.append(
-                f"shards were built by DIFFERENT helix versions: "
-                + "; ".join(sorted(f"{v}" for v in seen))
+                "shards were built by DIFFERENT helix versions: "
+                + "; ".join(f"{k}={' vs '.join(v)}" for k, v in sorted(conflicts.items()))
                 + "  (basis_digest and the geom/spectrum hashes pin the DSP's "
                   "inputs, not its code, so this is the only field that shows it)")
+        elif len({frozenset(c) for _, c in known}) > 1:
+            # Same values everywhere, but some shards recorded fewer fields.
+            # Not a refusal -- nothing disagrees -- but say so, because it means
+            # provenance capture failed on some tasks and the NEXT build might
+            # lose a field that would have mattered.
+            missing = sorted({k for _, c in known for k in c}
+                             - set.intersection(*[set(c) for _, c in known]))
+            probs.append(
+                f"NOTE: provenance is INCOMPLETE on some shards (missing: {missing}). "
+                f"Every field that IS recorded agrees, so this is not a mixed "
+                f"build -- helix.core.coeff_io._code_version gives up on a git "
+                f"timeout, which happens under a wide job array on a shared "
+                f"filesystem.")
         elif any(c.get("git_dirty") for _, c in known):
             probs.append(
                 f"corpus was built from a DIRTY working tree "
@@ -231,9 +255,15 @@ def main(argv=None):
     probs = verify_corpus(a.data_root, a.dataset_name, split=a.split,
                           expect_events=a.expect, modalities=tuple(a.modalities),
                           source_root=a.source_root)
-    if probs:
-        print(f"CORPUS FAILED ({len(probs)} problem(s)):")
-        for p in probs:
+    # "NOTE:" entries are observations that do not contradict anything -- they
+    # are printed, but they do not fail the corpus. Everything else does.
+    notes = [p for p in probs if p.startswith("NOTE:")]
+    fatal = [p for p in probs if not p.startswith("NOTE:")]
+    for n in notes:
+        print(f"  ~ {n}")
+    if fatal:
+        print(f"CORPUS FAILED ({len(fatal)} problem(s)):")
+        for p in fatal:
             print(f"  - {p}")
         return 1
     print("corpus OK")
