@@ -45,15 +45,24 @@ mkdir -p "$LOGS"
 case "$CFG" in /*) ;; *) CFG="$H/$CFG" ;; esac
 [ -f "$CFG" ] || { echo "FATAL: no config at $CFG"; exit 1; }
 
+# Name the jobs after the CONFIG, not "coeff8". Every link of every chain used
+# to be `coeff8_<i>`, so two chains running different experiments were
+# indistinguishable in squeue -- and their logs collided in the same
+# coeff8_<i>_%j.out namespace. Deciding which of two chains to cancel then meant
+# reasoning from submission order, which is exactly the kind of thing that is
+# wrong at 2am. The config name is the one thing that actually differs.
+TAG=$(basename "${CFG%.py}")
+TAG=${TAG#coeff_fm_}            # coeff_fm_train_8run_plane -> train_8run_plane
+
 PREV=""
 for i in $(seq 1 "$N"); do
   DEP=""
   [ -n "$PREV" ] && DEP="--dependency=afterany:$PREV"
   JID=$(sbatch --parsable $DEP ${EXC:+--exclude=$EXC} \
       --account="$ACCT" \
-      --job-name="coeff8_$i" \
-      --output="$LOGS/coeff8_${i}_%j.out" \
-      --error="$LOGS/coeff8_${i}_%j.out" \
+      --job-name="${TAG}_$i" \
+      --output="$LOGS/${TAG}_${i}_%j.out" \
+      --error="$LOGS/${TAG}_${i}_%j.out" \
       --export=ALL,HELIX_ROOT=$H,CFG=$CFG \
       "$H/scripts/submit_coeff_fm_train.sh")
   printf "link %2d/%s -> job %s%s\n" "$i" "$N" "$JID" "${PREV:+  (after $PREV)}"
@@ -61,4 +70,4 @@ for i in $(seq 1 "$N"); do
 done
 echo
 echo "logs: $LOGS"
-echo "watch: squeue -u \$USER -n $(basename "${CFG%.py}") ; tail -f $LOGS/coeff8_1_*.out"
+echo "watch: squeue -u \$USER -n ${TAG}_1 ; tail -f $LOGS/${TAG}_1_*.out"
