@@ -134,3 +134,25 @@ def test_the_training_hook_actually_calls_the_guard():
         "the training hook no longer CALLS check_corpus_matches (a comment "
         "mentioning it does not count) -- a resumed run can switch corpora "
         "silently again")
+
+
+def test_write_holdout_exists_and_is_wired():
+    """The split must be materialisable, not only computable.
+
+    configs/pimm/coeff_fm_train.py says the split is "Resolved once and written
+    to holdout.json beside the corpus" -- and nothing wrote it.
+    CoeffTPCDataset.holdout_manifest() computed it, dump_probe_truth.py and
+    run_probe.py READ the file, and no code put it there. Result: the probe could
+    not run on any corpus built from scratch, and in fact 7 of the 8 production
+    runs have no holdout.json either.
+    """
+    import ast, os
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = os.path.join(here, "scripts", "write_holdout.py")
+    assert os.path.exists(src), "scripts/write_holdout.py is gone; the probe cannot run"
+    tree = ast.parse(open(src, encoding="utf-8").read())
+    calls = {getattr(n.func, "attr", None) for n in ast.walk(tree)
+             if isinstance(n, ast.Call)}
+    assert "holdout_manifest" in calls, (
+        "write_holdout.py no longer calls holdout_manifest() -- it must derive the "
+        "split from the dataset, not re-implement the identity hash")
