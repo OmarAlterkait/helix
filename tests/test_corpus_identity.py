@@ -84,3 +84,53 @@ def test_an_unstamped_run_warns_but_does_not_fail(tmp_path):
     for recorded in (None, {}, {"basis_digest": ""}):
         note = check_corpus_matches(recorded, actual, where="x")
         assert "NOT RECORDED" in note
+
+
+# ── the resume path, not just eval ───────────────────────────────────────────
+
+def test_resuming_against_a_different_corpus_is_refused():
+    """A run directory continued against a different corpus must REFUSE.
+
+    check_corpus_matches was wired into scripts/eval_checkpoint.py alone. The
+    training hook RECORDED corpus identity per link and never compared it, so a
+    resumed run could switch corpora silently -- which is the exact mismatch
+    identity.py exists to prevent, in the one place where it also costs GPU
+    days before anyone sees a number.
+    """
+    r1 = dict(basis_digest="8c4542b6" + "0" * 56, removal_json='{"tau":0.05}',
+              sigma_norm=2.6)
+    legacy = dict(basis_digest="7f954a84" + "0" * 56, removal_json="{}",
+                  sigma_norm=2.6)
+    with pytest.raises(Exception) as e:
+        check_corpus_matches(r1, legacy, where="run/provenance.json")
+    assert "basis_digest" in str(e.value) or "corpus" in str(e.value).lower()
+
+
+def test_the_training_hook_actually_calls_the_guard():
+    """Guard the wiring, not just the guard.
+
+    The function existing and being correct is not the property that matters
+    here; being CALLED from the resume path is.
+    """
+    # Read the FILE, do not import it: helix.integrations.pimm imports the pimm
+    # framework at module scope (deliberately -- see helix/integrations/__init__),
+    # and the DSP container has no pimm. A test of the wiring must not require
+    # the very environment the wiring is for.
+    import os
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(here, "helix", "integrations", "pimm", "hooks.py"),
+               encoding="utf-8").read()
+    # A SUBSTRING TEST IS NOT ENOUGH. The first version of this asserted
+    # `"check_corpus_matches" in src`, and a mutation that deleted the import
+    # AND the call still passed -- because the name also appears in the comment
+    # explaining why the call is there. Parse for an actual Call node.
+    import ast
+    tree = ast.parse(src)
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", None))
+             == "check_corpus_matches"]
+    assert calls, (
+        "the training hook no longer CALLS check_corpus_matches (a comment "
+        "mentioning it does not count) -- a resumed run can switch corpora "
+        "silently again")

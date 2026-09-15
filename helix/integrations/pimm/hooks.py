@@ -131,6 +131,30 @@ class HelixPathBootstrap(HookBase):
                     log = json.load(fh)
                 if isinstance(log, dict):          # a single record from an older run
                     log = [log]
+            # REFUSE to continue a run directory against a different corpus.
+            #
+            # This hook already appends a record per link precisely because "a
+            # run that was preempted and resumed from a DIFFERENT working tree
+            # is exactly the case worth catching" -- but it only ever RECORDED
+            # that. Nothing checked, and check_corpus_matches was wired into
+            # eval_checkpoint.py alone, so the training path could resume a
+            # checkpoint trained on one corpus against another and report
+            # plausible numbers the whole way.
+            #
+            # The failure is realistic: save_path is derived from a config whose
+            # run name is a literal, so pointing HELIX_EXP somewhere new while
+            # leaving the name alone lands on an existing run's directory. A
+            # corpus swap under a resumed run is the silent version of the very
+            # mismatch identity.py was written for.
+            prev = next((r.get("corpus") for r in reversed(log)
+                         if isinstance(r, dict) and r.get("corpus")), None)
+            if prev and info.get("corpus") and not info["corpus"].get("error"):
+                from helix.data.identity import check_corpus_matches
+                # Raises on a present-and-different basis_digest; a missing or
+                # unreadable record is tolerated, exactly as at eval time.
+                note = check_corpus_matches(prev, info["corpus"], where=path)
+                self.trainer.logger.info(f"[corpus] {note}")
+
             log.append(info)
             tmp = path + ".tmp"
             with open(tmp, "w") as fh:
