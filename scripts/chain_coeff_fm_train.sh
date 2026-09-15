@@ -39,6 +39,19 @@ ACCT=${ACCOUNT:-mli:default}
 # busy or unavailable". The launcher's preflight now requeues instead of burning
 # a link, but excluding a known-bad node saves the round trip.
 EXC=${EXCLUDE:-}
+# QOS: empty means "whatever submit_coeff_fm_train.sh declares", which is
+# preemptable. On S3DF that costs roughly HALF the scheduling priority --
+# measured in one 409-deep ampere queue, preemptable jobs sat at 9,592 while the
+# same user's normal-QoS jobs on the SAME account were at 19,591. There was no
+# way to run a chain at normal QoS at all: ACCOUNT and EXCLUDE were overridable
+# and this was not, so switching accounts to get headroom silently kept the low
+# priority that made the switch pointless.
+#
+# Not defaulted to normal: preemptable is the right choice for a long chain when
+# the allocation is shared, and `normal` is not granted on every account
+# (`sacctmgr -n show assoc user=$USER format=Account,Partition,QOS` lists yours;
+# mli:default and neutrino:default carry preemptable only).
+QOS=${QOS:-}
 LOGS=${LOGDIR:-/sdf/data/neutrino/omara/exp/_diag/trainlogs}
 mkdir -p "$LOGS"
 
@@ -58,7 +71,7 @@ PREV=""
 for i in $(seq 1 "$N"); do
   DEP=""
   [ -n "$PREV" ] && DEP="--dependency=afterany:$PREV"
-  JID=$(sbatch --parsable $DEP ${EXC:+--exclude=$EXC} \
+  JID=$(sbatch --parsable $DEP ${EXC:+--exclude=$EXC} ${QOS:+--qos=$QOS} \
       --account="$ACCT" \
       --job-name="${TAG}_$i" \
       --output="$LOGS/${TAG}_${i}_%j.out" \
