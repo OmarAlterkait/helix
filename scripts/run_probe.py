@@ -215,6 +215,47 @@ def _cache_write(d, lo, hi, chunk, half=False):
     os.replace(tmp, os.path.join(d, f"ev_{lo:05d}_{hi:05d}.npz"))
 
 
+def _arm_key(probe, name, a):
+    """Identity of ONE fitted arm.
+
+    The fit parameters belong here, not in the feature cache's directory name:
+    `folds`/`epochs`/`seeds` change the NUMBER but not the features, so changing
+    them must invalidate a fitted arm while still reusing the extraction that
+    cost the GPU hour.
+    """
+    return f"{probe}:{name}:f{a.folds}:e{a.epochs}:s{a.seeds}:r{a.random_seed}"
+
+
+def _arms_load(cache_dir):
+    """Arms already fitted under this feature cache, or an empty map."""
+    if not cache_dir:
+        return {}
+    p = os.path.join(cache_dir, "arms.json")
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return {}
+
+
+def _arms_save(cache_dir, fitted):
+    """Persist after EVERY arm. The point is that the next one may not finish.
+
+    Extraction resume was only half the problem: the four mlp arms are ~1h20m
+    each at 2064 dims over 2.5M rows, `_emit` writes a row only once all four
+    are done, and a job that walls on its time limit three arms in loses all
+    three. That is the same failure `_emit`'s own docstring was written about
+    ("an OOM in triangulate discarded a complete four-arm mlp result"), one
+    level further in.
+    """
+    if not cache_dir:
+        return
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp = os.path.join(cache_dir, ".arms.json.tmp")
+    with open(tmp, "w") as fh:
+        json.dump(fitted, fh, indent=2, sort_keys=True)
+    os.replace(tmp, os.path.join(cache_dir, "arms.json"))
+
+
 def _emit(path, row):
     """Append one completed probe row immediately.
 
@@ -455,6 +496,11 @@ def main(argv=None):
                 cache_key=(os.path.basename(cache_dir) if cache_dir else None),
                 cache_resumed_events=int(start),
                 cache_half=bool(a.cache_half),
+                # How many arms were reused rather than fitted. Alongside
+                # cache_resumed_events this makes a resumed row auditable: both
+                # are expected to change nothing, and a row records enough to
+                # check that rather than asking anyone to trust it.
+                cache_arms_reused=len(_arms_load(cache_dir)),
                 cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
                 qtot_min=float(cfg.get("qtot_min", -1)),
                 dom_threshold=float(cfg.get("dom_threshold", -1)),
@@ -487,6 +533,9 @@ def main(argv=None):
     seeds = tuple(range(a.seeds))
     out_rows = []
     wanted = [p.strip() for p in a.probes.split(",") if p.strip()]
+    fitted = _arms_load(cache_dir)
+    if fitted:
+        print(f"cache: {len(fitted)} arm(s) already fitted, reusing", flush=True)
 
     if "mlp" in wanted:
         row = dict(base, probe="mlp")
@@ -497,6 +546,12 @@ def main(argv=None):
         for name in ("geo", "trained", "random", "raw"):
             if name != "geo" and arms.get(name) is None:
                 continue
+            k = _arm_key("mlp", name, a)
+            if k in fitted:
+                row[name] = fitted[k]
+                print(f"  [mlp] {name:8s} fisher_r={row[name]['fisher_r']:+.4f} "
+                      f"(cached)", flush=True)
+                continue
             X = mlp_designs(geo, {} if name == "geo" else {name: arms[name]})[name]
             oof, info = fit_probe(X, y, event, plane, n_folds=a.folds,
                                   epochs=a.epochs, seeds=seeds)
@@ -505,6 +560,8 @@ def main(argv=None):
                              per_group_r_std=round(float(rs.std()), 4),
                              n_groups=minfo["n_groups"],
                              stop_epoch=round(info["mean_stop_epoch"], 1))
+            fitted[k] = row[name]
+            _arms_save(cache_dir, fitted)
             print(f"  [mlp] {name:8s} fisher_r={r:+.4f}", flush=True)
             del X, oof
         if "geo" in row and "trained" in row:
@@ -522,6 +579,14 @@ def main(argv=None):
         row = dict(base, probe="triangulate")
         for name in list(d):
             X = d.pop(name)                  # hand off; do not keep a second ref
+            k = _arm_key("triangulate", name, a)
+            if k in fitted:
+                row[name] = fitted[k]
+                print(f"  [tri] {name:8s} fisher_r={row[name]['fisher_r']:+.4f} "
+                      f"(cached)", flush=True)
+                del X
+                gc.collect()
+                continue
             oof, info = fit_probe(X, y, event, plane, n_folds=a.folds,
                                   epochs=a.epochs, seeds=seeds)
             r, rs, minfo = fisher_r(y, oof, event, plane)
@@ -529,6 +594,8 @@ def main(argv=None):
                              per_group_r_std=round(float(rs.std()), 4),
                              n_groups=minfo["n_groups"],
                              stop_epoch=round(info["mean_stop_epoch"], 1))
+            fitted[k] = row[name]
+            _arms_save(cache_dir, fitted)
             print(f"  [tri] {name:8s} fisher_r={r:+.4f}", flush=True)
             del X, oof
             gc.collect()

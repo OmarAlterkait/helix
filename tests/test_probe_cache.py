@@ -157,3 +157,84 @@ def test_a_half_written_chunk_is_never_visible(tmp_path, monkeypatch):
     assert rp._cache_resume(d) == ([], 0)
     # the temp file is there, and it is NOT named like a chunk
     assert all(f.startswith(".") for f in os.listdir(d))
+
+
+# ------------------------------------------------- fit-level resume (the arms)
+
+class _Args:
+    folds, epochs, seeds, random_seed = 5, 40, 3, 0
+
+
+def test_a_fitted_arm_survives_the_job_that_walled(tmp_path):
+    """Extraction resume was only half of it.
+
+    The four mlp arms are ~1h20m each at 2064 dims over 2.5M rows, and `_emit`
+    writes a row only once all four are done — so a job that hits its time limit
+    three arms in loses all three. That is the failure `_emit`'s own docstring
+    was written about, one level further in.
+    """
+    rp = _rp()
+    d = str(tmp_path / "c")
+    assert rp._arms_load(d) == {}, "absent cache must read as empty, not raise"
+
+    fitted = {}
+    for name in ("geo", "trained"):
+        fitted[rp._arm_key("mlp", name, _Args)] = dict(fisher_r=0.15)
+        rp._arms_save(d, fitted)             # after EVERY arm, not at the end
+
+    back = rp._arms_load(d)
+    assert len(back) == 2
+    assert back[rp._arm_key("mlp", "trained", _Args)]["fisher_r"] == 0.15
+
+
+def test_the_arm_key_separates_what_changes_the_fit(tmp_path):
+    """Fit parameters key the ARM, not the feature cache.
+
+    `folds`/`epochs`/`seeds` change the number but not the features, so changing
+    one must invalidate a fitted arm while still reusing the extraction that
+    cost the GPU hour. `seeds` especially: oof is averaged over them and going
+    1 -> 3 is worth about +0.05 on the trained arm.
+    """
+    rp = _rp()
+    base = rp._arm_key("mlp", "trained", _Args)
+    assert rp._arm_key("triangulate", "trained", _Args) != base
+    assert rp._arm_key("mlp", "random", _Args) != base
+    for field, val in (("folds", 2), ("epochs", 10), ("seeds", 1), ("random_seed", 7)):
+        other = type("A", (), dict(vars(_Args)))
+        setattr(other, field, val)
+        assert rp._arm_key("mlp", "trained", other) != base, field
+
+
+def test_a_corrupt_arm_cache_is_ignored_not_fatal(tmp_path):
+    """It runs after a GPU hour of extraction; it must never be the thing that
+    throws that away. Refitting is expensive, crashing is worse."""
+    rp = _rp()
+    d = str(tmp_path / "c")
+    os.makedirs(d)
+    open(os.path.join(d, "arms.json"), "w").write("{not json")
+    assert rp._arms_load(d) == {}
+
+
+def test_arms_are_written_atomically(tmp_path, monkeypatch):
+    rp = _rp()
+    d = str(tmp_path / "c")
+    rp._arms_save(d, {"a": {"fisher_r": 1.0}})
+
+    real = rp.json.dump
+
+    def boom(obj, fh, **kw):
+        real(obj, fh, **kw)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rp.json, "dump", boom)
+    with pytest.raises(KeyboardInterrupt):
+        rp._arms_save(d, {"a": {"fisher_r": 2.0}})
+    assert rp._arms_load(d)["a"]["fisher_r"] == 1.0, "a killed write clobbered the good one"
+
+
+def test_no_cache_dir_means_no_arm_persistence(tmp_path):
+    """--cache-dir is opt-in; without it nothing is written anywhere."""
+    rp = _rp()
+    assert rp._arms_load(None) == {}
+    rp._arms_save(None, {"a": {}})            # must not raise, must not create
+    assert not list(tmp_path.iterdir())

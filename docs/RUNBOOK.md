@@ -257,6 +257,15 @@ corpus, truth, and the storage precision), so a stale cache cannot be read by
 mistake. The cost is disk: `n_patch x feat_dim x 3 arms x 4 B`, about 62 GB for
 the 388-event split at feature dim 2048, so put it on `$SCRATCH`.
 
+`--cache-dir` also resumes the FITS, which is the other half. The four mlp arms
+are ~1h20m each at feature dim 2048 over 2.5M patches, and a row is written only
+once all four finish -- so a job that hits its time limit three arms in used to
+lose all three. Each arm is now persisted the moment it completes, keyed by the
+fit parameters (`folds`/`epochs`/`seeds`/`random_seed`) rather than by the
+feature hash, so changing a fit parameter refits while still reusing the
+extraction that cost the GPU hour. Budget four hours for a 388-event probe with
+both probe types, or expect to resume once.
+
 Full precision is the default, and it was earned. At float16 a resumed run
 reproduced three arms exactly but moved `raw` from +0.0044 to +0.0045 -- 1e-4,
 some 20x under the probe's own seed-to-seed sigma of 0.0021, and still wrong,
