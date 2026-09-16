@@ -163,7 +163,8 @@ across the wall-clock limit), `smoke_train_fm.py`, `plot_train_progress.py`.
 `dump_probe_truth.py` + `run_probe.py` (the 3D probe, two stages),
 `feats_rank.py`, `probe_xattn.py`, `viz_mask_recon.py`.
 
-**Tools** — `tools/convert_fm_ckpt.py` turns a research checkpoint into one
-self-contained file. Research checkpoints kept their bin edges in a separate
-sidecar named only on the command line, so one that outlived its sidecar cannot
-be evaluated at all.
+**Tools** — `scripts/export_artifact.py` promotes a `pimm export` into a helix
+eval artifact: weights plus the operating point, the corpus `basis_digest` and
+the helix commit. An export cannot say which weight set it holds, which corpus
+it trained on, or which code defined its tokenizer; an artifact can, and that is
+what makes a probe number attributable.

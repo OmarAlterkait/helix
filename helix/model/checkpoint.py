@@ -23,10 +23,10 @@ import os
 from helix.model.artifact import _EXPORT_CONFIGS, _EXPORT_WEIGHTS  # noqa: F401
 
 def patch_config_from_checkpoint(checkpoint, cell_t=None):
-    """The ``PatchConfig`` a converted checkpoint was TRAINED with.
+    """The ``PatchConfig`` a checkpoint was TRAINED with.
 
-    The blob records ``tokenizer`` (pw, pt, cell_t) because none of it is
-    recoverable from the weights. Nothing read it: ``build_coeff_fm`` took only
+    The checkpoint records pw, pt and cell_t because none of it is recoverable
+    from the weights. Nothing read it: ``build_coeff_fm`` took only
     config/state_dict/bins, and every recipe built ``CoeffTokenize`` with no
     ``cfg=``, falling through to a then-defaulted ``PatchConfig()`` — whose
     ``cell_t`` was ``centroid`` while m113 trained on ``grid_center``. That
@@ -106,23 +106,6 @@ def _export_tokenizer_cfg(path):
     """Deprecated alias for :func:`helix.model.artifact.export_tokenizer_cfg`."""
     from helix.model.artifact import export_tokenizer_cfg
     return export_tokenizer_cfg(path)
-
-
-def load_converted(model, blob, *, prefer="raw"):
-    """Load a converted checkpoint's weights into ``model``, strict.
-
-    Kept as the name the recipes call; the work is
-    :func:`helix.model.artifact.Artifact.pick` plus :func:`load_state_dict`.
-    Returns which weight set was used.
-    """
-    from helix.model.artifact import Artifact
-
-    art = Artifact(arch={}, op=None, fmt="converted",
-                   state_dict=blob["state_dict"],
-                   state_dict_ema=blob.get("state_dict_ema") or blob.get("ema"))
-    sd, used = art.pick(prefer)
-    load_state_dict(model, sd, bins=blob.get("bins"))
-    return used
 
 
 #: Bin-centroid buffers, and how to derive each from the edges. Persistent since
@@ -253,9 +236,6 @@ def load_export_dir(path, *, device=None):
     in progress, and the directory is portable by construction. What it cannot
     record is WHICH weight set it holds; see :func:`helix.model.artifact.save`.
 
-    ``tools/convert_fm_ckpt.py`` stays frozen as the one-time rescue of the
-    historical m113 checkpoint, which could not describe itself. Nothing trained
-    from here should go through it.
     """
     from helix.model.artifact import build, load
 

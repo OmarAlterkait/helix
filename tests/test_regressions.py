@@ -187,11 +187,13 @@ def test_the_converted_m113_checkpoint_records_its_own_operating_point():
 
     from helix.paths import archive
 
-    ckpt = archive("fm_m113_converted.pt")
+    from helix.model.artifact import inspect
+
+    ckpt = archive("fm_m113_artifact")
     if not ckpt.exists():
-        pytest.skip(f"converted m113 checkpoint absent: {ckpt}")
-    b = torch.load(str(ckpt), map_location="cpu", weights_only=False)
-    cfg, tok = b.get("config", {}), b.get("tokenizer", {})
+        pytest.skip(f"m113 artifact absent: {ckpt}")
+    art = inspect(str(ckpt))                      # no weights: this is metadata
+    cfg, op, prov = art.arch, art.op, art.provenance
 
     assert cfg.get("serial") is True
     assert cfg.get("rope_split") is False, (
@@ -199,13 +201,28 @@ def test_the_converted_m113_checkpoint_records_its_own_operating_point():
         "(True) rebuilds a model the checkpoint was never trained as")
     assert (cfg.get("gp"), cfg.get("gd")) == (1024, 2048)
 
-    assert tok, "checkpoint records no tokenizer geometry"
-    assert tok["cell_t"] == "grid_center", (
+    assert op.recorded, "artifact records no tokenizer geometry"
+    assert op.cell_t == "grid_center", (
         "m113 trained with research cellt='canonical', which is helix "
         "'grid_center'; PatchConfig has no default now, but a caller passing "
         "'centroid' would feed it a time coordinate it never saw")
-    assert tok["cellt_research"] == "canonical"
-    assert (tok["pw"], tok["pt"]) == (16, 8)
+    assert (op.pw, op.pt) == (16, 8)
+
+    # The pre-tau corpus. m113 predates the occupancy gate, so scoring it
+    # against coeff_tpc_r1 reads coefficients from a different DSP -- which no
+    # other layer treats as an error, since the shards load and a number comes
+    # out. This is the field that makes it detectable.
+    assert prov["corpus"]["basis_digest"].startswith("7f954a84")
+
+    # Carried across when the converter was retired: the research-side name for
+    # cell_t, and the research checkpoint these weights came from. Nothing else
+    # records either any more.
+    src = prov["source_provenance"]
+    assert src["tokenizer_extra"]["cellt_research"] == "canonical"
+    assert "ckpt_clean160cat_m113" in src["source"]
+    assert art.weights == "raw", (
+        "m113's converted blob took the 'model' key, not the EMA shadow; an "
+        "artifact that could not say which would let it be compared to an EMA arm")
 
 def test_version_is_single_sourced():
     """pyproject must not carry its own literal.

@@ -36,7 +36,7 @@ import numpy as np
 import torch
 
 CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
-ARCHIVE = "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt"
+ARCHIVE = "/sdf/data/neutrino/omara/archive/fm_m113_artifact"
 
 # Per-cell keys the dense (fused / categorical) loss path needs. The sparse
 # cell/slot view is deliberately not carried: it indexes the per-event cell axis

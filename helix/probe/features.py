@@ -27,9 +27,11 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
                      random_seed=0):
     """``(model, meta)`` from a converted checkpoint, trained or random-init.
 
-    ``weights='ema'`` prefers ``state_dict_ema`` / the sidecar EMA and falls back
-    to the raw weights ONLY if the checkpoint has none — loudly, in ``meta``, so
-    a run cannot silently report EMA numbers it did not use.
+    ``weights=`` is what you are ASKING for. A checkpoint holds one weight set
+    and either says which it is or cannot; when that disagrees with the request,
+    ``meta['weights']`` reports what was actually used and ``meta['warning']``
+    says so, so a run cannot silently report EMA numbers it did not compute.
+    Promote an export with ``scripts/export_artifact.py`` to make it answerable.
 
     ``random_seed`` seeds the ``random_init`` draw. It used to be unseeded, so the
     control was a DIFFERENT network in every probe process, drawn from torch's
@@ -48,10 +50,10 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
         torch.manual_seed(int(random_seed))
 
     art = load(checkpoint)
-    used = "random-init" if random_init else art.pick(weights)[1]
+    used = "random-init" if random_init else art.weights
     if random_init:
-        art = replace(art, state_dict=None, state_dict_ema=None)
-    model = build(art, prefer=weights, device=dev)
+        art = replace(art, state_dict=None)
+    model = build(art, device=dev)
 
     meta = dict(source=art.fmt, weights=used, requested_weights=weights,
                 random_init=bool(random_init),
@@ -85,8 +87,6 @@ def _are_ema(art):
     warning stops being read. And pimm's ``_sanitize_config`` nulls the one key
     that could have recorded the source, so a real export is always None.
     """
-    if art.state_dict_ema:
-        return True                     # a converted blob carries both sets
     return None if art.weights == "unknown" else art.weights == "ema"
 
 

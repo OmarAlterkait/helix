@@ -452,7 +452,7 @@ def build_fm(cfg=None, **kw):
     """Construct an FM from a plain config dict, ignoring unrelated keys.
 
     Accepts a checkpoint's own metadata dict directly, which is how
-    ``tools/convert_fm_ckpt.py`` rebuilds a research model."""
+    an eval artifact rebuilds a trained model."""
     import inspect
     from helix.model.serial import SerialFMModel   # lazy: serial imports this module
 

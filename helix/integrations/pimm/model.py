@@ -34,10 +34,10 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
     (``output_dict["loss"]``), so nothing is wrapped.
 
     Args:
-        checkpoint (str | None): a checkpoint from helix's
-            ``tools/convert_fm_ckpt.py`` — self-contained, carrying ``config``,
-            ``state_dict`` and (for a categorical head) inlined bin ``edges``.
-            Its ``config`` supplies the architecture; ``cfg`` overrides fields.
+        checkpoint (str | None): a helix eval artifact or a ``pimm export``
+            directory — self-describing, carrying the architecture, the operating
+            point and (for a categorical head) the bin ``edges``. Its
+            architecture is used; ``cfg`` overrides individual fields.
         weights (bool): restore the weights. ``False`` builds the same
             architecture freshly initialised.
         **cfg: architecture kwargs for ``helix.model.build_fm``.
@@ -81,18 +81,31 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
 def _load_bins(path):
     """Bin edges from either a bins sidecar or a checkpoint that carries them.
 
-    The sidecar is its own shape — `tier1_setup_bins.py` writes a bare `edges`
+    The sidecar is its own shape — `tier1_setup_bins.py` writes a bare ``edges``
     mapping, which is not a checkpoint and has no architecture — so it is read
-    here rather than taught to `helix.model.artifact`.
+    here rather than taught to `helix.model.artifact`. Everything else is a
+    checkpoint and goes to the one reader.
+
+    The directory test comes FIRST and is not cosmetic: an eval artifact is a
+    directory, and `torch.load` on one raises ``IsADirectoryError`` before any
+    of the code that would have coped. That is the same shape of bug as
+    `load_probe_model` learning about export dirs while its sibling did not.
     """
-    import torch
-    blob = torch.load(path, map_location="cpu", weights_only=False)
-    if isinstance(blob, dict) and "edges" in blob:      # the sidecar
-        return blob
+    import os
+
     from helix.model.artifact import inspect
+
+    if not os.path.isdir(path):
+        import torch
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(blob, dict) and "edges" in blob:      # the sidecar
+            return blob
     bins = inspect(path).op.bins
     if bins is None:
         raise ValueError(
-            f"{path}: no bin edges found (expected an 'edges' key, or a "
-            f"checkpoint carrying them)")
+            f"{path}: no bin edges found. Expected a bins sidecar (an 'edges' "
+            f"mapping from tier1_setup_bins.py), or a checkpoint that carries "
+            f"them — an eval artifact does, and a `pimm export` keeps them in "
+            f"the weights as the persistent `bin_edges` buffer, so it reports "
+            f"none here and needs none.")
     return bins

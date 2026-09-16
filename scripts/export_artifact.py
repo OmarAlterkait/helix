@@ -106,7 +106,13 @@ def main(argv=None):
             raise SystemExit(f"{a.corpus}: no {a.dataset_name}_coeff_*.h5 shard found")
         corpus = dict(corpus, root=os.path.abspath(a.corpus))
 
+    # The SOURCE's own provenance travels whole. When a format is retired the
+    # blob it described becomes unreadable, and its lineage -- m113's research
+    # checkpoint, its train_config, the bins file it was given, the research-side
+    # name for its cell_t -- exists nowhere else. Copying it here is what makes
+    # retiring a reader a safe thing to do.
     prov = dict(source=os.path.abspath(a.export_dir), source_format=art.fmt,
+                source_provenance=dict(art.provenance),
                 source_weights=art.weights_source, corpus=corpus,
                 helix=_code_version(), step=art.provenance.get("step"),
                 weights_digest=weights_digest(art.state_dict),

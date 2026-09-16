@@ -191,12 +191,6 @@ Two stages. Stage 1 is expensive and reusable; stage 2 is cheap and per-checkpoi
     # them into a portable directory. Nothing needs inventing.
     pimm export --run-dir <save_path> model_ema.pth <export_dir>
 
-    # NOT tools/convert_fm_ckpt.py. It is frozen as the one-time rescue of the
-    # historical m113 checkpoint, which could not describe itself, and it cannot
-    # read a pimm checkpoint at all (it wants 'model'/'ema'; pimm writes
-    # 'state_dict'). helix/model/checkpoint.py says so: "Nothing trained from
-    # here should go through it."
-
     # Stage 3 -- PROMOTE the export into an eval artifact.
     #
     # An export is portable but cannot describe itself in three ways that each
@@ -292,8 +286,16 @@ evaluated. The research trainer kept bin edges in a separate `tier1_bins.pt`
 named only on the command line, and nothing in the checkpoint records which one;
 the edges are training-set statistics and are not recoverable from the weights.
 
-`tools/convert_fm_ckpt.py` is the way back: it infers architecture from the
-tensors, cross-checks it against the checkpoint's metadata, strips the DDP
-prefix, and inlines the bins into one file that stands alone. It has been run
-once, producing `archive/fm_m113_converted.pt`. For the others you must supply
-the matching bins file, and for most it no longer exists.
+There is no way back any more, and that is deliberate. `tools/convert_fm_ckpt.py`
+inferred architecture from the tensors and inlined the bins; it was run exactly
+once, on `m113`, and has been retired. m113 is now
+`archive/fm_m113_artifact` — a self-describing eval artifact carrying the
+weights, the operating point, the pre-tau `basis_digest`, and the converter's
+whole provenance record (the research checkpoint, its train config, its bins
+file, the research-side name for its `cell_t`).
+
+`archive/fm_m113_converted.pt` is still on disk as lineage but nothing reads it;
+pointing a tool at it prints where the artifact is. For the other 394
+checkpoints you would need the matching bins file, and for most it no longer
+exists — the converter is in git history if that ever changes, but re-exporting
+a run beats reviving it.

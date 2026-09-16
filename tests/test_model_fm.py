@@ -129,38 +129,6 @@ def test_build_fm_ignores_unknown_keys():
 # extraction fidelity — the whole point of the line-slice extraction
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("arch", [
-    dict(SMALL, d=64, blocks=2, dec_blocks=1, heads=4),
-    dict(SMALL, d=128, blocks=3, dec_blocks=2, heads=8, n_bins=32),
-])
-def test_converter_infers_arch_from_tensors_alone(arch):
-    """The converter derives arch from SHAPES and only cross-checks metadata.
-
-    This used to load the 473 MB m113 research checkpoint and assert its literal
-    numbers, so it ran on one machine and skipped everywhere else. The property
-    has nothing to do with m113: build a model, hand the converter its
-    state_dict, and it must recover what was built -- which also exercises more
-    than one architecture instead of one hardcoded tuple.
-    """
-    from tools.convert_fm_ckpt import infer_arch, strip_ddp
-
-    sd = {f"module.{k}": v for k, v in build_fm(arch).state_dict().items()}
-    cfg, bad = infer_arch(strip_ddp(sd), meta={"heads": arch["heads"]})
-    assert not bad, bad
-    for key in ("d", "n_slot", "blocks", "dec_blocks", "dec_mode"):
-        assert cfg[key] == arch[key], f"{key}: inferred {cfg[key]!r} != built {arch[key]!r}"
-
-
-def test_converter_flags_metadata_disagreeing_with_weights():
-    """A metadata field that contradicts the tensors is reported, not trusted."""
-    from tools.convert_fm_ckpt import infer_arch, strip_ddp
-
-    arch = dict(SMALL, d=64, blocks=2, dec_blocks=1, heads=4)
-    sd = {f"module.{k}": v for k, v in build_fm(arch).state_dict().items()}
-    _, bad = infer_arch(strip_ddp(sd), meta={"heads": 4, "blocks": 99})
-    assert any("blocks" in b for b in bad), bad
-
-
 def test_serial_rejects_self_decoder():
     """SerialFMModel's decoder is grouped-cross attention; with dec_mode='self'
     the research code dies with an AttributeError deep in attention. build_fm

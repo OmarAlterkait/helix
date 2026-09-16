@@ -182,10 +182,22 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
     got = ns["_load_bins"](str(path))
     assert "edges" in got and got["edges"].shape == (4, 17)
 
-    conv = tmp_path / "converted.pt"
-    torch.save(dict(config={}, state_dict={},
-                    bins=dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1))), conv)
-    assert "edges" in ns["_load_bins"](str(conv))
+    # An eval artifact carries its edges inline, and it is a DIRECTORY --
+    # `torch.load` raises IsADirectoryError on one before reaching any code that
+    # would cope, which is why _load_bins tests for a directory first.
+    pytest.importorskip("safetensors")
+    from helix.model.artifact import OperatingPoint, save
+
+    art = save(str(tmp_path / "art"), state_dict={},
+               arch=dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
+                         dec_blocks=1, heads=4, dec_mode="cross", n_bins=16),
+               op=OperatingPoint(cell_t="grid_center", pw=16, pt=8, n_bands=4,
+                                 bins=dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1))),
+               weights="raw")
+    ns["os"] = os
+    ns["inspect"] = __import__("helix.model.artifact", fromlist=["inspect"]).inspect
+    got = ns["_load_bins"](art)
+    assert "edges" in got and len(got["edges"]) == 4
 
 
 def test_configs_bootstrap_helix_onto_sys_path():

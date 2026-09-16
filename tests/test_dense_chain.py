@@ -72,6 +72,8 @@ def _import_jaxtpc():
     three tests in test_model_fm.py failed with
     `ModuleNotFoundError: No module named 'tools.convert_fm_ckpt'` -- but only
     when the whole suite ran, and only in file order. In isolation they passed.
+    (helix's own `tools/` is gone now, retired with that converter, so this
+    particular symptom cannot recur -- but the mechanism is unchanged.)
 
     The namespace collision it guards against is real (pimm also ships a `tools`),
     so the eviction stays; it is the FAILURE TO RESTORE that was the bug. The

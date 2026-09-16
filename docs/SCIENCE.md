@@ -131,10 +131,13 @@ in the metric.
 it. Numbers computed before that date under the old closure are not comparable.
 
 **`m113`'s operating point was never stored in its checkpoint** — `rope_split=0`,
-`cell_t=canonical`, `mask=0.75`, `plane_frac`/EMA. Every evaluation of it before
-that was discovered used the wrong config. This is why
-`tools/convert_fm_ckpt.py` writes a self-contained checkpoint: architecture,
-weights, bins and provenance in one file.
+`cell_t=canonical` (helix `grid_center`), `mask=0.75`, `plane_frac`/EMA. Every
+evaluation of it before that was discovered used the wrong config. That is the
+origin of the eval-artifact format: architecture, operating point, bins and
+provenance beside the weights, in one directory that stands alone. m113 now
+lives at `archive/fm_m113_artifact` — weights digest
+`7d795cc3ab49f90a79f98927647028b5`, trained on the pre-tau corpus
+(`basis_digest 7f954a84…`), raw `model` weights rather than the EMA shadow.
 
 ---
 

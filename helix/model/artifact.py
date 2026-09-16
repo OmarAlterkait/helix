@@ -49,8 +49,15 @@ _ARTIFACT_WEIGHTS = "weights.safetensors"
 #: so adding a shape without teaching the matrix about it fails.
 FORMATS = ("helix-eval", "pimm-export", "converted", "research",
            "dcp-resume", "raw-state-dict", "unknown-dir", "unknown-file")
-#: The shapes that carry enough to score a number. The rest are refused by name.
-READABLE = ("helix-eval", "pimm-export", "converted", "research")
+#: The shapes that carry enough to score a number. The rest are refused BY NAME:
+#: a refusal that says which shape it got and what to run instead is worth far
+#: more than a generic one, and costs only the dict entry.
+#:
+#: `converted` and `research` were readable until the converter was retired.
+#: They are still DETECTED, because both still exist on disk -- m113's blob sits
+#: in the archive as its own lineage -- and "unrecognised checkpoint shape" would
+#: be a hostile thing to tell someone who found one.
+READABLE = ("helix-eval", "pimm-export")
 
 
 @dataclass(frozen=True)
@@ -105,28 +112,22 @@ class Artifact:
     source: str = ""                  # the path it was read from
     fmt: str = ""                     # which of FORMATS it was
     state_dict: dict | None = None    # None when only inspected
-    #: A second weight set, when the source carries one. Only the converted
-    #: blobs do: they keep `state_dict_ema` beside the raw weights. An export
-    #: directory holds exactly one set, which is why `weights` above is tri-state
-    #: rather than a preference.
-    state_dict_ema: dict | None = None
-
     def pick(self, prefer="raw"):
-        """``(state_dict, used)``. Falls back to raw LOUDLY, via ``used``.
+        """``(state_dict, weights)``. ``prefer`` is a REQUEST, not a selector.
 
-        A caller that asked for the EMA and silently got the raw weights is
-        reporting EMA numbers it did not compute: on a flat-LR WSD run the raw
-        weights sit at full LR noise for the whole stable phase, which is what
-        the EMA exists to avoid.
+        An artifact holds exactly one weight set and says what it is. It used to
+        be able to hold two -- the retired converter wrote `state_dict` and
+        `state_dict_ema` side by side -- and `prefer` chose between them. Nothing
+        writes two any more, and keeping a selector that can no longer select
+        would read as though the choice were still being made here.
+
+        So the answer is what the artifact HOLDS, and a caller who asked for
+        something else is told by comparing `prefer` against the second return
+        value. "unknown" propagates rather than collapsing to "raw": a `pimm
+        export` cannot say what it holds, and calling that raw is what lets an
+        EMA arm and a raw arm be compared in silence.
         """
-        if prefer == "ema" and self.state_dict_ema:
-            return self.state_dict_ema, "ema"
-        if self.fmt in ("helix-eval", "pimm-export"):
-            # One set, described rather than selected. "unknown" propagates: a
-            # `pimm export` cannot say what it holds, and calling that "raw"
-            # would let an EMA arm and a raw arm be compared in silence.
-            return self.state_dict, self.weights
-        return self.state_dict, "raw"
+        return self.state_dict, self.weights
 
 
 def detect(path):
@@ -157,13 +158,15 @@ def detect(path):
 #: The one copy of the message four call sites had each grown their own of.
 _EXPORT_THE_RUN = (
     "Export the RUN, which has the architecture and the tokenizer beside the "
-    "weights:\n"
-    "    pimm export --run-dir <save_path> model_ema.pth <out_dir>\n"
-    "then pass <out_dir>.\n"
-    "NOT tools/convert_fm_ckpt.py -- that is frozen as the one-time rescue of "
-    "the historical m113 checkpoint, which could not describe itself, and it "
-    "cannot read a pimm checkpoint at all (it expects 'model'/'ema' keys; pimm "
-    "writes 'state_dict').")
+    "weights, then promote it so it can say which weight set it holds:\n"
+    "    pimm export --run-dir <save_path> model_ema.pth <tmp_dir>\n"
+    "    scripts/export_artifact.py <tmp_dir> --weights ema --corpus <corpus> "
+    "-o <artifact_dir>\n"
+    "then pass <artifact_dir>.")
+
+#: Where m113 lives now. Named rather than described because it is the single
+#: reason anyone still meets a `converted` blob.
+_M113 = "$HELIX_ARCHIVE/fm_m113_artifact"
 
 
 def _refuse(path, fmt):
@@ -178,6 +181,18 @@ def _refuse(path, fmt):
             f"{path} is a raw checkpoint: it holds weights and nothing else, so "
             f"neither the architecture nor the tokenizer the weights were "
             f"trained with is recoverable from it.\n{_EXPORT_THE_RUN}")
+    if fmt in ("converted", "research"):
+        raise ValueError(
+            f"{path} is a {fmt} checkpoint. tools/convert_fm_ckpt.py, the only "
+            f"thing that could produce or read one, was retired once m113 -- its "
+            f"sole subject -- was promoted to a self-describing eval artifact.\n"
+            f"If you want m113, it is at {_M113}: same weights (digest "
+            f"7d795cc3ab49f90a79f98927647028b5), plus the operating point, the "
+            f"pre-tau basis_digest it trained on, and this blob's whole "
+            f"provenance carried across.\n"
+            f"If you want something else, the converter is in git history; "
+            f"reviving it to read one blob is almost certainly the wrong trade "
+            f"against re-exporting the run.")
     raise ValueError(
         f"{path}: unrecognised checkpoint shape ({fmt}). Expected one of "
         f"{READABLE}.")
@@ -200,9 +215,13 @@ def _read(path, *, weights):
         _refuse(path, fmt)
     if fmt == "helix-eval":
         return _read_helix_eval(path, weights)
-    if fmt == "pimm-export":
-        return _read_pimm_export(path, weights)
-    return _read_blob(path, weights, fmt)
+    return _read_pimm_export(path, weights)
+
+
+#: Tokenizer keys the operating point models. Anything else a source recorded is
+#: kept as provenance rather than dropped -- `cellt_research` is the research-side
+#: name for m113's cell_t, and it is the only surviving record of that mapping.
+_OP_KEYS = ("cell_t", "pw", "pt", "n_bands")
 
 
 def _op(tok, *, n_bands=None, bins=None):
@@ -211,6 +230,10 @@ def _op(tok, *, n_bands=None, bins=None):
     return OperatingPoint(cell_t=tok.get("cell_t"), pw=tok.get("pw"),
                           pt=tok.get("pt"),
                           n_bands=None if n is None else int(n), bins=bins)
+
+
+def _tok_extra(tok):
+    return {k: v for k, v in dict(tok or {}).items() if k not in _OP_KEYS}
 
 
 def _read_helix_eval(path, weights):
@@ -298,37 +321,12 @@ def _read_pimm_export(path, weights):
     which = "unknown"
     if src:
         which = "ema" if "ema" in os.path.basename(str(src)).lower() else "raw"
-    return Artifact(arch=arch, op=_op(export_tokenizer_cfg(path), n_bands=n_band),
+    tok = export_tokenizer_cfg(path)
+    return Artifact(arch=arch, op=_op(tok, n_bands=n_band),
                     weights=which, weights_source=src,
-                    provenance={"step": full.get("step")},
+                    provenance={"step": full.get("step"),
+                                "tokenizer_extra": _tok_extra(tok)},
                     source=path, fmt="pimm-export", state_dict=sd)
-
-
-def _read_blob(path, weights, fmt):
-    import torch
-    blob = torch.load(path, map_location="cpu", weights_only=False)
-    if fmt == "research":
-        # The historical shape. It genuinely cannot describe itself — that is
-        # what convert_fm_ckpt.py exists for — so say so rather than half-read it.
-        raise ValueError(
-            f"{path} is a research-tier checkpoint ('model'/'ema' keys). It "
-            f"records no tokenizer and no operating point, so a number scored "
-            f"from it is unattributable. Convert it once with "
-            f"tools/convert_fm_ckpt.py --train-config <the run's yaml>, which is "
-            f"kept for exactly this checkpoint.")
-    arch = dict(blob.get("config") or {})
-    if isinstance(arch.get("film"), list):
-        arch["film"] = tuple(arch["film"])
-    prov = dict(blob.get("provenance") or {})
-    return Artifact(arch=arch,
-                    op=_op(blob.get("tokenizer"), n_bands=arch.get("n_band"),
-                           bins=blob.get("bins")),
-                    weights=str(prov.get("weights", "unknown")),
-                    weights_source=prov.get("source"),
-                    provenance=prov, source=path, fmt=fmt,
-                    state_dict=blob.get("state_dict") if weights else None,
-                    state_dict_ema=((blob.get("state_dict_ema") or blob.get("ema"))
-                                    if weights else None))
 
 
 #: Buffers excluded from :func:`weights_digest`: step counters registered as
@@ -353,10 +351,10 @@ def weights_digest(sd):
     so a reader had two answers to "which weights" and no way to tell which. That
     is the same failure as eight loaders for eight formats, in miniature.
 
-    Same SHAPE as ``tools/convert_fm_ckpt.py:_digest`` but deliberately NOT the
-    same value: the dtype is hashed, because two tensors with identical bytes
-    under different dtypes are different weights. Compare these to each other,
-    never to a convert_fm_ckpt one.
+    The dtype is hashed, because two tensors with identical bytes under
+    different dtypes are different weights. The retired converter wrote a digest
+    of the same shape but a different value (no dtype, no exclusions); rows
+    predating this carry those, so compare digests only within a format.
 
     Bytes go through ``flatten().view(torch.uint8)`` rather than ``.numpy()``:
     ``.numpy()`` raises on bfloat16, and ``view(torch.uint8)`` raises on a 0-dim
@@ -441,19 +439,15 @@ def save(out_dir, *, state_dict, arch, op, weights, provenance=None):
     return out_dir
 
 
-def build(art, *, prefer="raw", device=None, eval_mode=True):
-    """Instantiate ``art``'s architecture and, when it carries them, its weights.
-
-    ``prefer`` selects between the two weight sets a converted blob may carry;
-    ask ``art.pick(prefer)[1]`` for which one was actually used.
-    """
+def build(art, *, device=None, eval_mode=True):
+    """Instantiate ``art``'s architecture and, when it carries them, its weights."""
     import torch
     from helix.model import build_fm
     from helix.model.checkpoint import load_state_dict
 
     model = build_fm(dict(art.arch))
     if art.state_dict is not None:
-        load_state_dict(model, art.pick(prefer)[0], bins=art.op.bins)
+        load_state_dict(model, art.state_dict, bins=art.op.bins)
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model.to(dev)
     if eval_mode:

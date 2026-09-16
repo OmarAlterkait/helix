@@ -87,7 +87,7 @@ custom_imports = dict(
 )
 
 CORPUS = str(_root("HELIX_LEGACY_CORPUS"))     # m113 trained pre-tau
-CKPT = str(_root("HELIX_ARCHIVE") / "fm_m113_converted.pt")
+CKPT = str(_root("HELIX_ARCHIVE") / "fm_m113_artifact")
 # The time coordinate to use when CKPT records no tokenizer block, and to
 # cross-check against when it does. Every helix config trains grid_center.
 CELL_T = "grid_center"
@@ -164,9 +164,9 @@ structured_logging = dict(
 # ---------------------------------------------------------------------------
 # model
 # ---------------------------------------------------------------------------
-# Architecture comes from the checkpoint (convert_fm_ckpt.py infers it from
-# tensor shapes and cross-checks the recorded metadata), so nothing is restated
-# here — a config that restated it could silently disagree.
+# Architecture comes from the checkpoint — the artifact records it beside the
+# weights — so nothing is restated here; a config that restated it could
+# silently disagree with the tensors it is loading into.
 model = dict(type="Coeff-FM", checkpoint=CKPT, weights=True, bins=BINS)
 
 optimizer = dict(type="AdamW", lr=3e-4, weight_decay=0.05)

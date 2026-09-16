@@ -62,19 +62,13 @@ def make_helix_eval(d, *, weights="ema"):
 
 
 def make_converted(p):
-    """``tools/convert_fm_ckpt.py``'s output: self-describing, bins inline."""
+    """The retired converter's output. Still on disk (m113's blob is), so it must
+    still be DETECTED -- but it is no longer readable."""
     torch.save({"config": dict(ARCH), "tokenizer": dict(TOK),
                 "state_dict": _model().state_dict(),
                 "bins": {"edges": torch.linspace(-4, 4, 17).repeat(4, 1).tolist()},
                 "provenance": {"weights": "ema", "source": "/somewhere/m113.pth"}},
                p)
-    return p
-
-
-def make_converted_with_ema(p):
-    blob = torch.load(make_converted(p), map_location="cpu", weights_only=False)
-    blob["state_dict_ema"] = {k: v + 1 for k, v in blob["state_dict"].items()}
-    torch.save(blob, p)
     return p
 
 
@@ -85,7 +79,8 @@ def make_raw_state_dict(p):
 
 
 def make_research(p):
-    """The historical shape convert_fm_ckpt.py exists to rescue."""
+    """The historical research shape. Nothing has been able to read it since the
+    converter was retired; m113 was its only subject and now has an artifact."""
     torch.save({"model": _model().state_dict(), "ema": None, "step": 113000}, p)
     return p
 
@@ -126,7 +121,7 @@ def test_detect_names_every_shape(fmt, tmp_path):
     assert detect(_make(fmt, tmp_path)) == fmt
 
 
-@pytest.mark.parametrize("fmt", ["pimm-export", "helix-eval", "converted"])
+@pytest.mark.parametrize("fmt", ["pimm-export", "helix-eval"])
 def test_the_operating_point_survives_every_readable_format(fmt, tmp_path):
     """THE property. A number scored through any of these is comparable.
 
@@ -139,7 +134,7 @@ def test_the_operating_point_survives_every_readable_format(fmt, tmp_path):
     assert art.arch["d"] == ARCH["d"] and art.arch["n_band"] == ARCH["n_band"]
 
 
-@pytest.mark.parametrize("fmt", ["pimm-export", "helix-eval", "converted"])
+@pytest.mark.parametrize("fmt", ["pimm-export", "helix-eval"])
 def test_inspect_loads_no_weights(fmt, tmp_path):
     """Reading the tokenizer must not cost 236 MB of tensors."""
     assert inspect(_make(fmt, tmp_path)).state_dict is None
@@ -149,7 +144,8 @@ def test_inspect_loads_no_weights(fmt, tmp_path):
 @pytest.mark.parametrize("fmt,expect", [
     ("dcp-resume", "RESUME state"),
     ("raw-state-dict", "weights and nothing else"),
-    ("research", "convert_fm_ckpt"),
+    ("converted", "was retired"),
+    ("research", "was retired"),
     ("unknown-dir", "unrecognised"),
     ("unknown-file", "unrecognised"),
 ])
@@ -164,13 +160,33 @@ def test_what_cannot_be_scored_is_refused_by_name(fmt, expect, tmp_path):
         inspect(_make(fmt, tmp_path))
 
 
-def test_the_refusals_point_at_pimm_export_not_the_frozen_converter(tmp_path):
-    """The one remedy, spelled once. Four call sites each had their own copy."""
+def test_the_refusals_spell_the_one_remedy(tmp_path):
+    """One remedy, spelled once. Four call sites each had their own copy."""
     for fmt in ("dcp-resume", "raw-state-dict"):
         with pytest.raises(ValueError) as e:
             inspect(_make(fmt, tmp_path))
         assert "pimm export --run-dir" in str(e.value)
-        assert "NOT tools/convert_fm_ckpt.py" in str(e.value)
+        assert "export_artifact.py" in str(e.value), (
+            "exporting is only half of it: an export cannot say which weight "
+            "set it holds, so the remedy must name the promotion step too")
+
+
+def test_a_retired_format_says_so_and_says_where_m113_went(tmp_path):
+    """A retired reader must not degrade into "unrecognised".
+
+    Both blobs still exist on disk -- m113's IS its own lineage, kept in the
+    archive -- so someone will point a tool at one. Telling them the shape is
+    unrecognised would be false; telling them the converter was retired and
+    where m113 lives now is the whole value of detecting a format you cannot
+    read.
+    """
+    for fmt in ("converted", "research"):
+        with pytest.raises(ValueError) as e:
+            inspect(_make(fmt, tmp_path))
+        msg = str(e.value)
+        assert "convert_fm_ckpt" in msg and "retired" in msg
+        assert "fm_m113_artifact" in msg
+        assert "git history" in msg, "say where it went, not just that it is gone"
 
 
 def test_a_helix_eval_artifact_says_which_weights_it_holds(tmp_path):
@@ -236,22 +252,37 @@ def test_a_helix_eval_artifact_round_trips_through_the_model(tmp_path):
         torch.testing.assert_close(v, back.state_dict()[k], msg=k, equal_nan=True)
 
 
-def test_ema_selection_is_reported_not_assumed(tmp_path):
-    """``pick`` must never call a weight set EMA that it did not select."""
-    both = load(make_converted_with_ema(str(tmp_path / "both.pt")))
-    assert both.pick("ema")[1] == "ema"
-    assert both.pick("raw")[1] == "raw"
+def test_asking_for_ema_never_makes_a_weight_set_ema(tmp_path):
+    """``pick`` reports what the artifact HOLDS; the request cannot change it.
 
-    raw_only = load(make_converted(str(tmp_path / "one.pt")))
-    assert raw_only.pick("ema")[1] == "raw", "no EMA present; must not claim one"
-
+    It used to be a selector, because the converted blobs carried `state_dict`
+    and `state_dict_ema` side by side. Nothing writes two sets any more, so the
+    only honest answer is what is there -- and for an export that is "unknown",
+    never "raw", or an EMA arm and a raw arm compare in silence.
+    """
     exported = load(make_pimm_export(str(tmp_path / "d")))
-    assert exported.pick("ema")[1] == "unknown", (
-        "an export holds one unattributable set; 'raw' would let an EMA arm and "
-        "a raw arm be compared in silence")
+    assert exported.pick("ema")[1] == "unknown"
+    assert exported.pick("raw")[1] == "unknown"
+
+    promoted = load(make_helix_eval(str(tmp_path / "a"), weights="ema"))
+    assert promoted.pick("raw")[1] == "ema", "asking for raw cannot unmake an EMA"
+
+    raw = load(make_helix_eval(str(tmp_path / "b"), weights="raw"))
+    assert raw.pick("ema")[1] == "raw", "asking for EMA cannot make one"
 
 
 def test_every_declared_format_has_a_row(tmp_path):
     """Adding a shape to FORMATS without a fixture fails HERE, not in production."""
     assert set(MATRIX) == set(FORMATS)
     assert set(READABLE) <= set(FORMATS)
+
+
+def test_nothing_readable_needs_a_retired_tool(tmp_path):
+    """Every readable format is one the CURRENT toolchain can produce.
+
+    That is what retiring the converter bought: two of the eight shapes were
+    reachable only through a tool kept alive for one checkpoint.
+    """
+    assert set(READABLE) == {"helix-eval", "pimm-export"}
+    for fmt in READABLE:
+        assert inspect(_make(fmt, tmp_path)).op.recorded

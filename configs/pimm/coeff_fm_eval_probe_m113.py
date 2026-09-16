@@ -33,13 +33,13 @@ _base_ = ["./coeff_fm_eval_probe.py"]
 
 import os as _os
 CKPT = _os.environ.get("COEFF_EVAL_CKPT",
-                       "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt")
+                       "/sdf/data/neutrino/omara/archive/fm_m113_artifact")
 _CORPUS = (_os.environ.get("COEFF_EVAL_CORPUS")
            or "/sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715")
 del _os
 
-# bins=None is load-bearing: build_coeff_fm falls back to the blob's inlined
-# table only when nothing else is supplied.
+# bins=None is load-bearing: build_coeff_fm falls back to the artifact's own
+# inlined table only when nothing else is supplied.
 model = dict(type="Coeff-FM", checkpoint=CKPT, weights=True, bins=None)
 
 # No cfg.weight -- CheckpointLoader has nothing to load and says so; the weights
