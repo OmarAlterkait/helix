@@ -254,8 +254,12 @@ patches over 388 events, tens of minutes on a GPU -- and a preemption used to
 discard all of it before a single probe was fitted. Chunks are keyed by a hash of
 everything that changes the features (both weight digests, layer, tokenizer,
 corpus, truth, and the storage precision), so a stale cache cannot be read by
-mistake. The cost is disk: `n_patch x feat_dim x 3 arms x 4 B`, about 62 GB for
-the 388-event split at feature dim 2048, so put it on `$SCRATCH`.
+mistake. The cost is disk: **44 GB measured** for the 388-event split (2,503,852
+patches at feature dim 2048), which is less than the naive
+`n_patch x feat_dim x 3 arms x 4 B` because the `raw` arm is narrower than the
+two feature arms. That does not fit comfortably in the 100 GB `$SCRATCH`
+alongside anything else, so put it beside the run instead and delete it once the
+number is in.
 
 `--cache-dir` also resumes the FITS, which is the other half. The four mlp arms
 are ~1h20m each at feature dim 2048 over 2.5M patches, and a row is written only
@@ -273,6 +277,11 @@ because it made `cache_resumed_events` a field that moves the number. Verified
 end to end: a resumed run now reproduces all four arms, their per-group std and
 their stop epochs identically. `--cache-half` halves the disk at that measured
 cost, keyed apart so the two caches can never be read as one another's.
+
+The two resumes compose. Extraction is ~35 min for the full split and each of
+the four mlp arms is over an hour, so a preempted job restarts having already
+banked whichever of those completed — re-running the same command is the whole
+recovery procedure.
 
 `--cell-t` matters and run_probe will refuse rather than guess: an artifact and a
 converted checkpoint carry their tokenizer, but for one that does not you must
