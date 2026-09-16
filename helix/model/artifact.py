@@ -326,6 +326,54 @@ def _read_blob(path, weights, fmt):
                                     if weights else None))
 
 
+#: Buffers excluded from :func:`weights_digest`: step counters registered as
+#: persistent buffers. Including them would make the digest partly a function of
+#: how long training ran, so the same weights reached by two paths would hash
+#: differently.
+_DIGEST_SKIP = ("num_batches_tracked", "n_averaged")
+
+
+def weights_digest(sd):
+    """blake2b over a weight set -- the only identifier that survives a move.
+
+    ``weights_source`` is a path the export recorded and ``weights_are_ema`` is a
+    substring test on a filename; neither survives a file being moved, renamed or
+    re-exported. This does, and it needs no cooperation from whoever wrote the
+    file: if two rows claim the same checkpoint, this is what shows they probed
+    the same tensors.
+
+    THERE MUST BE ONE OF THESE. There were briefly two -- a sha256 over the saved
+    state_dict in the export script and this blake2b over the loaded model in
+    run_probe -- and both landed in the same results row under different names,
+    so a reader had two answers to "which weights" and no way to tell which. That
+    is the same failure as eight loaders for eight formats, in miniature.
+
+    Same SHAPE as ``tools/convert_fm_ckpt.py:_digest`` but deliberately NOT the
+    same value: the dtype is hashed, because two tensors with identical bytes
+    under different dtypes are different weights. Compare these to each other,
+    never to a convert_fm_ckpt one.
+
+    Bytes go through ``flatten().view(torch.uint8)`` rather than ``.numpy()``:
+    ``.numpy()`` raises on bfloat16, and ``view(torch.uint8)`` raises on a 0-dim
+    tensor of a different element size, so a scalar buffer would crash the row.
+    """
+    import hashlib
+    import torch
+
+    h = hashlib.blake2b(digest_size=16)
+    for k in sorted(sd):
+        if k.endswith(_DIGEST_SKIP):
+            continue
+        v = sd[k]
+        if not torch.is_tensor(v):
+            continue
+        h.update(k.encode())
+        h.update(str(v.dtype).encode())
+        h.update(v.detach().cpu().contiguous().flatten()
+                 .view(torch.uint8).numpy().tobytes())
+    return h.hexdigest()
+
+
 def save(out_dir, *, state_dict, arch, op, weights, provenance=None):
     """Write a helix EVAL artifact: weights, architecture, operating point.
 

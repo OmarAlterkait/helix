@@ -34,27 +34,12 @@ feats_rank, the encode recipe — because there is one reader
 (:mod:`helix.model.artifact`) and this is one of its formats.
 """
 import argparse
-import hashlib
 import json
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def weights_digest(sd):
-    """A content hash of the tensors, so two artifacts can be told apart.
-
-    The one attribution that needs no cooperation from the writer: if a row says
-    it probed these weights, this is what "these weights" means.
-    """
-    h = hashlib.sha256()
-    for k in sorted(sd):
-        v = sd[k]
-        h.update(k.encode())
-        h.update(v.detach().cpu().contiguous().numpy().tobytes())
-    return h.hexdigest()
 
 
 def main(argv=None):
@@ -79,7 +64,7 @@ def main(argv=None):
     from dataclasses import replace
 
     from helix.core.coeff_io import _code_version
-    from helix.model.artifact import load, save
+    from helix.model.artifact import load, save, weights_digest
 
     if os.path.exists(os.path.join(a.out, "artifact.json")) and not a.force:
         raise SystemExit(f"{a.out} already holds an artifact; pass --force to replace it")
@@ -124,7 +109,7 @@ def main(argv=None):
     prov = dict(source=os.path.abspath(a.export_dir), source_format=art.fmt,
                 source_weights=art.weights_source, corpus=corpus,
                 helix=_code_version(), step=art.provenance.get("step"),
-                weights_sha256=weights_digest(art.state_dict),
+                weights_digest=weights_digest(art.state_dict),
                 exported_at=int(time.time()), note=a.note)
     save(a.out, state_dict=art.state_dict, arch=art.arch, op=op,
          weights=a.weights, provenance=prov)
@@ -134,7 +119,7 @@ def main(argv=None):
                           n_bands=op.n_bands,
                           basis_digest=(corpus or {}).get("basis_digest", ""),
                           helix=prov["helix"].get("git", "unknown"),
-                          weights_sha256=prov["weights_sha256"][:16]),
+                          weights_digest=prov["weights_digest"]),
                      indent=2))
     if corpus is None:
         print("\nNOTE: no --corpus given, so this artifact does not name the "

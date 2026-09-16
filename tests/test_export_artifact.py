@@ -38,7 +38,7 @@ def test_promotion_records_what_the_export_could_not(tmp_path):
     assert art.weights == "ema"                       # the fix
     assert art.op.comparable_to(OP)
     assert art.arch["d"] == ARCH["d"]
-    assert len(art.provenance["weights_sha256"]) == 64
+    assert len(art.provenance["weights_digest"]) == 32
     assert art.provenance["source"] == os.path.abspath(src)
 
 
@@ -90,6 +90,35 @@ def test_it_will_not_silently_replace_an_artifact(tmp_path):
     assert inspect(out).weights == "raw"
 
 
+def test_the_recorded_digest_is_the_one_run_probe_recomputes(tmp_path):
+    """ONE digest. There were briefly two, landing in the same results row.
+
+    The artifact records it at promotion time over the SAVED tensors; run_probe
+    recomputes it over the LOADED model. They must agree, which makes the
+    comparison a real check on the load path rather than two unrelated hashes.
+    """
+    import importlib.util as _ilu
+    import pathlib as _pl
+
+    from helix.model.artifact import load, weights_digest
+
+    src = make_pimm_export(str(tmp_path / "exp"))
+    out = str(tmp_path / "art")
+    _script().main([src, "-o", out, "--weights", "ema"])
+
+    rp_path = _pl.Path(__file__).resolve().parents[1] / "scripts" / "run_probe.py"
+    spec = _ilu.spec_from_file_location("_rp_digest_under_test", rp_path)
+    rp = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(rp)
+
+    from helix.probe.features import load_probe_model
+    model, meta = load_probe_model(out, weights="ema", device="cpu")
+    assert rp._weights_digest(model) == meta["provenance"]["weights_digest"]
+    # and the export it was promoted from hashes identically: promotion moves
+    # bytes, it does not change them
+    assert weights_digest(load(src).state_dict) == meta["provenance"]["weights_digest"]
+
+
 def test_the_probe_loader_reads_a_promoted_artifact_and_attributes_it(tmp_path):
     """End to end: the number this produces is finally attributable."""
     from helix.probe.features import load_probe_model
@@ -104,7 +133,7 @@ def test_the_probe_loader_reads_a_promoted_artifact_and_attributes_it(tmp_path):
         model, meta = load_probe_model(out, weights="ema", device="cpu")
     assert meta["weights"] == "ema" and meta["weights_are_ema"] is True
     assert meta["tokenizer"]["cell_t"] == "grid_center"
-    assert meta["provenance"]["weights_sha256"]
+    assert meta["provenance"]["weights_digest"]
 
     # And the same weights, byte for byte, as the export it was promoted from.
     exported, _ = load_probe_model(src, weights="raw", device="cpu")

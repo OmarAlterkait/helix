@@ -124,41 +124,14 @@ def _position_of(shard, event_id):
 
 
 def _weights_digest(model):
-    """blake2b over the scored weights — the only field that identifies WHICH
-    weights produced a row.
+    """The scored weights' identity. One implementation, in helix.model.artifact.
 
-    `weights_source` is a path the export recorded and `weights_are_ema` is a
-    substring test on a filename; neither survives a file being moved, renamed,
-    or re-exported.
-
-    Same SHAPE as tools/convert_fm_ckpt.py:_digest -- blake2b over sorted keys
-    and contiguous CPU bytes -- but NOT the same value, deliberately, on two
-    counts. The dtype is hashed, because two tensors with identical bytes under
-    different dtypes are different weights. And `num_batches_tracked` /
-    `n_averaged` are excluded, because they are step counters registered as
-    persistent buffers: including them would make the digest partly a function
-    of how long training ran. Compare these digests to each other, never to a
-    convert_fm_ckpt one.
-
-    Bytes go through `flatten().view(torch.uint8)` rather than `.numpy()`:
-    `.numpy()` raises on bfloat16, and `view(torch.uint8)` raises on a 0-dim
-    tensor of a different element size, so a scalar buffer would crash the row.
+    It used to live here, which is how the export script came to grow a second,
+    incompatible one -- a script is not a place a shared definition can be found
+    from.
     """
-    import hashlib
-    import torch
-    h = hashlib.blake2b(digest_size=16)
-    sd = model.state_dict()
-    for k in sorted(sd):
-        if k.endswith(("num_batches_tracked", "n_averaged")):
-            continue
-        v = sd[k]
-        if not torch.is_tensor(v):
-            continue
-        h.update(k.encode())
-        h.update(str(v.dtype).encode())
-        h.update(v.detach().cpu().contiguous().flatten()
-                 .view(torch.uint8).numpy().tobytes())
-    return h.hexdigest()
+    from helix.model.artifact import weights_digest
+    return weights_digest(model.state_dict())
 
 
 #: Feature arms, cached at half precision. They are standardised before the fit
@@ -429,6 +402,7 @@ def main(argv=None):
     # worth about +0.05 on the trained arm going 1 -> 3 — so rows with different
     # `seeds` must never be compared, and `stale` says whether the truth artifact
     # still matched the corpus it was used with.
+    _wd = _weights_digest_or_none(model_t)
     base = dict(tag=a.tag, checkpoint=os.path.abspath(a.checkpoint),
                 corpus=os.path.abspath(corpus),
                 layer=a.layer, weights=meta_t["weights"],
@@ -448,7 +422,12 @@ def main(argv=None):
                 # checked against the one being read just below.
                 ckpt_basis_digest=str((_prov.get("corpus") or {}).get("basis_digest", "")),
                 ckpt_helix=str((_prov.get("helix") or {}).get("git", "")),
-                weights_sha256=str(_prov.get("weights_sha256", "")),
+                # The artifact's own record of the weights it holds. Same
+                # function as `weights_digest` below, computed at promotion time
+                # over the saved tensors rather than here over the loaded model,
+                # so the two MUST agree -- and `weights_digest_matches` says
+                # whether they did, which is a real check on the load path.
+                ckpt_weights_digest=str(_prov.get("weights_digest", "")),
                 random_seed=a.random_seed,
                 # Which cache these features came from, and how many events were
                 # reused rather than extracted. A resumed run and an
@@ -477,7 +456,10 @@ def main(argv=None):
                 holdout_sha256=str(cfg.get("holdout_json_sha256", "")),
                 corpus_ident_sha256=str(cfg.get("corpus_ident_sha256", "")),
                 # Which weights, by content rather than by filename.
-                weights_digest=_weights_digest_or_none(model_t),
+                weights_digest=_wd,
+                weights_digest_matches=(
+                    None if not (_wd and _prov.get("weights_digest"))
+                    else _wd == _prov["weights_digest"]),
                 # Which code. fisher_r's definition lives in helix/probe/, so two
                 # rows from different commits are not necessarily the same metric.
                 code=_provenance_or_none())
