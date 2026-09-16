@@ -1,6 +1,0 @@
-{
-  "type": "Coeff-FM",
-  "checkpoint": "/sdf/data/neutrino/omara/archive/fm_m113_converted.pt",
-  "weights": true,
-  "bins": "/sdf/data/neutrino/omara/archive/coeff_bins_run0027575715.pt"
-}

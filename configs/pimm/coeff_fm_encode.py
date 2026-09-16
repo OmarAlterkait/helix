@@ -107,7 +107,12 @@ resume = False
 evaluate = True
 test_only = False
 seed = 0
-save_path = "exp/coeff_fm_encode"
+# RELATIVE was the bug: pimm resolves save_path against the CWD, so running this
+# from the checkout wrote the run into the repo and four of its files were
+# committed -- config.py, model_config.json, resolved_config.json,
+# run_metadata.json, carrying 23 frozen /sdf paths. Every other config here
+# resolves through helix.paths; this one did not.
+save_path = str(_root("HELIX_EXP") / "coeff_fm_encode")
 
 # pimm's `batch_size` is the GLOBAL batch across all ranks — default_config_parser
 # asserts `batch_size % world_size == 0` and derives batch_size_per_gpu from it.

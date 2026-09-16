@@ -301,6 +301,26 @@ resolved, the likely shape is: the detector description belongs to whoever owns
 the detector (helix), and pimm-data's `Densify` receives `geom=` from the caller
 rather than shipping its own copy.
 
+**`plane_id` carries four meanings at once.** In `helix.model` it is
+simultaneously the FiLM conditioning index, the RoPE projection axis, the
+masking group, and the plane's identity. One modality made that free; a second
+separates them — an optical corpus would condition on PMT, group for masking by
+module or side, and position on time alone.
+
+What is NOT a problem, and is worth stating because it looks like one:
+`make_mask` selects whole planes via the per-token label `B["plane_id"]`, not by
+token position. Nothing assumes a plane's tokens are contiguous, and no
+reshape-by-plane exists. The token set is already order-free — a flat set plus a
+grouping label — so whole-plane masking imposes no ordering or access constraint
+on a future multi-modal model. The work a second modality needs is splitting the
+four roles into declared axes (`band` -> FiLM, `group_id` -> masking, `pos` ->
+RoPE, `cond` -> conditioning), not restructuring the token layout.
+
+Deliberately not done yet: `helix.optical` has no corpus, tokenizer or noise
+model, so any registry or base-class split designed now would be fitted to one
+real modality and one imagined one. Build optical's DSP first and let it fail
+against the TPC-shaped schema in a specific way; split at the seam it reveals.
+
 **The `pimm-fm` pin is a path source.** `{ path = "../pimm-data", editable = true }`
 works because the two checkouts are siblings. At handover, once pimm-data is
 pushed, it flips back to a git source WITH an explicit `rev` — the original had

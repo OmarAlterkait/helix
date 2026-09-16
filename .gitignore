@@ -35,3 +35,8 @@ report/
 *.err
 *.log
 *.done
+
+# Run output. `save_path` must resolve through helix.paths (HELIX_EXP), never
+# relative to the checkout -- a relative one wrote a run into the repo and four
+# of its files were committed.
+exp/

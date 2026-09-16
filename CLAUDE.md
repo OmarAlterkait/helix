@@ -1,83 +1,92 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository.
 
 ## What this is
 
-HELIX is a signal-processing toolkit for liquid-argon TPC detector data, organized as three packages:
+HELIX covers the whole path from raw LArTPC wire data to a trained foundation
+model: coherent-noise removal and wavelet sparsification, a coefficient corpus,
+a masked autoencoder over those coefficients, and a 3D probe that asks whether
+the learned representation knows where charge is.
 
-- **`helix.core`** — detector-agnostic wavelet sparsification + a lazy multi-backend dispatcher.
-- **`helix.tpc`** — wire-plane pipeline: coherent noise removal → wavelet sparsification. Each plane is a dense `(n_wires, n_ticks)` float32 image (pedestal-subtracted ADC). Quality metric **F0** = `1 - sum|recon-clean|/sum|clean|`.
-- **`helix.optical`** — PMT optical-waveform pipeline for goop "light" files. Operates on goop's stored chunks (gap-compressed "stitches") directly; wavelet-sparsifies them for compression.
+| package | may import pimm-data / pimm | what it is |
+|---|---|---|
+| `helix.core` | **no** | detector-agnostic wavelets, coeff IO, provenance, lazy backend dispatch |
+| `helix.tpc` | **no** | LArTPC physics: coherent gate, forward model (noise + digitize), geometry, corpus builder |
+| `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP |
+| `helix.probe` | no | the 3D deconvolution probe |
+| `helix.optical` | no | PMT light path — a SEPARATE pipeline, not part of the wire FM |
+| `helix.data` | **pimm-data** | coeff corpus reader/dataset/verifier, registered transforms, identity guard |
+| `helix.integrations.pimm` | **pimm** | adapters into the training framework |
 
-There are **no top-level shims**. `helix.config`, `helix.coherent`, `helix.wavelet`, `helix.pipeline`, `helix.io`, `helix._backend`, `helix._numpy_ops`, `helix._jax_ops` and `helix._dwt_matrix` were re-export shims and are gone — import from `helix.core.*` / `helix.tpc.*` directly. `helix/__init__.py` still resolves the common names (`sparsify`, `DetectorConfig`, `process_plane`, …) lazily, so `from helix import X` keeps working; a submodule path does not.
+## The invariant
 
-`helix.tpc.wavelet` is **not** a shim despite having lived at `helix/wavelet.py` under that label: it is the `(image, DetectorConfig)` adapter over `helix.core.wavelet`'s keyword API, and it is the only implementation of that signature.
+`helix.core` and `helix.tpc` must NEVER import `pimm_data`. `helix.data` and
+`helix.integrations` may, and do. This is not style: pimm-data requires
+`torch>=2.5` and `hdf5plugin` unconditionally, while helix's base install is
+numpy/h5py/PyWavelets/scipy. `tests/test_boundary.py` enforces it with three
+complementary checks — read its docstring before moving code between
+subpackages.
+
+Only two directories import an external package. `helix/data/*` reaches
+pimm-data through 9 public symbols; `helix/integrations/pimm/*` reaches pimm
+through its registries. Nothing else imports either.
 
 ## Commands
 
+Everything runs in one container (`docs/ARCHITECTURE.md` §4):
+
 ```bash
-pip install -e .                  # base: numpy + pywt + scipy + h5py
-pip install -e ".[jax-cpu]"       # + jax CPU      (or .[jax-gpu] for cuda12)
-pip install -e ".[torch-cpu]"     # + torch CPU    (torch is the optical/GPU wavelet backend)
-pip install -e ".[dev]"           # + pytest
+IMG=${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}
+PY="apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python"
 
-pytest                            # full suite (~10s; torch/jax tests importorskip if absent)
-pytest tests/test_optical.py -q   # one file
-python tests/bench_numpy.py       # legacy numpy-ops microbenchmarks
-
-helix-tpc --input sensor.h5 --output out.h5 --backend jax   # TPC CLI (alias: helix); --removal gate|multipass|none, --to-coeffs, --events 0-19
-python scripts/optical/sweep_big.py depth 100              # optical rate-distortion campaign, sharded across all GPUs (stages: depth|complete_wav|complete_lev|complete_meth)
+$PY -m helix.paths                 # FIRST: every external path, its source, whether it exists
+$PY -m pytest -q                   # expect 440 passed / 54 skipped
 ```
 
-## Architecture
+`env PYTHONNOUSERSITE=1` is worth adding: `-B /sdf` remounts home, so anything
+pip-installed under `~/.local` is visible inside the container and a green run
+may be yours alone. When editing pimm-data, put its working tree ahead of the
+installed copy with `PYTHONPATH=<pimm-data>/src` — the image INSTALLS pimm-data,
+so a plain pytest there tests the baked copy, not your edits.
 
-### Lazy multi-backend dispatch (`helix.core.backend`) — the core structural pattern
+See `docs/RUNBOOK.md` for corpus → train → eval → probe.
 
-Heavy frameworks (`jax`, `torch`) are imported **only when their backend is selected and used**, never at `import helix` time (numpy is the default; the test suite dropped from 15s→0.6s because of this). Mechanism:
+## Structural patterns worth knowing
 
-- Each op *family* ships one module per backend: `<family>_<backend>.py`. Currently `core/wavelet_ops_{numpy,jax,torch}.py` and `tpc/coherent_ops_{numpy,jax}.py`.
-- `backend.ops("helix.core.wavelet_ops")` imports and returns **only the active backend's** module (`importlib`, cached). The framework import lives inside that file.
-- Selection precedence: `set_backend(name)` > `$HELIX_BACKEND` > `"numpy"`. Valid: `numpy`, `jax`, `torch`.
+**Lazy multi-backend dispatch (`helix.core.backend`).** jax/torch are imported
+only when their backend is selected, never at `import helix` time. Each op
+family ships `<family>_<backend>.py`; `backend.ops(...)` imports only the active
+one. Adding an op means adding it to every backend module, or it silently works
+on one.
 
-To add a backend to a family, drop in `<family>_<newbackend>.py` implementing the same functions — no dispatcher change needed. That holds for `wavelet` and `coherent_gate`, which dispatch through `backend.ops(...)`. It does NOT hold for `coherent`: it hand-rolls an `if be == ...` chain and keeps the algorithm in `_remove_{numpy,jax,torch}` inside the facade, so adding a backend there means editing the dispatcher. All three families now have numpy, jax and torch backends.
+**Values are raw; normalisation is a sidecar.** The corpus stores unnormalised
+coefficients plus a `norm_sigma` table applied at tokenize — deliberately, so
+the corpus stays reversible and tokenization stays changeable.
 
-### Wavelet core (`helix.core.wavelet`)
+**The corpus is compression; the tokenizer is interpretation.** Changing the
+wavelet, the gate or `tau` costs a 344 GB rebuild and a new `basis_digest`,
+invalidating comparability with every existing checkpoint. Changing `n_bands`,
+cell geometry or masking costs a config change and a retrain. Vary
+interpretation freely; change compression only with a measured reason.
 
-`sparsify(image, *, wavelet, level, mode, threshold, sigma=None)` → `SparseResult`; `reconstruct(result, n_time)`. `ThresholdSpec` selects the strategy:
+**`plane_id` currently serves FOUR roles** — FiLM conditioning, RoPE projection
+axis, masking group, and plane identity. `make_mask` groups by that LABEL, not
+by token position, so the token set is already order-free (nothing assumes
+planes are contiguous). For a second modality those four roles separate; see
+`docs/ARCHITECTURE.md` §8.
 
-- **universal = VisuShrink** (`func='hard'|'soft'|'garrote'`): `t = scale·σ·sqrt(2 ln N)` with a **per-signal** noise σ — caller-supplied via `sigma=`, else MAD of the *finest* detail band per row. (Do NOT use per-band σ — it's signal-contaminated in coarse bands and over-thresholds; that was a bug.)
-- **topk**: keep top `keep` fraction of detail coeffs per signal.
-- **energy**: keep smallest set holding `energy` fraction of detail energy per signal.
+## Traps that have cost real time
 
-Approximation band kept untouched when `include_approx`. **Validated finding (100-event campaign): for this denoise-then-compress task, noise-relative VisuShrink-hard is the right method — energy/topk are content-relative and either leak on noise-only regions (energy) or are noise-blind (topk); SURE/Bayes barely threshold high-SNR signal. Wavelet family/level barely matter (coif/sym, level≈8–12). `scale` (κ) is the rate knob.**
-
-Backend differences that callers must respect:
-- **numpy** = pywt (`per_wire DWT`, any length, exact). `coeffs` = list `[cA, cD_L, …, cD_1]`.
-- **jax** = matmul DWT via precomputed pywt-exact matrices (`core/dwt_matrix.py`). `coeffs` = flat `(n_sig, n_coeffs)` array. Only for SHORT signals (a 36k² matrix is ~5 GB — never use jax wavelet on optical chunks).
-- **torch** = FFT-based periodization DWT (`wavelet_ops_torch.py`), batched on GPU, scales to long signals, machine-precision perfect reconstruction. `coeffs` = list of torch tensors. **Coefficient-identical to pywt** (== numpy/jax) — the filter bank is matched to pywt's exact periodization convention (`cA = roll(circ_conv(x, dec_lo), -dec_len//2)[0::2]`; synthesis = its adjoint), verified to ~1e-14 (float64) vs `pywt.wavedec`/`waverec` up to length 36864. **Requires the signal length to be a multiple of `2^level`** (even at every level — the optical pipeline pads to this; raises a clear error otherwise). Cross-backend comparison of coeffs/`n_kept` is now valid; differences are float32 rounding only.
-
-### TPC pipeline (`helix.tpc`)
-
-`process_plane` → `remove_coherent` (multi-pass mask-accumulation: group median → residual → kσ mask → temporal dilation → masked group mean → subtract `α·estimate`, `α=n_unflagged/group_size`; passes 2..n detect on the *cleaned* output but re-estimate/subtract from the *original*) → `core.sparsify` (universal hard, built from `DetectorConfig.threshold_spec()`). `DetectorConfig` is a frozen dataclass; geometry comes from `tpc.io.config_from_file`. Sensor HDF5: `event_<N>/<plane>` with sparse COO (`wire`,`time`,`values`) + pedestal/n_wires attrs.
-
-### Optical pipeline (`helix.optical`)
-
-goop light files are **two-sided** (`event_NNN/{east,west}` + `pe_counts_{side}`), each side a CSR-style `SlicedWaveform` (`adc`/`offsets`/`t0_ns`/`pmt_id`). **The upstream goop loader expects `label_N` groups and will NOT read these** — use `optical.io` (east/west schema).
-
-**Default method** (`OpticalConfig`): per-chunk DWT (coif3, level 10, periodization) → **VisuShrink-hard** (`ThresholdSpec("universal","hard",scale=1.2)`) → quantize survivors to `quant_bits` (12). The default **κ=1.2 is the 1× noise-RMS operating point** (recon RMS over signal ≈ noise floor ~2.57 ADC, ~33×); κ≈1 is pure denoising (~25×), κ≈1.75/2.5 → 2×/3× noise (~49×/85×). `process_event` reads **stored chunks directly** (no deslicing), pedestal-subtracts, pad-batches to a multiple of `2^level`, and runs one batched `core.sparsify`. **σ is computed by `io.chunk_noise_sigma` from the UNPADDED chunk (db1 MAD) and passed to `sparsify` — never estimate σ from the padded batch (the zero-padding collapses the MAD → threshold collapses → keeps ~12× too many; this was a real bug).** Note `core.sparsify`'s `universal` thresholds each detail band with its **own** length in `√(2 ln N)` (level-dependent universal), so production κ is not bit-identical to the campaign's total-N "visu" helper — within a few % on total count (coarse bands keep marginally more). `viz.plot_decomposition(signal, style='bars'|'map')` renders the multi-level decomposition with correct dyadic time–scale placement. Metrics in `metrics.py` score peak/area over SIGNAL chunks only (|x|max>50 ADC). `deslice_side` is viz-only.
-
-**Per-level coefficient budget** (κ=1.2, 100 events, `scripts/optical/coeffs_per_level.py` → `plot_coeffs_per_level.py`): ~994 kept coeffs / signal chunk, concentrated at **mid-scales** — D4+D3 hold ~41% of the budget, D1 (finest) keeps ~0.04% of its band (noise-dominated, thresholded away), survival fraction declines monotonically coarse→fine (A10 100% → D10 28% → D1 0.04%). Noise-only chunks keep ~50 coeffs (~920× each).
-
-Data characteristics (goop light_output.h5): 162 ch (81/side), 1 ns ticks, pedestal ~29490, 15-bit, SERKernel (10 µs), noise 2.57 ADC (white, verified). Pulses are large negative-going; single PE (~0.36 ADC) is sub-noise. Stored chunk ~36k samples ⊃ active >3σ ~6.8k. Honest compression: ~3× would be wrong (a padding-σ bug) — the real faithful frontier is **~30× at the noise floor**, since the bright prompt is high-information and only the noise tail compresses for free.
-
-### Gotchas
-
-- `config.beta`/`xblock_kernel` (TPC) exist but are **not wired into** `remove_coherent` (defined-but-unused spatial high-pass).
-- jax/torch wavelet `coeffs` differ in type (flat array vs list); `tpc.io.write_processed` handles both.
-- `temp/` holds a throwaway goop clone + scratch analysis (gitignored intent; pytest `norecursedirs` skips it).
-
-## scripts/ layout
-
-- `scripts/optical/` — optical compression analysis toolkit (sweeps, frontier, transform/WPT/zerotree comparisons, plots). `sweep_big.py` is the campaign engine + canonical method helpers; see `scripts/optical/README.md`. All shard across available GPUs. Campaign results + manifest live in `temp/figures/big/` (`RESULTS.md`, `*.jsonl`, `*.json`).
-- Other `scripts/*.py` (TPC metrics/plots) hardcode another machine's paths and import external `pimm_data.jaxtpc` / `tools.coherent_noise` — reference only, not runnable here.
+- **Provenance refuses a dirty tree.** Build a corpus from an uncommitted
+  checkout and every shard records `git_dirty: True`; `coeff_verify` then
+  refuses it. This cost a 344 GB rebuild once.
+- **`#SBATCH` directives cannot read shell variables**, so `--account`,
+  `--output` and `--partition` are literal. The corpus build (turing) and
+  training (ampere) need DIFFERENT accounts — `sacctmgr -n show assoc
+  user=$USER format=Account,Partition,QOS` lists yours.
+- **A corpus run may have gaps.** `run_0027670361` is missing source files
+  51-56 and 94-97; 180 shards / 17,999 events is complete for it, not a failure.
+- **`save_path` must resolve through `helix.paths`**, never relative to the
+  checkout — a relative one wrote a run INTO the repo and four files were
+  committed.

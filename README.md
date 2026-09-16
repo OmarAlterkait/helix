@@ -40,6 +40,23 @@ torch and jax are **optional**. `helix.core` and `helix.tpc` import with neither
 and a test enforces it — that is what lets the DSP half run where the training
 stack does not exist.
 
+## Scope: the wire path
+
+This repository contains two pipelines. Everything above — corpus, foundation
+model, probe — is the **wire** path, and it is what the documentation, the
+tests and the runbook describe.
+
+`helix/optical` and `scripts/optical` (18 files) are a **separate PMT-light
+pipeline**: wavelet compression of goop waveform chunks, with its own config and
+metrics. It shares `helix.core` and nothing else — no corpus, no tokenizer, no
+model. It is live code, not dead, but it is not part of the FM pipeline and is
+not exercised by the handover validation.
+
+The intent is for optical to grow the same way the wire path did — its own
+wavelet compression, its own corpus, feeding the same model. See
+`docs/ARCHITECTURE.md` §8 for what that would require and why it has not been
+designed yet.
+
 ## The two packages
 
 helix works with **pimm-data**, a generic data layer serving several detector
