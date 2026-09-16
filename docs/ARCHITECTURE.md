@@ -207,6 +207,16 @@ Rebuild whenever pimm-data changes: the image is part of the lockstep pair.
             v
   foundation model        (masked autoencoding over wavelet coefficients)
             |
+            |  RESUME state stays with pimm: <save_path>/model/last/ (DCP),
+            |  iter_N.pth, model_ema.pth. helix reads NONE of it.
+            |
+            |  pimm export  -> weights + resolved config
+            |  scripts/export_artifact.py -> eval artifact
+            v
+  eval artifact           (weights.safetensors + artifact.json: architecture,
+                           operating point, corpus basis_digest, helix commit,
+                           which weight set, weights digest)
+            |
             v
   3D probe / evaluators   (helix.probe)
 ```
@@ -218,6 +228,37 @@ being read: it REFUSES on mismatch and WARNS when a corpus is unstamped.
 message prints them, but `basis_digest` is the only field COMPARED — its
 docstring says it is "the one field worth carrying". That guard is why the retired 540 GB
 `fm_cache_tpc` could never have been used again — it carried no stamps at all.
+
+### One owner for "what is a checkpoint"
+
+A run leaves two kinds of file and they are not interchangeable. RESUME state is
+weights plus optimizer, scheduler, RNG, sampler and step; it exists so training
+continues bit-identically, it is pimm's, and nothing in helix reads it. EVAL
+state is one weight set plus everything needed to make a number reproducible and
+attributable; that is helix's, and `helix/model/artifact.py` is the only thing
+that reads it.
+
+That module exists because the alternative was measured: eight checkpoint shapes
+were in circulation and eight independent `torch.load` sites read them, each
+knowing a subset. A `pimm export` directory was taught to `load_probe_model` and
+not to `patch_config_from_checkpoint`, so probing a pimm-trained model died on
+`IsADirectoryError` — a failure no test could have caught, because nothing named
+the set of formats. `tests/test_artifact_formats.py` now does: every shape either
+reads with an operating point that survives the round trip, or is refused by a
+message naming the remedy, and a ninth shape added without a row there fails.
+
+The promotion step is not ceremony. `pimm export` writes a portable directory but
+cannot say WHICH weight set it holds — `_sanitize_config` nulls the only key that
+could record it, and the exported file is always named `model.safetensors`
+whatever it came from — nor which corpus the weights trained on, nor which helix
+commit defined their tokenizer. All three change the number. Every probe row
+written before the artifact existed carries `weights_are_ema: null`.
+
+Two shapes were retired rather than carried: `converted` and `research` existed
+only for `m113`, kept alive by a converter run exactly once. m113 was promoted to
+an artifact — verified tensor-for-tensor first — and the converter deleted. Both
+shapes are still DETECTED, because the blobs remain on disk and "unrecognised
+checkpoint shape" would be a false thing to tell someone who found one.
 
 ---
 
