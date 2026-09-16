@@ -219,7 +219,12 @@ def _read_helix_eval(path, weights):
     if weights:
         from safetensors.torch import load_file
         sd = load_file(os.path.join(path, _ARTIFACT_WEIGHTS))
-    return Artifact(arch=dict(meta["arch"]),
+    arch = dict(meta["arch"])
+    # JSON has no tuple. `film` is one, and build_fm's behaviour depends on it,
+    # so it is restored here exactly as the other two readers restore it.
+    if isinstance(arch.get("film"), list):
+        arch["film"] = tuple(arch["film"])
+    return Artifact(arch=arch,
                     op=OperatingPoint(**meta["operating_point"]),
                     weights=meta.get("weights", "unknown"),
                     weights_source=meta.get("weights_source"),
@@ -374,6 +379,36 @@ def weights_digest(sd):
     return h.hexdigest()
 
 
+def _jsonable(v, where):
+    """Numbers, lists and dicts -- with tensors and arrays spelled out in full.
+
+    Written because ``json.dump(..., default=str)`` silently turned m113's bin
+    EDGES into the string repr of a tensor. The artifact wrote, loaded, and
+    reported its operating point correctly; it just could not build a model any
+    more, because the categorical head's edges are training-set statistics that
+    nothing can re-derive. A serialiser that cannot fail is a serialiser that
+    loses data, so anything not representable raises here instead.
+    """
+    import numpy as np
+
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, dict):
+        return {str(k): _jsonable(x, f"{where}.{k}") for k, x in v.items()}
+    if hasattr(v, "detach"):                      # torch tensor
+        v = v.detach().cpu().numpy()
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x, f"{where}[]") for x in v]
+    raise TypeError(
+        f"{where}: {type(v).__name__} cannot be written to an artifact. Convert "
+        f"it to numbers, or leave it out -- an artifact that stringifies what it "
+        f"cannot represent is an artifact that has lost it.")
+
+
 def save(out_dir, *, state_dict, arch, op, weights, provenance=None):
     """Write a helix EVAL artifact: weights, architecture, operating point.
 
@@ -391,13 +426,17 @@ def save(out_dir, *, state_dict, arch, op, weights, provenance=None):
     os.makedirs(out_dir, exist_ok=True)
     save_file({k: v.detach().cpu().contiguous() for k, v in state_dict.items()},
               os.path.join(out_dir, _ARTIFACT_WEIGHTS))
-    meta = dict(arch={k: (list(v) if isinstance(v, tuple) else v)
-                      for k, v in dict(arch).items()},
-                operating_point=asdict(op), weights=weights,
-                provenance=dict(provenance or {}))
+    meta = dict(arch=_jsonable(dict(arch), "arch"),
+                operating_point=_jsonable(asdict(op), "operating_point"),
+                weights=weights,
+                # Provenance is free-form and may hold paths, timestamps and a
+                # git record, so it is the one place a str() fallback is right:
+                # nothing BUILDS from it. Everything above must round-trip.
+                provenance=json.loads(json.dumps(dict(provenance or {}),
+                                                 default=str, sort_keys=True)))
     tmp = os.path.join(out_dir, _ARTIFACT_JSON + ".tmp")
     with open(tmp, "w") as fh:
-        json.dump(meta, fh, indent=2, sort_keys=True, default=str)
+        json.dump(meta, fh, indent=2, sort_keys=True)
     os.replace(tmp, os.path.join(out_dir, _ARTIFACT_JSON))
     return out_dir
 

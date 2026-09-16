@@ -187,6 +187,44 @@ def test_a_helix_eval_artifact_says_which_weights_it_holds(tmp_path):
              weights="unknown")
 
 
+def test_inlined_bins_survive_the_round_trip_as_NUMBERS(tmp_path):
+    """The edges are training-set statistics; nothing can re-derive them.
+
+    `json.dump(..., default=str)` silently turned m113's edges into the string
+    repr of a tensor. The artifact still wrote, still loaded, and still reported
+    its operating point correctly -- it just could not build a model any more.
+    A serialiser that cannot fail is one that loses data.
+    """
+    from helix.model.artifact import build
+
+    m = build_fm(dict(ARCH))
+    edges = torch.linspace(-4, 4, ARCH["n_bins"] + 1).repeat(ARCH["n_band"], 1)
+    op = OperatingPoint(cell_t="grid_center", pw=16, pt=8, n_bands=4,
+                        bins={"edges": edges})                # a TENSOR, as m113 had
+    sd = {k: v for k, v in m.state_dict().items() if k != "bin_edges"}
+    d = save(str(tmp_path / "a"), state_dict=sd, arch=ARCH, op=op, weights="raw")
+
+    back = inspect(d).op.bins["edges"]
+    assert isinstance(back, list) and isinstance(back[0][0], float), \
+        f"edges came back as {type(back).__name__}: they were stringified"
+    torch.testing.assert_close(torch.tensor(back), edges)
+    # and the model builds from them, which is what they are FOR
+    torch.testing.assert_close(build(load(d), device="cpu").bin_edges, edges)
+
+
+def test_what_cannot_be_written_raises_instead_of_being_stringified(tmp_path):
+    with pytest.raises(TypeError, match="cannot be written to an artifact"):
+        save(str(tmp_path / "a"), state_dict={}, arch=dict(ARCH, film=object()),
+             op=OP, weights="raw")
+
+
+def test_film_comes_back_a_tuple_from_every_reader(tmp_path):
+    """JSON has no tuple, and build_fm's behaviour depends on it."""
+    arch = dict(ARCH, film=("band", "plane", "wire"))
+    d = save(str(tmp_path / "a"), state_dict={}, arch=arch, op=OP, weights="raw")
+    assert inspect(d).arch["film"] == ("band", "plane", "wire")
+
+
 def test_a_helix_eval_artifact_round_trips_through_the_model(tmp_path):
     from helix.model.artifact import build
     pytest.importorskip("safetensors")
