@@ -197,15 +197,31 @@ Two stages. Stage 1 is expensive and reusable; stage 2 is cheap and per-checkpoi
     # 'state_dict'). helix/model/checkpoint.py says so: "Nothing trained from
     # here should go through it."
 
-    # Stage 3 -- probe the EXPORT directory
-    $PY scripts/run_probe.py --checkpoint <export_dir> --corpus <dir> \
+    # Stage 3 -- PROMOTE the export into an eval artifact.
+    #
+    # An export is portable but cannot describe itself in three ways that each
+    # change the number. `_sanitize_config` nulls `weight`, so nothing records
+    # WHICH weight set it holds -- every probe row so far carries
+    # weights_are_ema=null, and an EMA arm and a raw arm compare in silence.
+    # Nothing records the CORPUS the weights trained on, so a coeff_tpc model
+    # scored against coeff_tpc_r1 produces a plausible number. And nothing
+    # records the helix commit that defined the tokenizer.
+    #
+    # --weights is required and unguessable on purpose: you are asserting what
+    # you just exported, once, at the moment you know it.
+    $PY scripts/export_artifact.py <export_dir> --weights ema \
+        --corpus <dir> -o <artifact_dir>
+
+    # Stage 4 -- probe the artifact (an export dir still works; it just cannot
+    # attribute itself, and run_probe will say so)
+    $PY scripts/run_probe.py --checkpoint <artifact_dir> --corpus <dir> \
         --tag <name> --out probe_results.jsonl
 
-`--cell-t` matters and run_probe will refuse rather than guess: a converted
-checkpoint carries its tokenizer, but for one that does not you must pass the
-value the run trained with (`grep cell_t <run>/config.py`). The old fallback
-silently chose `centroid` where every helix config trains `grid_center`, and
-they differ on 94% of cells.
+`--cell-t` matters and run_probe will refuse rather than guess: an artifact and a
+converted checkpoint carry their tokenizer, but for one that does not you must
+pass the value the run trained with (`grep cell_t <run>/config.py`). The old
+fallback silently chose `centroid` where every helix config trains
+`grid_center`, and they differ on 94% of cells.
 
 Stage 1 depends on the corpus only for WHICH events to dump, never for their
 content, so the artifact survives a corpus rebuild.

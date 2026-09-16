@@ -242,6 +242,17 @@ def main(argv=None):
     if meta_t.get("warning"):
         print("WARNING:", meta_t["warning"], flush=True)
 
+    # A model trained on one basis scored against another is not an error
+    # anywhere else in the stack: the shards load, the tokenizer runs, and a
+    # plausible number comes out. `coeff_tpc` (7f954a84…) and `coeff_tpc_r1`
+    # (8c4542b6…) differ only by the occupancy gate. So check it here, where the
+    # two are finally in the same process.
+    _prov = meta_t.get("provenance") or {}
+    if _prov.get("corpus"):
+        from helix.data.identity import check_corpus_matches, corpus_identity
+        print(check_corpus_matches(_prov["corpus"], corpus_identity(
+            corpus, dataset_name=a.dataset_name), where=a.checkpoint), flush=True)
+
     packs = []
     for i in range(n_ev):
         run, src, ev = ident[i]
@@ -304,10 +315,12 @@ def main(argv=None):
 
     # `corpus` is recorded because it was not, and an A/B whose entire independent
     # variable IS the corpus produced rows that never said which one they read —
-    # it had to be recovered from `n_patch`. `weights` is the weight FILE
-    # BASENAME, which for an export dir is always "model.bin" whatever it holds,
-    # so it cannot distinguish EMA from raw on its own; `requested_weights` and
-    # `weights_warning` record the case where the two disagree. `seeds` is a
+    # it had to be recovered from `n_patch`. `weights` is now what was USED
+    # ("ema" / "raw" / "unknown"), not the weight file's basename — that was
+    # always "model.bin" for an export dir whatever it held, so it could not
+    # distinguish EMA from raw at all; `requested_weights` and `weights_warning`
+    # record the case where asked-for and got disagree, and "unknown" means the
+    # checkpoint could not say (promote it with scripts/export_artifact.py). `seeds` is a
     # SYSTEMATIC lever, not a nuisance parameter — `oof` is averaged over seeds,
     # worth about +0.05 on the trained arm going 1 -> 3 — so rows with different
     # `seeds` must never be compared, and `stale` says whether the truth artifact
@@ -323,6 +336,15 @@ def main(argv=None):
                 weights_are_ema=meta_t.get("weights_are_ema"),
                 weights_source=meta_t.get("weights_source"),
                 weights_warning=meta_t.get("warning"),
+                # What the checkpoint says about ITSELF, when it is a helix eval
+                # artifact. `weights_sha256` identifies the tensors with no
+                # cooperation from the writer, so two rows claiming the same
+                # checkpoint can be shown to have probed the same weights;
+                # `ckpt_basis_digest` is the corpus the weights were TRAINED on,
+                # checked against the one being read just below.
+                ckpt_basis_digest=str((_prov.get("corpus") or {}).get("basis_digest", "")),
+                ckpt_helix=str((_prov.get("helix") or {}).get("git", "")),
+                weights_sha256=str(_prov.get("weights_sha256", "")),
                 random_seed=a.random_seed,
                 cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
                 qtot_min=float(cfg.get("qtot_min", -1)),
