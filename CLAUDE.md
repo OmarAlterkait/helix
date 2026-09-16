@@ -41,7 +41,7 @@ IMG=${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}
 PY="apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python"
 
 $PY -m helix.paths                 # FIRST: every external path, its source, whether it exists
-$PY -m pytest -q                   # expect 476 passed / 54 skipped
+$PY -m pytest -q                   # expect 477 passed / 54 skipped
 ```
 
 `env PYTHONNOUSERSITE=1` is worth adding: `-B /sdf` remounts home, so anything
