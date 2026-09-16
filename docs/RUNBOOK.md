@@ -215,7 +215,15 @@ Two stages. Stage 1 is expensive and reusable; stage 2 is cheap and per-checkpoi
     # Stage 4 -- probe the artifact (an export dir still works; it just cannot
     # attribute itself, and run_probe will say so)
     $PY scripts/run_probe.py --checkpoint <artifact_dir> --corpus <dir> \
-        --tag <name> --out probe_results.jsonl
+        --tag <name> --out probe_results.jsonl \
+        --cache-dir $SCRATCH/probe_cache
+
+`--cache-dir` makes the extraction loop resumable. It is the long pole -- 2.5M
+patches over 388 events, tens of minutes on a GPU -- and a preemption used to
+discard all of it before a single probe was fitted. Chunks are keyed by a hash of
+everything that changes the features (both weight digests, layer, tokenizer,
+corpus, truth), so a stale cache cannot be read by mistake; the cost is disk,
+roughly `n_patch x feat_dim x 3 arms` at float16, so put it on $SCRATCH.
 
 `--cell-t` matters and run_probe will refuse rather than guess: an artifact and a
 converted checkpoint carry their tokenizer, but for one that does not you must

@@ -161,6 +161,77 @@ def _weights_digest(model):
     return h.hexdigest()
 
 
+#: Feature arms, cached at half precision. They are standardised before the fit
+#: and consumed by an MLP trained in float32 from them, so fp16 storage costs
+#: nothing measurable and halves a cache that is otherwise tens of GB. Everything
+#: else -- labels, geometry, indices -- is small and stays exact.
+_CACHE_HALF = ("Xtr", "Xrn", "Xraw")
+
+
+def _cache_key(**parts):
+    """A directory name that changes whenever the cached features would.
+
+    Everything that feeds ``features_at_layer`` is in here, INCLUDING the
+    random-init control's own weight digest: the `random` arm lives in the same
+    cache, and reusing one seed's null under another seed would silently compare
+    two arms against two different floors. What is deliberately NOT in here is
+    ``--max-events``: events are cached by index in the truth artifact's own
+    order, so a 400-event run reuses a 100-event run's chunks.
+    """
+    blob = json.dumps(parts, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _cache_chunks(d):
+    """``[(start, end, path)]`` in order, for the chunks present."""
+    import glob as _glob
+    out = []
+    for f in sorted(_glob.glob(os.path.join(d, "ev_*.npz"))):
+        lo, hi = os.path.basename(f)[3:-4].split("_")
+        out.append((int(lo), int(hi), f))
+    return out
+
+
+def _cache_resume(d):
+    """``(packs, next_event)`` from the CONTIGUOUS prefix of cached chunks.
+
+    Contiguous on purpose. A gap means a chunk was lost or a run died mid-write,
+    and silently skipping the missing events would produce a result whose
+    ``n_events`` looks right in the row while the features behind it are a
+    different set. Trailing chunks past a gap are ignored, not deleted -- a later
+    run with the same key picks them up once the gap is refilled.
+    """
+    packs, nxt = [], 0
+    for lo, hi, f in _cache_chunks(d):
+        if lo != nxt:
+            print(f"  cache: gap at event {nxt} (next chunk starts {lo}); "
+                  f"re-extracting from there", flush=True)
+            break
+        z = np.load(f)
+        n = int(z["_n_packs"])
+        for j in range(n):
+            pk = {k[len(f"p{j}_"):]: z[k] for k in z.files if k.startswith(f"p{j}_")}
+            pk["n_bands"] = int(pk["n_bands"])
+            for k in _CACHE_HALF:
+                pk[k] = pk[k].astype(np.float32)
+            packs.append(pk)
+        nxt = hi
+    return packs, nxt
+
+
+def _cache_write(d, lo, hi, chunk):
+    """Write one chunk atomically. A half-written .npz is worse than none."""
+    os.makedirs(d, exist_ok=True)
+    flat = {"_n_packs": np.int64(len(chunk))}
+    for j, pk in enumerate(chunk):
+        for k, v in pk.items():
+            v = np.asarray(v)
+            flat[f"p{j}_{k}"] = v.astype(np.float16) if k in _CACHE_HALF else v
+    tmp = os.path.join(d, f".ev_{lo:05d}_{hi:05d}.tmp.npz")
+    np.savez(tmp, **flat)
+    os.replace(tmp, os.path.join(d, f"ev_{lo:05d}_{hi:05d}.npz"))
+
+
 def _emit(path, row):
     """Append one completed probe row immediately.
 
@@ -193,6 +264,14 @@ def main(argv=None):
                          "controls with nothing recording it.")
     ap.add_argument("--probes", default="mlp,triangulate")
     ap.add_argument("--allow-stale", action="store_true")
+    ap.add_argument("--cache-dir", default=None,
+                    help="cache extracted features here and RESUME from them. The "
+                         "extraction loop is the long pole — 2.5M patches over 388 "
+                         "events — and a preemption 40 minutes in used to discard "
+                         "all of it. Off by default because the cache is large "
+                         "(~n_patch x feat_dim x 3 arms, float16).")
+    ap.add_argument("--cache-every", type=int, default=25,
+                    help="flush a cache chunk every N events; the resume floor")
     ap.add_argument("--cell-t", default=None, choices=("grid_center", "centroid"),
                     help="tokenizer cell_t, REQUIRED when the checkpoint records no "
                          "tokenizer. helix configs train grid_center.")
@@ -253,8 +332,29 @@ def main(argv=None):
         print(check_corpus_matches(_prov["corpus"], corpus_identity(
             corpus, dataset_name=a.dataset_name), where=a.checkpoint), flush=True)
 
+    cache_dir, start = None, 0
     packs = []
-    for i in range(n_ev):
+    if a.cache_dir:
+        cache_dir = os.path.join(a.cache_dir, _cache_key(
+            trained=_weights_digest_or_none(model_t),
+            random=_weights_digest_or_none(model_r),
+            layer=a.layer, cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
+            n_bands=pcfg.n_bands, corpus=corpus, dataset_name=a.dataset_name,
+            truth=os.path.abspath(truth_path),
+            corpus_ident=str(cfg.get("corpus_ident_sha256", "")),
+            dom_threshold=float(cfg.get("dom_threshold", 0.5))))
+        packs, start = _cache_resume(cache_dir)
+        start = min(start, n_ev)
+        print(f"cache {cache_dir}: {len(packs)} packs, resuming at event {start}",
+              flush=True)
+        # A cached pack's `event` column is its index in the truth artifact's
+        # order, which is what `fit_probe` groups folds by -- so a resumed run
+        # and an uninterrupted one produce the SAME folds, not merely the same
+        # number of them.
+        packs = [p for p in packs if int(p["event"][0]) < n_ev]
+
+    pending, pend_lo = [], start
+    for i in range(start, n_ev):
         run, src, ev = ident[i]
         tag = src.replace("sim_wire_sensor_", "").replace(".h5", "")
         shard = os.path.join(corpus, f"{a.dataset_name}_coeff_{tag}.h5")
@@ -297,9 +397,13 @@ def main(argv=None):
         pr["tick"] = pr["geo"][:, 7] * 4321.0
         pr["wire"] = pr["geo"][:, 6] * 2000.0
         packs.append(pr)
+        pending.append(pr)
         del ft, fr
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if cache_dir and (len(pending) >= a.cache_every or i + 1 == n_ev):
+            _cache_write(cache_dir, pend_lo, i + 1, pending)
+            pending, pend_lo = [], i + 1
         if (i + 1) % 20 == 0 or i + 1 == n_ev:
             print(f"  {i+1}/{n_ev} events, {sum(len(p['y']) for p in packs):,} patches",
                   flush=True)
@@ -346,6 +450,12 @@ def main(argv=None):
                 ckpt_helix=str((_prov.get("helix") or {}).get("git", "")),
                 weights_sha256=str(_prov.get("weights_sha256", "")),
                 random_seed=a.random_seed,
+                # Which cache these features came from, and how many events were
+                # reused rather than extracted. A resumed run and an
+                # uninterrupted one must produce the same number; recording it is
+                # what makes that checkable after the fact rather than asserted.
+                cache_key=(os.path.basename(cache_dir) if cache_dir else None),
+                cache_resumed_events=int(start),
                 cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
                 qtot_min=float(cfg.get("qtot_min", -1)),
                 dom_threshold=float(cfg.get("dom_threshold", -1)),
