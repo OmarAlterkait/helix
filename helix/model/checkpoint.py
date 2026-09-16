@@ -1,14 +1,26 @@
-"""Reading a converted FM checkpoint's recorded operating point.
+"""Turning a checkpoint into a model: weights in, bins on, PatchConfig out.
 
-Separate from :mod:`helix.integrations.pimm` because none of this needs pimm —
-it reads a blob and returns a :class:`~helix.model.tokenize.PatchConfig`. Living
-in the pimm adapter made it unimportable without pimm installed, which is the
-opposite of what a config recipe needs. Separate from
+:mod:`helix.model.artifact` decides WHAT a checkpoint is and reads it; this
+module applies what it read — the strict state_dict load with its two
+migrations, the bin sidecar, and the ``PatchConfig`` a recipe needs. The split
+is deliberate: reading must not require a model, and building must not have to
+know about file formats.
+
+Separate from :mod:`helix.integrations.pimm` because none of it needs pimm.
+Living in the pimm adapter made it unimportable without pimm installed, which is
+the opposite of what a config recipe needs. Separate from
 :mod:`helix.model.tokenize` because that module is deliberately torch-free and a
 subprocess test enforces it.
 """
 
 from __future__ import annotations
+
+import os
+
+#: Filenames ``pimm export`` writes, in preference order. Re-exported
+#: because recipes and tests import them from here; the authority is
+#: :mod:`helix.model.artifact`.
+from helix.model.artifact import _EXPORT_CONFIGS, _EXPORT_WEIGHTS  # noqa: F401
 
 def patch_config_from_checkpoint(checkpoint, cell_t=None):
     """The ``PatchConfig`` a converted checkpoint was TRAINED with.
@@ -29,106 +41,87 @@ def patch_config_from_checkpoint(checkpoint, cell_t=None):
     ``cell_t`` fills the field in for a checkpoint that does not record it, and is
     CROSS-CHECKED against one that does — see :func:`_patch_config_from_tok`.
     """
-    import torch
+    from helix.model.artifact import inspect
 
     # A `pimm export` DIRECTORY is a valid checkpoint here too. It was not
     # handled: load_probe_model learned about export dirs but this did not, so
     # probing a pimm-trained model died on `IsADirectoryError` in torch.load
-    # before it reached the loader that would have coped.
-    if is_export_dir(checkpoint):
-        return _patch_config_from_tok(_export_tokenizer_cfg(checkpoint),
-                                      cell_t, checkpoint)
-
-    blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    return _patch_config_from_tok(blob.get("tokenizer"), cell_t, checkpoint)
+    # before it reached the loader that would have coped. There is now one
+    # reader for both, so the two cannot drift apart again.
+    return patch_config(inspect(checkpoint).op, cell_t, checkpoint)
 
 
-def _patch_config_from_tok(tok, cell_t, where):
-    """Build a :class:`PatchConfig` from a recorded tokenizer block.
+def patch_config(op, cell_t=None, where=""):
+    """Build a :class:`PatchConfig` from an
+    :class:`~helix.model.artifact.OperatingPoint`.
 
     Three cases callers must not conflate:
 
-    * **no block** -> ``None``. "Not recorded"; the caller asks the user.
-    * **block without cell_t** -> filled from ``cell_t``, or refused. The block's
-      ``pw``/``pt`` are real information, so returning ``None`` here would be
-      wrong twice over: it would discard them AND silently substitute the
-      ``PatchConfig`` defaults in their place.
-    * **block with cell_t, plus a conflicting ``cell_t``** -> refused. Letting the
-      file quietly win is the same failure this function exists to prevent, only
+    * **nothing recorded** -> ``None``. The caller asks the user.
+    * **recorded without cell_t** -> filled from ``cell_t``, or refused. The
+      recorded ``pw``/``pt`` are real information, so returning ``None`` here
+      would be wrong twice over: it would discard them AND silently substitute
+      the ``PatchConfig`` defaults in their place.
+    * **recorded, plus a conflicting ``cell_t``** -> refused. Letting the file
+      quietly win is the same failure this function exists to prevent, only
       pointed the other way; the four probe scripts used to do exactly that.
     """
-    if not tok:
+    if not op.recorded:
         return None
     from helix.model.tokenize import PatchConfig
-    kw = {k: tok[k] for k in ("pw", "pt", "cell_t") if k in tok}
-    if tok.get("n_bands"):
-        kw["n_bands"] = int(tok["n_bands"])
-    rec = kw.get("cell_t")
-    if rec is None:
+    kw = {k: getattr(op, k) for k in ("pw", "pt") if getattr(op, k) is not None}
+    if op.n_bands:
+        kw["n_bands"] = int(op.n_bands)
+    if op.cell_t is None:
         if cell_t is None:
             raise ValueError(
                 f"{where} records a tokenizer (pw={kw.get('pw')}, pt={kw.get('pt')}) "
                 "but no cell_t, so the time coordinate it trained on is unknown. "
                 "Supply it (--cell-t on the probe scripts).")
         kw["cell_t"] = cell_t
-    elif cell_t is not None and cell_t != rec:
-        raise ValueError(
-            f"{where} records cell_t={rec!r}, but cell_t={cell_t!r} was requested. "
-            "Refusing to override: one of the two is wrong, and picking either "
-            "silently is how a model gets scored on a coordinate it never saw.")
+    else:
+        if cell_t is not None and cell_t != op.cell_t:
+            raise ValueError(
+                f"{where} records cell_t={op.cell_t!r}, but cell_t={cell_t!r} was "
+                "requested. Refusing to override: one of the two is wrong, and "
+                "picking either silently is how a model gets scored on a "
+                "coordinate it never saw.")
+        kw["cell_t"] = op.cell_t
     return PatchConfig(**kw)
 
 
-def _export_tokenizer_cfg(path):
-    """``CoeffTokenize``'s ``cfg`` dict from a ``pimm export`` config.json, or None.
-
-    Shared by :func:`patch_config_from_checkpoint` and :func:`load_export_dir` so
-    the two cannot disagree about where the tokenizer geometry lives. It travels
-    in the transform list rather than the model section, because it describes how
-    coefficients become tokens, not the architecture.
-    """
-    import json
-    import os
-
-    cfg_path = next((os.path.join(path, c) for c in _EXPORT_CONFIGS
-                     if os.path.exists(os.path.join(path, c))), None)
-    if cfg_path is None:
+def _patch_config_from_tok(tok, cell_t, where):
+    """Compatibility shim: a recorded tokenizer block -> ``PatchConfig``."""
+    from helix.model.artifact import OperatingPoint
+    tok = dict(tok or {})
+    if not tok:
         return None
-    full = json.load(open(cfg_path))
-    for t in (full.get("transform") or []):
-        if isinstance(t, dict) and t.get("type") == "CoeffTokenize":
-            return dict(t.get("cfg") or {})
-    return None
+    return patch_config(
+        OperatingPoint(cell_t=tok.get("cell_t"), pw=tok.get("pw"),
+                       pt=tok.get("pt"), n_bands=tok.get("n_bands")),
+        cell_t, where)
+
+
+def _export_tokenizer_cfg(path):
+    """Deprecated alias for :func:`helix.model.artifact.export_tokenizer_cfg`."""
+    from helix.model.artifact import export_tokenizer_cfg
+    return export_tokenizer_cfg(path)
 
 
 def load_converted(model, blob, *, prefer="raw"):
     """Load a converted checkpoint's weights into ``model``, strict.
 
-    Exists so the bins migration lives in ONE place. ``bin_edges`` is a
-    persistent buffer now and rides inside the state_dict, but blobs converted
-    before that keep the edges beside the weights under ``blob["bins"]`` — so a
-    strict load of an old blob would fail on a missing key. Returns which
-    weights were used.
+    Kept as the name the recipes call; the work is
+    :func:`helix.model.artifact.Artifact.pick` plus :func:`load_state_dict`.
+    Returns which weight set was used.
     """
-    import torch
+    from helix.model.artifact import Artifact
 
-    sd = blob["state_dict"]
-    used = "raw"
-    if prefer == "ema":
-        ema = blob.get("state_dict_ema") or blob.get("ema")
-        if ema:
-            sd, used = ema, "ema"
-    if blob.get("bins") and "bin_edges" not in sd:
-        sd = dict(sd)
-        sd["bin_edges"] = torch.as_tensor(blob["bins"]["edges"])
-        # The converted blob may also carry the centroids; take them when
-        # present, and let the backfill below supply NaN when it does not.
-        for _n, _k in (("bin_cent_asinh", "cent_asinh"),
-                       ("bin_cent_ratio", "cent_ratio")):
-            if blob["bins"].get(_k) is not None:
-                sd[_n] = torch.as_tensor(blob["bins"][_k])
-    sd = _backfill_centroids(model, sd)
-    model.load_state_dict(sd, strict=True)
+    art = Artifact(arch={}, op=None, fmt="converted",
+                   state_dict=blob["state_dict"],
+                   state_dict_ema=blob.get("state_dict_ema") or blob.get("ema"))
+    sd, used = art.pick(prefer)
+    load_state_dict(model, sd, bins=blob.get("bins"))
     return used
 
 
@@ -217,16 +210,38 @@ def _backfill_centroids(model, sd):
     return sd
 
 
-#: Filenames ``pimm export`` writes, in preference order.
-_EXPORT_CONFIGS = ("config.json", "training_config.json")
-_EXPORT_WEIGHTS = ("model.safetensors", "model.bin")
+def load_state_dict(model, sd, *, bins=None):
+    """Strict load, after the migrations every caller needs and forgets.
+
+    Strips the DDP ``module.`` prefix; injects a pre-buffer checkpoint's bin
+    edges from the sidecar beside it; drops buffers the model no longer has; and
+    derives the bin-centroid buffers a pre-fix checkpoint predates — from the
+    checkpoint's OWN edges, so the loaded model obeys the same invariant
+    ``set_bins`` enforces and no consumer has to test for NaN.
+
+    ``strict=True`` stays an honest check on the WEIGHTS: that is the whole
+    reason these three migrations are explicit rather than a relaxed load.
+    """
+    import torch
+
+    sd = {k[7:] if k.startswith("module.") else k: v for k, v in sd.items()}
+    # `bin_edges` is a persistent buffer now and rides inside the state_dict,
+    # but blobs converted before that keep the edges beside the weights — so a
+    # strict load of an old blob would fail on a missing key.
+    if bins and "bin_edges" not in sd:
+        sd["bin_edges"] = torch.as_tensor(bins["edges"])
+        for _n, _k in (("bin_cent_asinh", "cent_asinh"),
+                       ("bin_cent_ratio", "cent_ratio")):
+            if bins.get(_k) is not None:
+                sd[_n] = torch.as_tensor(bins[_k])
+    model.load_state_dict(_backfill_centroids(model, sd), strict=True)
+    return model
 
 
 def is_export_dir(path):
     """True if ``path`` looks like a ``pimm export`` directory."""
-    import os
-    return os.path.isdir(path) and any(
-        os.path.exists(os.path.join(path, w)) for w in _EXPORT_WEIGHTS)
+    from helix.model.artifact import detect
+    return detect(path) == "pimm-export"
 
 
 def load_export_dir(path, *, device=None):
@@ -234,72 +249,28 @@ def load_export_dir(path, *, device=None):
 
     This is the forward path for anything WE train. ``pimm export`` already
     writes the HuggingFace-shaped pair — weights plus the resolved config beside
-    them — so there is no helix-specific checkpoint format to invent, and the
-    directory is portable by construction.
+    them — so there is no helix-specific checkpoint format to invent for a run
+    in progress, and the directory is portable by construction. What it cannot
+    record is WHICH weight set it holds; see :func:`helix.model.artifact.save`.
 
     ``tools/convert_fm_ckpt.py`` stays frozen as the one-time rescue of the
     historical m113 checkpoint, which could not describe itself. Nothing trained
     from here should go through it.
     """
-    import json
-    import os
-    import torch
-    from helix.model import build_fm
+    from helix.model.artifact import build, load
 
-    cfg_path = next((os.path.join(path, c) for c in _EXPORT_CONFIGS
-                     if os.path.exists(os.path.join(path, c))), None)
-    if cfg_path is None:
-        raise ValueError(
-            f"{path} has weights but none of {_EXPORT_CONFIGS} — the "
-            f"architecture is not recoverable. Re-export with the run's config.")
-    full = json.load(open(cfg_path))
-    mcfg = dict(full.get("model") or {})
-    if not mcfg:
-        raise ValueError(f"{cfg_path} carries no 'model' section")
-    for k in ("type", "checkpoint", "bins", "weights"):
-        mcfg.pop(k, None)                      # builder selectors, not arch
-    if isinstance(mcfg.get("film"), list):
-        mcfg["film"] = tuple(mcfg["film"])
-
-    model = build_fm(mcfg)
-    wpath = next(os.path.join(path, w) for w in _EXPORT_WEIGHTS
-                 if os.path.exists(os.path.join(path, w)))
-    if wpath.endswith(".safetensors"):
-        try:
-            from safetensors.torch import load_file
-        except ImportError:
-            raise SystemExit(
-                f"{wpath} needs the safetensors package, which is absent here. "
-                f"Re-export with --no-safe-serialization to get model.bin, or "
-                f"install safetensors in this image.")
-        sd = load_file(wpath)
-    else:
-        sd = torch.load(wpath, map_location="cpu", weights_only=False)
-        sd = sd.get("state_dict", sd)
-    sd = {k[7:] if k.startswith("module.") else k: v for k, v in sd.items()}
-    # The bin CENTROID buffers became persistent when the categorical read-back
-    # was fixed, so an export written before that carries `bin_edges` but not
-    # them. Backfill from the model's own NaN-initialised buffers rather than
-    # relaxing `strict`: a missing WEIGHT must still be an error, and NaN is
-    # exactly the "absent" signal `bin_centroids_ratio` already falls back on.
-    sd = _backfill_centroids(model, sd)
-    model.load_state_dict(sd, strict=True)     # bin_edges rides along, persistent
-
-    # Tokenizer geometry travels in the same config, inside the transform list.
-    tok = _export_tokenizer_cfg(path)
-    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model.to(dev).eval()
-    for prm in model.parameters():
-        prm.requires_grad_(False)
-    # WHICH checkpoint these tensors came from. The exported file is always
-    # named model.safetensors / model.bin whatever it was exported FROM, so the
-    # filename carries no provenance — a consumer that pattern-matches it for
-    # "ema" gets the same answer for an EMA export and a raw one. The resolved
-    # config's `weight` is the source path pimm was pointed at, which is the
-    # only record of it that survives into the directory. None means the export
-    # did not record one, and that is reported as unknown rather than as "raw".
-    src = full.get("weight") or (full.get("model") or {}).get("checkpoint")
-    meta = dict(source="pimm-export", weights=os.path.basename(wpath),
-                weights_source=src, config=mcfg, tokenizer=tok,
-                patch_config=_patch_config_from_tok(tok, None, wpath))
+    art = load(path)
+    model = build(art, device=device)
+    meta = dict(source="pimm-export",
+                weights=os.path.basename(_export_weights_path(path)),
+                weights_source=art.weights_source,
+                config={k: (list(v) if isinstance(v, tuple) else v)
+                        for k, v in art.arch.items()},
+                tokenizer=_export_tokenizer_cfg(path),
+                patch_config=patch_config(art.op, None, path))
     return model, meta
+
+
+def _export_weights_path(path):
+    return next(os.path.join(path, w) for w in _EXPORT_WEIGHTS
+                if os.path.exists(os.path.join(path, w)))

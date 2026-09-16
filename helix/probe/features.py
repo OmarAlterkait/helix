@@ -15,7 +15,7 @@ results row so the two are never silently mixed.
 
 from __future__ import annotations
 
-import os
+from dataclasses import replace
 import warnings
 
 import numpy as np
@@ -40,95 +40,90 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
     fix. It is recorded in ``meta`` so a results row can carry it.
     """
     import torch
-    from helix.model import build_fm
-
-    from helix.model.checkpoint import is_export_dir, load_export_dir
+    from helix.model.artifact import build, load
 
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     if random_init and random_seed is not None:
         # Before build_fm, which is where every parameter is drawn.
         torch.manual_seed(int(random_seed))
-    if is_export_dir(checkpoint):
-        # What WE train: a `pimm export` directory. bin_edges is persistent now,
-        # so the edges arrive with the weights and nothing needs a sidecar.
-        model, meta = load_export_dir(checkpoint, device=device)
-        if random_init:
-            fresh = build_fm(meta["config"])
-            fresh.to(dev).eval()
-            for prm in fresh.parameters():
-                prm.requires_grad_(False)
-            return fresh, dict(meta, weights="random-init", random_init=True,
-                               random_seed=random_seed)
-        # An export dir holds ONE set of weights, whatever `pimm export` was
-        # pointed at, so `weights=` cannot be honoured here. Say so loudly: the
-        # raw weights of a flat-LR WSD run sit at full LR noise for the entire
-        # stable phase, which is why the EMA exists, and silently probing them
-        # while the caller asked for the EMA compares two noisy draws rather than
-        # two models. Export from model_ema.pth to probe the EMA.
-        # Judge on the SOURCE path the export recorded, not on the exported
-        # filename. `pimm export` always writes model.safetensors / model.bin,
-        # so a filename test answers the same for an EMA export and a raw one —
-        # it warned on every export including correct ones, which is how a
-        # warning stops being read.
-        src = meta.get("weights_source")
-        is_ema = None if not src else ("ema" in os.path.basename(str(src)).lower())
-        if weights == "ema" and is_ema is False:
-            meta = dict(meta, warning=(
-                f"requested weights='ema' but this export was written from "
-                f"{src!r}, which is not an EMA checkpoint. An export dir carries "
-                f"one weight set; re-export from model_ema.pth. The raw weights "
-                f"of a flat-LR WSD run sit at full LR noise for the whole stable "
-                f"phase — which is why the EMA exists — so probing them while "
-                f"asking for the EMA compares two noisy draws, not two models."))
-            warnings.warn(meta["warning"], RuntimeWarning, stacklevel=2)
-        elif weights == "ema" and is_ema is None:
-            meta = dict(meta, warning=(
-                f"requested weights='ema' but this export records no source "
-                f"checkpoint, so which weight set it holds CANNOT be determined "
-                f"from the directory. Treat the result as unattributed."))
-            warnings.warn(meta["warning"], RuntimeWarning, stacklevel=2)
-        return model, dict(meta, requested_weights=weights, random_init=False,
-                           weights_are_ema=is_ema)
 
-    blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    if "config" not in blob or "state_dict" not in blob:
-        raise ValueError(
-            f"{checkpoint} is a raw checkpoint: it holds weights and nothing "
-            f"else, so neither the architecture nor the tokenizer the weights "
-            f"were trained with is recoverable from it.\n"
-            f"Export the RUN, which already has both beside the weights:\n"
-            f"    pimm export --run-dir <save_path> model_ema.pth <out_dir>\n"
-            f"then pass <out_dir> here.\n"
-            f"NOT tools/convert_fm_ckpt.py -- that is frozen as the one-time "
-            f"rescue of the historical m113 checkpoint, which could not describe "
-            f"itself, and it cannot read a pimm checkpoint at all (it expects "
-            f"'model'/'ema' keys; pimm writes 'state_dict').")
+    art = load(checkpoint)
+    used = "random-init" if random_init else art.pick(weights)[1]
+    if random_init:
+        art = replace(art, state_dict=None, state_dict_ema=None)
+    model = build(art, prefer=weights, device=dev)
 
-    cfg = dict(blob["config"])
-    if isinstance(cfg.get("film"), list):
-        cfg["film"] = tuple(cfg["film"])
-    model = build_fm(cfg)
-
-    used = "random-init"
-    if not random_init:
-        from helix.model.checkpoint import load_converted
-        used = load_converted(model, blob, prefer=weights)
-    model.to(dev).eval()
-    for p in model.parameters():
-        p.requires_grad_(False)
-
-    meta = dict(weights=used, requested_weights=weights,
+    meta = dict(source=art.fmt, weights=used, requested_weights=weights,
                 random_init=bool(random_init),
                 random_seed=random_seed if random_init else None,
                 config={k: (list(v) if isinstance(v, tuple) else v)
-                        for k, v in cfg.items()},
-                tokenizer=blob.get("tokenizer"),
-                bins_present=blob.get("bins") is not None)
-    if not random_init and weights == "ema" and used != "ema":
-        meta["warning"] = (
-            "EMA requested but the checkpoint carries none; used raw weights. "
-            "These numbers are NOT EMA numbers.")
+                        for k, v in art.arch.items()},
+                tokenizer=_tokenizer_meta(art.op),
+                bins_present=art.op.bins is not None,
+                weights_source=art.weights_source,
+                weights_are_ema=_are_ema(art),
+                # What the artifact says about itself: the corpus basis_digest
+                # it trained on, the helix commit, the weight content hash. A
+                # `pimm export` carries none of it — see scripts/export_artifact.py.
+                provenance=dict(art.provenance))
+    if not random_init:
+        w = _weights_warning(art, weights, used)
+        if w:
+            meta["warning"] = w
+            if art.fmt == "pimm-export":
+                warnings.warn(w, RuntimeWarning, stacklevel=2)
     return model, meta
+
+
+def _are_ema(art):
+    """Tri-state: True, False, or None for "the source cannot say".
+
+    Judge on what the artifact RECORDS, never on the exported filename.
+    ``pimm export`` always writes model.safetensors / model.bin whatever it was
+    exported from, so a filename test answers the same for an EMA export and a
+    raw one — it warned on every export including correct ones, which is how a
+    warning stops being read. And pimm's ``_sanitize_config`` nulls the one key
+    that could have recorded the source, so a real export is always None.
+    """
+    if art.state_dict_ema:
+        return True                     # a converted blob carries both sets
+    return None if art.weights == "unknown" else art.weights == "ema"
+
+
+def _tokenizer_meta(op):
+    """The recorded tokenizer block, or None when nothing was recorded."""
+    if not op.recorded:
+        return None
+    return {k: v for k, v in (("pw", op.pw), ("pt", op.pt),
+                              ("cell_t", op.cell_t), ("n_bands", op.n_bands))
+            if v is not None}
+
+
+def _weights_warning(art, requested, used):
+    """Why the weight set in hand may not be the one the caller asked for.
+
+    An export dir holds ONE set, so ``weights=`` cannot be honoured there. Say
+    so loudly: the raw weights of a flat-LR WSD run sit at full LR noise for the
+    entire stable phase, which is why the EMA exists, and silently probing them
+    while the caller asked for the EMA compares two noisy draws rather than two
+    models.
+    """
+    if requested != "ema" or used == "ema":
+        return None
+    if art.fmt == "pimm-export" and art.weights_source:
+        return (f"requested weights='ema' but this export was written from "
+                f"{art.weights_source!r}, which is not an EMA checkpoint. An "
+                f"export dir carries one weight set; re-export from "
+                f"model_ema.pth. The raw weights of a flat-LR WSD run sit at "
+                f"full LR noise for the whole stable phase — which is why the "
+                f"EMA exists — so probing them while asking for the EMA "
+                f"compares two noisy draws, not two models.")
+    if used == "unknown":
+        return (f"requested weights='ema' but {art.source} records no source "
+                f"checkpoint, so which weight set it holds CANNOT be determined "
+                f"from the directory. Treat the result as unattributed.")
+    return ("EMA requested but the checkpoint carries none; used raw weights. "
+            "These numbers are NOT EMA numbers.")
 
 
 def features_at_layer(model, batch, layer, *, amp=True):

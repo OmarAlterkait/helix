@@ -43,38 +43,27 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
         **cfg: architecture kwargs for ``helix.model.build_fm``.
     """
     from helix.model import build_fm
+    from helix.model.artifact import inspect, load
+    from helix.model.checkpoint import apply_bins, load_state_dict
 
-    blob = None      # NOT `blob = bins = None`: that clobbered the caller's bins
+    art = None
     if checkpoint is not None:
-        import torch
-        blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        if "config" not in blob or "state_dict" not in blob:
-            raise ValueError(
-                f"{checkpoint} is a raw checkpoint: it holds weights and "
-                f"nothing else, so neither the architecture nor the tokenizer "
-                f"the weights were trained with is recoverable from it.\n"
-                f"Export the RUN, which already has both beside the weights:\n"
-                f"    pimm export --run-dir <save_path> model_ema.pth <out_dir>\n"
-                f"then pass <out_dir> here.\n"
-                f"NOT tools/convert_fm_ckpt.py -- it is frozen as the one-time "
-                f"rescue of the historical m113 checkpoint, which could not "
-                f"describe itself, and it cannot read a pimm checkpoint at all "
-                f"(it expects 'model'/'ema' keys; pimm writes 'state_dict').")
-        arch = dict(blob["config"])
-        if isinstance(arch.get("film"), list):     # torch round-trip makes it a list
-            arch["film"] = tuple(arch["film"])
-        arch.update(cfg)
+        # One reader, one error message. Every refusal a raw pimm checkpoint,
+        # a DCP resume directory or a research blob deserves lives in
+        # helix.model.artifact, so the four call sites cannot drift apart.
+        art = (load if weights else inspect)(checkpoint)
+        arch = dict(art.arch)
+        arch.update(cfg)                 # the config overrides the checkpoint
         cfg = arch
         if bins is None:
-            bins = blob.get("bins")
+            bins = art.op.bins
 
     if isinstance(bins, str):
         bins = _load_bins(bins)
 
     model = build_fm(cfg)
-    if blob is not None and weights:
-        from helix.model.checkpoint import load_converted
-        load_converted(model, blob)
+    if art is not None and weights:
+        load_state_dict(model, art.state_dict, bins=art.op.bins)
     if getattr(model, "n_bins", 0) > 0:
         if bins is None:
             raise ValueError(
@@ -82,22 +71,28 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
                 f"supplied. They are TRAINING-SET STATISTICS, not learned "
                 f"parameters, so the model cannot invent them: pass "
                 f"bins='/path/to/bins.pt' in the model config, or a `checkpoint` "
-                f"whose converted blob carries them inline. Derive fresh edges "
-                f"for a new corpus with research tier1_setup_bins.py — the ones "
-                f"m113 shipped with came from a different noise model.")
-        from helix.model.checkpoint import apply_bins
+                f"that carries them. Derive fresh edges for a new corpus with "
+                f"research tier1_setup_bins.py — the ones m113 shipped with came "
+                f"from a different noise model.")
         apply_bins(model, bins)
     return model
 
 
 def _load_bins(path):
-    """Bin edges from either a bins sidecar or a converted checkpoint."""
+    """Bin edges from either a bins sidecar or a checkpoint that carries them.
+
+    The sidecar is its own shape — `tier1_setup_bins.py` writes a bare `edges`
+    mapping, which is not a checkpoint and has no architecture — so it is read
+    here rather than taught to `helix.model.artifact`.
+    """
     import torch
     blob = torch.load(path, map_location="cpu", weights_only=False)
-    if "edges" in blob:                       # tier1_setup_bins.py sidecar
+    if isinstance(blob, dict) and "edges" in blob:      # the sidecar
         return blob
-    if isinstance(blob.get("bins"), dict):    # converted checkpoint
-        return blob["bins"]
-    raise ValueError(
-        f"{path}: no bin edges found (expected an 'edges' key, or a converted "
-        f"checkpoint carrying 'bins')")
+    from helix.model.artifact import inspect
+    bins = inspect(path).op.bins
+    if bins is None:
+        raise ValueError(
+            f"{path}: no bin edges found (expected an 'edges' key, or a "
+            f"checkpoint carrying them)")
+    return bins
