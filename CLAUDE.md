@@ -41,7 +41,7 @@ IMG=${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}
 PY="apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python"
 
 $PY -m helix.paths                 # FIRST: every external path, its source, whether it exists
-$PY -m pytest -q                   # expect 440 passed / 54 skipped
+$PY -m pytest -q                   # expect 476 passed / 54 skipped
 ```
 
 `env PYTHONNOUSERSITE=1` is worth adding: `-B /sdf` remounts home, so anything
@@ -70,6 +70,23 @@ invalidating comparability with every existing checkpoint. Changing `n_bands`,
 cell geometry or masking costs a config change and a retrain. Vary
 interpretation freely; change compression only with a measured reason.
 
+**Reading a checkpoint has ONE owner (`helix.model.artifact`).** Eight shapes
+are in circulation and eight loaders used to read them, each knowing a subset —
+a `pimm export` directory was taught to `load_probe_model` and not to
+`patch_config_from_checkpoint`, so probing a pimm-trained model died in
+`torch.load`. `detect`/`inspect`/`load`/`build` are the whole surface;
+`tests/test_artifact_formats.py` is the matrix, and a ninth shape without a row
+there fails. The split is by PURPOSE: RESUME state (`<save_path>/model/last/`,
+`iter_N.pth`) is pimm's and nothing here reads it; EVAL state is a weight set
+plus the operating point that makes its number reproducible. The one caller
+deliberately left alone is `hooks.py:234` — EMA resume, training hot path.
+
+**A `pimm export` cannot attribute itself; promote it.** `_sanitize_config`
+nulls `weight`, so an export cannot say whether it holds EMA or raw weights, and
+it names neither the corpus nor the helix commit. `scripts/export_artifact.py
+<export_dir> --weights ema --corpus <dir> -o <artifact_dir>` records all three.
+Probe the artifact, not the export, or the row is unattributed.
+
 **`plane_id` currently serves FOUR roles** — FiLM conditioning, RoPE projection
 axis, masking group, and plane identity. `make_mask` groups by that LABEL, not
 by token position, so the token set is already order-free (nothing assumes
@@ -87,6 +104,10 @@ planes are contiguous). For a second modality those four roles separate; see
   user=$USER format=Account,Partition,QOS` lists yours.
 - **A corpus run may have gaps.** `run_0027670361` is missing source files
   51-56 and 94-97; 180 shards / 17,999 events is complete for it, not a failure.
+- **The probe's extraction loop is the long pole.** 2.5M patches over 388
+  events before a single probe is fitted; a preemption used to discard all of
+  it. Pass `--cache-dir $SCRATCH/probe_cache` — chunked, keyed by everything
+  that changes the features, resumable.
 - **`save_path` must resolve through `helix.paths`**, never relative to the
   checkout — a relative one wrote a run INTO the repo and four files were
   committed.
