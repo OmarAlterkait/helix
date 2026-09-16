@@ -50,10 +50,16 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
         blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
         if "config" not in blob or "state_dict" not in blob:
             raise ValueError(
-                f"{checkpoint} is not a converted checkpoint (no config/state_dict). "
-                f"Run helix's tools/convert_fm_ckpt.py on the raw research file — "
-                f"it also inlines the categorical bin edges, which the raw "
-                f"checkpoint does not carry at all.")
+                f"{checkpoint} is a raw checkpoint: it holds weights and "
+                f"nothing else, so neither the architecture nor the tokenizer "
+                f"the weights were trained with is recoverable from it.\n"
+                f"Export the RUN, which already has both beside the weights:\n"
+                f"    pimm export --run-dir <save_path> model_ema.pth <out_dir>\n"
+                f"then pass <out_dir> here.\n"
+                f"NOT tools/convert_fm_ckpt.py -- it is frozen as the one-time "
+                f"rescue of the historical m113 checkpoint, which could not "
+                f"describe itself, and it cannot read a pimm checkpoint at all "
+                f"(it expects 'model'/'ema' keys; pimm writes 'state_dict').")
         arch = dict(blob["config"])
         if isinstance(arch.get("film"), list):     # torch round-trip makes it a list
             arch["film"] = tuple(arch["film"])

@@ -179,9 +179,33 @@ Two stages. Stage 1 is expensive and reusable; stage 2 is cheap and per-checkpoi
     # Stage 1 -- per-pixel truth for a held-out split, written beside the corpus
     $PY scripts/dump_probe_truth.py --corpus <dir> --source $HELIX_SENSOR_ROOT
 
-    # Stage 2 -- probe one checkpoint against it
-    $PY scripts/run_probe.py --checkpoint <ckpt> --corpus <dir> \
+    # Stage 2 -- EXPORT the run. Not optional, and easy to get wrong.
+    #
+    # run_probe refuses a raw pimm checkpoint: model_ema.pth holds weights and
+    # nothing else, so neither the architecture nor the tokenizer is recoverable
+    # from it, and scoring a model on a tokenizer it never trained with gives a
+    # plausible WRONG number (cell_t alone moves 94% of cells).
+    #
+    # The run directory already has both beside the weights -- config.py carries
+    # n_slot/n_band/n_plane/d/blocks/heads and cell_t -- so `pimm export` bundles
+    # them into a portable directory. Nothing needs inventing.
+    pimm export --run-dir <save_path> model_ema.pth <export_dir>
+
+    # NOT tools/convert_fm_ckpt.py. It is frozen as the one-time rescue of the
+    # historical m113 checkpoint, which could not describe itself, and it cannot
+    # read a pimm checkpoint at all (it wants 'model'/'ema'; pimm writes
+    # 'state_dict'). helix/model/checkpoint.py says so: "Nothing trained from
+    # here should go through it."
+
+    # Stage 3 -- probe the EXPORT directory
+    $PY scripts/run_probe.py --checkpoint <export_dir> --corpus <dir> \
         --tag <name> --out probe_results.jsonl
+
+`--cell-t` matters and run_probe will refuse rather than guess: a converted
+checkpoint carries its tokenizer, but for one that does not you must pass the
+value the run trained with (`grep cell_t <run>/config.py`). The old fallback
+silently chose `centroid` where every helix config trains `grid_center`, and
+they differ on 94% of cells.
 
 Stage 1 depends on the corpus only for WHICH events to dump, never for their
 content, so the artifact survives a corpus rebuild.

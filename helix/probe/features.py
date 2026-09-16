@@ -93,9 +93,16 @@ def load_probe_model(checkpoint, *, random_init=False, weights="ema", device=Non
     blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if "config" not in blob or "state_dict" not in blob:
         raise ValueError(
-            f"{checkpoint} is not a converted checkpoint (no config/state_dict). "
-            f"Convert it with tools/convert_fm_ckpt.py, which also records the "
-            f"operating point the weights were trained at.")
+            f"{checkpoint} is a raw checkpoint: it holds weights and nothing "
+            f"else, so neither the architecture nor the tokenizer the weights "
+            f"were trained with is recoverable from it.\n"
+            f"Export the RUN, which already has both beside the weights:\n"
+            f"    pimm export --run-dir <save_path> model_ema.pth <out_dir>\n"
+            f"then pass <out_dir> here.\n"
+            f"NOT tools/convert_fm_ckpt.py -- that is frozen as the one-time "
+            f"rescue of the historical m113 checkpoint, which could not describe "
+            f"itself, and it cannot read a pimm checkpoint at all (it expects "
+            f"'model'/'ema' keys; pimm writes 'state_dict').")
 
     cfg = dict(blob["config"])
     if isinstance(cfg.get("film"), list):
