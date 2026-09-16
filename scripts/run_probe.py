@@ -134,11 +134,19 @@ def _weights_digest(model):
     return weights_digest(model.state_dict())
 
 
-#: Feature arms, cached at half precision. They are standardised before the fit
-#: and consumed by an MLP trained in float32 from them, so fp16 storage costs
-#: nothing measurable and halves a cache that is otherwise tens of GB. Everything
-#: else -- labels, geometry, indices -- is small and stays exact.
-_CACHE_HALF = ("Xtr", "Xrn", "Xraw")
+#: The feature arms. Cached at FULL precision by default, and that default was
+#: earned: at float16 a resumed run reproduced `trained`, `geo` and `random` to
+#: the printed 4 decimals but moved `raw` from +0.0044 to +0.0045. The shift is
+#: ~1e-4, which is 20x below the probe's own seed-to-seed sigma (0.0021) and
+#: changes no conclusion -- but it makes `cache_resumed_events` a field that
+#: moves the number, and this file's whole contract is that everything which
+#: moves a number is recorded and nothing else does. A resumed run must be the
+#: same run.
+#:
+#: `--cache-half` is there for when disk is the binding constraint. It halves a
+#: cache that is otherwise ~n_patch x feat_dim x 3 arms x 4 B (about 62 GB for
+#: the 388-event split at feat_dim 2048), at the cost above.
+_CACHE_ARMS = ("Xtr", "Xrn", "Xraw")
 
 
 def _cache_key(**parts):
@@ -185,21 +193,23 @@ def _cache_resume(d):
         for j in range(n):
             pk = {k[len(f"p{j}_"):]: z[k] for k in z.files if k.startswith(f"p{j}_")}
             pk["n_bands"] = int(pk["n_bands"])
-            for k in _CACHE_HALF:
+            for k in _CACHE_ARMS:
+                # A no-op for a full-precision cache; the widening a half one
+                # needs before the fit, which runs in float32 either way.
                 pk[k] = pk[k].astype(np.float32)
             packs.append(pk)
         nxt = hi
     return packs, nxt
 
 
-def _cache_write(d, lo, hi, chunk):
+def _cache_write(d, lo, hi, chunk, half=False):
     """Write one chunk atomically. A half-written .npz is worse than none."""
     os.makedirs(d, exist_ok=True)
     flat = {"_n_packs": np.int64(len(chunk))}
     for j, pk in enumerate(chunk):
         for k, v in pk.items():
             v = np.asarray(v)
-            flat[f"p{j}_{k}"] = v.astype(np.float16) if k in _CACHE_HALF else v
+            flat[f"p{j}_{k}"] = v.astype(np.float16) if (half and k in _CACHE_ARMS) else v
     tmp = os.path.join(d, f".ev_{lo:05d}_{hi:05d}.tmp.npz")
     np.savez(tmp, **flat)
     os.replace(tmp, os.path.join(d, f"ev_{lo:05d}_{hi:05d}.npz"))
@@ -242,7 +252,13 @@ def main(argv=None):
                          "extraction loop is the long pole — 2.5M patches over 388 "
                          "events — and a preemption 40 minutes in used to discard "
                          "all of it. Off by default because the cache is large "
-                         "(~n_patch x feat_dim x 3 arms, float16).")
+                         "(~n_patch x feat_dim x 3 arms x 4 B).")
+    ap.add_argument("--cache-half", action="store_true",
+                    help="halve the cache by storing the feature arms at "
+                         "float16. Measured cost: a resumed run moved the `raw` "
+                         "arm by 1e-4 (+0.0044 -> +0.0045), which is 20x under "
+                         "the seed-to-seed sigma but is NOT the same number. Use "
+                         "only when disk is the binding constraint.")
     ap.add_argument("--cache-every", type=int, default=25,
                     help="flush a cache chunk every N events; the resume floor")
     ap.add_argument("--cell-t", default=None, choices=("grid_center", "centroid"),
@@ -313,6 +329,9 @@ def main(argv=None):
             random=_weights_digest_or_none(model_r),
             layer=a.layer, cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
             n_bands=pcfg.n_bands, corpus=corpus, dataset_name=a.dataset_name,
+            # Precision is part of the key: a half cache and a full one hold
+            # different numbers, so they must not be read as one another's.
+            half=bool(a.cache_half),
             truth=os.path.abspath(truth_path),
             corpus_ident=str(cfg.get("corpus_ident_sha256", "")),
             dom_threshold=float(cfg.get("dom_threshold", 0.5))))
@@ -375,7 +394,7 @@ def main(argv=None):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         if cache_dir and (len(pending) >= a.cache_every or i + 1 == n_ev):
-            _cache_write(cache_dir, pend_lo, i + 1, pending)
+            _cache_write(cache_dir, pend_lo, i + 1, pending, half=a.cache_half)
             pending, pend_lo = [], i + 1
         if (i + 1) % 20 == 0 or i + 1 == n_ev:
             print(f"  {i+1}/{n_ev} events, {sum(len(p['y']) for p in packs):,} patches",
@@ -435,6 +454,7 @@ def main(argv=None):
                 # what makes that checkable after the fact rather than asserted.
                 cache_key=(os.path.basename(cache_dir) if cache_dir else None),
                 cache_resumed_events=int(start),
+                cache_half=bool(a.cache_half),
                 cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
                 qtot_min=float(cfg.get("qtot_min", -1)),
                 dom_threshold=float(cfg.get("dom_threshold", -1)),

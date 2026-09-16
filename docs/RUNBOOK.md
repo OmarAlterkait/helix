@@ -253,8 +253,17 @@ Two stages. Stage 1 is expensive and reusable; stage 2 is cheap and per-checkpoi
 patches over 388 events, tens of minutes on a GPU -- and a preemption used to
 discard all of it before a single probe was fitted. Chunks are keyed by a hash of
 everything that changes the features (both weight digests, layer, tokenizer,
-corpus, truth), so a stale cache cannot be read by mistake; the cost is disk,
-roughly `n_patch x feat_dim x 3 arms` at float16, so put it on $SCRATCH.
+corpus, truth, and the storage precision), so a stale cache cannot be read by
+mistake. The cost is disk: `n_patch x feat_dim x 3 arms x 4 B`, about 62 GB for
+the 388-event split at feature dim 2048, so put it on `$SCRATCH`.
+
+Full precision is the default, and it was earned. At float16 a resumed run
+reproduced three arms exactly but moved `raw` from +0.0044 to +0.0045 -- 1e-4,
+some 20x under the probe's own seed-to-seed sigma of 0.0021, and still wrong,
+because it made `cache_resumed_events` a field that moves the number. Verified
+end to end: a resumed run now reproduces all four arms, their per-group std and
+their stop epochs identically. `--cache-half` halves the disk at that measured
+cost, keyed apart so the two caches can never be read as one another's.
 
 `--cell-t` matters and run_probe will refuse rather than guess: an artifact and a
 converted checkpoint carry their tokenizer, but for one that does not you must

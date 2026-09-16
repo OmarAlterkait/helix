@@ -133,6 +133,12 @@ class Artifact:
 def detect(path):
     """Which of :data:`FORMATS` ``path`` is. Never guesses beyond them."""
     path = str(path)
+    # Checked here rather than left to torch: a path that does not exist is the
+    # most common way to get this wrong (a typo, or a $LSCRATCH artifact written
+    # on a different node), and torch reports it from four frames down inside
+    # serialization.py, which reads as though the checkpoint were malformed.
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"no checkpoint at {path}")
     if os.path.isdir(path):
         if os.path.exists(os.path.join(path, _ARTIFACT_JSON)):
             return "helix-eval"

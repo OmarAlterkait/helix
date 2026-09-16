@@ -91,12 +91,29 @@ def main(argv=None):
             f"{a.cell_t!r} was given. One of the two is wrong; picking either "
             f"silently is how a model gets scored on a coordinate it never saw.")
 
-    missing = [k for k in ("pw", "pt", "n_bands") if getattr(op, k) is None]
-    if missing:
-        raise SystemExit(
-            f"{a.export_dir}: the operating point is incomplete ({', '.join(missing)} "
-            f"not recorded). Re-export with the run's resolved config, which "
-            f"carries the CoeffTokenize transform.")
+    # pw/pt/n_bands are filled from PatchConfig's defaults when the run did not
+    # state them, and WHICH ones were filled is recorded. This is the opposite
+    # of the cell_t rule above, deliberately: cell_t has no default because
+    # every possible one is wrong for someone and the failure is silent, while
+    # pw=16/pt=8 are the geometry every helix config has ever trained and a
+    # config that omits them is relying on exactly that. Refusing here made the
+    # tool unusable on every real export -- the production configs record only
+    # `cell_t` in their CoeffTokenize cfg.
+    #
+    # The artifact still ends up STATING a complete operating point, which is
+    # the point: a default that later changes cannot retroactively move a
+    # number that was already scored.
+    from helix.model.tokenize import PatchConfig
+
+    defaults = {}
+    for k in ("pw", "pt", "n_bands"):
+        if getattr(op, k) is None:
+            defaults[k] = getattr(PatchConfig(cell_t=op.cell_t), k)
+    if defaults:
+        op = replace(op, **defaults)
+        print(f"NOTE: {', '.join(sorted(defaults))} not recorded by the export; "
+              f"filled from PatchConfig defaults ({defaults}) and noted in "
+              f"provenance.", file=sys.stderr)
 
     corpus = None
     if a.corpus:
@@ -116,6 +133,9 @@ def main(argv=None):
                 source_weights=art.weights_source, corpus=corpus,
                 helix=_code_version(), step=art.provenance.get("step"),
                 weights_digest=weights_digest(art.state_dict),
+                # Which operating-point fields came from a DEFAULT rather than
+                # from the run. Empty is the good case.
+                operating_point_defaults=sorted(defaults),
                 exported_at=int(time.time()), note=a.note)
     save(a.out, state_dict=art.state_dict, arch=art.arch, op=op,
          weights=a.weights, provenance=prov)

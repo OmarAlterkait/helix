@@ -49,12 +49,19 @@ def test_the_weights_flag_is_not_optional(tmp_path):
         _script().main([src, "-o", str(tmp_path / "art")])
 
 
-def test_an_artifact_without_cell_t_is_refused(tmp_path):
-    """Refusing to write is the whole point.
+def test_cell_t_is_required_but_pw_and_pt_are_defaulted(tmp_path):
+    """The two halves of the operating point are NOT symmetric.
 
-    An artifact whose cell_t is unknown is the exact failure this format exists
-    to prevent: the probe falls back to a default and 94.06% of cells carry a
-    time coordinate the model never saw.
+    `cell_t` has no default anywhere, because every possible one is wrong for
+    someone and the failure is silent -- an artifact that cannot name it is the
+    exact thing this format exists to prevent (94.06% of cells, mean |delta|
+    19.5 ticks). So it is refused.
+
+    `pw`/`pt` do have defaults, and the production configs rely on them: every
+    real export records only `cell_t` in its CoeffTokenize cfg. Refusing there
+    made the tool reject the thing it exists to serve. They are filled in and
+    the fact is RECORDED, so the artifact still states a complete operating
+    point and a default that changes later cannot move an already-scored number.
     """
     src = str(tmp_path / "exp")
     make_pimm_export(src)
@@ -65,11 +72,22 @@ def test_an_artifact_without_cell_t_is_refused(tmp_path):
     with pytest.raises(SystemExit, match="records no tokenizer cell_t"):
         _script().main([src, "-o", str(tmp_path / "a"), "--weights", "ema"])
 
-    # ...and --cell-t supplies it, because pw/pt being absent too is a DIFFERENT
-    # failure with a different remedy.
-    with pytest.raises(SystemExit, match="operating point is incomplete"):
-        _script().main([src, "-o", str(tmp_path / "b"), "--weights", "ema",
-                        "--cell-t", "grid_center"])
+    out = str(tmp_path / "b")
+    assert _script().main([src, "-o", out, "--weights", "ema",
+                           "--cell-t", "grid_center"]) == 0
+    art = inspect(out)
+    assert (art.op.cell_t, art.op.pw, art.op.pt) == ("grid_center", 16, 8)
+    assert art.provenance["operating_point_defaults"] == ["pt", "pw"], (
+        "which fields came from a default must be on the record, or the "
+        "artifact cannot be told apart from one whose run stated them")
+
+
+def test_a_real_export_records_no_defaults(tmp_path):
+    """The good case: nothing was guessed."""
+    src = make_pimm_export(str(tmp_path / "exp"))     # carries pw/pt
+    out = str(tmp_path / "art")
+    _script().main([src, "-o", out, "--weights", "ema"])
+    assert inspect(out).provenance["operating_point_defaults"] == []
 
 
 def test_a_conflicting_cell_t_is_refused_not_resolved(tmp_path):

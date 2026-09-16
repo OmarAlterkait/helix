@@ -41,7 +41,15 @@ def _pack(ev, n=7, dim=5, rng=None):
                 Xraw=rng.normal(size=(n, dim)).astype(np.float32))
 
 
-def test_a_resumed_run_reconstructs_what_it_had(tmp_path):
+def test_a_resumed_run_reconstructs_what_it_had_EXACTLY(tmp_path):
+    """Bit-exact, every array. A resumed run must be the same run.
+
+    This was float16 for the feature arms, and it cost accuracy that showed:
+    an end-to-end resume reproduced `trained`, `geo` and `random` to the printed
+    four decimals but moved `raw` from +0.0044 to +0.0045. That is ~1e-4, well
+    under the probe's own seed sigma of 0.0021 -- and still wrong, because it
+    made `cache_resumed_events` a field that moves the number.
+    """
     rp = _rp()
     d = str(tmp_path / "c")
     original = [_pack(i) for i in range(6)]
@@ -53,12 +61,30 @@ def test_a_resumed_run_reconstructs_what_it_had(tmp_path):
     for got, want in zip(packs, original):
         assert set(got) == set(want)
         for k, v in want.items():
-            if k in rp._CACHE_HALF:
-                # fp16 storage is the deliberate trade; the fit standardises
-                # these anyway. Anything else must round-trip exactly.
-                np.testing.assert_allclose(got[k], v, rtol=1e-3, atol=1e-3)
-            else:
-                np.testing.assert_array_equal(np.asarray(got[k]), np.asarray(v))
+            np.testing.assert_array_equal(np.asarray(got[k]), np.asarray(v), err_msg=k)
+
+
+def test_cache_half_is_opt_in_and_keyed_apart(tmp_path):
+    """Half precision stays available, but cannot be mistaken for a full cache."""
+    rp = _rp()
+    d = str(tmp_path / "c")
+    original = [_pack(0)]
+    rp._cache_write(d, 0, 1, original, half=True)
+    got = rp._cache_resume(d)[0][0]
+
+    assert got["Xtr"].dtype == np.float32, "must widen before the fit"
+    assert not np.array_equal(got["Xtr"], original[0]["Xtr"]), (
+        "if half storage were lossless there would be no reason for the flag")
+    np.testing.assert_allclose(got["Xtr"], original[0]["Xtr"], rtol=1e-3, atol=1e-3)
+    # non-arm fields are never downcast, whatever the flag
+    np.testing.assert_array_equal(got["y"], original[0]["y"])
+
+    base = dict(trained="aa", random="bb", layer=12, cell_t="grid_center",
+                pw=16, pt=8, n_bands=4, corpus="/c", dataset_name="sim_wire",
+                truth="/t", corpus_ident="dd", dom_threshold=0.5)
+    assert rp._cache_key(**base, half=True) != rp._cache_key(**base, half=False), (
+        "a half cache and a full one hold different numbers; reading one as the "
+        "other would silently change a result")
 
 
 def test_a_gap_is_re_extracted_not_skipped(tmp_path, capsys):
@@ -90,13 +116,14 @@ def test_the_key_changes_with_everything_that_changes_the_features():
     rp = _rp()
     base = dict(trained="aa", random="bb", layer=12, cell_t="grid_center",
                 pw=16, pt=8, n_bands=4, corpus="/c", dataset_name="sim_wire",
-                truth="/t", corpus_ident="dd", dom_threshold=0.5)
+                truth="/t", corpus_ident="dd", dom_threshold=0.5, half=False)
     k0 = rp._cache_key(**base)
     assert k0 == rp._cache_key(**base), "the key must be deterministic"
     for field, other in [("trained", "zz"), ("random", "zz"), ("layer", 6),
                          ("cell_t", "centroid"), ("pw", 8), ("pt", 16),
                          ("corpus", "/other"), ("truth", "/other"),
-                         ("corpus_ident", "zz"), ("dom_threshold", 0.9)]:
+                         ("corpus_ident", "zz"), ("dom_threshold", 0.9),
+                         ("half", True)]:
         assert rp._cache_key(**dict(base, **{field: other})) != k0, field
 
 
