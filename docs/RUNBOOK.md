@@ -161,6 +161,43 @@ launcher creates the link into pimm's `configs/` from the checkout it is running
 
 ## 3. Evaluate a checkpoint
 
+### Two kinds of checkpoint. Read this once; it saves an afternoon.
+
+A run leaves behind files that look interchangeable and are not.
+
+| | RESUME state | EVAL state |
+|---|---|---|
+| what | `<save_path>/model/last/`, `iter_N.pth`, `model_ema.pth` | a `pimm export` dir, a helix eval artifact |
+| holds | weights **+ optimizer, scheduler, RNG, sampler, step** | one weight set + architecture + operating point |
+| for | continuing training bit-identically | producing a number that is reproducible and attributable |
+| owner | pimm's. Nothing in helix reads it. | helix's |
+
+Pointing an eval tool at resume state is the single most common way to waste a
+GPU hour here. It no longer fails obscurely — `helix.model.artifact` recognises
+each shape by name and the error says what to run — but the fix is always the
+same, and it is two steps, not one:
+
+    # 1. bundle the weights with the architecture and tokenizer they trained with
+    pimm export --run-dir <save_path> model_ema.pth /tmp/exp
+
+    # 2. promote it, so it can say WHICH weights, WHICH corpus, WHICH code
+    $PY scripts/export_artifact.py /tmp/exp --weights ema \
+        --corpus <corpus> -o <run>/artifact
+
+Step 2 is not ceremony. pimm's `_sanitize_config` nulls the `weight` key on
+every export, and the exported file is always named `model.safetensors`
+whatever it was exported from — so an export cannot say whether it holds the
+EMA or the raw weights, and every probe row written before this carries
+`weights_are_ema: null`. On a flat-LR WSD run the raw weights sit at full LR
+noise for the whole stable phase, which is the entire reason the EMA exists, so
+comparing an unattributed arm against an EMA arm compares two noisy draws
+rather than two models. `--weights` is required and unguessable on purpose: you
+are asserting what you just exported, once, while you still know.
+
+An artifact is a directory of two files — `weights.safetensors` and
+`artifact.json` — and it is portable by construction: nothing in it names a
+path that has to exist.
+
     $PY scripts/eval_checkpoint.py --config configs/pimm/coeff_fm_eval_probe.py \
         --options weight=<run>/model/model_ema.pth save_path=<out>
 
@@ -279,7 +316,7 @@ Corpora currently on disk:
 Nothing large belongs on `/sdf/group` — it is a 10 TB quota that was at 100%
 until 742 GB of dead cache and stray checkpoints were cleared off it.
 
-### Reviving an old research checkpoint
+### The old research checkpoints
 
 The 394 checkpoints other than `m113` are NOT self-contained and mostly cannot be
 evaluated. The research trainer kept bin edges in a separate `tier1_bins.pt`
@@ -299,3 +336,19 @@ pointing a tool at it prints where the artifact is. For the other 394
 checkpoints you would need the matching bins file, and for most it no longer
 exists — the converter is in git history if that ever changes, but re-exporting
 a run beats reviving it.
+
+**If the m113 artifact is ever lost**, it cannot be rebuilt from `main`: the
+reader that understands a converted blob was retired. The recipe is a detached
+worktree at `eb216b7` — the last commit that could read one — plus the two
+lineage hunks from `922aa52` (`_tok_extra` in `helix/model/artifact.py`, and
+`source_provenance` in `scripts/export_artifact.py`), which is the combination
+that never existed as a single commit. The artifact's own `provenance.note`
+says this too, and its `provenance.helix.git_dirty` is `true` for exactly that
+reason — the tree that built it was not a clean commit, and recording that
+honestly is worth more than a tidy field.
+
+Check it is intact without loading a single tensor:
+
+    $PY -c "from helix.model.artifact import inspect; \
+             p = inspect('$HELIX_ARCHIVE/fm_m113_artifact').provenance; \
+             print(p['weights_digest'])"    # 7d795cc3ab49f90a79f98927647028b5
