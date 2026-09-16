@@ -278,14 +278,27 @@ end to end: a resumed run now reproduces all four arms, their per-group std and
 their stop epochs identically. `--cache-half` halves the disk at that measured
 cost, keyed apart so the two caches can never be read as one another's.
 
-The two resumes compose. Extraction is ~35 min for the full split and each of
-the four mlp arms is over an hour, so a preempted job restarts having already
-banked whichever of those completed — re-running the same command is the whole
-recovery procedure.
+The two resumes compose, and both have now been exercised by a real preemption
+rather than by a test. Job 38395161 was preempted on ampere at 1:47 having banked
+the extraction and two fitted arms; resubmitting the identical script reported
 
-`--cell-t` matters and run_probe will refuse rather than guess: an artifact and a
-converted checkpoint carry their tokenizer, but for one that does not you must
-pass the value the run trained with (`grep cell_t <run>/config.py`). The old
+    cache .../probe_cache/1391900325c983a6: 388 packs, resuming at event 388
+    cache: 2 arm(s) already fitted, reusing
+      [mlp] geo      fisher_r=+0.1514 (cached)
+      [mlp] trained  fisher_r=+0.8403 (cached)
+
+and restarted at the third arm. Its predecessor 38360259, with none of this, hit
+its 4h wall one arm in and produced nothing at all.
+
+`--requeue` is NOT the mechanism and is not worth setting: 38395161 had it and
+did not come back, because preemption here cancels rather than requeues.
+Resubmit by hand; the cache is what makes that cheap.
+
+`--cell-t` matters and run_probe will refuse rather than guess. An eval artifact
+always carries its tokenizer, so you will not need the flag for one; a bare
+`pimm export` carries `cell_t` only if the run's config stated it, and for
+anything that does not you must pass the value the run trained with
+(`grep cell_t <run>/config.py`). The old
 fallback silently chose `centroid` where every helix config trains
 `grid_center`, and they differ on 94% of cells.
 
