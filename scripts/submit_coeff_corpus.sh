@@ -145,7 +145,10 @@ KG_ARG=""; [ -n "$KGATE" ] && KG_ARG="--kgate $KGATE"
 CONTAINER=${CONTAINER-${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}}
 if [ -n "$CONTAINER" ]; then
   PY=(singularity exec --nv -B /sdf,/lscratch "$CONTAINER" python3)
-  export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$H:${PIMM_DATA_SRC:-/sdf/group/neutrino/omara/pimm-data/src}"
+  # helix only. pimm-data comes from the image at its PINNED revision; a
+  # checkout here would shadow it and the corpus would be built by code the pin
+  # does not describe -- which every shard then records as its provenance.
+  export PYTHONPATH="${PYTHONPATH:-}${PYTHONPATH:+:}$H"
   export SINGULARITYENV_PYTHONPATH="$PYTHONPATH"
 else
   PY=(python)

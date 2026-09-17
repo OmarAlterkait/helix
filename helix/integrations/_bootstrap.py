@@ -36,11 +36,25 @@ __all__ = ["BOOTSTRAP_MARK", "bootstrap_block", "has_bootstrap", "running_roots"
 BOOTSTRAP_MARK = "# helix: sys.path bootstrap re-added by HelixPathBootstrap"
 
 #: (env var, package) pairs the block resolves, in precedence order.
-ROOTS = (("HELIX_ROOT", "helix"), ("PIMM_DATA_SRC", "pimm_data"))
+# helix only. PIMM_DATA_SRC was here when the image baked a stale pimm_data and
+# a checkout had to win over it; the image installs the pinned revision now.
+ROOTS = (("HELIX_ROOT", "helix"),)
 
 
-def bootstrap_block(helix_root, pimm_data_root):
-    """Source lines putting both checkouts on ``sys.path``, honouring env vars.
+def bootstrap_block(helix_root, pimm_data_root=None):
+    """Source lines putting the helix checkout on ``sys.path``, honouring HELIX_ROOT.
+
+    ONLY helix. It used to insert a pimm-data checkout too, because the image
+    baked pimm_data 0.3.0 and `CoeffTPCDataset` needed a newer one -- so the
+    checkout had to WIN over site-packages, not merely be present. Both halves
+    of that are now false: the image installs pimm-data at the PINNED revision
+    and container/helix-train.def's %post fails the build if it is stale, and
+    `CoeffTPCDataset` is helix's (helix/data/coeff_dataset.py), not pimm-data's.
+    Shadowing the installed copy only meant the pin governed the image while a
+    checkout governed the run -- two authorities, differing by whatever was
+    uncommitted.
+
+    ``pimm_data_root`` is accepted and ignored, so an old caller does not break.
 
     ``insert(1)``, which is neither of the two obvious choices and is the only
     one that works:
@@ -50,9 +64,8 @@ def bootstrap_block(helix_root, pimm_data_root):
       The config executes during that import, so an ``insert(0)`` here lands
       ABOVE the temp dir and the trailing ``pop(0)`` deletes our entry instead of
       pimm's — silently, leaving the temp dir behind.
-    * ``append`` survives the pop but loses on precedence: site-packages already
-      contains ``pimm_data`` 0.3.0, which would keep winning and take the run
-      back to ``No module named 'pimm_data.coeff'``.
+    * ``append`` survives the pop but loses on precedence to anything already on
+      the path under the same name.
 
     ``insert(1)`` sits just under pimm's temp dir, so the ``pop(0)`` removes the
     temp dir and leaves ours at the front, ahead of site-packages.
@@ -66,19 +79,17 @@ def bootstrap_block(helix_root, pimm_data_root):
     """
     return (
         f"{BOOTSTRAP_MARK}\n"
-        "# `custom_imports` below needs helix importable, and CoeffTPCDataset\n"
-        "# needs a pimm_data NEWER than the 0.3.0 in the image. pimm's train.sh\n"
-        "# sets PYTHONPATH to its own code snapshot only, so neither is reachable\n"
-        "# by environment. insert(1), not insert(0) (pimm's loader pops index 0)\n"
-        "# and not append (site-packages' stale pimm_data would still win).\n"
+        "# `custom_imports` below needs helix importable. pimm's train.sh sets\n"
+        "# PYTHONPATH to its own code snapshot only, so helix is not reachable by\n"
+        "# environment. insert(1), not insert(0): pimm's loader pops index 0.\n"
+        "# pimm_data is NOT inserted -- the image installs it at the pinned\n"
+        "# revision and the build refuses a stale one, so there is one authority.\n"
         "import os as _os\n"
         "import sys as _sys\n"
-        f"for _v, _p in (('HELIX_ROOT', {str(helix_root)!r}),\n"
-        f"               ('PIMM_DATA_SRC', {str(pimm_data_root)!r})):\n"
-        "    _p = _os.environ.get(_v) or _p\n"
-        "    if _p not in _sys.path:\n"
-        "        _sys.path.insert(1, _p)\n"
-        "del _os, _sys, _v, _p\n"
+        f"_p = _os.environ.get('HELIX_ROOT') or {str(helix_root)!r}\n"
+        "if _p not in _sys.path:\n"
+        "    _sys.path.insert(1, _p)\n"
+        "del _os, _sys, _p\n"
     )
 
 

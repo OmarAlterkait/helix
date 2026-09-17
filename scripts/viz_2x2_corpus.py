@@ -286,8 +286,15 @@ def main():
         print(f"noise seed {seed} matches the corpus")
 
     if a.removal == "r1":
-        import sys as _s
-        _s.path.insert(0, "/sdf/data/neutrino/omara/exp/_diag")
+        # helix's OWN gate, not a scratch prototype. This used to
+        # sys.path.insert an experiment directory and import `r1_gate`, so the
+        # `--removal r1` branch could not run from a clone at all. That module
+        # was the prototype of what shipped as
+        # helix.tpc.coherent_gate.gate_band(..., tau=...) -- it even imported
+        # helix's own _detect_signal/_sigc -- so the productionised version is
+        # the same computation, and using it also means this figure exercises
+        # the code the corpus was actually built with.
+        from helix.tpc.coherent_gate_ops_torch import gate_band as _gate_r1
         from helix.core import backend as _bk
         from helix.core.wavelet import (SparseResult, reconstruct as _rec,
                                         threshold_bands as _thr, wavedec as _wd)
@@ -304,7 +311,7 @@ def main():
         for _g, _img in noisy_all.items():
             _co, _lev = _wd(_pad_time(_img.astype(np.float32), _cfg.dwt_level),
                             wavelet=_cfg.wavelet, level=_cfg.dwt_level, mode=_cfg.dwt_mode)
-            _gt = [np.asarray(gate_band_r1(
+            _gt = [np.asarray(_gate_r1(
                 _t.as_tensor(np.asarray(_b2, np.float32)), group_size=_cfg.group_size,
                 kgate=[_cfg.gate_kgate] * _cfg.gate_npass, ksig=_cfg.gate_ksig,
                 npass=_cfg.gate_npass, tau=a.r1_tau).numpy(), np.float32) for _b2 in _co]

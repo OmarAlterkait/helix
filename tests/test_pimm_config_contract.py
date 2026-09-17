@@ -259,8 +259,13 @@ def test_configs_bootstrap_helix_onto_sys_path():
             f"append loses to the stale pimm_data in site-packages")
         assert src.index("_sys.path.") < assign, (
             f"{path.name} bootstraps AFTER custom_imports, which is too late")
-        assert "PIMM_DATA_SRC" in src, (
-            f"{path.name} bootstraps helix but not pimm_data; the image's 0.3.0 "
+        assert "PIMM_DATA_SRC" not in src, (
+            f"{path.name} still bootstraps a pimm-data CHECKOUT. The image "
+            f"installs it at the pinned revision and the build refuses a stale "
+            f"one, so shadowing it makes the run disagree with the pin — one "
+            f"authority governs the image and another the run. (Was required "
+            f"when the image baked 0.3.0; that is fixed at the source.) "
+            f"the image's 0.3.0 "
             f"has no CoeffTPCDataset")
 
 
@@ -351,8 +356,10 @@ def test_bootstrap_block_is_valid_python_that_appends():
     assert "insert(0" not in code
     assert ".append(" not in code
     assert "'/some/checkout'" in block
-    assert "'/some/pimm-data/src'" in block, "pimm_data must be bootstrapped too"
-    assert "HELIX_ROOT" in block and "PIMM_DATA_SRC" in block
+    assert "'/some/pimm-data/src'" not in block, (
+        "the block must NOT insert a pimm-data checkout: the image installs the "
+        "pinned revision and shadowing it splits authority between image and run")
+    assert "HELIX_ROOT" in block and "PIMM_DATA_SRC" not in block
 
 
 def test_rewritten_config_is_importable_without_helix_on_the_path(tmp_path):
@@ -370,40 +377,37 @@ def test_rewritten_config_is_importable_without_helix_on_the_path(tmp_path):
 
     root = str(Path(__file__).resolve().parent.parent)
 
-    # A "fresh" pimm_data the block points at, and a "stale" one standing in for
-    # the 0.3.0 in site-packages. Only the fresh one has CoeffTPCDataset, which is
-    # exactly the difference that broke the first real launch.
-    fresh = tmp_path / "fresh"
-    (fresh / "pimm_data").mkdir(parents=True)
-    (fresh / "pimm_data" / "__init__.py").write_text(
-        "CoeffTPCDataset = object\nWHICH = 'fresh'\n")
-    stale = tmp_path / "stale"
-    (stale / "pimm_data").mkdir(parents=True)
-    (stale / "pimm_data" / "__init__.py").write_text("WHICH = 'stale'\n")
-
+    # The property is that the block inserts ONLY helix, so `pimm_data` keeps
+    # resolving to whatever is INSTALLED. This used to build a "fresh" and a
+    # "stale" pimm_data and assert the fresh one won, because the block had to
+    # beat the image's baked 0.3.0. The image installs the pinned revision now,
+    # so shadowing it is the bug and resolving to it is the contract.
     dumped = "custom_imports = dict(imports=['helix.integrations.pimm'])\n"
     cfg = tmp_path / "config.py"
-    cfg.write_text(bootstrap_block(root, str(fresh)) + "\n" + dumped)
+    cfg.write_text(bootstrap_block(root) + "\n" + dumped)
 
-    # Execute it the way the loader does: helix absent, and the stale pimm_data
-    # APPENDED, which is where site-packages sits relative to a fresh insert.
     probe = tmp_path / "probe.py"
     probe.write_text(
         "import runpy, sys\n"
         f"sys.path[:] = [p for p in sys.path if {root!r} not in p]\n"
-        f"sys.path.append({str(stale)!r})\n"
         f"runpy.run_path({str(cfg)!r})\n"
         "import importlib\n"
         "importlib.import_module('helix')\n"
         "pd = importlib.import_module('pimm_data')\n"
-        "print('HELIX-IMPORTABLE', 'pimm_data=' + pd.WHICH)\n")
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+        "print('HELIX-IMPORTABLE', 'pimm_data=' + (pd.__file__ or ''))\n")
+    # Inherit the env: we WANT the installed pimm_data reachable, because that
+    # is what the run must resolve.
+    env = dict(os.environ)
     out = subprocess.run([sys.executable, str(probe)], capture_output=True,
-                         text=True, env=env)
-    assert "HELIX-IMPORTABLE" in out.stdout, out.stderr[-2000:]
-    assert "pimm_data=fresh" in out.stdout, (
-        "the bootstrapped pimm_data lost to the one later on sys.path — this is "
-        f"the 'No module named pimm_data.coeff' failure. stdout={out.stdout!r}")
+                         text=True, env=env, cwd=str(tmp_path), timeout=120)
+    assert out.returncode == 0, f"probe failed:\n{out.stdout}\n{out.stderr[-2000:]}"
+    assert "HELIX-IMPORTABLE" in out.stdout, (
+        f"the rewritten config did not make helix importable:\n{out.stderr[-2000:]}")
+    resolved = out.stdout.split("pimm_data=")[-1].strip()
+    assert str(tmp_path) not in resolved and root not in resolved, (
+        f"the config bootstrap shadowed the installed pimm_data with "
+        f"{resolved!r}. It must not: the pin governs the image, and a run that "
+        f"resolves something else makes the pin a statement about nothing.")
 
 
 def test_configs_leave_no_module_objects_in_the_namespace():

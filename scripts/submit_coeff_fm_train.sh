@@ -63,7 +63,6 @@ fi
 CFG=${CFG:-$H/configs/pimm/coeff_fm_train_8run.py}
 IMG=${IMG:-${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}}
 PIMM=${PIMM_ROOT:-/sdf/group/neutrino/omara/pimm-fm}
-PDATA=${PIMM_DATA_SRC:-/sdf/group/neutrino/omara/pimm-data/src}
 
 # K=128 at full event size needs Ampere: the logits are (n_cells, n_slot, K),
 # ~2.4 GB for one event, and the backward doubles it. An 11 GB Turing card is
@@ -74,7 +73,13 @@ PDATA=${PIMM_DATA_SRC:-/sdf/group/neutrino/omara/pimm-data/src}
 # recomputing STEPS in shell would be a second source of truth for numbers the
 # config already computes — and a `_base_`-derived config keeps most of them in
 # its parent, where the grep would not see them at all.
-export PYTHONPATH="$PIMM:$H:$PDATA"
+# NO pimm-data checkout here. The image installs it at the PINNED revision and
+# container/helix-train.def's %post fails the build if it is stale, so shadowing
+# it with a checkout only created a second authority: the pin governed the image
+# while whatever was checked out governed the run. Set PYTHONPATH yourself if you
+# are deliberately testing an unreleased pimm-data, and know that the run's
+# provenance.json is then the only record of it.
+export PYTHONPATH="$PIMM:$H"
 read -r SAVE TOTAL < <(apptainer exec -B /sdf,/lscratch "$IMG" \
   env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python - "$CFG" <<'PY'
 import sys

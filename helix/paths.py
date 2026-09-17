@@ -132,11 +132,17 @@ def packaged(name: str) -> Path:
 
 
 def pythonpath() -> str:
-    """The PYTHONPATH a pimm run needs: pimm, helix, pimm-data src."""
+    """The PYTHONPATH a pimm run needs: pimm, then helix.
+
+    NOT pimm-data. The image installs it at the pinned revision and the build
+    refuses a stale one, so putting a checkout ahead of it would make the run
+    disagree with the pin -- the image governed by one and the run by the other.
+    HELIX_PIMM_DATA_SRC remains declared for the case where you deliberately
+    want an unreleased pimm-data, and you then set PYTHONPATH yourself.
+    """
     return os.pathsep.join((
         str(root("HELIX_PIMM_ROOT")),
         str(Path(__file__).resolve().parent.parent),
-        str(root("HELIX_PIMM_DATA_SRC")),
     ))
 
 

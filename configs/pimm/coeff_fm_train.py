@@ -46,12 +46,14 @@ Run (Turing, 1 GPU)::
 #
 # NOT derived from __file__: pimm copies the config into a temporary module
 # before executing it (Config._file2dict), so __file__ points at the temp copy.
-# HELIX_ROOT / PIMM_DATA_SRC override, so this is not pinned to one checkout.
+# HELIX_ROOT overrides, so this is not pinned to one checkout. pimm-data is NOT
+# inserted: the image installs it at the pinned revision (see
+# container/helix-train.def) and shadowing it would make the run disagree with
+# the pin.
 import os as _os
 import sys as _sys
 
-for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix"),
-               ("PIMM_DATA_SRC", "/sdf/group/neutrino/omara/pimm-data/src")):
+for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix"),):
     _p = _os.environ.get(_v) or _p
     # Cannot self-locate here: pimm copies the config to a temp file before
     # executing it, so __file__ is the copy, and helix is not importable yet --

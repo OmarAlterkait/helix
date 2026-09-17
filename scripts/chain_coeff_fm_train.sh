@@ -52,7 +52,11 @@ EXC=${EXCLUDE:-}
 # (`sacctmgr -n show assoc user=$USER format=Account,Partition,QOS` lists yours;
 # mli:default and neutrino:default carry preemptable only).
 QOS=${QOS:-}
-LOGS=${LOGDIR:-/sdf/data/neutrino/omara/exp/_diag/trainlogs}
+# Under the run's own experiment root, not a personal scratch directory. This
+# defaulted to /sdf/data/neutrino/omara/exp/_diag/trainlogs -- one person's
+# diagnostics folder on one cluster, which a recipient cannot write to and which
+# put the logs for every 8-run link somewhere the run directory does not mention.
+LOGS=${LOGDIR:-${HELIX_EXP:-$PWD/exp}/trainlogs}
 mkdir -p "$LOGS"
 
 case "$CFG" in /*) ;; *) CFG="$H/$CFG" ;; esac
