@@ -36,6 +36,9 @@ import numpy as np
 import torch
 
 CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
+# m113's eval artifact. Its edges are INLINED (it predates bin_edges being a
+# persistent buffer), so it doubles as a bins source -- but a corpus of your own
+# wants its own table: scripts/derive_coeff_bins.py --corpus <dir> --out <pt>.
 ARCHIVE = "/sdf/data/neutrino/omara/archive/fm_m113_artifact"
 
 # Per-cell keys the dense (fused / categorical) loss path needs. The sparse
@@ -86,9 +89,32 @@ def main(argv=None):
     # rope_split is explicit for the same reason the configs pin it: it leaves no
     # trace in the weights, and defaulting it is what made m113 unevaluable.
     model = build_fm(cfg, serial=True, rope_split=False).to(dev)
-    edges = torch.load(a.bins_from, map_location=dev,
-                       weights_only=False)["bins"]["edges"]
-    model.set_bins(edges)
+    # Read the edges through the ONE loader. This used to be
+    # `torch.load(...)["bins"]["edges"]`, which only understood the converted
+    # blob's shape -- so when the converter was retired and ARCHIVE was
+    # repointed at m113's eval ARTIFACT (a directory), this died with
+    # IsADirectoryError, and on a bins sidecar from derive_coeff_bins.py it died
+    # with KeyError: 'bins'. Both shapes work now, which is the whole point of
+    # having one reader.
+    import os
+
+    from helix.model.checkpoint import apply_bins
+
+    if os.path.isdir(a.bins_from):
+        from helix.model.artifact import inspect
+        bins = inspect(a.bins_from).op.bins
+        if bins is None:
+            raise SystemExit(
+                f"{a.bins_from} is an artifact that carries no inlined bins; "
+                f"its edges ride in the weights. Pass a bins sidecar from "
+                f"scripts/derive_coeff_bins.py instead.")
+    else:
+        blob = torch.load(a.bins_from, map_location=dev, weights_only=False)
+        # sidecar (derive_coeff_bins) or a checkpoint that inlines them
+        bins = blob if "edges" in blob else (blob.get("bins") or {})
+        if "edges" not in bins:
+            raise SystemExit(f"{a.bins_from}: no bin edges found")
+    apply_bins(model, bins)
 
     opt = torch.optim.AdamW(model.param_groups(a.lr, weight_decay=a.wd),
                             lr=a.lr, betas=(0.9, 0.95))
