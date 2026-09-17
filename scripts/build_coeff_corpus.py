@@ -166,8 +166,16 @@ def main():
                          "loader mode uses it only to locate the RUN (it reads the "
                          "run-wide joint index) -- use --event-start to select within it")
     ap.add_argument("--out", required=True, help="output corpus dir (<root>/coeff_tpc/<run>/)")
-    ap.add_argument("--npz", default="/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz",
-                    help="colored incoherent series spectrum (freqs_hz, shape)")
+    # The PACKAGED spectrum by default. It used to hardcode
+    # /sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz -- one person's
+    # checkout on one cluster, and the only external input to the DSP that
+    # helix.paths did not resolve. helix ships its own copy (declared in
+    # pyproject's package-data), so a clone has it; HELIX_JAXTPC_ROOT still wins
+    # when you deliberately want JAXTPC's.
+    ap.add_argument("--npz", default=None,
+                    help="colored incoherent series spectrum (freqs_hz, shape). "
+                         "Default: helix's packaged copy, or "
+                         "$HELIX_JAXTPC_ROOT/config/noise_spectrum.npz when set")
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json",
                     help="plane registry (pimm_data.geometry.load_plane_registry)")
     ap.add_argument("--dataset-name", default="wire_test_00_00_02")

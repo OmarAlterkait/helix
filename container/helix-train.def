@@ -25,37 +25,43 @@
 # under active development and arrive by bind mount / PYTHONPATH, so a change to
 # either does not need an image rebuild. Only DEPENDENCIES are installed here.
 #
-# Build (needs no root; ~2 minutes since only two packages are added):
+# Build. Needs no root and no sibling checkout -- run it from anywhere, on any
+# cluster, with outbound network to ghcr.io and github.com:
 #
 #   APPTAINER_TMPDIR=$LSCRATCH apptainer build --fakeroot \
-#     /sdf/data/neutrino/omara/images/helix-train.sif container/helix-train.def
+#     <somewhere>/helix-train.sif container/helix-train.def
 #
-# Rebuild whenever pimm-data changes, and record the revision: the image is part
-# of the lockstep pair with helix.
+# It used to require the parent directory holding BOTH this checkout and a
+# pimm-data checkout side by side, because pimm-data arrived through %files.
+# That is gone: the revision is pinned below and fetched from git.
+#
+# Rebuild whenever PIMM_DATA_REV changes, and move it in step with helix -- the
+# image is half of the lockstep pair.
 
-Bootstrap: localimage
-# The CONCRETE image, not the `pimm-latest.sif` symlink beside it. That symlink
-# lives in a third party's directory and can be repointed at any time, which
-# would silently change this image's base between two builds of the same
-# definition file. Verified 2026-09-13:
-#   pimm-latest.sif -> pimm_v0.5.1.sif
-#   md5 f4ed3cfd8479734757bcd9981750e9b5, 8,886,087,680 bytes, mtime Jul 20
-# Check the digest before trusting a rebuild to be equivalent to this one.
-From: /sdf/data/neutrino/youngsam/images/pimm_v0.5.1.sif
-
-%files
-    # RELATIVE to the directory you run `apptainer build` from, which must be the
-    # parent holding BOTH checkouts side by side:
-    #
-    #   <parent>/helix/       <- this definition lives here
-    #   <parent>/pimm-data/
-    #   cd <parent> && apptainer build --fakeroot <out>.sif helix/container/helix-train.def
-    #
-    # This used to name /sdf/group/neutrino/omara/pimm-data outright, so the
-    # image always baked ONE developer's working checkout no matter whose clone
-    # the definition came from -- including when the point of the build was to
-    # test the published code. Found by doing exactly that.
-    pimm-data /opt/build/pimm-data
+Bootstrap: docker
+# pimm's OWN published image, pinned by DIGEST.
+#
+# This used to be `Bootstrap: localimage` from
+# /sdf/data/neutrino/youngsam/images/pimm_v0.5.1.sif -- an absolute path into
+# another user's directory on one cluster. That made this file unbuildable
+# anywhere else, which is fatal for a handover: the base is 8.9 GB, is not ours
+# to redistribute, and its only provenance was an md5 of a local file that a
+# second site cannot check.
+#
+# ghcr.io/deeplearnphysics/pimm publishes the same versions and is pullable
+# anonymously (verified 2026-09-17: token 200, manifest 200). The digest below
+# is v0.5.1, the version the local .sif carried:
+#
+#   v0.5.1  sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c6803d69e012f770d927b7a776bf
+#   v0.5.2  sha256:bf0623db2982c68489ad8c9ed19edff1b822c4e0fcb482551422641ab8ddc586
+#
+# By DIGEST, not by tag: a tag can be repointed, which is the same failure the
+# `pimm-latest.sif` symlink had. A digest cannot, so two builds of this file
+# anywhere in the world share a base byte for byte.
+#
+# Needs outbound network to ghcr.io at build time. On a site without it, pull
+# once where there is network and `apptainer build` from the local .sif.
+From: ghcr.io/deeplearnphysics/pimm@sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c6803d69e012f770d927b7a776bf
 
 %post
     set -e
@@ -76,6 +82,16 @@ From: /sdf/data/neutrino/youngsam/images/pimm_v0.5.1.sif
     export UV_LINK_MODE=copy
     export UV_NO_CACHE=1
 
+    # pimm-data by PINNED REVISION, from the public repo -- not from a
+    # side-by-side checkout via %files. The old form required the builder to
+    # have a sibling working tree and baked whatever happened to be in it,
+    # which is unreproducible by construction and impossible on a fresh
+    # machine. This rev is the one coeff-fm's pyproject.toml pins, and the two
+    # must move together: the AddNoise/Digitize registration is LOCKSTEP with
+    # helix, and an environment that straddles the boundary move raises
+    # KeyError on the second registration.
+    PIMM_DATA_REV=6b2656ab32336131783176d49b09d0a77007607d
+
     # Replace the stale 0.3.0 rather than shadow it. An editable .pth or a
     # PYTHONPATH entry would leave two copies resolvable and make which one wins
     # depend on sys.path order -- exactly the fragility this image exists to end.
@@ -87,10 +103,9 @@ From: /sdf/data/neutrino/youngsam/images/pimm_v0.5.1.sif
     # missing the source_root gap fix (74cfe5f) -- silently wrong answers from a
     # module that is supposed to be gone. build/ is gitignored, so it is
     # invisible to every check that looks at the repo.
-    rm -rf /opt/build/pimm-data/build /opt/build/pimm-data/*.egg-info
-
     $UV pip uninstall --python $VENV/bin/python pimm-data || true
-    $UV pip install --python $VENV/bin/python --no-deps /opt/build/pimm-data
+    $UV pip install --python $VENV/bin/python --no-deps \
+        "pimm-data @ git+https://github.com/OmarAlterkait/pimm-data@${PIMM_DATA_REV}" 
 
     # helix's DSP half: PyWavelets is helix's only dependency not already here.
     $UV pip install --python $VENV/bin/python PyWavelets
@@ -108,8 +123,6 @@ From: /sdf/data/neutrino/youngsam/images/pimm_v0.5.1.sif
     # broken. CPU jax costs nothing and lets the jax-parametrised tests actually
     # run: without it 19 of them skip rather than fail, which is honest but blind.
     $UV pip install --python $VENV/bin/python "jax[cpu]"
-
-    rm -rf /opt/build
 
     # Fail the BUILD, not a training run six hours in.
     $VENV/bin/python - <<'PYCHECK'

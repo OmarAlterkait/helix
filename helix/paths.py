@@ -119,6 +119,18 @@ def exp(*parts: str) -> Path:
     return root("HELIX_EXP").joinpath(*parts)
 
 
+def packaged(name: str) -> Path:
+    """A data file helix SHIPS, under ``helix/tpc/data/``.
+
+    The DSP's external inputs used to be resolved only from a JAXTPC checkout,
+    by an absolute path baked into the corpus builder. helix packages its own
+    copy of the noise spectrum (see pyproject package-data) precisely so that a
+    clone can build a corpus with no second repository present -- this is how a
+    caller reaches it without knowing where the package landed.
+    """
+    return Path(__file__).resolve().parent / "tpc" / "data" / name
+
+
 def pythonpath() -> str:
     """The PYTHONPATH a pimm run needs: pimm, helix, pimm-data src."""
     return os.pathsep.join((

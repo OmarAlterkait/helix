@@ -98,3 +98,16 @@ include = ["helix*"]
 # FileNotFoundError, which an editable install hides completely.
 [tool.setuptools.package-data]
 "helix.tpc" = ["data/*.json", "data/*.npz"]
+
+[tool.uv.sources]
+# pimm-data is not on PyPI, so the `pimm` extra needs an explicit source. Pinned
+# by REVISION rather than by branch, for the same reason pimm's own coeff-fm
+# branch pins it: an unpinned git dependency follows whatever the default branch
+# happens to be, and `uv lock` records the result in a file nobody reads. It had
+# already settled on a revision predating the boundary move, which still defines
+# AddNoise/Digitize -- transforms helix registers now -- and that pair raises
+# KeyError on the second registration.
+#
+# THIS REVISION IS LOCKSTEP WITH helix. It must equal PIMM_DATA_REV in
+# container/helix-train.def; tests/test_lockstep_pin.py asserts that.
+pimm-data = { git = "https://github.com/OmarAlterkait/pimm-data", rev = "6b2656ab32336131783176d49b09d0a77007607d" }
