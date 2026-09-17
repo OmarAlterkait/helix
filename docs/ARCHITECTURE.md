@@ -171,7 +171,7 @@ has lost `Densify`, or still registers `AddNoise`/`Digitize` — so a lockstep
 violation cannot ship in an image again.
 
 Verified in that image with user site-packages disabled, so no home directory can
-help: **helix 386 passed / 50 skipped, pimm-data 360 passed / 8 skipped.**
+help: **helix 496 passed / 53 skipped (536 / 12 with pimm on the path), pimm-data 363 passed / 7 skipped.**
 
 ### Rebuilding
 

@@ -7,7 +7,17 @@ One image, one command:
     cd $HELIX_ROOT
     apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python -m pytest -q
 
-Expect **395 passed, 50 skipped**. In pimm-data, **360 passed, 8 skipped**.
+**Test counts depend on whether pimm is importable**, and the difference is
+large enough to mislead: ~40 tests are `@pimm_importable` and SKIP wherever pimm
+is absent.
+
+| environment | helix | pimm-data |
+|---|---|---|
+| pimm not on the path | 496 passed, 53 skipped | 363 passed, 7 skipped |
+| pimm on `PYTHONPATH` | **536 passed, 12 skipped, 1 xfailed** | 363 passed, 7 skipped |
+
+Run with pimm on the path when you want the real number. Seven failures hid in
+that gap once -- see the clean-room note in `TESTING.md`.
 
 ## Testing a change to pimm-data
 
@@ -83,3 +93,41 @@ its coherent implementation against JAXTPC's own `noise_spectrum.npz` and
 `tools/coherent_noise.py`. If they start skipping everywhere, that agreement is
 unverified — the forward model would be free to drift from the simulator it is
 supposed to reproduce.
+
+## The clean-room run
+
+The suite passing in a development tree is weaker evidence than it looks. Run
+it from FRESH CLONES with nothing else reachable:
+
+```bash
+CR=$SCRATCH/cleanroom && mkdir -p $CR && cd $CR
+git clone <helix> helix && git clone <pimm-data> pimm-data && git clone <pimm> pimm
+cd $CR/helix
+apptainer exec -B /sdf,/lscratch <image> env PYTHONNOUSERSITE=1 \
+  PYTHONPATH=$CR/helix:$CR/pimm-data/src:$CR/pimm \
+  /opt/pimm/.venv/bin/python -m pytest tests/ -q
+```
+
+Done once (2026-09-17) it found seven failures invisible in the development
+tree, every one of them because ~40 tests are `@pimm_importable` and skip
+wherever pimm is absent:
+
+* `tests/test_export_artifact.py` imported `from tests.test_artifact_formats`.
+  There is no `tests/__init__.py`, so that resolves only when the REPO ROOT
+  lands on `sys.path` — true for one invocation style and not another. The rest
+  of the suite imports top-level (`from _paths import`); this now does too.
+* Five tests in `tests/test_evaluator_ddp_reduce.py` built their evaluator with
+  `CoeffFMEvaluator.__new__` and hand-listed its attributes, so the stub drifted
+  when the class gained `mask_mode`/`n_planes`. Its fake `make_mask` had drifted
+  the same way. Construct with `__init__` and fake only what you must.
+* `tests/test_boundary.py` claimed `helix.integrations.pimm.hooks` imports
+  `pimm_data`. It reaches it lazily, inside functions, so a module-scope probe
+  cannot see it.
+
+It also found `scripts/smoke_train_fm.py` broken in every invocation, and a
+`pimm_data.testing` fixture that could not reach the probe stages. Neither was
+visible to any test.
+
+**Re-run it before a handover**, and from a clone you have not copied files
+into — `coeff_verify` correctly refuses a corpus built from a dirty tree, which
+is what a polluted clone gives you.

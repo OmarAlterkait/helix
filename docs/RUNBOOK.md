@@ -24,8 +24,20 @@ defaults, not truths.
 
 Then the suites, which need no data:
 
-    cd <your helix checkout>     && $PY -m pytest -q   # 395 passed, 50 skipped
-    cd <your pimm-data checkout> && $PY -m pytest -q   # 360 passed,  8 skipped
+    cd <your helix checkout>     && $PY -m pytest -q
+    cd <your pimm-data checkout> && $PY -m pytest -q
+
+**Test counts depend on whether pimm is importable**, and the difference is
+large enough to mislead: ~40 tests are `@pimm_importable` and SKIP wherever pimm
+is absent.
+
+| environment | helix | pimm-data |
+|---|---|---|
+| pimm not on the path | 496 passed, 53 skipped | 363 passed, 7 skipped |
+| pimm on `PYTHONPATH` | **536 passed, 12 skipped, 1 xfailed** | 363 passed, 7 skipped |
+
+Run with pimm on the path when you want the real number. Seven failures hid in
+that gap once -- see the clean-room note in `TESTING.md`.
 
 If you see fewer passes and more skips, something optional is missing and the
 skip reasons say which (`pytest -q -rs`). If you see a COLLECTION ERROR, the
