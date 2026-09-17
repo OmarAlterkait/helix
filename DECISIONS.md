@@ -145,15 +145,17 @@ would break all three. Delete when the format next changes for a real reason.
 
 **Deriving centroids from edges** is unreachable for anything current (the v2
 sidecar measures both; live checkpoints carry both). Kept only for pre-fix blobs
-like m113, which has no measured `cent_ratio` and never will. Delete when the
-research bundle retires (TODO §1).
+like m113, which has no measured `cent_ratio` and never will. (The research
+bundle has since retired; this is the remaining reason to keep the fallback.)
 
 ---
 
 ## Operational
 
-Details and incantations live in `TODO.md` and the two launcher scripts; the
-decisions are:
+Details and incantations live in `docs/RUNBOOK.md`; `TODO.md` is what is NOT
+done. There are still TWO launcher scripts (`scripts/submit_coeff_fm_train.sh`
+is the production one, `launch/coeff_fm_train.sbatch` the older) and that is one
+too many — see RUNBOOK §2. The decisions are:
 
 - **Corpus builds on `turing` only.** The DSP is architecture-sensitive: turing
   and A100 disagree on 0.016% of surviving coefficients and are not

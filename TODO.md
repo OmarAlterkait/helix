@@ -11,62 +11,52 @@ Larger records get their own file: `MULTI_EVENT_BATCHING.md` (why the FM is one
 event per forward), `NOISE_BANDS.md` (what the noise model does to each band, and
 why m113 is out-of-distribution here).
 
-**Running anything.** This tree needs two containers, and neither is the other:
+**Running anything.** ONE container now — see `CLAUDE.md` and
+`docs/ARCHITECTURE.md` §4. The two-container instructions that were here named
+`develop.sif` and `pimm-latest.sif` and were both wrong: one had no pimm-data at
+all, the other baked a pimm-data predating the boundary move.
 
-```bash
-# tests + DSP (torch, pytest, pywt)
-singularity exec -B /sdf,/lscratch /sdf/group/neutrino/images/develop.sif \
-    bash -lc 'PYTHONPATH=<helix>:<pimm-data>/src python -m pytest'
-
-# anything importing pimm (pyarrow + addict; NOT containers/pimm.sif, which lacks pyarrow)
-singularity exec --nv -B /sdf,/lscratch \
-    /sdf/data/neutrino/youngsam/images/pimm-latest.sif ...
-```
-
-Short GPU work goes to the preemptable pool: `--account=mli:default
---qos=preemptable`, partition `turing` for wiring, `ampere` for anything with a
-K=128 head at full event size.
+GPU accounts: `neutrino:default@ampere` carries ONLY the `preemptable` QOS, and
+preemption here CANCELS rather than requeues, so anything longer than the
+preemption window cannot finish on it. Use an account that has `normal`
+(`neutrino:cider-nu`, `mli:cider-ml`, `mli:nu-ml-dev`) and pass `--qos=normal`;
+`sacctmgr -n show assoc user=$USER format=Account,Partition,QOS` lists yours.
 
 ---
 
-## 1. Retire the research bundle — now unblocked
+## 1. Retire the research bundle — DONE (from the REPO)
 
-13 modules, ~3,700 lines, one connected graph anchored by `fm/mae_ddp.py`:
+`git ls-files research` returns nothing: the 13-module bundle and the DSP
+golden that `research/goldens/capture.py` anchored are out of the tree
+(f825057). The directory still exists on the machine helix was developed on,
+gitignored, which is why the citations below still resolve for one reader and
+nobody else.
 
-```
-fm/     mae_ddp  model  model_serial  train  data
-top     star_tpc  measure_coeffs  vit_tpc  star_model  vit_model
-        baseline_tpc  doraemon_optical  onfly_optical
-```
+What is NOT done: ~15 docstrings across `helix/model/mask.py`, `tokenize.py`,
+`helix/tpc/coherent_gate*.py` and four scripts cite `research/...` paths for
+provenance. They are historical references, not imports — nothing breaks — but
+they point at a directory a handover target does not have. Quote the fact
+inline, or drop the citation.
 
-The gate was "FMTrainer parity". FMTrainer now exists and has trained on a GPU,
-and `tests/test_training_parity.py` pins loss, gradients, optimizer state and a
-full multi-step trajectory bit-exactly against the research implementation —
-a stronger licence than a live A/B could have given, since `mae_ddp`'s recorded
-numbers are on the white-noise distribution (`NOISE_BANDS.md`).
+## 3. Probes and eval — the 3D probe is DONE
 
-`research/goldens/capture.py` depends on this bundle (it calls
-`star_tpc.prep_tpc_rows`), so the DSP golden retires with it.
+`scripts/run_probe.py` + `scripts/dump_probe_truth.py` are the two stages, and
+`scripts/export_artifact.py` promotes a run into a scoreable, attributable
+artifact. Measured on the handover validation run: trained +0.8403 against
+random +0.1161, geo +0.1514, raw +0.0616.
 
-## 2. Merge the branches
+Still missing: charge closure and per-band variance explained as EVALUATORS
+inside a run, rather than as scripts after it. pimm has
+`EventProbeSuiteEvaluator` and `hooks/eval/pretrain/probes/` to build them into
+— and the `eval-contract` branch of pimm-private is 26 commits of exactly that
+groundwork, unpushed at the time of writing.
 
-Held at instruction, not because anything is unfinished: helix `extraction`,
-pimm-data `coeff-corpus`. `main` carries only the two corpus data fixes.
+## 4. A real pretraining run — DONE
 
-## 3. Probes and eval
-
-`CoeffFMEvaluator` covers the training metric. What is missing is anything that
-says whether the representation is GOOD: the 3D probe, charge closure, per-band
-variance explained. The research versions were deleted deliberately (they were
-written against the old npz cache); pimm has `EventProbeSuiteEvaluator` and
-`hooks/eval/pretrain/probes/` to rebuild them into.
-
-## 4. A real pretraining run
-
-The 1500-step run was a demonstration: it reached bce 0.096 and categorical CE
-2.29 from ln(128)=4.85, on 1500 of 19,999 events, in under 5 minutes. A real
-pretrain is a different scale of job and wants a decision on steps, LR schedule
-and corpus size.
+112,677 steps via a chain of links on the 8-run corpus; eval `var_expl 0.6844`
+against production's 0.7030. What is still open is the COOLDOWN: the chain
+exhausted at step 6,417 of 14,264 with all three links preempted, on an account
+whose only QOS is preemptable (see above).
 
 ## 5. Corpus scale — DONE
 
@@ -74,12 +64,13 @@ All 8 runs built: 790 shards, 344 GB, ~158k events (train 150,239 / val 4,641 /
 probe 3,111). The bins were NOT re-derived — see DECISIONS.md for why, and for
 the yardstick that would overturn it.
 
-## 6. Mirror the jax forward ops
+## 6. `--backend jax` still imports pimm-data
 
-`helix/tpc/{noise,dense_ops,geometry}.py` mirror pimm-data for numpy and torch,
-pinned by `tests/test_forward_mirror.py`. The jax path (`noise_jax`,
-`dense_ops_jax`) is not mirrored, so `build_coeff_corpus.py --backend jax` still
-imports pimm-data. torch is the production backend, so this is a loose end.
+`scripts/build_coeff_corpus.py` imports `pimm_data` on EVERY backend (the
+reader/dataset layer is pimm-data's), so the jax path is not the special case
+this entry used to claim. `tests/test_forward_mirror.py`, cited here as the pin,
+was deleted with the forward model. torch is the production backend
+(`--backend torch`, measured 10.6 ms), so jax remains an override.
 
 ## 7. Housekeeping
 
