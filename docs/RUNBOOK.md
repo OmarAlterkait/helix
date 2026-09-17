@@ -42,6 +42,48 @@ will fail rather than produce a mismatched image.
 
 ---
 
+## 0b. Smoke the whole path with NO data
+
+Before your own simulation exists, `pimm_data.testing.make_jaxtpc_sample` writes
+a schema-conformant JAXTPC v3 dataset you can drive the whole pipeline with.
+This is the check to run first on a new cluster: it exercises the code, the
+container and the plumbing without a byte of production data.
+
+    $PY -c "from pimm_data.testing import make_jaxtpc_sample; \
+             make_jaxtpc_sample('$W/sim', dataset_name='sim_wire', \
+                                n_events=200, readout_type='wire')"
+
+    $PY scripts/build_coeff_corpus.py --shard $W/sim/sensor/sim_wire_sensor_0000.h5 \
+        --out $W/corpus/run_synth --dataset-name sim_wire --mode serial --backend torch
+    $PY -m helix.data.coeff_verify $W/corpus/run_synth --dataset-name sim_wire
+    $PY scripts/write_holdout.py --corpus $W/corpus/run_synth --dataset-name sim_wire \
+        --train 0.6 --val 0.2 --probe 0.2
+    $PY scripts/derive_coeff_bins.py --corpus $W/corpus/run_synth \
+        --dataset-name sim_wire --out $W/bins.pt --events 100 --K 128
+    $PY scripts/smoke_train_fm.py --corpus $W/corpus/run_synth \
+        --bins-from $W/bins.pt --events 4 --steps 8
+
+All five pass on a 100-event synthetic corpus (verified from clean clones,
+2026-09-17). `coeff_verify` prints `corpus OK`; `smoke_train_fm` prints a
+DECREASING loss from about ln(128) = 4.85, which is where an untrained
+categorical head starts.
+
+Two things to know, both real:
+
+* **The default holdout fractions do not work at this scale.** 95/3/2 is tuned
+  for 158k events; the split is a hash of event identity, so a 2% part over 100
+  events can legitimately select ZERO and `write_holdout` refuses. That refusal
+  is correct -- pass smoke fractions as above.
+* **`dump_probe_truth` cannot run on synthetic input, by design.** The fixture
+  is schema-conformant, not physics-conformant: its `hits`/`step` are random
+  draws with no relationship to the `sensor` waveforms it ships beside. So the
+  pixel->cell join does not correspond, and the coverage guard says so --
+  "band-0 charge-weighted coverage 0.673 < 0.9 ... a mismatched event scores
+  ~0.37, a good one ~0.999". That is the guard doing its job. The probe stages
+  need real simulation; everything before them does not.
+
+---
+
 ## 1. Build a coefficient corpus
 
 Input: doraemon sensor shards (`HELIX_SENSOR_ROOT`).
