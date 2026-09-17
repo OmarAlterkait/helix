@@ -7,7 +7,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from helix.model import build_fm
-from helix.model.checkpoint import is_export_dir, load_export_dir
+from helix.model.artifact import build, detect, load
+from helix.model.checkpoint import patch_config
 
 ARCH = dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1, dec_blocks=1,
             heads=4, dec_mode="cross", n_bins=16)
@@ -52,8 +53,9 @@ def test_export_round_trip_recovers_weights_and_bins(tmp_path):
     m.set_bins(edges)
     d = _export(tmp_path, m)
 
-    assert is_export_dir(d)
-    back, meta = load_export_dir(d, device="cpu")
+    assert detect(d) == "pimm-export"
+    art = load(d)
+    back = build(art, device="cpu")
     torch.testing.assert_close(back.bin_edges, m.bin_edges)
     for (k, a), (_, b) in zip(sorted(m.state_dict().items()),
                               sorted(back.state_dict().items())):
@@ -62,13 +64,13 @@ def test_export_round_trip_recovers_weights_and_bins(tmp_path):
         # bin_centroids_ratio falls back on. Round-tripping unset->unset must
         # pass; a centroid that silently became a number would not.
         torch.testing.assert_close(a, b, msg=k, equal_nan=True)
-    assert meta["source"] == "pimm-export"
+    assert art.fmt == "pimm-export"
 
 
 def test_it_strips_the_ddp_prefix(tmp_path):
     m = build_fm(dict(ARCH))
     m.set_bins(torch.linspace(-4, 4, 17).repeat(4, 1))
-    back, _ = load_export_dir(_export(tmp_path, m), device="cpu")
+    back = build(load(_export(tmp_path, m)), device="cpu")
     assert not any(k.startswith("module.") for k in back.state_dict())
 
 
@@ -77,11 +79,11 @@ def test_tokenizer_geometry_travels_in_the_same_config(tmp_path):
     encode path silently defaulting to `centroid` (which cost 94% of cells)."""
     m = build_fm(dict(ARCH))
     m.set_bins(torch.linspace(-4, 4, 17).repeat(4, 1))
-    _, meta = load_export_dir(_export(tmp_path, m), device="cpu")
-    assert meta["patch_config"].cell_t == "grid_center"
+    op = load(_export(tmp_path, m)).op
+    assert patch_config(op).cell_t == "grid_center"
 
-    _, meta2 = load_export_dir(_export(tmp_path, m, with_tokenizer=False), device="cpu")
-    assert meta2["patch_config"] is None      # absent, not silently defaulted
+    op2 = load(_export(tmp_path, m, with_tokenizer=False)).op
+    assert patch_config(op2) is None          # absent, not silently defaulted
 
 
 def test_weights_without_a_config_are_refused(tmp_path):
@@ -89,7 +91,7 @@ def test_weights_without_a_config_are_refused(tmp_path):
     m.set_bins(torch.linspace(-4, 4, 17).repeat(4, 1))
     torch.save(m.state_dict(), tmp_path / "model.bin")
     with pytest.raises(ValueError, match="architecture is not recoverable"):
-        load_export_dir(tmp_path, device="cpu")
+        load(tmp_path)
 
 
 def test_probe_loader_accepts_an_export_dir(tmp_path):

@@ -6,12 +6,20 @@
 # long — it is a job that waits. Short links start sooner, and losing one costs
 # at most SAVE_EVERY steps.
 #
-# Two independent recovery paths, because they fail differently:
-#   --requeue        SLURM puts the SAME job back on preemption, mid-link.
-#   --dependency     the NEXT link starts when this one ends for any reason,
-#                    including hitting the wall clock.
-# Both land here, and both are handled by the same rule below: resume if a
-# checkpoint exists, start fresh if not. Nothing has to know WHY it restarted.
+# Recovery is the CHAIN, not --requeue. This cluster runs PreemptMode=CANCEL
+# (QoS preemptable = "within,cancel"), so a preempted job is cancelled outright
+# and never returns to the queue whatever --requeue says. Measured 2026-09-16:
+# job 38395161 carried --requeue, was preempted on sdfampere040 at 1:47, and
+# stayed dead. launch/coeff_fm_train.sbatch had this right and this file did
+# not; the header used to claim "--requeue puts the SAME job back on preemption".
+#
+#   --dependency=afterany   the NEXT link starts when this one ends for ANY
+#                           reason -- preempted, completed, or out of wall clock.
+#                           This is what actually continues a run.
+#   --requeue               kept only for NODE FAILURE, which slurm does requeue.
+#
+# Both land here and are handled by the same rule below: resume if a checkpoint
+# exists, start fresh if not. Nothing has to know WHY it restarted.
 #
 # Usage — submit a chain of N links:
 #   scripts/chain_coeff_fm_train.sh <N> [config]

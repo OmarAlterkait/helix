@@ -72,8 +72,11 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
                 f"parameters, so the model cannot invent them: pass "
                 f"bins='/path/to/bins.pt' in the model config, or a `checkpoint` "
                 f"that carries them. Derive fresh edges for a new corpus with "
-                f"research tier1_setup_bins.py — the ones m113 shipped with came "
-                f"from a different noise model.")
+                f"scripts/derive_coeff_bins.py — the ones m113 shipped with came "
+                f"from a different noise model. (This used to name `research "
+                f"tier1_setup_bins.py`, a gitignored directory that exists on "
+                f"one machine: an error message must name something the reader "
+                f"has.)")
         apply_bins(model, bins)
     return model
 
@@ -81,8 +84,8 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
 def _load_bins(path):
     """Bin edges from either a bins sidecar or a checkpoint that carries them.
 
-    The sidecar is its own shape — `tier1_setup_bins.py` writes a bare ``edges``
-    mapping, which is not a checkpoint and has no architecture — so it is read
+    The sidecar is its own shape — `scripts/derive_coeff_bins.py` writes a bare
+    ``edges`` mapping, which is not a checkpoint and has no architecture — so it is read
     here rather than taught to `helix.model.artifact`. Everything else is a
     checkpoint and goes to the one reader.
 
@@ -104,7 +107,7 @@ def _load_bins(path):
     if bins is None:
         raise ValueError(
             f"{path}: no bin edges found. Expected a bins sidecar (an 'edges' "
-            f"mapping from tier1_setup_bins.py), or a checkpoint that carries "
+            f"mapping from scripts/derive_coeff_bins.py), or a checkpoint that carries "
             f"them — an eval artifact does, and a `pimm export` keeps them in "
             f"the weights as the persistent `bin_edges` buffer, so it reports "
             f"none here and needs none.")

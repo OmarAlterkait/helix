@@ -1,10 +1,19 @@
-"""Turning a checkpoint into a model: weights in, bins on, PatchConfig out.
+"""Applying what was read: weights in, bins on, PatchConfig out.
 
 :mod:`helix.model.artifact` decides WHAT a checkpoint is and reads it; this
-module applies what it read — the strict state_dict load with its two
-migrations, the bin sidecar, and the ``PatchConfig`` a recipe needs. The split
-is deliberate: reading must not require a model, and building must not have to
+module applies what it read — the strict state_dict load with its migrations,
+the bin sidecar, and the ``PatchConfig`` a recipe needs. The split is
+deliberate: reading must not require a model, and building must not have to
 know about file formats.
+
+NOTHING HERE READS A FILE FORMAT. It briefly did: `is_export_dir`,
+`load_export_dir` and `_export_tokenizer_cfg` stayed behind when the one-owner
+move landed, along with a `_patch_config_from_tok` that no longer had callers
+and an `_EXPORT_CONFIGS`/`_EXPORT_WEIGHTS` re-export whose comment claimed
+"recipes and tests import them from here" when nothing did. Two modules that
+both know what an export directory looks like is the exact condition
+`artifact.py` exists to end, so the second one is gone -- use
+``artifact.load(path)`` and ``artifact.build(art)``.
 
 Separate from :mod:`helix.integrations.pimm` because none of it needs pimm.
 Living in the pimm adapter made it unimportable without pimm installed, which is
@@ -16,11 +25,6 @@ subprocess test enforces it.
 from __future__ import annotations
 
 import os
-
-#: Filenames ``pimm export`` writes, in preference order. Re-exported
-#: because recipes and tests import them from here; the authority is
-#: :mod:`helix.model.artifact`.
-from helix.model.artifact import _EXPORT_CONFIGS, _EXPORT_WEIGHTS  # noqa: F401
 
 def patch_config_from_checkpoint(checkpoint, cell_t=None):
     """The ``PatchConfig`` a checkpoint was TRAINED with.
@@ -39,7 +43,7 @@ def patch_config_from_checkpoint(checkpoint, cell_t=None):
     tell "not recorded" from "recorded as the default".
 
     ``cell_t`` fills the field in for a checkpoint that does not record it, and is
-    CROSS-CHECKED against one that does — see :func:`_patch_config_from_tok`.
+    CROSS-CHECKED against one that does — see :func:`patch_config`.
     """
     from helix.model.artifact import inspect
 
@@ -88,24 +92,6 @@ def patch_config(op, cell_t=None, where=""):
                 "coordinate it never saw.")
         kw["cell_t"] = op.cell_t
     return PatchConfig(**kw)
-
-
-def _patch_config_from_tok(tok, cell_t, where):
-    """Compatibility shim: a recorded tokenizer block -> ``PatchConfig``."""
-    from helix.model.artifact import OperatingPoint
-    tok = dict(tok or {})
-    if not tok:
-        return None
-    return patch_config(
-        OperatingPoint(cell_t=tok.get("cell_t"), pw=tok.get("pw"),
-                       pt=tok.get("pt"), n_bands=tok.get("n_bands")),
-        cell_t, where)
-
-
-def _export_tokenizer_cfg(path):
-    """Deprecated alias for :func:`helix.model.artifact.export_tokenizer_cfg`."""
-    from helix.model.artifact import export_tokenizer_cfg
-    return export_tokenizer_cfg(path)
 
 
 #: Bin-centroid buffers, and how to derive each from the edges. Persistent since
@@ -219,38 +205,3 @@ def load_state_dict(model, sd, *, bins=None):
                 sd[_n] = torch.as_tensor(bins[_k])
     model.load_state_dict(_backfill_centroids(model, sd), strict=True)
     return model
-
-
-def is_export_dir(path):
-    """True if ``path`` looks like a ``pimm export`` directory."""
-    from helix.model.artifact import detect
-    return detect(path) == "pimm-export"
-
-
-def load_export_dir(path, *, device=None):
-    """``(model, meta)`` from a ``pimm export`` directory.
-
-    This is the forward path for anything WE train. ``pimm export`` already
-    writes the HuggingFace-shaped pair — weights plus the resolved config beside
-    them — so there is no helix-specific checkpoint format to invent for a run
-    in progress, and the directory is portable by construction. What it cannot
-    record is WHICH weight set it holds; see :func:`helix.model.artifact.save`.
-
-    """
-    from helix.model.artifact import build, load
-
-    art = load(path)
-    model = build(art, device=device)
-    meta = dict(source="pimm-export",
-                weights=os.path.basename(_export_weights_path(path)),
-                weights_source=art.weights_source,
-                config={k: (list(v) if isinstance(v, tuple) else v)
-                        for k, v in art.arch.items()},
-                tokenizer=_export_tokenizer_cfg(path),
-                patch_config=patch_config(art.op, None, path))
-    return model, meta
-
-
-def _export_weights_path(path):
-    return next(os.path.join(path, w) for w in _EXPORT_WEIGHTS
-                if os.path.exists(os.path.join(path, w)))

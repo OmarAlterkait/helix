@@ -117,6 +117,20 @@ different (white) noise model. Do not reuse bins across corpus generations.
 
 ## 2. Train
 
+**There are two launchers and that is one too many.** `scripts/` is the
+production path (it trained the 8-run, and carries the config-fingerprint resume
+guard and the QOS knob); `launch/` is the older one and is the better-documented
+of the two about how this cluster preempts. They must not both survive the
+handover -- pick one, move anything the other knows into it, and delete the
+loser. Until then, use `scripts/`.
+
+    # THE PRODUCTION PATH -- this is what trained the 8-run (its default config
+    # is configs/pimm/coeff_fm_train_8run.py):
+    scripts/chain_coeff_fm_train.sh <N> [config]           # a chain of links
+    sbatch --export=ALL,CFG=<config> scripts/submit_coeff_fm_train.sh   # one link
+
+    # THE OLDER PATH, still present and still working, defaulting to
+    # configs/pimm/coeff_fm_train.py:
     sbatch launch/coeff_fm_train.sbatch                    # one job
     ./launch/chain_submit.sh <n_jobs> <run_name>           # a chain
 

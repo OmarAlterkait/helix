@@ -545,7 +545,8 @@ def main(argv=None):
                 # `ckpt_basis_digest` is the corpus the weights were TRAINED on,
                 # checked against the one being read just below.
                 ckpt_basis_digest=str((_prov.get("corpus") or {}).get("basis_digest", "")),
-                ckpt_helix=str((_prov.get("helix") or {}).get("git", "")),
+                ckpt_helix=str((_prov.get("helix") or {}).get("commit", "")),
+                ckpt_helix_dirty=(_prov.get("helix") or {}).get("dirty"),
                 # The artifact's own record of the weights it holds. Same
                 # function as `weights_digest` below, computed at promotion time
                 # over the saved tensors rather than here over the loaded model,

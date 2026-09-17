@@ -137,6 +137,36 @@ def test_the_recorded_digest_is_the_one_run_probe_recomputes(tmp_path):
     assert weights_digest(load(src).state_dict) == meta["provenance"]["weights_digest"]
 
 
+def test_the_artifact_and_the_probe_row_record_helix_the_SAME_way(tmp_path):
+    """One schema for "which helix", checked across the two writers.
+
+    The artifact stamped `coeff_io._code_version` -- a PRIVATE helper belonging
+    to the corpus codec, returning {version, git, git_dirty} -- while the probe
+    row stamped `_bootstrap.provenance()`, returning {root, commit, dirty,
+    branch}. Both were called "helix"; no test compared them; run_probe read
+    `.get("git")` off the artifact and would have silently produced an empty
+    `ckpt_helix` the moment either side moved.
+
+    `_code_version` deliberately stays as it is: corpus shards are verified
+    field-by-field against that schema and must not change.
+    """
+    from helix.integrations._bootstrap import describe_checkout, running_roots
+
+    src = make_pimm_export(str(tmp_path / "exp"))
+    out = str(tmp_path / "art")
+    _script().main([src, "-o", out, "--weights", "ema"])
+
+    recorded = inspect(out).provenance["helix"]
+    live = describe_checkout(running_roots()[0])
+    assert set(recorded) == set(live) == {"root", "commit", "dirty", "branch"}
+    assert recorded["commit"] == live["commit"]
+
+    # and the key run_probe actually reads off it must be the one that is there
+    import pathlib as _pl
+    rp = (_pl.Path(__file__).resolve().parents[1] / "scripts" / "run_probe.py").read_text()
+    assert 'get("commit", "")' in rp, "run_probe reads a key the artifact does not write"
+
+
 def test_the_probe_loader_reads_a_promoted_artifact_and_attributes_it(tmp_path):
     """End to end: the number this produces is finally attributable."""
     from helix.probe.features import load_probe_model

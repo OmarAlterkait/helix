@@ -63,7 +63,7 @@ def main(argv=None):
 
     from dataclasses import replace
 
-    from helix.core.coeff_io import _code_version
+    from helix.integrations._bootstrap import describe_checkout, running_roots
     from helix.model.artifact import load, save, weights_digest
 
     if os.path.exists(os.path.join(a.out, "artifact.json")) and not a.force:
@@ -131,7 +131,16 @@ def main(argv=None):
     prov = dict(source=os.path.abspath(a.export_dir), source_format=art.fmt,
                 source_provenance=dict(art.provenance),
                 source_weights=art.weights_source, corpus=corpus,
-                helix=_code_version(), step=art.provenance.get("step"),
+                # The SAME record run_probe stamps into its results row, from the
+                # same function. It used to be `coeff_io._code_version` -- a
+                # PRIVATE helper belonging to the corpus codec, with a different
+                # schema ({version, git, git_dirty} vs {root, commit, dirty,
+                # branch}) -- so an artifact and the number scored from it
+                # recorded 'which helix' in two shapes that no test compared.
+                # `_code_version` stays where it is: corpus shards are verified
+                # field-by-field against it and must not change schema.
+                helix=describe_checkout(running_roots()[0]),
+                step=art.provenance.get("step"),
                 weights_digest=weights_digest(art.state_dict),
                 # Which operating-point fields came from a DEFAULT rather than
                 # from the run. Empty is the good case.
@@ -144,7 +153,7 @@ def main(argv=None):
                           cell_t=op.cell_t, pw=op.pw, pt=op.pt,
                           n_bands=op.n_bands,
                           basis_digest=(corpus or {}).get("basis_digest", ""),
-                          helix=prov["helix"].get("git", "unknown"),
+                          helix=(prov["helix"].get("commit") or "unknown")[:8],
                           weights_digest=prov["weights_digest"]),
                      indent=2))
     if corpus is None:
