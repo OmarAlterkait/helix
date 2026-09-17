@@ -242,10 +242,28 @@ def main():
                     default=str(Path(__file__).resolve().parent.parent))
     ap.add_argument("--pimm-src", default="/sdf/group/neutrino/omara/pimm-data/src")
     args = ap.parse_args()
+    _add_repo_paths(args.helix_root, args.pimm_src)
+
+    # Resolve --npz here, because argparse cannot: the packaged copy's location
+    # depends on where helix was installed, and $HELIX_JAXTPC_ROOT may not be
+    # set. A literal default could not fall back, and the literal it used to
+    # carry was one person's JAXTPC checkout.
+    #
+    # os.environ, NOT helix.paths.root(): root() returns the S3DF DEFAULT when
+    # the variable is unset, so on any other machine it would hand back a path
+    # that does not exist and the packaged copy would never be reached.
+    if args.npz is None:
+        from helix.paths import packaged
+        _jx = os.environ.get("HELIX_JAXTPC_ROOT")
+        _cand = Path(_jx) / "config" / "noise_spectrum.npz" if _jx else None
+        args.npz = str(_cand) if (_cand and _cand.exists()) else str(packaged("noise_spectrum.npz"))
+    if not Path(args.npz).exists():
+        raise SystemExit(
+            f"--npz {args.npz} does not exist. helix ships its own copy; pass "
+            f"--npz explicitly, or unset HELIX_JAXTPC_ROOT to use the packaged one.")
 
     if args.backend == "jax":                    # keep XLA from grabbing the whole card
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    _add_repo_paths(args.helix_root, args.pimm_src)
     from helix.core import backend
     backend.set_backend(args.backend)
     from helix.tpc.io import (config_from_file, read_sensor_event,

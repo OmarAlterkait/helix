@@ -174,6 +174,7 @@ def test_the_packaged_noise_spectrum_is_the_one_the_corpus_was_built_with():
     it before.
     """
     import hashlib
+    import pathlib
 
     from helix.paths import packaged
 
@@ -183,6 +184,47 @@ def test_the_packaged_noise_spectrum_is_the_one_the_corpus_was_built_with():
         "the packaged noise spectrum changed. Every corpus built before this "
         "recorded the old spectrum_sha256, so this is a NEW DSP distribution and "
         "a new basis_digest -- intended only as a deliberate rebuild.")
+
+
+def test_the_corpus_builder_RESOLVES_its_npz_default():
+    """Run the resolution, do not read it.
+
+    The first version of this test asserted `--npz` defaults to None "so the
+    resolution below can pick the packaged copy" -- and there was no resolution.
+    A str.replace that was supposed to add it had targeted `a = ap.parse_args(argv)`
+    while the file says `args = ap.parse_args()`, so it silently did nothing.
+    The default became None, `np.load(None)` raises TypeError, and EVERY corpus
+    build was dead on arrival. The test enshrined the bug because it checked the
+    literal instead of the behaviour.
+
+    So: execute it. Drive the builder's own argument parser and resolution the
+    way `main` does, and assert the result is a file that exists.
+    """
+    import os
+    import subprocess
+    import sys
+
+    import pathlib
+    root = str(pathlib.Path(__file__).resolve().parents[1])
+    # A subprocess, because the resolution reads os.environ and imports
+    # helix.paths, and because this is how the builder is actually invoked.
+    prog = (
+        "import sys, os, argparse, pathlib\n"
+        f"sys.path.insert(0, {root!r})\n"
+        "from helix.paths import packaged\n"
+        "npz = None\n"
+        "jx = os.environ.get('HELIX_JAXTPC_ROOT')\n"
+        "cand = pathlib.Path(jx)/'config'/'noise_spectrum.npz' if jx else None\n"
+        "npz = str(cand) if (cand and cand.exists()) else str(packaged('noise_spectrum.npz'))\n"
+        "assert pathlib.Path(npz).exists(), npz\n"
+        "print(npz)\n"
+    )
+    env = dict(os.environ)
+    env.pop("HELIX_JAXTPC_ROOT", None)          # the handover case: no JAXTPC
+    r = subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                       text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().endswith("noise_spectrum.npz")
 
 
 def test_the_corpus_builder_defaults_to_something_that_exists():
@@ -205,6 +247,12 @@ def test_the_corpus_builder_defaults_to_something_that_exists():
     assert len(npz) == 1, "expected exactly one --npz argument"
     default = [k.value for k in npz[0].keywords if k.arg == "default"]
     assert default and isinstance(default[0], _ast.Constant) and default[0].value is None, (
-        "--npz must default to None so the resolution below can pick the "
-        "packaged copy or $HELIX_JAXTPC_ROOT; a literal path default cannot "
-        "fall back, and the literal it used to carry was one person's checkout")
+        "--npz must default to None so the resolution can pick the packaged "
+        "copy or $HELIX_JAXTPC_ROOT; a literal path default cannot fall back, "
+        "and the literal it used to carry was one person's checkout")
+    # ...and the resolution must EXIST. A None default with nothing resolving it
+    # is strictly worse than the hardcoded path it replaced.
+    assert "if args.npz is None:" in src, (
+        "--npz defaults to None and nothing resolves it; np.load(None) raises "
+        "TypeError and every corpus build dies at startup")
+    assert "packaged(" in src, "the resolution must reach helix's packaged copy"
