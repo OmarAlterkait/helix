@@ -171,31 +171,25 @@ different (white) noise model. Do not reuse bins across corpus generations.
 
 ## 2. Train
 
-**There are two launchers and that is one too many.** `scripts/` is the
-production path (it trained the 8-run, and carries the config-fingerprint resume
-guard and the QOS knob); `launch/` is the older one and is the better-documented
-of the two about how this cluster preempts. They must not both survive the
-handover -- pick one, move anything the other knows into it, and delete the
-loser. Until then, use `scripts/`.
+ONE launcher. `launch/` was the predecessor and is retired -- `scripts/` ran
+every current result (the 8-run's 16 links, 8run_plane's 12, and both cooldowns)
+and carries the config-fingerprint resume guard, the QOS knob and the helix code
+snapshot.
 
-    # THE PRODUCTION PATH -- this is what trained the 8-run (its default config
-    # is configs/pimm/coeff_fm_train_8run.py):
     scripts/chain_coeff_fm_train.sh <N> [config]           # a chain of links
     sbatch --export=ALL,CFG=<config> scripts/submit_coeff_fm_train.sh   # one link
 
-    # THE OLDER PATH, still present and still working, defaulting to
-    # configs/pimm/coeff_fm_train.py:
-    sbatch launch/coeff_fm_train.sbatch                    # one job
-    ./launch/chain_submit.sh <n_jobs> <run_name>           # a chain
+Default config is `configs/pimm/coeff_fm_train_8run.py`. Knobs are environment
+variables, not `#SBATCH` edits: `CFG`, `ACCOUNT`, `QOS`, `EXCLUDE`, `LOGDIR`.
 
-**Set these on the command line** — `#SBATCH` directives cannot read shell
-variables, so the defaults in the file point at one person's allocation and log
-directory:
-
-    sbatch --account=<facility>:<repo> --output=<your logs>/coeff-fm-%j.out \
-           launch/coeff_fm_train.sbatch
-
-`chain_submit.sh` forwards `"$@"` to every link.
+**Every run snapshots helix into `<save_path>/helix-code/`.** `provenance.json`
+records the commit and the dirty flag, and that was not enough: the 8-run's
+eleven links all recorded commit `87248d88` on branch `extraction`, and that
+hash resolves in no repository today -- the 2026-09-14 consolidation rewrote
+every commit, so the recorded identity ceased to exist. A hash is a pointer into
+a history someone may rewrite; a copy is not. (pimm's `train.sh` has always
+snapshotted ITS code into `<save_path>/code`; helix, which defines the model and
+the tokenizer, had no equivalent until now.)
 
 **Why a chain and not `--requeue`.** This cluster runs `PreemptMode=CANCEL`
 (QoS preemptable = "within,cancel"), so a preempted job is CANCELLED and never

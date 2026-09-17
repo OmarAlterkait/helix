@@ -307,14 +307,16 @@ or relocated checkout still finds itself.
 Two things paths.py deliberately does NOT cover:
 
 * **`#SBATCH` directives.** They cannot read shell variables, so `--account`,
-  `--output` and `--partition` in `launch/coeff_fm_train.sbatch` stay literal and
-  point into one person's allocation and log directory. They are overridable on
-  the command line and `chain_submit.sh` forwards `"$@"`; the script header says
-  so with an example.
-* **`pimm-fm/configs/helix`.** pimm's `train.sh` resolves `-c helix/<cfg>` under
-  its OWN `configs/` with no absolute-path option, so a link must exist there.
-  `launch/coeff_fm_train.sbatch` now creates it from the running checkout
-  (creating, repointing a stale one, or failing loudly on a real directory).
+  `--output` and `--partition` in `scripts/submit_coeff_fm_train.sh` stay
+  literal. They are overridable through the environment instead — `ACCOUNT`,
+  `QOS`, `EXCLUDE`, `LOGDIR` — which `chain_coeff_fm_train.sh` forwards to every
+  link; the script header says so with an example.
+* **`pimm-fm/configs/helix`.** Needed only by pimm's `train.sh`, which resolves
+  `-c helix/<cfg>` under its OWN `configs/` with no absolute-path option. The
+  surviving launcher does not use `train.sh`: `scripts/submit_coeff_fm_train.sh`
+  calls `python -m pimm.train --config-file <abs path>`, so no link is required
+  and none is created. (`launch/coeff_fm_train.sbatch` needed one and managed it;
+  it was retired with the rest of that launcher.)
 
 ---
 

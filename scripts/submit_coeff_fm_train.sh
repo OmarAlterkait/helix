@@ -10,7 +10,7 @@
 # (QoS preemptable = "within,cancel"), so a preempted job is cancelled outright
 # and never returns to the queue whatever --requeue says. Measured 2026-09-16:
 # job 38395161 carried --requeue, was preempted on sdfampere040 at 1:47, and
-# stayed dead. launch/coeff_fm_train.sbatch had this right and this file did
+# stayed dead. The retired launch/ launcher had this right and this file did
 # not; the header used to claim "--requeue puts the SAME job back on preemption".
 #
 #   --dependency=afterany   the NEXT link starts when this one ends for ANY
@@ -91,6 +91,45 @@ PY
 [ -n "$SAVE" ] && [ -n "$TOTAL" ] || { echo "FATAL: config gave no save_path/STEPS"; exit 1; }
 echo "config: $CFG -> $SAVE, $TOTAL steps"
 
+# SNAPSHOT HELIX INTO THE RUN DIRECTORY.
+#
+# provenance.json records helix's commit and dirty flag, which is the right
+# thing and was not enough. The 8-run's eleven links all recorded commit
+# 87248d88 on branch `extraction`, clean -- and that hash resolves in NO
+# repository today: the 2026-09-14 consolidation purged 517 research/ files and
+# rewrote every commit, so the recorded identity ceased to exist. The cooldown
+# is worse: three different commits across six links, one of them dirty.
+#
+# A hash is a pointer into a history someone may rewrite. A copy is not. pimm's
+# own train.sh has snapshotted ITS code into <save_path>/code since forever --
+# helix, the repo that actually defines the model and the tokenizer, had no
+# equivalent. This is it.
+#
+# Written once per run, not per link: links share a save_path, and the first one
+# is the code the run started from. ~13 MB, against checkpoints of 236 MB each.
+if [ ! -d "$SAVE/helix-code" ]; then
+  mkdir -p "$SAVE"
+  if command -v git >/dev/null && git -C "$H" rev-parse --git-dir >/dev/null 2>&1; then
+    # `git archive` takes the COMMITTED tree; a dirty tree would silently ship
+    # something the commit does not describe, so fall back to a copy and say so.
+    if [ -z "$(git -C "$H" status --porcelain)" ]; then
+      mkdir -p "$SAVE/helix-code"
+      git -C "$H" archive HEAD | tar -x -C "$SAVE/helix-code" \
+        && echo "snapshot: $SAVE/helix-code <- git archive $(git -C "$H" rev-parse --short HEAD)"
+    else
+      echo "snapshot: WORKING TREE IS DIRTY — copying it verbatim, because the" >&2
+      echo "          commit does not describe what will run" >&2
+      mkdir -p "$SAVE/helix-code"
+      tar -C "$H" --exclude=.git --exclude='*.pyc' --exclude=__pycache__ -cf - . \
+        | tar -x -C "$SAVE/helix-code"
+    fi
+  else
+    echo "snapshot: $H is not a git checkout; copying verbatim" >&2
+    mkdir -p "$SAVE/helix-code"
+    tar -C "$H" --exclude='*.pyc' --exclude=__pycache__ -cf - . | tar -x -C "$SAVE/helix-code"
+  fi
+fi
+
 # Resume iff there is something to resume from. This is what makes a preempted
 # link, a wall-clock link and a fresh start all the same case — the alternative
 # is a flag the submitter has to get right on every link but the first, which is
@@ -146,7 +185,7 @@ if [ -n "$WEIGHT" ]; then
   # HELIX_EXP with an unchanged name lands on an existing run -- and if HELIX_EXP
   # fails to reach the job at all, on the production one.
   #
-  # launch/coeff_fm_train.sbatch has an ALLOW_RESUME guard for exactly this and
+  # The retired launch/ launcher had an ALLOW_RESUME guard for exactly this and
   # this launcher, the one the chain actually uses, had none.
   #
   # pimm dumps the RESOLVED config to <save_path>/config.py, so the check is

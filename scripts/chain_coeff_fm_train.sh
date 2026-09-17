@@ -1,17 +1,28 @@
 #!/bin/bash
-# Submit N chained links of the coefficient-FM stable phase.
+# Submit a CHAIN of dependent training links.
 #
-# Each link depends on the previous with `afterany`, so it starts when that one
-# ENDS — completed, preempted-past-requeue, or out of wall clock alike. Every
-# link resumes from the last checkpoint, and a link that finds training already
-# complete exits without claiming its GPUs, so over-submitting is cheap and
-# under-submitting is what costs a night.
+# WHY A CHAIN, and not --requeue. This cluster runs PreemptMode=CANCEL (QoS
+# preemptable = "within,cancel"): a preempted job is cancelled outright and
+# never returns to the queue, whatever --requeue says. Confirmed twice -- once
+# by a run that reached epoch 11/25 (step 51,170, 3h20m) and simply vanished,
+# and again on 2026-09-16 when job 38395161 carried --requeue, was preempted at
+# 1:47, and stayed dead. Continuation therefore needs something OUTSIDE the job:
+# each link starts when the previous one ENDS for any reason
+# (--dependency=afterany) and resumes from the last checkpoint, so a preemption
+# costs at most SAVE_EVERY steps instead of the whole run.
 #
-#   scripts/chain_coeff_fm_train.sh 5
-#   scripts/chain_coeff_fm_train.sh 5 configs/pimm/coeff_fm_cooldown.py
+# --requeue is still worth setting on the link itself, because it covers NODE
+# FAILURE, which slurm does requeue.
 #
-# Add more links at any time — a new chain's first link simply resumes.
-set -euo pipefail
+# This is only safe because resume works: pimm's loader moved the saved RNG
+# state to the GPU and torch.set_rng_state rejects a CUDA tensor, so `resume=True`
+# used to die before step 1 and an evicted run could only warm-start with its
+# optimizer and step counter reset -- which on a 25-epoch schedule means
+# restarting the schedule on every eviction.
+# helix.integrations.pimm._compat moves it back.
+#
+# (This paragraph came from launch/coeff_fm_train.sbatch, which knew it first
+# and was retired into this launcher.)
 
 N=${1:-4}
 # Locating the checkout: NOT by name. Three helix checkouts have existed side by

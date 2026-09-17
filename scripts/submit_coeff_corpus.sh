@@ -74,7 +74,7 @@
 # And note it is NOT necessarily the account the TRAINING job uses. On S3DF the
 # accounts are authorised per partition: `mli:cider-ml` covers ampere and milano
 # but NOT turing, which this job pins for the architecture reason above, so the
-# corpus build needs `mli:default` while launch/coeff_fm_train.sbatch correctly
+# corpus build needs `mli:default` while the training launcher correctly
 # defaults to `mli:cider-ml` on ampere. `sacctmgr -n show assoc user=$USER
 # format=Account,Partition` lists what you may use where. Submitting without an
 # account gives "you must specify a valid account"; submitting with one that is

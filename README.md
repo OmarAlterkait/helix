@@ -156,8 +156,9 @@ built the current corpus.
 Slurm array), `calibrate_norm_sigma.sh` (the frozen norm_sigma table),
 `derive_coeff_bins.py` (the categorical bin grid), `viz_2x2_corpus.py`.
 
-**Training** — `launch/coeff_fm_train.sbatch`, `launch/chain_submit.sh` (chain
-across the wall-clock limit), `smoke_train_fm.py`, `plot_train_progress.py`.
+**Training** — `scripts/chain_coeff_fm_train.sh` (a chain of links across the
+wall-clock limit and preemption), `scripts/submit_coeff_fm_train.sh` (one link),
+`smoke_train_fm.py`, `plot_train_progress.py`.
 
 **Evaluation** — `eval_checkpoint.py` (score a frozen checkpoint),
 `dump_probe_truth.py` + `run_probe.py` (the 3D probe, two stages),
