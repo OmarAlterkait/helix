@@ -156,3 +156,55 @@ def test_write_holdout_exists_and_is_wired():
     assert "holdout_manifest" in calls, (
         "write_holdout.py no longer calls holdout_manifest() -- it must derive the "
         "split from the dataset, not re-implement the identity hash")
+
+
+def test_the_packaged_noise_spectrum_is_the_one_the_corpus_was_built_with():
+    """helix ships its own copy of the DSP's external input. It must not drift.
+
+    `scripts/build_coeff_corpus.py --npz` used to default to
+    /sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz -- one checkout
+    on one cluster. It now defaults to the PACKAGED copy so a clone can build a
+    corpus with no second repository present, which is only safe because the two
+    files are byte-identical (md5 fd80df5c4df6d761264b2db95c29dfb6, verified
+    2026-09-17 against the JAXTPC checkout).
+
+    Every shard records `spectrum_sha256`, and `coeff_verify` compares it, so a
+    divergence would be CAUGHT rather than silently producing a second
+    distribution -- but it would be caught after building a corpus. This catches
+    it before.
+    """
+    import hashlib
+
+    from helix.paths import packaged
+
+    p = packaged("noise_spectrum.npz")
+    assert p.exists(), f"helix no longer ships {p.name}; the corpus builder's default is broken"
+    assert hashlib.md5(p.read_bytes()).hexdigest() == "fd80df5c4df6d761264b2db95c29dfb6", (
+        "the packaged noise spectrum changed. Every corpus built before this "
+        "recorded the old spectrum_sha256, so this is a NEW DSP distribution and "
+        "a new basis_digest -- intended only as a deliberate rebuild.")
+
+
+def test_the_corpus_builder_defaults_to_something_that_exists():
+    """The default must resolve without a second repository on the machine."""
+    import importlib.util
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "build_coeff_corpus.py"
+    import ast as _ast
+
+    src = path.read_text()
+    # Parse the argparse call, do not grep the file: the old path still appears
+    # in a COMMENT explaining why it was removed, and a substring test flagged
+    # that as a regression. Assert on the default VALUE.
+    tree = _ast.parse(src)
+    npz = [c for c in _ast.walk(tree)
+           if isinstance(c, _ast.Call)
+           and getattr(c.func, "attr", "") == "add_argument"
+           and c.args and getattr(c.args[0], "value", "") == "--npz"]
+    assert len(npz) == 1, "expected exactly one --npz argument"
+    default = [k.value for k in npz[0].keywords if k.arg == "default"]
+    assert default and isinstance(default[0], _ast.Constant) and default[0].value is None, (
+        "--npz must default to None so the resolution below can pick the "
+        "packaged copy or $HELIX_JAXTPC_ROOT; a literal path default cannot "
+        "fall back, and the literal it used to carry was one person's checkout")
