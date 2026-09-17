@@ -130,7 +130,7 @@ def test_the_operating_point_survives_every_readable_format(fmt, tmp_path):
     so "the loader read it" is not enough; every loader must read the SAME one.
     """
     art = inspect(_make(fmt, tmp_path))
-    assert art.op.comparable_to(OP), f"{fmt}: {art.op} != {OP}"
+    assert art.op == OP, f"{fmt}: {art.op} != {OP}"
     assert art.arch["d"] == ARCH["d"] and art.arch["n_band"] == ARCH["n_band"]
 
 
@@ -250,25 +250,6 @@ def test_a_helix_eval_artifact_round_trips_through_the_model(tmp_path):
     back = build(load(d), device="cpu")
     for k, v in m.state_dict().items():
         torch.testing.assert_close(v, back.state_dict()[k], msg=k, equal_nan=True)
-
-
-def test_asking_for_ema_never_makes_a_weight_set_ema(tmp_path):
-    """``pick`` reports what the artifact HOLDS; the request cannot change it.
-
-    It used to be a selector, because the converted blobs carried `state_dict`
-    and `state_dict_ema` side by side. Nothing writes two sets any more, so the
-    only honest answer is what is there -- and for an export that is "unknown",
-    never "raw", or an EMA arm and a raw arm compare in silence.
-    """
-    exported = load(make_pimm_export(str(tmp_path / "d")))
-    assert exported.pick("ema")[1] == "unknown"
-    assert exported.pick("raw")[1] == "unknown"
-
-    promoted = load(make_helix_eval(str(tmp_path / "a"), weights="ema"))
-    assert promoted.pick("raw")[1] == "ema", "asking for raw cannot unmake an EMA"
-
-    raw = load(make_helix_eval(str(tmp_path / "b"), weights="raw"))
-    assert raw.pick("ema")[1] == "raw", "asking for EMA cannot make one"
 
 
 def test_every_declared_format_has_a_row(tmp_path):

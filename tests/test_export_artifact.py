@@ -42,7 +42,7 @@ def test_promotion_records_what_the_export_could_not(tmp_path):
     art = inspect(out)
     assert art.fmt == "helix-eval"
     assert art.weights == "ema"                       # the fix
-    assert art.op.comparable_to(OP)
+    assert art.op == OP
     assert art.arch["d"] == ARCH["d"]
     assert len(art.provenance["weights_digest"]) == 32
     assert art.provenance["source"] == os.path.abspath(src)

@@ -89,31 +89,13 @@ def main(argv=None):
     # rope_split is explicit for the same reason the configs pin it: it leaves no
     # trace in the weights, and defaulting it is what made m113 unevaluable.
     model = build_fm(cfg, serial=True, rope_split=False).to(dev)
-    # Read the edges through the ONE loader. This used to be
-    # `torch.load(...)["bins"]["edges"]`, which only understood the converted
-    # blob's shape -- so when the converter was retired and ARCHIVE was
-    # repointed at m113's eval ARTIFACT (a directory), this died with
-    # IsADirectoryError, and on a bins sidecar from derive_coeff_bins.py it died
-    # with KeyError: 'bins'. Both shapes work now, which is the whole point of
-    # having one reader.
-    import os
-
+    # The one bins loader, in helix.integrations.pimm.model. This grew its own
+    # copy -- an artifact branch and a sidecar branch -- in the same change that
+    # was fixing a "one reader" bug. Two readers is what the bug was.
+    from helix.integrations.pimm.model import _load_bins
     from helix.model.checkpoint import apply_bins
 
-    if os.path.isdir(a.bins_from):
-        from helix.model.artifact import inspect
-        bins = inspect(a.bins_from).op.bins
-        if bins is None:
-            raise SystemExit(
-                f"{a.bins_from} is an artifact that carries no inlined bins; "
-                f"its edges ride in the weights. Pass a bins sidecar from "
-                f"scripts/derive_coeff_bins.py instead.")
-    else:
-        blob = torch.load(a.bins_from, map_location=dev, weights_only=False)
-        # sidecar (derive_coeff_bins) or a checkpoint that inlines them
-        bins = blob if "edges" in blob else (blob.get("bins") or {})
-        if "edges" not in bins:
-            raise SystemExit(f"{a.bins_from}: no bin edges found")
+    bins = _load_bins(a.bins_from)
     apply_bins(model, bins)
 
     opt = torch.optim.AdamW(model.param_groups(a.lr, weight_decay=a.wd),

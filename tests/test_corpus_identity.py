@@ -225,34 +225,3 @@ def test_the_corpus_builder_RESOLVES_its_npz_default():
                        text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip().endswith("noise_spectrum.npz")
-
-
-def test_the_corpus_builder_defaults_to_something_that_exists():
-    """The default must resolve without a second repository on the machine."""
-    import importlib.util
-    import pathlib
-
-    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "build_coeff_corpus.py"
-    import ast as _ast
-
-    src = path.read_text()
-    # Parse the argparse call, do not grep the file: the old path still appears
-    # in a COMMENT explaining why it was removed, and a substring test flagged
-    # that as a regression. Assert on the default VALUE.
-    tree = _ast.parse(src)
-    npz = [c for c in _ast.walk(tree)
-           if isinstance(c, _ast.Call)
-           and getattr(c.func, "attr", "") == "add_argument"
-           and c.args and getattr(c.args[0], "value", "") == "--npz"]
-    assert len(npz) == 1, "expected exactly one --npz argument"
-    default = [k.value for k in npz[0].keywords if k.arg == "default"]
-    assert default and isinstance(default[0], _ast.Constant) and default[0].value is None, (
-        "--npz must default to None so the resolution can pick the packaged "
-        "copy or $HELIX_JAXTPC_ROOT; a literal path default cannot fall back, "
-        "and the literal it used to carry was one person's checkout")
-    # ...and the resolution must EXIST. A None default with nothing resolving it
-    # is strictly worse than the hardcoded path it replaced.
-    assert "if args.npz is None:" in src, (
-        "--npz defaults to None and nothing resolves it; np.load(None) raises "
-        "TypeError and every corpus build dies at startup")
-    assert "packaged(" in src, "the resolution must reach helix's packaged copy"

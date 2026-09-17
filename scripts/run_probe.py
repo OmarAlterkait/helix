@@ -173,40 +173,11 @@ def _cache_chunks(d):
     return out
 
 
-#: What each arm's fit actually reads. `triangulate` builds every one of its
-#: designs from the TRAINED features plus geometry, never from random or raw.
-_ARM_NEEDS = {"geo": (), "trained": ("Xtr",), "random": ("Xrn",), "raw": ("Xraw",),
-              "solo": ("Xtr",), "cross": ("Xtr",), "xwire": ("Xtr",)}
-#: Columns every fit needs regardless of arm.
-_ALWAYS = ("y", "geo", "event", "plane", "cells", "n_pixels", "n_dom",
-           "multiplane", "n_bands", "tick", "wire")
-
-
-def _cache_floor(d):
-    """The contiguous resume floor, from FILENAMES alone -- no data read.
-
-    Needed before the load, to decide which arm columns to read: restricting
-    them is only safe once extraction is complete, because any event still to be
-    extracted produces all three arms and a pack set where some events carry an
-    arm and others do not cannot be concatenated.
-    """
-    nxt = 0
-    for lo, hi, _ in _cache_chunks(d):
-        if lo != nxt:
-            break
-        nxt = hi
-    return nxt
-
-
-def _cache_resume(d, need=None):
+def _cache_resume(d):
     """``(packs, next_event)`` from the CONTIGUOUS prefix of cached chunks.
 
-    ``need`` names the arm columns this run will actually fit with; the rest are
-    skipped at load -- the difference between reading 44 GB and about 15 GB for
-    a single-arm resume. The reload is CPU-bound and takes a few minutes either
-    way, so this is an optimisation rather than a rescue; the saving that makes
-    the cache worth having is the FITS (measured: geo 36 min, trained 58 min),
-    not the extraction (12.5 min).
+    The saving that makes this worth having is the FITS (measured: geo 36 min,
+    trained 58 min), not the extraction (12.5 min) -- see `arms.json`.
 
     Contiguous on purpose. A gap means a chunk was lost or a run died mid-write,
     and silently skipping the missing events would produce a result whose
@@ -229,8 +200,6 @@ def _cache_resume(d, need=None):
                 if not k.startswith(pre):
                     continue
                 col = k[len(pre):]
-                if need is not None and col in _CACHE_ARMS and col not in need:
-                    continue            # not fitted this run; do not read it
                 v = z[k]
                 if col in _CACHE_ARMS and v.dtype != np.float32:
                     # Widen a half cache; a full one is already float32 and an
@@ -417,27 +386,7 @@ def main(argv=None):
             truth=os.path.abspath(truth_path),
             corpus_ident=str(cfg.get("corpus_ident_sha256", "")),
             dom_threshold=float(cfg.get("dom_threshold", 0.5))))
-        # Decide what to READ before reading it. Only when extraction is
-        # already complete can arms be skipped -- an event still to be
-        # extracted produces all three, and a pack set where some events carry
-        # an arm and others do not cannot be concatenated.
-        need = None
-        if _cache_floor(cache_dir) >= n_ev:
-            done = _arms_load(cache_dir)
-            need = set()
-            for probe in (p.strip() for p in a.probes.split(",") if p.strip()):
-                for arm, cols in _ARM_NEEDS.items():
-                    if probe == "mlp" and arm not in ("geo", "trained", "random", "raw"):
-                        continue
-                    if probe == "triangulate" and arm not in ("solo", "cross", "xwire"):
-                        continue
-                    if _arm_key(probe, arm, a) not in done:
-                        need.update(cols)
-            skipped = [c for c in _CACHE_ARMS if c not in need]
-            if skipped:
-                print(f"cache: skipping {', '.join(skipped)} at load — "
-                      f"no remaining arm reads them", flush=True)
-        packs, start = _cache_resume(cache_dir, need=need)
+        packs, start = _cache_resume(cache_dir)
         start = min(start, n_ev)
         print(f"cache {cache_dir}: {len(packs)} packs, resuming at event {start}",
               flush=True)
@@ -507,12 +456,9 @@ def main(argv=None):
     cat = lambda k: np.concatenate([p[k] for p in packs])
     y, event, plane = cat("y"), cat("event"), cat("plane")
     geo = cat("geo")
-    have = set(packs[0])
-    arms = {n: (cat(c) if c in have else None)
-            for n, c in (("trained", "Xtr"), ("random", "Xrn"), ("raw", "Xraw"))}
-    _dim = next((v.shape[1] for v in arms.values() if v is not None), 0)
+    arms = {"trained": cat("Xtr"), "random": cat("Xrn"), "raw": cat("Xraw")}
     print(f"total {len(y):,} patches over {len(np.unique(event))} events, "
-          f"feature dim {_dim}", flush=True)
+          f"feature dim {arms['trained'].shape[1]}", flush=True)
 
     # `corpus` is recorded because it was not, and an A/B whose entire independent
     # variable IS the corpus produced rows that never said which one they read —
@@ -644,17 +590,8 @@ def main(argv=None):
         gc.collect()
         tri_names = ("solo", "cross", "xwire")
         row = dict(base, probe="triangulate")
-        if all(_arm_key("triangulate", n, a) in fitted for n in tri_names):
-            # Every design already fitted: its features were skipped at load, so
-            # there is nothing to build from and nothing to build.
-            d = {}
-            for n in tri_names:
-                row[n] = fitted[_arm_key("triangulate", n, a)]
-                print(f"  [tri] {n:8s} fisher_r={row[n]['fisher_r']:+.4f} "
-                      f"(cached)", flush=True)
-        else:
-            d = triangulate_designs(geo, arms["trained"], plane, cat("tick"),
-                                    cat("wire"), event)
+        d = triangulate_designs(geo, arms["trained"], plane, cat("tick"),
+                                cat("wire"), event)
         for name in list(d):
             X = d.pop(name)                  # hand off; do not keep a second ref
             k = _arm_key("triangulate", name, a)

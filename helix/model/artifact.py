@@ -91,11 +91,6 @@ class OperatingPoint:
         """
         return any(v is not None for v in (self.cell_t, self.pw, self.pt))
 
-    def comparable_to(self, other):
-        """Two numbers may be compared only if these agree."""
-        return (self.cell_t == other.cell_t and self.pw == other.pw
-                and self.pt == other.pt and self.n_bands == other.n_bands)
-
 
 @dataclass(frozen=True)
 class Artifact:
@@ -112,22 +107,6 @@ class Artifact:
     source: str = ""                  # the path it was read from
     fmt: str = ""                     # which of FORMATS it was
     state_dict: dict | None = None    # None when only inspected
-    def pick(self, prefer="raw"):
-        """``(state_dict, weights)``. ``prefer`` is a REQUEST, not a selector.
-
-        An artifact holds exactly one weight set and says what it is. It used to
-        be able to hold two -- the retired converter wrote `state_dict` and
-        `state_dict_ema` side by side -- and `prefer` chose between them. Nothing
-        writes two any more, and keeping a selector that can no longer select
-        would read as though the choice were still being made here.
-
-        So the answer is what the artifact HOLDS, and a caller who asked for
-        something else is told by comparing `prefer` against the second return
-        value. "unknown" propagates rather than collapsing to "raw": a `pimm
-        export` cannot say what it holds, and calling that raw is what lets an
-        EMA arm and a raw arm be compared in silence.
-        """
-        return self.state_dict, self.weights
 
 
 def detect(path):

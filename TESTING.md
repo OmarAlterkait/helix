@@ -7,17 +7,12 @@ One image, one command:
     cd $HELIX_ROOT
     apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python -m pytest -q
 
-**Test counts depend on whether pimm is importable**, and the difference is
-large enough to mislead: ~40 tests are `@pimm_importable` and SKIP wherever pimm
-is absent.
-
-| environment | helix | pimm-data |
-|---|---|---|
-| pimm not on the path | 496 passed, 53 skipped | 363 passed, 7 skipped |
-| pimm on `PYTHONPATH` | **536 passed, 12 skipped, 1 xfailed** | 363 passed, 7 skipped |
-
-Run with pimm on the path when you want the real number. Seven failures hid in
-that gap once -- see the clean-room note in `TESTING.md`.
+**Test counts are deliberately not quoted.** They depend on whether pimm is
+importable -- ~40 tests are `@pimm_importable` and SKIP without it -- and
+quoting a number turns every change into a documentation edit. Three commits in
+one session existed only to bump one, and four documents still disagreed
+afterwards. What matters: the suite is green, and you ran it with pimm on the
+path so those ~40 actually execute. Seven failures hid in that gap once.
 
 ## Testing a change to pimm-data
 
