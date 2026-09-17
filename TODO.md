@@ -51,12 +51,20 @@ inside a run, rather than as scripts after it. pimm has
 — and the `eval-contract` branch of pimm-private is 26 commits of exactly that
 groundwork, unpushed at the time of writing.
 
-## 4. A real pretraining run — DONE
+## 4. A real pretraining run — DONE, cooldown included
 
 112,677 steps via a chain of links on the 8-run corpus; eval `var_expl 0.6844`
-against production's 0.7030. What is still open is the COOLDOWN: the chain
-exhausted at step 6,417 of 14,264 with all three links preempted, on an account
-whose only QOS is preemptable (see above).
+against production's 0.7030.
+
+The cooldown finished too. Both arms reached `iter_14260.pth` of 14,264 steps:
+
+    exp/helix/coeff-fm-cooldown-r1-8run/model/iter_14260.pth
+    exp/helix/coeff-fm-cooldown-r1-8run-plane25/model/iter_14260.pth
+
+(An earlier version of this entry said the chain "exhausted at step 6,417 with
+all three links preempted". That was the state at one moment during the run and
+was never re-checked against disk; a newcomer reading it would have re-run a
+finished cooldown.)
 
 ## 5. Corpus scale — DONE
 
@@ -81,7 +89,43 @@ was deleted with the forward model. torch is the production backend
 * ~~The 10 back-compat flat shims~~ — REMOVED, along with the 6 import-broken
   scripts that were their only non-test users.
 
-## 8. Courtesy report to pimm's author
+## 8. BEFORE MERGING pimm's `eval-contract` branch
+
+That branch (26 commits, the Evaluator-contract work) pins pimm-data at
+`74cfe5f`, and its `uv.lock` resolves to **pimm-data 0.3.0** — the revision
+BEFORE the forward model moved, which still registers AddNoise and Digitize.
+helix registers both now, so merging eval-contract and resolving `pyproject.toml`
+/`uv.lock` toward it puts the environment on the wrong side of the lockstep and
+`_registry.py` raises KeyError at import.
+
+The branch's own CODE is fine at `6b2656a` — every pimm_data symbol it uses
+still exists. Only the pin is stale. Re-pin to
+`6b2656ab32336131783176d49b09d0a77007607d` and relock BEFORE merging.
+
+`tests/test_lockstep_pin.py` cannot see this: it checks the two pins inside
+helix. A third check reading `$HELIX_PIMM_ROOT/pyproject.toml` when present
+would.
+
+
+## 9. The pin governs the IMAGE, not the RUN
+
+Worth knowing before trusting the lockstep machinery. `container/helix-train.def`
+installs pimm-data at the pinned revision, and `test_lockstep_pin.py` keeps the
+pins equal — but `scripts/submit_coeff_fm_train.sh:77` exports
+`PYTHONPATH="$PIMM:$H:$PDATA"` and `configs/pimm/coeff_fm_train.py:53` does an
+`insert(1)`, both putting the pimm-data CHECKOUT ahead of the installed copy.
+`tests/test_pimm_config_contract.py` actively requires that precedence.
+
+So a training run uses whatever is checked out, which today is one unpushed
+commit past the pin. The image assertion, the lockfiles and the pin test all
+govern the container; `provenance.json` recording the checkout commit and dirty
+flag is what actually pins a run. Pick one authority — either drop
+`PIMM_DATA_SRC` from the launchers and let the install rule, or keep the
+shadowing and say so in ARCHITECTURE §4 — but do not read the pin as a
+guarantee about a run.
+
+
+## 10. Courtesy report to pimm's author
 
 `engines/train.py::run_step` does
 `if "offset" in input_dict: input_dict["coord"].shape[0]` — a batch with an
