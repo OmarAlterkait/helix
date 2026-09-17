@@ -134,10 +134,21 @@ def test_max_events_is_not_in_the_key():
     `corpus_ident` already pins that order, so the count is not part of identity.
     """
     rp = _rp()
+    import ast as _ast
     import inspect as _inspect
-    src = _inspect.getsource(rp.main)
-    call = src[src.index("_cache_key("):src.index("packs, start = _cache_resume")]
-    assert "max_events" not in call and "n_ev" not in call
+    import textwrap as _tw
+
+    # Parse the actual call, not a text span. Slicing to the next statement was
+    # brittle: it broke the moment an unrelated `n_ev` check was added between
+    # the two, flagging a violation that did not exist.
+    tree = _ast.parse(_tw.dedent(_inspect.getsource(rp.main)))
+    calls = [n for n in _ast.walk(tree)
+             if isinstance(n, _ast.Call) and getattr(n.func, "id", "") == "_cache_key"]
+    assert len(calls) == 1, "expected exactly one _cache_key call in main"
+    names = {n.id for n in _ast.walk(calls[0]) if isinstance(n, _ast.Name)}
+    assert not (names & {"n_ev", "max_events"}), (
+        f"the feature-cache key must not depend on how many events are being "
+        f"probed; found {names & {'n_ev', 'max_events'}}")
 
 
 def test_a_half_written_chunk_is_never_visible(tmp_path, monkeypatch):
@@ -238,3 +249,68 @@ def test_no_cache_dir_means_no_arm_persistence(tmp_path):
     assert rp._arms_load(None) == {}
     rp._arms_save(None, {"a": {}})            # must not raise, must not create
     assert not list(tmp_path.iterdir())
+
+
+# ---------------------------------------------- reading only what is still needed
+
+def test_the_resume_reads_only_the_arms_it_will_fit(tmp_path):
+    """The dominant cost of a resume is the reload, not the fitting.
+
+    Measured on job 38444314: pulling all three arms back from a 98%-full
+    /sdf/data took 2h29m at 16 MB/s while burning 2m41s of CPU — longer than the
+    35 min of extraction the cache exists to save. A resume that costs more than
+    what it skips is not a resume.
+    """
+    rp = _rp()
+    d = str(tmp_path / "c")
+    rp._cache_write(d, 0, 2, [_pack(0), _pack(1)])
+
+    both = rp._cache_resume(d)[0][0]
+    assert {"Xtr", "Xrn", "Xraw"} <= set(both)
+
+    only_raw = rp._cache_resume(d, need={"Xraw"})[0][0]
+    assert "Xraw" in only_raw
+    assert "Xtr" not in only_raw and "Xrn" not in only_raw
+    # everything that is not an arm is still read, whatever `need` says
+    for k in ("y", "geo", "event", "plane", "n_bands"):
+        assert k in only_raw, k
+
+    none_needed = rp._cache_resume(d, need=set())[0][0]
+    assert not ({"Xtr", "Xrn", "Xraw"} & set(none_needed))
+    np.testing.assert_array_equal(none_needed["y"], _pack(0)["y"])
+
+
+def test_the_floor_is_readable_without_touching_the_data(tmp_path):
+    """`_cache_floor` decides WHAT to read, so it must not read it.
+
+    It runs before the load and its answer picks the columns; if it opened the
+    .npz files it would pay the very cost it exists to avoid.
+    """
+    rp = _rp()
+    d = str(tmp_path / "c")
+    rp._cache_write(d, 0, 3, [_pack(0)])
+    rp._cache_write(d, 3, 6, [_pack(3)])
+    rp._cache_write(d, 9, 12, [_pack(9)])          # gap at 6
+
+    assert rp._cache_floor(d) == 6
+    assert rp._cache_floor(str(tmp_path / "absent")) == 0
+    assert rp._cache_floor(d) == rp._cache_resume(d)[1], \
+        "the cheap floor must agree with the one the full load computes"
+
+    # proof it read no payload: break every .npz and ask again
+    for _lo, _hi, f in rp._cache_chunks(d):
+        open(f, "wb").write(b"not an npz")
+    assert rp._cache_floor(d) == 6
+
+
+def test_every_fittable_arm_is_covered_by_the_needs_map():
+    """A new arm without an entry would silently load nothing and be skipped."""
+    rp = _rp()
+    assert set(rp._ARM_NEEDS) == {"geo", "trained", "random", "raw",
+                                  "solo", "cross", "xwire"}
+    for arm, cols in rp._ARM_NEEDS.items():
+        assert all(c in rp._CACHE_ARMS for c in cols), arm
+    # triangulate builds every design from the TRAINED features, never the
+    # random or raw ones — so resuming into triangulate alone reads one arm.
+    assert rp._ARM_NEEDS["cross"] == ("Xtr",)
+    assert rp._ARM_NEEDS["xwire"] == ("Xtr",)

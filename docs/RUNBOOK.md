@@ -255,11 +255,15 @@ discard all of it before a single probe was fitted. Chunks are keyed by a hash o
 everything that changes the features (both weight digests, layer, tokenizer,
 corpus, truth, and the storage precision), so a stale cache cannot be read by
 mistake. The cost is disk: **44 GB measured** for the 388-event split (2,503,852
-patches at feature dim 2048), which is less than the naive
+patches at feature dim 2048), less than the naive
 `n_patch x feat_dim x 3 arms x 4 B` because the `raw` arm is narrower than the
-two feature arms. That does not fit comfortably in the 100 GB `$SCRATCH`
-alongside anything else, so put it beside the run instead and delete it once the
-number is in.
+two feature arms.
+
+Either `$SCRATCH` (the documented home for large temporary data, 100 GB, so
+44 GB fits but not comfortably) or a directory beside the run (more room, and
+what the validation used). Reload of the full 44 GB takes a few minutes and is
+CPU-bound, not I/O-bound — measured on job 38444314 at 98% CPU — so placement is
+a space decision, not a speed one. Delete the cache once the number is in.
 
 `--cache-dir` also resumes the FITS, which is the other half. The four mlp arms
 are ~1h20m each at feature dim 2048 over 2.5M patches, and a row is written only
