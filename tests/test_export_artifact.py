@@ -15,7 +15,13 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("safetensors")
 
 from helix.model.artifact import inspect
-from tests.test_artifact_formats import ARCH, OP, make_pimm_export
+# Top-level, not `from tests.…`: there is no tests/__init__.py, so `tests` is
+# a namespace package that resolves only when the REPO ROOT happens to be on
+# sys.path. That depends on how pytest was invoked -- it held in the
+# development tree and broke in a clean clone. pytest's prepend import mode
+# puts tests/ itself on sys.path, which is what the rest of this suite relies
+# on (see `from _paths import ...`).
+from test_artifact_formats import ARCH, OP, make_pimm_export
 
 
 def _script():

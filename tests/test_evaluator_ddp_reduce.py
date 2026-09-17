@@ -33,8 +33,22 @@ GF = ("sse", "sy", "syy", "nv", "chg_pred", "chg_true", "chg_pred_s", "chg_true_
 
 
 def _ev(rank=0, world=1, logger=None):
+    """A real evaluator with a fake trainer.
+
+    `__new__` WITHOUT `__init__` is what this used to do, and the stub then had
+    to re-list every attribute the class needed. It drifted: when the evaluator
+    grew `mask_mode`/`n_planes`, five tests here started dying with
+    `AttributeError: 'CoeffFMEvaluator' object has no attribute 'mask_mode'`
+    inside the eval loop -- and nobody saw it, because the whole module is
+    @pimm_importable and skips wherever pimm is absent, which is every
+    environment we normally run the suite in. A clean-room run with pimm on the
+    path found all five at once.
+
+    So construct it properly: __init__ owns the defaults, and only the trainer
+    is faked.
+    """
     from helix.integrations.pimm import CoeffFMEvaluator
-    ev = CoeffFMEvaluator.__new__(CoeffFMEvaluator)
+    ev = CoeffFMEvaluator()
     ev.trainer = types.SimpleNamespace(
         logger=logger or types.SimpleNamespace(
             info=lambda *a, **k: None, exception=lambda *a, **k: None),
@@ -141,7 +155,7 @@ def _worker(rank, world, init_file, out):
                             rank=rank, world_size=world)
     try:
         from helix.integrations.pimm import CoeffFMEvaluator
-        ev = CoeffFMEvaluator.__new__(CoeffFMEvaluator)
+        ev = CoeffFMEvaluator()          # __init__, not __new__ -- see _ev above
         lines = []
         ev.trainer = types.SimpleNamespace(
             logger=types.SimpleNamespace(info=lines.append,
@@ -213,7 +227,11 @@ def test_eval_shard_actually_ENTERS_the_loop(monkeypatch):
         def train(self):
             pass
 
-        def make_mask(self, B, mode=None, gen=None):
+        # Signature must track helix.model.mask.make_mask(B, mode, ratio,
+        # n_planes, gen). A fake that accepts less does not fail where the real
+        # one would -- it fails HERE, with a TypeError that looks like a bug in
+        # the evaluator. It drifted once already, when n_planes was added.
+        def make_mask(self, B, mode=None, ratio=None, n_planes=None, gen=None):
             return torch.ones(N, dtype=torch.bool)
 
     def _batch():

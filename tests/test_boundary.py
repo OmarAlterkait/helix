@@ -61,8 +61,20 @@ CLEAN = ["helix", "helix.core", "helix.tpc", "helix.model.tokenize",
 MAY_IMPORT_PIMM_DATA = [
     ("helix.data", ["pimm_data"]),
     ("helix.data.transforms", ["pimm_data", "torch"]),
-    ("helix.integrations.pimm.hooks", ["pimm_data", "pimm"]),
 ]
+
+# helix.integrations.pimm.hooks is deliberately in NEITHER list.
+#
+# It is ALLOWED to import pimm_data -- it lives in helix.integrations -- but it
+# does not do so eagerly: `from helix.data.identity import corpus_identity /
+# check_corpus_matches` sit inside the two functions that use them, so a
+# module-scope import probe cannot see them and never will. CLEAN is wrong (that
+# asserts it must never), and MAY_IMPORT_PIMM_DATA is wrong (that asserts it
+# does, eagerly). It was listed in the second, which made the test demand an
+# eager import nothing wants.
+#
+# Found by a clean-room run: this whole module skips wherever pimm is absent,
+# which is every environment we normally run the suite in.
 
 _PROBE = (
     "import sys, importlib; importlib.import_module({mod!r}); "
