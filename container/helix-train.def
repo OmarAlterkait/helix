@@ -63,24 +63,51 @@ Bootstrap: docker
 # once where there is network and `apptainer build` from the local .sif.
 From: ghcr.io/deeplearnphysics/pimm@sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c6803d69e012f770d927b7a776bf
 
+%arguments
+    # Which jax to install. The image is otherwise identical either way.
+    #
+    #   cuda12  GPU jax. Needs NO GPU to build -- the wheels are prebuilt and
+    #           arch-generic (PTX + SASS for sm_70..sm_90), so an image built on
+    #           a CPU node or a Turing node runs on Ampere unchanged. This is
+    #           the default because helix HAS a jax GPU DSP backend and an image
+    #           that cannot use it makes `--backend jax` a lie.
+    #   cpu     no CUDA jax. Smaller, and the right choice if the %post guard
+    #           below ever fires on your resolver.
+    #
+    #   apptainer build --build-arg JAX_EXTRA=cpu <out>.sif container/helix-train.def
+    JAX_EXTRA=cuda12
+
 %post
     set -e
     VENV=/opt/pimm/.venv
     UV=/usr/local/uv/bin/uv
 
-    # uv installs by hardlinking out of its cache, and in the build sandbox those
-    # links do not materialise: a cached package "installs" in 99 ms and then
-    # imports as ModuleNotFoundError: No module named 'pywt.version'. The first
-    # build passed only because nothing was cached yet and it downloaded fresh,
-    # which makes this fail on the REBUILD -- the worst time to discover it.
-    #
-    # link-mode=copy alone was not enough: by then the cache held half-written
-    # entries from the failed attempts, and copying a corrupt entry reproduces
-    # the corruption (pywt recovered, pytest failed identically). A build should
-    # not depend on cache state at all, so it is bypassed outright. The cost is
-    # one download of four small pure-Python packages.
+    # uv installs by hardlinking out of its cache, and in the build sandbox
+    # those links do not materialise: a cached package "installs" in 99 ms and
+    # then imports as ModuleNotFoundError: No module named 'pywt.version'.
+    # link-mode=copy fixes that. The cache itself is put INSIDE the sandbox, so
+    # every build starts with an empty one -- which is what the earlier
+    # UV_NO_CACHE=1 was really reaching for, and it is the better way to get it:
+    # disabling the cache made uv re-extract into TMPDIR on every invocation and
+    # the build then died partway through on the largest package.
     export UV_LINK_MODE=copy
-    export UV_NO_CACHE=1
+    export UV_CACHE_DIR=/tmp/uvcache
+
+    # TMPDIR is INHERITED from whoever runs `apptainer build`, and inside the
+    # build sandbox that path usually does not exist: on this cluster it is
+    # $LSCRATCH/..., bind-mounted for `apptainer exec` but NOT for %post. uv
+    # writes its interpreter-probe module there, so the probe vanishes and uv
+    # dies with
+    #
+    #   Failed to inspect Python interpreter ...
+    #   ModuleNotFoundError: No module named 'python.get_interpreter_info'
+    #
+    # which reads like a broken interpreter and is nothing of the kind. Pinning
+    # it makes the build independent of the builder's environment, which is the
+    # whole point of this file now.
+    export TMPDIR=/tmp
+    mkdir -p "$TMPDIR" "$UV_CACHE_DIR"
+    df -h /tmp | tail -1
 
     # pimm-data by PINNED REVISION, from the public repo -- not from a
     # side-by-side checkout via %files. The old form required the builder to
@@ -107,22 +134,72 @@ From: ghcr.io/deeplearnphysics/pimm@sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c
     $UV pip install --python $VENV/bin/python --no-deps \
         "pimm-data @ git+https://github.com/OmarAlterkait/pimm-data@${PIMM_DATA_REV}" 
 
-    # helix's DSP half: PyWavelets is helix's only dependency not already here.
-    $UV pip install --python $VENV/bin/python PyWavelets
+    # ONE install for everything else. It was four separate uv invocations,
+    # each re-resolving and re-extracting; the build died partway through the
+    # last of them. One call also means one consistent resolution.
+    #
+    #   PyWavelets  helix's DSP half -- its only dep not already here.
+    #   pytest      because the first thing anyone does with a new environment
+    #               is ask whether it works, and the base image has no runner.
+    #   jax         {{ JAX_EXTRA }} -- see %arguments. The hazard is NOT the
+    #               GPU: it is that torch 2.10+cu126 brings 16 nvidia-*-cu12
+    #               wheels (cudnn 9.10.2.21, cublas 12.6.4.1, ...) and a CUDA
+    #               jax depends on the same wheel family. If the resolver moves
+    #               any of them to satisfy jax, torch is the thing that breaks,
+    #               six hours into a training run. So the versions are captured
+    #               before and compared after, and a move FAILS THE BUILD.
+    #
+    #               `cuda12_local` is not an option here: it wants a system
+    #               cuDNN and this image has none -- /usr/local/cuda has the
+    #               runtime and nvcc, but libcudnn arrives only as torch's pip
+    #               wheel.
+    $VENV/bin/python - <<'PYSNAP' > /tmp/nvidia_before.txt
+import importlib.metadata as m
+for d in sorted(m.distributions(), key=lambda d: d.metadata["Name"] or ""):
+    n = d.metadata["Name"] or ""
+    if n.startswith("nvidia-") or n in ("torch",):
+        print(n, d.version)
+PYSNAP
+    cat /tmp/nvidia_before.txt
 
-    # pytest, because the first thing anyone does with a new environment is ask
-    # whether it works, and the base image has no test runner at all. These are
-    # helix's [dev] extra.
-    $UV pip install --python $VENV/bin/python pytest pytest-benchmark
+    $UV pip install --python $VENV/bin/python \
+        PyWavelets pytest pytest-benchmark "jax[{{ JAX_EXTRA }}]"
 
-    # jax CPU, deliberately NOT jax[cuda12]. helix has a JAX GPU DSP backend, but
-    # the corpus builder DEFAULTS to torch ("measured 10.6 ms") and
-    # submit_coeff_corpus.sh passes --backend torch, so jax is an override and
-    # not the production path. A CUDA jax would install its own nvidia-* wheels
-    # beside torch 2.10+cu126's, which is how a carefully pinned CUDA stack gets
-    # broken. CPU jax costs nothing and lets the jax-parametrised tests actually
-    # run: without it 19 of them skip rather than fail, which is honest but blind.
-    $UV pip install --python $VENV/bin/python "jax[cpu]"
+    $VENV/bin/python - <<'PYSNAP' > /tmp/nvidia_after.txt
+import importlib.metadata as m
+for d in sorted(m.distributions(), key=lambda d: d.metadata["Name"] or ""):
+    n = d.metadata["Name"] or ""
+    if n.startswith("nvidia-") or n in ("torch",):
+        print(n, d.version)
+PYSNAP
+    # Compare only what existed BEFORE. An ADDITION is fine and expected:
+    # jax[cuda12] brings its own nvidia-cuda-nvcc-cu12 (12.9) for ptxas, beside
+    # torch's 12.6 runtime, and touches nothing torch resolved. What must never
+    # happen is a package torch already had being MOVED or REMOVED to satisfy
+    # jax -- that breaks torch, six hours into a training run, far from here.
+    # The first version of this guard failed on the addition and would have
+    # forced jax[cpu] for no reason.
+    $VENV/bin/python - <<'PYGUARD'
+def read(p):
+    return dict(l.split() for l in open(p) if l.strip())
+before, after = read("/tmp/nvidia_before.txt"), read("/tmp/nvidia_after.txt")
+moved = {k: (v, after.get(k)) for k, v in before.items() if after.get(k) != v}
+added = sorted(set(after) - set(before))
+if added:
+    print("  jax added (fine):", ", ".join(f"{k} {after[k]}" for k in added))
+if moved:
+    for k, (was, now) in sorted(moved.items()):
+        print(f"  MOVED {k}: {was} -> {now}")
+    raise SystemExit(
+        "FATAL: installing jax[{{ JAX_EXTRA }}] moved a package torch had "
+        "pinned.\n"
+        "       Rebuild with --build-arg JAX_EXTRA=cpu, or pin jax to a "
+        "release whose nvidia-* requirements match torch 2.10+cu126.")
+print("  torch's own CUDA wheels: unchanged")
+PYGUARD
+
+    df -h /tmp | tail -1
+    rm -rf "$UV_CACHE_DIR"
 
     # Fail the BUILD, not a training run six hours in.
     $VENV/bin/python - <<'PYCHECK'
@@ -135,7 +212,10 @@ assert "Densify" in names, "pimm_data lost Densify"
 for gone in ("AddNoise", "Digitize"):
     assert gone not in names, f"pimm_data still registers {gone}: lockstep violated"
 import pytest as _pt, jax as _jx, torch as _t, importlib.util as _iu
-assert not _jx.devices("cpu")[0].platform.startswith("gpu")
+# NOT asserting a GPU is visible: this image is built on whatever node is free,
+# usually one with no GPU at all, and the jax wheels are arch-generic so the
+# build node's hardware says nothing about where it will run.
+_jxk = "{{ JAX_EXTRA }}"
 
 # Modules the boundary move DELETED. The registry check above cannot see these:
 # they register nothing, so it passed while the image shipped all five.
@@ -145,16 +225,17 @@ for _gone in ("pimm_data.noise", "pimm_data.noise_jax", "pimm_data.coeff",
         f"{_gone} was deleted from pimm-data but is installed -- a stale "
         f"build/lib leaked into the wheel")
 print(f"OK: pywt {pywt.__version__}, pimm_data {pimm_data.__version__}, "
-      f"pytest {_pt.__version__}, jax {_jx.__version__} (cpu), "
+      f"pytest {_pt.__version__}, jax {_jx.__version__} ({_jxk}), "
       f"torch {_t.__version__}, {len(names)} transforms, "
       f"forward model absent as expected")
 PYCHECK
 
 %labels
     helix.purpose  corpus building and FM training in one image
-    helix.base     pimm_v0.5.1.sif
-    helix.base_md5 f4ed3cfd8479734757bcd9981750e9b5
-    helix.built    2026-09-13
+    helix.base     ghcr.io/deeplearnphysics/pimm v0.5.1
+    helix.base_digest sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c6803d69e012f770d927b7a776bf
+    helix.built    2026-09-17
+    helix.jax      {{ JAX_EXTRA }}
 
 %help
     One image for both halves of the helix workflow.
