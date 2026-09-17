@@ -249,9 +249,9 @@ Two stages. Stage 1 is expensive and reusable; stage 2 is cheap and per-checkpoi
         --tag <name> --out probe_results.jsonl \
         --cache-dir $SCRATCH/probe_cache
 
-`--cache-dir` makes the extraction loop resumable. It is the long pole -- 2.5M
-patches over 388 events, tens of minutes on a GPU -- and a preemption used to
-discard all of it before a single probe was fitted. Chunks are keyed by a hash of
+`--cache-dir` makes the extraction loop resumable: 2.5M patches over 388 events,
+**12m28s measured** (job 38395161, from the cache chunk mtimes), which a
+preemption used to discard before a single probe was fitted. Chunks are keyed by a hash of
 everything that changes the features (both weight digests, layer, tokenizer,
 corpus, truth, and the storage precision), so a stale cache cannot be read by
 mistake. The cost is disk: **44 GB measured** for the 388-event split (2,503,852
@@ -265,9 +265,9 @@ what the validation used). Reload of the full 44 GB takes a few minutes and is
 CPU-bound, not I/O-bound — measured on job 38444314 at 98% CPU — so placement is
 a space decision, not a speed one. Delete the cache once the number is in.
 
-`--cache-dir` also resumes the FITS, which is the other half. The four mlp arms
-are ~1h20m each at feature dim 2048 over 2.5M patches, and a row is written only
-once all four finish -- so a job that hits its time limit three arms in used to
+`--cache-dir` also resumes the FITS, and that is the bigger half by far.
+Measured on the same run: `geo` 36 min, `trained` 58 min, and `random` had run
+past 1h20m when it was preempted. A row is written only once all four finish -- so a job that hits its time limit three arms in used to
 lose all three. Each arm is now persisted the moment it completes, keyed by the
 fit parameters (`folds`/`epochs`/`seeds`/`random_seed`) rather than by the
 feature hash, so changing a fit parameter refits while still reusing the

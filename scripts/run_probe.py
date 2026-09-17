@@ -202,12 +202,11 @@ def _cache_resume(d, need=None):
     """``(packs, next_event)`` from the CONTIGUOUS prefix of cached chunks.
 
     ``need`` names the arm columns this run will actually fit with; the rest are
-    skipped at load. That is the difference between reading 44 GB and reading
-    15 GB, and it is the dominant cost of a resume, not a micro-optimisation:
-    measured on job 38444314, reloading all three arms from a 98%-full
-    /sdf/data took 2h29m at 16 MB/s while burning 2m41s of CPU -- longer than
-    the 35 min of extraction the cache exists to save. A resume that costs more
-    than what it skips is not a resume.
+    skipped at load -- the difference between reading 44 GB and about 15 GB for
+    a single-arm resume. The reload is CPU-bound and takes a few minutes either
+    way, so this is an optimisation rather than a rescue; the saving that makes
+    the cache worth having is the FITS (measured: geo 36 min, trained 58 min),
+    not the extraction (12.5 min).
 
     Contiguous on purpose. A gap means a chunk was lost or a run died mid-write,
     and silently skipping the missing events would produce a result whose
