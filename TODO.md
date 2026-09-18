@@ -47,9 +47,7 @@ random +0.1161, geo +0.1514, raw +0.0616.
 
 Still missing: charge closure and per-band variance explained as EVALUATORS
 inside a run, rather than as scripts after it. pimm has
-`EventProbeSuiteEvaluator` and `hooks/eval/pretrain/probes/` to build them into
-— and the `eval-contract` branch of pimm-private is 26 commits of exactly that
-groundwork, unpushed at the time of writing.
+`EventProbeSuiteEvaluator` and `hooks/eval/pretrain/probes/` to build them into.
 
 ## 4. A real pretraining run — DONE, cooldown included
 
@@ -89,43 +87,20 @@ was deleted with the forward model. torch is the production backend
 * ~~The 10 back-compat flat shims~~ — REMOVED, along with the 6 import-broken
   scripts that were their only non-test users.
 
-## 8. BEFORE MERGING pimm's `eval-contract` branch
+## 8. The pimm branch this trains against
 
-That branch (26 commits, the Evaluator-contract work) pins pimm-data at
-`74cfe5f`, and its `uv.lock` resolves to **pimm-data 0.3.0** — the revision
-BEFORE the forward model moved, which still registers AddNoise and Digitize.
-helix registers both now, so merging eval-contract and resolving `pyproject.toml`
-/`uv.lock` toward it puts the environment on the wrong side of the lockstep and
-`_registry.py` raises KeyError at import.
+`coeff-fm` of `DeepLearnPhysics/pimm-private`, which `HELIX_PIMM_ROOT` points
+at. It is four commits off main and all four are the pimm-data dependency pin;
+there is no helix-specific pimm code.
 
-The branch's own CODE is fine at `6b2656a` — every pimm_data symbol it uses
-still exists. Only the pin is stale. Re-pin to
-`6b2656ab32336131783176d49b09d0a77007607d` and relock BEFORE merging.
-
-`tests/test_lockstep_pin.py` cannot see this: it checks the two pins inside
-helix. A third check reading `$HELIX_PIMM_ROOT/pyproject.toml` when present
-would.
+`eval-contract` on the same repo is 26 commits of Evaluator-contract work for
+pimm's OWN evaluators (SemSeg, RingPanoptic, MAE, EventProbeSuite...). helix
+uses none of them -- `CoeffFMEvaluator` subclasses `HookBase` and the production
+config enables exactly one evaluator, ours. That branch is not part of this
+work and nothing here depends on it landing.
 
 
-## 9. The pin governs the IMAGE, not the RUN
-
-Worth knowing before trusting the lockstep machinery. `container/helix-train.def`
-installs pimm-data at the pinned revision, and `test_lockstep_pin.py` keeps the
-pins equal — but `scripts/submit_coeff_fm_train.sh:77` exports
-`PYTHONPATH="$PIMM:$H:$PDATA"` and `configs/pimm/coeff_fm_train.py:53` does an
-`insert(1)`, both putting the pimm-data CHECKOUT ahead of the installed copy.
-`tests/test_pimm_config_contract.py` actively requires that precedence.
-
-So a training run uses whatever is checked out, which today is one unpushed
-commit past the pin. The image assertion, the lockfiles and the pin test all
-govern the container; `provenance.json` recording the checkout commit and dirty
-flag is what actually pins a run. Pick one authority — either drop
-`PIMM_DATA_SRC` from the launchers and let the install rule, or keep the
-shadowing and say so in ARCHITECTURE §4 — but do not read the pin as a
-guarantee about a run.
-
-
-## 10. Courtesy report to pimm's author
+## 9. Courtesy report to pimm's author
 
 `engines/train.py::run_step` does
 `if "offset" in input_dict: input_dict["coord"].shape[0]` — a batch with an
