@@ -96,6 +96,50 @@ Two things to know, both real:
 Input: doraemon sensor shards (`HELIX_SENSOR_ROOT`).
 Output: sharded HDF5 under `HELIX_CORPUS_ROOT/<run>/`.
 
+### The order, which is not optional
+
+Six steps, and the first two cannot be swapped. `norm_sigma` is frozen BEFORE any
+shard is written, because `CoeffTPCReader` refuses to open a corpus whose shards
+disagree on it — so it must be computed once, from a sample of every run, and
+then handed to every build job. Building first and calibrating after produces a
+corpus that cannot be opened.
+
+| # | step | command | produces |
+|---|---|---|---|
+| 0 | name the runs | write `<corpus root>/_calib/RUNS.txt` **by hand** | the run list |
+| 1 | freeze `norm_sigma` | `scripts/calibrate_norm_sigma.sh [events_per_run]` | `_calib/norm_sigma_global.npy` |
+| 2 | build | 8 × `RUN_INDEX=$i sbatch scripts/submit_coeff_corpus.sh` | the shards |
+| 3 | verify | `$PY -m helix.data.coeff_verify <run dir> --dataset-name sim_wire` | pass/fail |
+| 4 | write the split | `$PY scripts/write_holdout.py --corpus <run dir>` | `holdout.json` |
+| 5 | derive the grid | `$PY scripts/derive_coeff_bins.py --corpus <run dir> --out bins.pt` | `bins.pt` |
+
+**Step 0 is a real step.** `_calib/RUNS.txt` is one run name per line and nothing
+generates it. Both phase 1 and phase 2 abort without it, and phase 2's message
+says "run phase 1 first" — which is misleading, because phase 1 needs it too.
+
+**`KGATE` must match between steps 1 and 2.** The frozen table is calibrated at a
+particular gate, and `submit_coeff_corpus.sh` defaults `KGATE` to empty, meaning
+`DetectorConfig`'s 3.0. Calibrating at one gate and building at another
+mis-normalises the whole corpus with nothing to say so.
+
+**Each corpus root carries its OWN `_calib`.** `norm_sigma` is computed from the
+GATED coefficients, so the r1 and pre-tau generations have genuinely different
+tables. Borrowing one root's `_calib` for another silently mis-normalises
+everything built under it.
+
+**Step 4 is a free check on the whole rebuild.** The split is keyed on
+`blake2b(run/source_file) + event` — the SIMULATION event's identity — so it is
+independent of basis, noise model, shard size and shard order. A corpus rebuilt
+with a different gate or wavelet gets the *same* split. So
+`write_holdout.py --compare <production holdout.json>` reproducing byte for byte
+is evidence the rebuild preserved event identity end to end. Use it; it costs
+nothing.
+
+**Step 5 checks itself.** A plain derive compares its result against the grid
+declared in `helix/data/data/reference_bins.json` and says whether it matches the
+one the released models were trained against. See "The norm_sigma table and the
+bin grid" below.
+
     # Phase 2 is EIGHT submissions, not one: this cluster's MaxArraySize is 100,
     # so an 0-799 array is rejected outright. RUN_INDEX picks the run.
     for i in 0 1 2 3 4 5 6 7; do
@@ -154,13 +198,29 @@ shards, or that was built from a dirty working tree.
 ### The norm_sigma table and the bin grid
 
 Both are TRAINING-SET STATISTICS and both must come from the corpus you will
-actually train on:
+actually train on. They sit at OPPOSITE ends of the build, which is the thing to
+get right:
 
-    scripts/calibrate_norm_sigma.sh          # one frozen table the corpus shares
-    $PY scripts/derive_coeff_bins.py --corpus <dir> --out bins.pt [--events 120]
+    # BEFORE the build — frozen, then handed to every build job (step 1)
+    scripts/calibrate_norm_sigma.sh          # one table the whole corpus shares
+
+    # AFTER the build — derived from the finished shards (step 5)
+    $PY scripts/derive_coeff_bins.py --corpus <run dir> --out bins.pt
+
+`norm_sigma` is an INPUT to the shards and is recorded in every one of them;
+the bin grid is computed FROM them. Reversing that is the mistake the order
+table above exists to prevent.
 
 The bins shipped with `m113` were derived from an old cache built with a
-different (white) noise model. Do not reuse bins across corpus generations.
+different (white) noise model. Do not reuse bins across corpus generations —
+and note that a derive now tells you whether the grid it produced is the one the
+released models were trained against, so a mistake here is reported rather than
+inherited.
+
+`derive_coeff_bins.py` also takes `--like <bins.pt>` to reuse the parameters an
+existing grid records, and `--verify <bins.pt>` to rederive and compare without
+writing. The derivation is importable as `helix.data.bins` if you need it from
+code.
 
 ---
 

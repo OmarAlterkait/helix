@@ -243,6 +243,27 @@ Check both landed, along with each run's `holdout.json`. Regenerating the probe
 truth requires the source simulation, which is the one input that belongs to a
 different group.
 
+### Rebuilding a corpus from scratch
+
+If the receiving site has its own simulation output and wants to build rather
+than copy, `docs/RUNBOOK.md` §1 opens with the ordered pipeline. Three things
+there are not guessable and cost a full rebuild to discover:
+
+- **`_calib/RUNS.txt` is step zero and hand-written.** Nothing generates it, and
+  both phases abort without it — with a message that says "run phase 1 first"
+  even when phase 1 is what is failing.
+- **`norm_sigma` is frozen BEFORE any shard is written**, then handed to every
+  build job. It is an input to the shards, not a summary of them, and
+  `CoeffTPCReader` refuses to open a corpus whose shards disagree on it. The bin
+  grid is the opposite: derived from the finished shards.
+- **`KGATE` must match between the calibration and the build.** Different gates
+  mis-normalise the whole corpus with nothing to say so.
+
+A rebuild also gets a free end-to-end check: the train/eval split is keyed on
+`blake2b(run/source_file) + event`, so it is independent of basis, noise model
+and shard order. `scripts/write_holdout.py --compare <production holdout.json>`
+reproducing byte for byte is evidence the rebuild preserved event identity.
+
 ### The bin grid: derive it — you do not need the original
 
 The categorical head's bin grid is training-set statistics — not recoverable
