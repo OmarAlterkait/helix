@@ -12,10 +12,12 @@ representation knows where charge is.
 
 | you want to | read |
 |---|---|
+| take this over from someone | **[HANDOVER.md](HANDOVER.md)** |
 | run something | **[docs/RUNBOOK.md](docs/RUNBOOK.md)** |
 | know why it is shaped this way | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | know what was measured | [docs/SCIENCE.md](docs/SCIENCE.md) |
 | run the tests | [TESTING.md](TESTING.md) |
+| know what is not in git | [docs/INVENTORY.md](docs/INVENTORY.md) |
 
 First command in a new environment:
 
