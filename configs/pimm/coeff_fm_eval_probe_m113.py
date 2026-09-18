@@ -27,6 +27,12 @@ Two runs are meaningful and they answer different questions:
                 when the data matches what it was built for.
 
 Set both with COEFF_EVAL_CORPUS; neither is "the" answer alone.
+
+The r1 run is a DELIBERATE cross-corpus study, so eval_checkpoint's corpus guard
+refuses it -- correctly: m113 records basis_digest 7f954a84 (pre-tau) and r1 is
+8c4542b6. Pass --allow-corpus-mismatch for that arm; the guard then warns instead
+of refusing and the row still records which corpus was read. (Until recently the
+guard was silently inert on this route, so the refusal is new, not a regression.)
 """
 
 _base_ = ["./coeff_fm_eval_probe.py"]

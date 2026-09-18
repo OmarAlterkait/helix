@@ -185,3 +185,39 @@ Reopen this if any of these becomes true:
   (no mask, no loss rebasing).
 * **Someone needs `batch_size>1` for any reason.** In that case implement
   section 6 first; do not raise the config value against the current model.
+
+## The grouped-attention padding attends its own padding
+
+`helix/model/serial.py:19` (`uniform_attn`) and `:31` (`grouped_cross`) pad the
+final block to a multiple of the group size by DUPLICATING the last real token:
+
+    if npad > T: b[T:] = x[order[-1]]
+
+and then call `F.scaled_dot_product_attention` with **no mask**, so the real
+tokens in that block attend to the copies. This document previously described
+the padding purely as a compute-cost tradeoff and did not say the pad rows are
+attended.
+
+Measured against a pad-masked reference, through the real 12-layer
+`SerialFMModel.encode_layers`, with `gp=1024` and `gd=2048`:
+
+    T       pad@1024  pad@2048   tokens>1%   tokens>10%   max|d|
+    2048           0         0        0.0%         0.0%   0.0000   <- control
+    4096           0         0        0.0%         0.0%   0.0000   <- control
+    3000          72      1096      100.0%        61.3%   1.1517
+    6000         144       144       56.3%         0.0%   0.3405
+   30976         768      1792        8.0%         2.9%   1.6867
+
+The two zero-pad rows are bit-identical, which is what makes the rest causal.
+Mean feature magnitude is ~1.45, so those deltas are order-unity. The share
+affected depends on how the event's token count sits against BOTH group sizes,
+and the 12 layers re-sort between blocks, which is why it is not confined to one
+final block.
+
+NOT FIXED, deliberately. Every checkpoint we have -- m113 and all eight-run
+descendants -- was TRAINED with the padding attended, so masking it at inference
+would change the computation the weights were fitted to. These numbers measure
+how much of the computation the duplication drives, not a proven quality loss.
+The choice is: leave it and keep comparability, or mask it and retrain. A new
+run is the place to decide, and whoever does should measure the probe with and
+without rather than assume the masked version is better.

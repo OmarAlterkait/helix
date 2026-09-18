@@ -120,6 +120,7 @@ class HelixPathBootstrap(HookBase):
 
         from helix.integrations._bootstrap import provenance
 
+        _deferred_check = None
         try:
             info = provenance()
             info["step"] = int(getattr(self.trainer, "global_step", 0) or 0)
@@ -149,11 +150,15 @@ class HelixPathBootstrap(HookBase):
             prev = next((r.get("corpus") for r in reversed(log)
                          if isinstance(r, dict) and r.get("corpus")), None)
             if prev and info.get("corpus") and not info["corpus"].get("error"):
-                from helix.data.identity import check_corpus_matches
-                # Raises on a present-and-different basis_digest; a missing or
-                # unreadable record is tolerated, exactly as at eval time.
-                note = check_corpus_matches(prev, info["corpus"], where=path)
-                self.trainer.logger.info(f"[corpus] {note}")
+                # DEFERRED PAST THE except BELOW, deliberately. This check used
+                # to run here, inside the try whose handler says "Provenance is
+                # a record, not a dependency. Never take down a run." That is
+                # right for writing a JSON file and exactly wrong for a corpus
+                # refusal, whose entire job is to take down a run: the
+                # ValueError was caught, logged via logger.exception, and
+                # training continued against the wrong corpus. Measured: 3 of 3
+                # genuine mismatches returned normally.
+                _deferred_check = (prev, info["corpus"], path)
 
             log.append(info)
             tmp = path + ".tmp"
@@ -171,8 +176,18 @@ class HelixPathBootstrap(HookBase):
                     "provenance.json does not fully describe the code that ran")
         except Exception:
             # Provenance is a record, not a dependency. Never take down a run.
+            # NOTE: the corpus check is deliberately NOT in here -- see below.
             self.trainer.logger.exception(
                 "HelixPathBootstrap: could not write provenance.json")
+
+        # OUTSIDE the handler: a corpus mismatch must reach the caller.
+        if _deferred_check is not None:
+            from helix.data.identity import check_corpus_matches
+            prev, actual, path = _deferred_check
+            # Raises on a present-and-different basis_digest; a missing or
+            # unreadable record is tolerated, exactly as at eval time.
+            note = check_corpus_matches(prev, actual, where=path)
+            self.trainer.logger.info(f"[corpus] {note}")
 
 
 @HOOKS.register_module()

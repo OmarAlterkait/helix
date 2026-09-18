@@ -225,3 +225,47 @@ def test_the_corpus_builder_RESOLVES_its_npz_default():
                        text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip().endswith("noise_spectrum.npz")
+
+
+def test_a_corpus_mismatch_on_RESUME_reaches_the_caller(tmp_path, monkeypatch):
+    """The guard must escape the handler that swallows provenance errors.
+
+    `check_corpus_matches` sat inside the try whose `except Exception` says
+    "Provenance is a record, not a dependency. Never take down a run." That is
+    right for writing a JSON file and exactly wrong for a corpus refusal, whose
+    whole job is to take down a run: the ValueError was caught, logged through
+    logger.exception, and training continued against the wrong corpus.
+
+    Drives the real hook, with a provenance.json whose recorded corpus differs
+    from the one now being read.
+    """
+    import json
+    import types
+
+    import pytest
+
+    pytest.importorskip("pimm")
+    from helix.integrations.pimm.hooks import HelixPathBootstrap
+
+    save = tmp_path / "run"
+    save.mkdir()
+    (save / "provenance.json").write_text(json.dumps([{
+        "corpus": {"basis_digest": "a" * 64, "removal_json": "{}", "sigma_norm": 2.6,
+                   "shard": "sim_wire_coeff_0000.h5"}}]))
+
+    hook = HelixPathBootstrap.__new__(HelixPathBootstrap)
+    logged = []
+    hook.trainer = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(save_path=str(save)),
+        global_step=0,
+        logger=types.SimpleNamespace(info=logged.append, warning=logged.append,
+                                     exception=lambda *a, **k: logged.append("EXC")))
+    # a DIFFERENT corpus now
+    monkeypatch.setattr(hook, "_corpus_identity", lambda: {
+        "basis_digest": "b" * 64, "removal_json": "{}", "sigma_norm": 2.6,
+        "shard": "sim_wire_coeff_0000.h5"}, raising=False)
+
+    with pytest.raises(ValueError, match="corpus mismatch"):
+        hook._stamp_provenance()
+    assert "EXC" not in logged, (
+        "the mismatch was swallowed by the provenance handler instead of raising")

@@ -49,9 +49,30 @@ def _check_corpus(cfg, weight, *, strict):
     actual = corpus_identity(root, dataset_name=d.get("dataset_name", "sim_wire"),
                              split=split)
 
-    recorded, run_dir = None, os.path.dirname(os.path.dirname(str(weight)))
+    # WHERE the record lives depends on which route the weight arrived by, and
+    # this used to assume the pimm one for both.
+    #
+    #   cfg.weight        -> <run>/model/<file>.pth, so dirname(dirname(...)) is
+    #                        the run directory. Correct.
+    #   model.checkpoint  -> an eval ARTIFACT DIRECTORY, so the same arithmetic
+    #                        walks TWO levels ABOVE it. For the shipped m113
+    #                        artifact that is /sdf/data/neutrino/omara, which has
+    #                        no provenance.json -- so the guard printed "corpus
+    #                        identity NOT RECORDED", a false reassurance, and
+    #                        returned. 100% inert on that route, which is the
+    #                        DEFAULT m113 eval. Meanwhile the artifact carries
+    #                        its corpus in artifact.json, in the very directory
+    #                        the guard was handed.
+    recorded = None
+    if os.path.isdir(str(weight)):
+        try:
+            from helix.model.artifact import inspect as _inspect
+            recorded = (_inspect(str(weight)).provenance or {}).get("corpus")
+        except Exception:
+            recorded = None            # not an artifact; fall through to the path below
+    run_dir = os.path.dirname(os.path.dirname(str(weight)))
     pj = os.path.join(run_dir, "provenance.json")
-    if os.path.exists(pj):
+    if recorded is None and os.path.exists(pj):
         try:
             with open(pj) as fh:
                 blob = json.load(fh)

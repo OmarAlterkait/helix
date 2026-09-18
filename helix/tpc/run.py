@@ -15,13 +15,32 @@ import time
 from pathlib import Path
 
 
-def _event_range(spec, n):
+def _event_ids(spec, ids):
+    """The event IDS to process, filtered to those actually present.
+
+    This used to be `_event_range(spec, n)` over `range(count_events(...))`,
+    which assumes ids are 0..n-1. `list_events`'s own docstring says they are
+    not: production files can be missing an id in the middle. Measured on the
+    real corpus, 3 of 600 shards of wire_test_00_00_02 have a gap -- e.g.
+    run_0027575715/sim_wire_sensor_0065.h5 holds 199 events spanning 0..199
+    with 167 ABSENT. range(199) then asks for 167, which raises
+    KeyError('event 167 not found'), and never asks for 199, which is there.
+    Since write_coeff_shard runs after the loop, --to-coeffs wrote 0 of 199
+    events on such a shard.
+
+    `--events lo-hi` is an inclusive range over IDS, not positions, and silently
+    yields nothing rather than failing if the range covers only absent ids --
+    the caller sees the printed count.
+    """
+    present = list(ids)
     if not spec:
-        return range(n)
+        return present
     if "-" in spec:
         lo, hi = spec.split("-")
-        return range(int(lo), int(hi) + 1)
-    return range(int(spec), int(spec) + 1)
+        lo, hi = int(lo), int(hi)
+    else:
+        lo = hi = int(spec)
+    return [e for e in present if lo <= e <= hi]
 
 
 def main():
@@ -40,13 +59,18 @@ def main():
 
     from helix.core import backend
     backend.set_backend(args.backend)
-    from helix.tpc.io import config_from_file, count_events, read_sensor_event, write_processed
+    from helix.tpc.io import config_from_file, list_events, read_sensor_event, write_processed
     from helix.tpc.pipeline import process_event, event_coeff_event, canonical_plane_gid
     from helix.core.coeff_io import write_coeff_shard
 
     config = config_from_file(args.input)
-    n = count_events(args.input)
-    events = _event_range(args.events, n)
+    ids = list_events(args.input)
+    n = len(ids)
+    events = _event_ids(args.events, ids)
+    if not events:
+        raise SystemExit(f"--events {args.events!r} selects none of the {n} ids "
+                         f"present in {args.input} (range {min(ids)}..{max(ids)})"
+                         if ids else f"{args.input} contains no events")
     removal = args.removal or config.removal
     src = Path(args.input)
     print(f"HELIX TPC | backend={backend.get_backend()} | removal={removal} | "
