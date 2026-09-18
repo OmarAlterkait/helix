@@ -108,11 +108,32 @@ what the other had.
     /sdf/data/neutrino/omara/images/helix-train.sif      9.17 GB
 
 **Pull it if you can reach GHCR.** CI builds and tests the image on every change
-to `container/**`, `pyproject.toml` or `uv.lock`, and publishes it:
+to `container/**`, `pyproject.toml` or `uv.lock`, and publishes it publicly — no
+credentials needed:
 
 ```bash
-apptainer pull helix-train.sif docker://ghcr.io/omaralterkait/helix@sha256:<digest>
+apptainer pull helix-train.sif \
+  docker://ghcr.io/omaralterkait/helix@sha256:d7a59b2be4a801560c13dde62f71d2b9b92bcd0c253d544ae6189555b27e2044
 ```
+
+That exact command was run anonymously from a cluster node on 2026-09-18 and
+produced an image reporting `pimm_data 0.4.0` at revision `2b20573c`, forward
+model absent from pimm-data and registered by helix, jax `cuda12`. Later digests
+are printed by each workflow run; `:jax-cuda12` is the rolling tag if you want
+the newest and accept that it moves.
+
+**At NERSC, use the other image.** `ghcr.io/omaralterkait/helix-nersc` is the
+same recipe on pimm's NERSC base, published as a Docker v2 manifest because
+Shifter and podman-hpc cannot consume the OCI manifests the standard image uses:
+
+```bash
+podman-hpc pull ghcr.io/omaralterkait/helix-nersc@sha256:<digest>
+```
+
+It also carries MPICH and a parallel HDF5 inherited from `pimm-nersc`. helix uses
+neither today — nothing in helix or pimm-data imports `mpi4py` or opens HDF5 with
+`driver="mpio"`, and training is single-node DDP over NCCL — so the manifest
+format is the reason to prefer it there, not MPI.
 
 Pin the **digest**, not a tag. Tags are mutable rolling aliases, and this image is
 half of a lockstep pair — "whatever `:main` points at today" is precisely the

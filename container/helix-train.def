@@ -33,10 +33,16 @@
 #
 # It used to require the parent directory holding BOTH this checkout and a
 # pimm-data checkout side by side, because pimm-data arrived through %files.
-# That is gone: the revision is pinned below and fetched from git.
+# That is gone: the revision is READ FROM pyproject.toml by container/install.sh
+# and fetched from git, so the image and a dev install cannot pin different ones.
 #
-# Rebuild whenever PIMM_DATA_REV changes, and move it in step with helix -- the
-# image is half of the lockstep pair.
+# What goes into the image is container/install.sh, shared with
+# container/Dockerfile. This file is only the apptainer packaging of it.
+#
+# Rebuild whenever helix's pimm-data pin moves -- the image is half of the
+# lockstep pair. Or pull the one CI already built and tested:
+#
+#   apptainer pull helix-train.sif docker://ghcr.io/omaralterkait/helix@sha256:<digest>
 
 Bootstrap: docker
 # pimm's OWN published image, pinned by DIGEST.

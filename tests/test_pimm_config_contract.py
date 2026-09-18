@@ -423,14 +423,37 @@ def test_configs_leave_no_module_objects_in_the_namespace():
     from pathlib import Path
 
     cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
+    checked = []
+    missing = []
     for path in sorted(cfg_dir.glob("coeff_fm_*.py")):
         ns = {}
-        exec(compile(path.read_text(), str(path), "exec"), ns)
+        try:
+            exec(compile(path.read_text(), str(path), "exec"), ns)
+        except FileNotFoundError as e:
+            # Some configs resolve a checkpoint or a bin table AT MODULE SCOPE, so
+            # executing them needs that data present. coeff_fm_encode.py reaches
+            # for the m113 artifact under HELIX_ARCHIVE, which exists on the
+            # machine helix was developed on and nowhere else -- a CI runner, or
+            # any fresh site, has none of it.
+            #
+            # Skip that config rather than fail: the contract under test is about
+            # module objects leaking into the namespace, and a config that cannot
+            # be executed tells us nothing about it either way.
+            missing.append(f"{path.name} ({e})")
+            continue
+        checked.append(path.name)
         leaked = sorted(k for k, v in ns.items()
                         if not k.startswith("__") and isinstance(v, types.ModuleType))
         assert not leaked, (
             f"{path.name} leaks module objects {leaked} into the config dict; "
             f"Config.dump cannot serialise them and the run dies at setup")
+
+    # A test that checked nothing must not report success. Without this the whole
+    # thing passes vacuously wherever the data is absent, which is exactly where
+    # nobody would notice.
+    if not checked:
+        pytest.skip("no coeff_fm config could be executed; external data absent: "
+                    + "; ".join(missing))
 
 
 def test_bootstrap_block_deletes_its_temporaries():

@@ -108,8 +108,21 @@ This is why `pimm-fm`'s lock had to be repointed: it pinned pimm-data at
 
 ## 4. The container
 
-**One image: `/sdf/data/neutrino/omara/images/helix-train.sif`**, built by
-`container/helix-train.def`. It does corpus building AND training.
+**One recipe, `container/install.sh`, with two packaging front-ends.** It does
+corpus building AND training.
+
+| | |
+|---|---|
+| `container/helix-train.def` | apptainer. Builds anywhere with a checkout and nothing else — clusters have apptainer and no docker, so this is the portable path. |
+| `container/Dockerfile` | what CI builds and publishes to `ghcr.io/omaralterkait/helix`, so a site can pull a tested image instead of spending eleven minutes rebuilding one. |
+| `container/Dockerfile.nersc` | the same recipe on the `pimm-nersc` base, published as a Docker v2 manifest because Shifter and podman-hpc cannot consume OCI. |
+
+Both front-ends call the same script, which is why they cannot drift, and that
+script reads the pimm-data revision out of `pyproject.toml` rather than carrying
+its own — collapsing what used to be three pin sites in helix to one.
+
+The site default remains `/sdf/data/neutrino/omara/images/helix-train.sif`
+(`HELIX_IMAGE`); it is now a *pulled* artifact rather than a hand-built one.
 
 This section used to say the two-container split was correct and not friction.
 That was wrong, and the way it was wrong is worth recording, because the
@@ -173,22 +186,40 @@ violation cannot ship in an image again.
 Verified in that image with user site-packages disabled, so no home directory can
 help: **both suites green; ~40 helix tests skip unless pimm is on the path.**
 
-### Rebuilding
+### Getting the image
+
+Pull the one CI built and tested, by **digest**:
+
+    apptainer pull helix-train.sif docker://ghcr.io/omaralterkait/helix@sha256:<digest>
+
+Pin the digest, not the tag. A tag is a mutable alias, and this image is half of
+a lockstep pair — "whatever `:jax-cuda12` points at today" is the ambiguity that
+once produced three differently-named `.sif` files, the canonical one built from
+a local path source with CPU jax while every default pointed at it. Each build
+prints its digest.
+
+Or build it, which is the path for a site that cannot reach GHCR:
 
     APPTAINER_TMPDIR=$LSCRATCH apptainer build --fakeroot \
-      /sdf/data/neutrino/omara/images/helix-train.sif container/helix-train.def
+      helix-train.sif container/helix-train.def
 
-Two traps the definition already handles, both found the hard way:
+Three traps `container/install.sh` already handles, all found the hard way:
 
 * uv installs by hardlinking from its cache, and in the build sandbox those links
   do not materialise — a cached package "installs" in 99 ms and then imports as
   `ModuleNotFoundError: No module named 'pywt.version'`. The FIRST build passes
-  (nothing cached yet) and the REBUILD fails.
-* `UV_LINK_MODE=copy` alone was not enough, because by then the cache held
-  half-written entries and copying a corrupt entry reproduces the corruption.
-  The build sets `UV_NO_CACHE=1` and does not depend on cache state at all.
+  (nothing cached yet) and the REBUILD fails. `UV_LINK_MODE=copy` fixes it.
+* An earlier fix set `UV_NO_CACHE=1`, which was reaching for the right thing the
+  wrong way: it made uv re-extract into `TMPDIR` on every invocation and the build
+  died partway through the largest package. The cache now lives INSIDE the
+  sandbox (`UV_CACHE_DIR=/tmp/uvcache`), so every build starts with an empty one.
+* `TMPDIR` is inherited from whoever runs the build and usually does not exist
+  inside an apptainer `%post` sandbox, so uv's interpreter probe vanishes and it
+  dies with `No module named 'python.get_interpreter_info'` — which reads like a
+  broken interpreter and is nothing of the kind. It is pinned.
 
-Rebuild whenever pimm-data changes: the image is part of the lockstep pair.
+Rebuild whenever helix's pimm-data pin moves: the image is part of the lockstep
+pair, and `install.sh` reads that pin from `pyproject.toml`.
 
 ## 5. Data flow, end to end
 
