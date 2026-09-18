@@ -53,3 +53,44 @@ def test_removal_modes_all_run(config, synthetic_plane):
         pp = process_plane(img, config, synthetic_plane["sigma_w"], removal=mode)
         assert pp.reconstructed.shape == img.shape
         assert pp.sparse.n_kept > 0
+
+
+def test_the_descriptor_records_the_mode_that_RAN_not_the_config_default():
+    """A shard must not be able to claim a DSP it did not use.
+
+    `process_plane` takes `removal=` and does `mode = (removal or
+    config.removal)`, so an explicit override diverges from the config.
+    `basis_from_config` only ever saw the config, so a run with removal='none'
+    produced ungated coefficients under a descriptor saying 'gate' -- and
+    therefore the same `basis_digest` as a real gated shard. `check_corpus_matches`
+    compares exactly that digest, so the two were indistinguishable: a wrong
+    number with no error, which is what the descriptor exists to prevent.
+    """
+    import numpy as np
+
+    from helix.tpc.config import DetectorConfig
+    from helix.tpc.pipeline import basis_from_config, process_plane
+
+    cfg = DetectorConfig()
+    assert cfg.removal == "gate", "this test assumes the gate default"
+    img = np.random.default_rng(0).normal(scale=5.0,
+                                          size=(128, cfg.num_time_steps)).astype(np.float32)
+
+    gated = process_plane(img, cfg, removal="gate", with_images=False)
+    plain = process_plane(img, cfg, removal="none", with_images=False)
+    cat = lambda r: np.concatenate([np.asarray(c).ravel() for c in r.sparse.coeffs])
+    assert not np.array_equal(cat(gated), cat(plain)), (
+        "gate and none produced identical coefficients; this test cannot detect "
+        "the divergence it exists for")
+
+    bl = [np.asarray(c).shape[-1] for c in gated.sparse.coeffs]
+    b_gate = basis_from_config(cfg, band_lengths=bl, level=gated.sparse.level,
+                               removal="gate")
+    b_none = basis_from_config(cfg, band_lengths=bl, level=plain.sparse.level,
+                               removal="none")
+    assert b_gate.removal["kind"] == "gate"
+    assert b_none.removal["kind"] == "none", (
+        "the descriptor stamped the CONFIG default, not the mode that ran")
+    assert b_gate.digest() != b_none.digest(), (
+        "two different DSPs produced the same basis_digest -- corpus identity "
+        "cannot tell them apart")

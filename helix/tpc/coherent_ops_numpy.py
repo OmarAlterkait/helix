@@ -18,7 +18,14 @@ def group_median(image: np.ndarray, group_size: int) -> np.ndarray:
     if n_full > 0:
         full = image[:n_full * group_size].reshape(n_full, group_size, nt)
         mid = group_size // 2
-        p = np.partition(full, mid, axis=1)
+        # BOTH kth positions for the even case -- the same rule `mad_sigma_per_wire`
+        # states below. np.partition(a, mid) only guarantees index mid; index
+        # mid-1 is some element of the lower half, not the order statistic.
+        # Measured: at every group_size tried (8..512) numpy's introselect
+        # happens to leave mid-1 correct, so this is latent rather than live --
+        # but it is a guarantee we do not have, one numpy release from being a
+        # silently wrong median feeding residual -> mad_sigma -> signal_mask.
+        p = np.partition(full, [mid - 1, mid] if group_size % 2 == 0 else mid, axis=1)
         if group_size % 2 == 0:
             out[:n_full] = (p[:, mid - 1, :] + p[:, mid, :]) * 0.5
         else:
@@ -26,7 +33,7 @@ def group_median(image: np.ndarray, group_size: int) -> np.ndarray:
     if rem > 0:
         last = image[n_full * group_size:]
         mid_r = rem // 2
-        pr = np.partition(last, mid_r, axis=0)
+        pr = np.partition(last, [mid_r - 1, mid_r] if rem % 2 == 0 and mid_r else mid_r, axis=0)
         if rem % 2 == 0:
             out[n_full] = (pr[mid_r - 1] + pr[mid_r]) * 0.5
         else:

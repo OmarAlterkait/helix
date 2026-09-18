@@ -210,7 +210,8 @@ def build_corpus_stream(stream, config: DetectorConfig, out_dir, *,
         seeds.append(seed)
         results = {int(gid): process_plane(img, config, removal="gate", with_images=False)
                    for gid, img in noisy_planes.items()}
-        ce = event_coeff_event(results, config, run=run, source_file=src, event=ev_id)
+        ce = event_coeff_event(results, config, run=run, source_file=src,
+                               event=ev_id, removal="gate")   # matches line 211
         noisy_ces.append(ce)
         if with_clean:
             clean_ces.append(clean_coeff_event(ce, clean_planes, config,

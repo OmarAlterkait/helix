@@ -141,7 +141,8 @@ def canonical_plane_gid(label: str) -> int:
     return int(vol.split("_")[1]) * 3 + _PLANE_IDX[p]
 
 
-def basis_from_config(config: DetectorConfig, *, band_lengths, level: int) -> BasisDescriptor:
+def basis_from_config(config: DetectorConfig, *, band_lengths, level: int,
+                      removal: str | None = None) -> BasisDescriptor:
     """Build the BasisDescriptor stamped into a CoeffEvent / shard /config.
 
     The padded length is derived from the actual bands (not an assumed pad rule),
@@ -153,7 +154,16 @@ def basis_from_config(config: DetectorConfig, *, band_lengths, level: int) -> Ba
         wavelet=config.wavelet, level=level, mode=config.dwt_mode,
         n_ticks_raw=config.num_time_steps, pad=npad, band_lengths=tuple(band_lengths),
         sigma_norm=config.sigma_norm,
-        removal=dict(kind=config.removal, kgate=config.gate_kgate, ksig=config.gate_ksig,
+        # The mode that RAN, not the one the config defaults to. `process_plane`
+        # takes `removal=` and does `mode = (removal or config.removal)`, so an
+        # explicit override silently diverged from what was stamped here: a run
+        # with removal='none' produced ungated coefficients under a descriptor
+        # saying 'gate', giving it the same basis_digest as a real gated shard.
+        # check_corpus_matches compares that digest, so the two were
+        # indistinguishable -- a wrong number with no error, which is the exact
+        # failure this descriptor exists to prevent.
+        removal=dict(kind=(removal or config.removal).lower(),
+                     kgate=config.gate_kgate, ksig=config.gate_ksig,
                      npass=config.gate_npass, tau=config.gate_tau,
                      group_size=config.group_size),
         threshold=dict(method="universal", func=config.threshold_mode,
@@ -163,13 +173,20 @@ def basis_from_config(config: DetectorConfig, *, band_lengths, level: int) -> Ba
 
 
 def event_coeff_event(results: dict[int, ProcessedPlane], config: DetectorConfig,
-                      *, run: str = "", source_file: str = "", event: int = -1) -> CoeffEvent:
-    """Assemble ``{gid: ProcessedPlane}`` into one CoeffEvent (the corpus atom)."""
+                      *, run: str = "", source_file: str = "", event: int = -1,
+                      removal: str | None = None) -> CoeffEvent:
+    """Assemble ``{gid: ProcessedPlane}`` into one CoeffEvent (the corpus atom).
+
+    ``removal`` must be the mode that was actually PASSED to ``process_plane``,
+    not the config default, or the stamped ``basis_digest`` describes a
+    different DSP than the one that produced these coefficients.
+    """
     if not results:
         raise ValueError("event_coeff_event: no planes")
     any_sparse = next(iter(results.values())).sparse
     band_lengths = [c.shape[-1] for c in any_sparse.coeffs]
-    basis = basis_from_config(config, band_lengths=band_lengths, level=any_sparse.level)
+    basis = basis_from_config(config, band_lengths=band_lengths,
+                              level=any_sparse.level, removal=removal)
     sparse_by_gid = {int(gid): pp.sparse for gid, pp in results.items()}
     return CoeffEvent.from_sparse_results(sparse_by_gid, basis=basis,
                                           run=run, source_file=source_file, event=event)

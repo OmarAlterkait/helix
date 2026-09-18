@@ -49,7 +49,22 @@ RUNS=$(tr '\n' ' ' < "$CALIB/RUNS.txt")
 mkdir -p "$CALIB"
 cd "$H"
 for r in $RUNS; do
-  [ -s "$CALIB/$r.npy" ] && { echo "=== $r already calibrated, skipping"; continue; }
+  # The skip must know the GATE, not just the run. Keyed on run name alone, a
+  # re-run at a different KGATE silently reused the tables calibrated at the old
+  # one, averaged them into norm_sigma_global.npy, and every build job then
+  # embedded that table via --norm-sigma. Nothing on disk records the gate a
+  # table was calibrated at, and the reader's cross-shard check passes because
+  # every shard carries the same wrong table -- so it could not be caught later
+  # either. The stamp file records the gate; a change to it forces recalibration.
+  _WANT="kgate=${KGATE:-default}"
+  _STAMP="$CALIB/$r.gate"
+  if [ -s "$CALIB/$r.npy" ] && [ "$(cat "$_STAMP" 2>/dev/null)" = "$_WANT" ]; then
+    echo "=== $r already calibrated at $_WANT, skipping"; continue
+  fi
+  if [ -s "$CALIB/$r.npy" ]; then
+    echo "=== $r was calibrated at '$(cat "$_STAMP" 2>/dev/null || echo unrecorded)'," \
+         "wanted $_WANT -- RECALIBRATING"
+  fi
   echo "=== calibrating $r ($N events)"
   python scripts/build_coeff_corpus.py \
     --shard "$SRC/$r/sim_wire_sensor_0000.h5" --out "$CALIB/$r" \
@@ -57,6 +72,7 @@ for r in $RUNS; do
     --event-start 0 --events "$N" --mode serial --backend torch \
     $KG_ARG \
     --calibrate --save-norm-sigma "$CALIB/$r.npy" 2>&1 | tail -2
+  printf '%s\n' "$_WANT" > "$_STAMP"
 done
 
 python - "$CALIB" "$RUNS" << 'PY'

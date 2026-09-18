@@ -63,7 +63,7 @@ def main():
         if args.to_coeffs:
             by_gid = {canonical_plane_gid(lbl): pp for lbl, pp in results.items()}
             coeff_events.append(event_coeff_event(
-                by_gid, config, run=src.parent.name, source_file=src.name, event=idx))
+                by_gid, config, run=src.parent.name, source_file=src.name, event=idx, removal=removal))
         else:
             write_processed(args.output, idx, {lbl: pp.sparse for lbl, pp in results.items()}, config)
         kept = sum(pp.sparse.n_kept for pp in results.values())
