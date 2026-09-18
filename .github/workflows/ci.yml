@@ -43,15 +43,18 @@ jobs:
         with:
           python-version: '3.11'
 
-      # tests/test_lockstep_pin.py needs nothing but the repo: it reads
-      # pyproject.toml, container/install.sh, the def and the Dockerfile. It is
-      # the guard against the failure that does not degrade quietly -- a
-      # pimm-data from before the forward-model move plus a current helix raises
-      # KeyError on a duplicate AddNoise registration at import.
+      # tests/test_lockstep_pin.py reads pyproject.toml, container/install.sh,
+      # the def and the Dockerfile -- stdlib only. --noconftest because
+      # tests/conftest.py imports numpy and helix.tpc.config, which this job
+      # deliberately does not install: the SUITE runs inside the built image
+      # (docker.yml), where everything is present. This job only guards the pin,
+      # which is worth checking on every push because the failure it prevents
+      # does not degrade quietly -- a pimm-data from before the forward-model
+      # move plus a current helix raises KeyError at import.
       - name: the revision is named once, and the build reads it
         run: |
           python -m pip install --quiet pytest
-          python -m pytest tests/test_lockstep_pin.py -q
+          python -m pytest tests/test_lockstep_pin.py -q --noconftest
 
       # install.sh is what both packaging front-ends run. A syntax error in it
       # fails an 11-minute apptainer build on a cluster, or a 20-minute image

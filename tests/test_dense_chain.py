@@ -37,11 +37,18 @@ import sys
 from copy import deepcopy
 
 import numpy as np
-from helix.tpc import dense_ops as helix_dense_ops
-
 import pytest
 
-from pimm_data import JAXTPCDataset, Compose
+# helix.tpc.dense_ops imports torch, and pimm_data requires it too. Both are
+# module-scope imports here, so without the guard this file raises a collection
+# ERROR in a DSP-only install and aborts the entire run rather than skipping
+# itself. Every other module in this suite guards the same way.
+pytest.importorskip("torch")
+pytest.importorskip("pimm_data")
+
+from helix.tpc import dense_ops as helix_dense_ops              # noqa: E402
+
+from pimm_data import JAXTPCDataset, Compose                    # noqa: E402
 
 from helix.tpc.noise import (generate_noise, incoherent_noise, coherent_noise,
                              digitize, DEFAULT_ENC, DEFAULT_SAMPLING_RATE_HZ)

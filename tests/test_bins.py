@@ -27,6 +27,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# helix.data.__init__ imports pimm_data, so importing bins drags it in even
+# though the derivation itself is pure numpy. Skip rather than error: helix
+# advertises a DSP-only install (`pip install -e .`, numpy/h5py/PyWavelets/scipy)
+# and a collection ERROR there aborts the whole run instead of skipping one file.
+pytest.importorskip("pimm_data")
+
 from helix.data import bins as binlib                            # noqa: E402
 
 from _paths import CORPUS                                        # noqa: E402
