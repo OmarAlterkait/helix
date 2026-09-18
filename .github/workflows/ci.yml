@@ -1,0 +1,60 @@
+name: CI
+
+# The cheap checks: the lockfile resolves, and the pimm-data pin is still a
+# single source. These need no image and no GPU, so they run on every push.
+#
+# The expensive ones -- building the image, the suite, the no-data smoke -- live
+# in docker.yml, which is path-filtered because a 9 GB build is not free.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pins:
+    name: lockfile and the lockstep pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: 0.11.28
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # `uv lock` records what it RESOLVED, not what was asked for. The original
+      # pimm-data pin named the repository with no rev, so the lockfile was the
+      # only record of which revision got used -- and it had silently settled on
+      # a pre-boundary one.
+      - name: uv lock --check
+        run: uv lock --check
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # tests/test_lockstep_pin.py needs nothing but the repo: it reads
+      # pyproject.toml, container/install.sh, the def and the Dockerfile. It is
+      # the guard against the failure that does not degrade quietly -- a
+      # pimm-data from before the forward-model move plus a current helix raises
+      # KeyError on a duplicate AddNoise registration at import.
+      - name: the revision is named once, and the build reads it
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest tests/test_lockstep_pin.py -q
+
+      # install.sh is what both packaging front-ends run. A syntax error in it
+      # fails an 11-minute apptainer build on a cluster, or a 20-minute image
+      # build here; shellcheck-free bash -n costs a second.
+      - name: the install recipe parses
+        run: bash -n container/install.sh

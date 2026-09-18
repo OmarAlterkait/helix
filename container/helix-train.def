@@ -77,158 +77,20 @@ From: ghcr.io/deeplearnphysics/pimm@sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c
     #   apptainer build --build-arg JAX_EXTRA=cpu <out>.sif container/helix-train.def
     JAX_EXTRA=cuda12
 
+%files
+    # The install recipe and the pin it reads. helix's own pyproject.toml is the
+    # SINGLE source of the pimm-data revision -- the def used to carry its own
+    # copy, and a bump applied to one of them built an image on the wrong side of
+    # the forward-model boundary.
+    container/install.sh /opt/helix-build/install.sh
+    pyproject.toml       /opt/helix-build/pyproject.toml
+
 %post
     set -e
-    VENV=/opt/pimm/.venv
-    UV=/usr/local/uv/bin/uv
-
-    # uv installs by hardlinking out of its cache, and in the build sandbox
-    # those links do not materialise: a cached package "installs" in 99 ms and
-    # then imports as ModuleNotFoundError: No module named 'pywt.version'.
-    # link-mode=copy fixes that. The cache itself is put INSIDE the sandbox, so
-    # every build starts with an empty one -- which is what the earlier
-    # UV_NO_CACHE=1 was really reaching for, and it is the better way to get it:
-    # disabling the cache made uv re-extract into TMPDIR on every invocation and
-    # the build then died partway through on the largest package.
-    export UV_LINK_MODE=copy
-    export UV_CACHE_DIR=/tmp/uvcache
-
-    # TMPDIR is INHERITED from whoever runs `apptainer build`, and inside the
-    # build sandbox that path usually does not exist: on this cluster it is
-    # $LSCRATCH/..., bind-mounted for `apptainer exec` but NOT for %post. uv
-    # writes its interpreter-probe module there, so the probe vanishes and uv
-    # dies with
-    #
-    #   Failed to inspect Python interpreter ...
-    #   ModuleNotFoundError: No module named 'python.get_interpreter_info'
-    #
-    # which reads like a broken interpreter and is nothing of the kind. Pinning
-    # it makes the build independent of the builder's environment, which is the
-    # whole point of this file now.
-    export TMPDIR=/tmp
-    mkdir -p "$TMPDIR" "$UV_CACHE_DIR"
-    df -h /tmp | tail -1
-
-    # pimm-data by PINNED REVISION, from the public repo -- not from a
-    # side-by-side checkout via %files. The old form required the builder to
-    # have a sibling working tree and baked whatever happened to be in it,
-    # which is unreproducible by construction and impossible on a fresh
-    # machine. This rev is the one coeff-fm's pyproject.toml pins, and the two
-    # must move together: the AddNoise/Digitize registration is LOCKSTEP with
-    # helix, and an environment that straddles the boundary move raises
-    # KeyError on the second registration.
-    PIMM_DATA_REV=2b20573ca14f1d06bcc40df8ee8c4e38b13fd94a
-
-    # Replace the stale 0.3.0 rather than shadow it. An editable .pth or a
-    # PYTHONPATH entry would leave two copies resolvable and make which one wins
-    # depend on sys.path order -- exactly the fragility this image exists to end.
-    # Delete any stale build tree BEFORE installing. setuptools copies sources
-    # into build/lib and never prunes, so a build/ left from before the forward
-    # model moved re-ships every module that was deleted since. It did: the
-    # previous image had pimm_data.{noise,noise_jax,coeff,coeff_verify} and
-    # readers.coeff_tpc importable, and that coeff_verify was an OLDER copy
-    # missing the source_root gap fix (74cfe5f) -- silently wrong answers from a
-    # module that is supposed to be gone. build/ is gitignored, so it is
-    # invisible to every check that looks at the repo.
-    $UV pip uninstall --python $VENV/bin/python pimm-data || true
-    $UV pip install --python $VENV/bin/python --no-deps \
-        "pimm-data @ git+https://github.com/OmarAlterkait/pimm-data@${PIMM_DATA_REV}" 
-
-    # ONE install for everything else. It was four separate uv invocations,
-    # each re-resolving and re-extracting; the build died partway through the
-    # last of them. One call also means one consistent resolution.
-    #
-    #   PyWavelets  helix's DSP half -- its only dep not already here.
-    #   pytest      because the first thing anyone does with a new environment
-    #               is ask whether it works, and the base image has no runner.
-    #   jax         {{ JAX_EXTRA }} -- see %arguments. The hazard is NOT the
-    #               GPU: it is that torch 2.10+cu126 brings 16 nvidia-*-cu12
-    #               wheels (cudnn 9.10.2.21, cublas 12.6.4.1, ...) and a CUDA
-    #               jax depends on the same wheel family. If the resolver moves
-    #               any of them to satisfy jax, torch is the thing that breaks,
-    #               six hours into a training run. So the versions are captured
-    #               before and compared after, and a move FAILS THE BUILD.
-    #
-    #               `cuda12_local` is not an option here: it wants a system
-    #               cuDNN and this image has none -- /usr/local/cuda has the
-    #               runtime and nvcc, but libcudnn arrives only as torch's pip
-    #               wheel.
-    $VENV/bin/python - <<'PYSNAP' > /tmp/nvidia_before.txt
-import importlib.metadata as m
-for d in sorted(m.distributions(), key=lambda d: d.metadata["Name"] or ""):
-    n = d.metadata["Name"] or ""
-    if n.startswith("nvidia-") or n in ("torch",):
-        print(n, d.version)
-PYSNAP
-    cat /tmp/nvidia_before.txt
-
-    $UV pip install --python $VENV/bin/python \
-        PyWavelets pytest pytest-benchmark "jax[{{ JAX_EXTRA }}]"
-
-    $VENV/bin/python - <<'PYSNAP' > /tmp/nvidia_after.txt
-import importlib.metadata as m
-for d in sorted(m.distributions(), key=lambda d: d.metadata["Name"] or ""):
-    n = d.metadata["Name"] or ""
-    if n.startswith("nvidia-") or n in ("torch",):
-        print(n, d.version)
-PYSNAP
-    # Compare only what existed BEFORE. An ADDITION is fine and expected:
-    # jax[cuda12] brings its own nvidia-cuda-nvcc-cu12 (12.9) for ptxas, beside
-    # torch's 12.6 runtime, and touches nothing torch resolved. What must never
-    # happen is a package torch already had being MOVED or REMOVED to satisfy
-    # jax -- that breaks torch, six hours into a training run, far from here.
-    # The first version of this guard failed on the addition and would have
-    # forced jax[cpu] for no reason.
-    $VENV/bin/python - <<'PYGUARD'
-def read(p):
-    return dict(l.split() for l in open(p) if l.strip())
-before, after = read("/tmp/nvidia_before.txt"), read("/tmp/nvidia_after.txt")
-moved = {k: (v, after.get(k)) for k, v in before.items() if after.get(k) != v}
-added = sorted(set(after) - set(before))
-if added:
-    print("  jax added (fine):", ", ".join(f"{k} {after[k]}" for k in added))
-if moved:
-    for k, (was, now) in sorted(moved.items()):
-        print(f"  MOVED {k}: {was} -> {now}")
-    raise SystemExit(
-        "FATAL: installing jax[{{ JAX_EXTRA }}] moved a package torch had "
-        "pinned.\n"
-        "       Rebuild with --build-arg JAX_EXTRA=cpu, or pin jax to a "
-        "release whose nvidia-* requirements match torch 2.10+cu126.")
-print("  torch's own CUDA wheels: unchanged")
-PYGUARD
-
-    df -h /tmp | tail -1
-    rm -rf "$UV_CACHE_DIR"
-
-    # Fail the BUILD, not a training run six hours in.
-    $VENV/bin/python - <<'PYCHECK'
-import pywt, pimm_data
-from pimm_data.transform import TRANSFORMS
-names = set(TRANSFORMS.module_dict)
-assert tuple(int(x) for x in pimm_data.__version__.split(".")[:2]) >= (0, 4), \
-    f"stale pimm_data {pimm_data.__version__}"  # tuple, not string: "0.10" < "0.4" lexically
-assert "Densify" in names, "pimm_data lost Densify"
-for gone in ("AddNoise", "Digitize"):
-    assert gone not in names, f"pimm_data still registers {gone}: lockstep violated"
-import pytest as _pt, jax as _jx, torch as _t, importlib.util as _iu
-# NOT asserting a GPU is visible: this image is built on whatever node is free,
-# usually one with no GPU at all, and the jax wheels are arch-generic so the
-# build node's hardware says nothing about where it will run.
-_jxk = "{{ JAX_EXTRA }}"
-
-# Modules the boundary move DELETED. The registry check above cannot see these:
-# they register nothing, so it passed while the image shipped all five.
-for _gone in ("pimm_data.noise", "pimm_data.noise_jax", "pimm_data.coeff",
-              "pimm_data.coeff_verify", "pimm_data.readers.coeff_tpc"):
-    assert _iu.find_spec(_gone) is None, (
-        f"{_gone} was deleted from pimm-data but is installed -- a stale "
-        f"build/lib leaked into the wheel")
-print(f"OK: pywt {pywt.__version__}, pimm_data {pimm_data.__version__}, "
-      f"pytest {_pt.__version__}, jax {_jx.__version__} ({_jxk}), "
-      f"torch {_t.__version__}, {len(names)} transforms, "
-      f"forward model absent as expected")
-PYCHECK
+    # Everything that goes into the image lives in container/install.sh, shared
+    # with container/Dockerfile so the two front-ends cannot drift.
+    export JAX_EXTRA="{{ JAX_EXTRA }}"
+    bash /opt/helix-build/install.sh
 
 %labels
     helix.purpose  corpus building and FM training in one image
