@@ -112,15 +112,22 @@ to `container/**`, `pyproject.toml` or `uv.lock`, and publishes it publicly — 
 credentials needed:
 
 ```bash
-apptainer pull helix-train.sif \
-  docker://ghcr.io/omaralterkait/helix@sha256:d7a59b2be4a801560c13dde62f71d2b9b92bcd0c253d544ae6189555b27e2044
+# resolve the digest the rolling tag currently points at, then pull THAT
+D=$(skopeo inspect docker://ghcr.io/omaralterkait/helix:jax-cuda12 --format '{{.Digest}}')
+apptainer pull helix-train.sif "docker://ghcr.io/omaralterkait/helix@${D}"
+echo "pinned: $D"     # record this next to the run it produced
 ```
 
-That exact command was run anonymously from a cluster node on 2026-09-18 and
-produced an image reporting `pimm_data 0.4.0` at revision `2b20573c`, forward
-model absent from pimm-data and registered by helix, jax `cuda12`. Later digests
-are printed by each workflow run; `:jax-cuda12` is the rolling tag if you want
-the newest and accept that it moves.
+Resolve-then-pin rather than a digest written down here, because a digest in a
+document goes stale the moment anything rebuilds — `d7a59b2b…` was current when
+this was written and was superseded within the hour. Record the digest **with the
+run**, in its provenance, where it means something. Each workflow run also prints
+its own.
+
+The route is verified: that pull was run anonymously from a cluster node on
+2026-09-18 and produced an image reporting `pimm_data 0.4.0` at revision
+`2b20573c` — forward model absent from pimm-data, registered by helix, jax
+`cuda12`.
 
 **At NERSC, use the other image.** `ghcr.io/omaralterkait/helix-nersc` is the
 same recipe on pimm's NERSC base, published as a Docker v2 manifest because
