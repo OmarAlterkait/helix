@@ -49,6 +49,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  NERSC_IMAGE: ghcr.io/omaralterkait/helix-nersc
+  NERSC_CACHE_IMAGE: ghcr.io/omaralterkait/helix-nersc-buildcache:main
   # Same owner as this repository, deliberately: GITHUB_TOKEN carries
   # packages:write for the repo owner's namespace and nothing else, so publishing
   # here needs no PAT and no secret to arrange. Moving the image under an
@@ -224,3 +226,138 @@ jobs:
               $PY scripts/smoke_train_fm.py --corpus $W/corpus/run_synth \
                   --bins-from $W/bins.pt --events 4 --steps 8
             '
+
+  # The NERSC variant. Same install.sh on the pimm-nersc base, published in a
+  # format Shifter and podman-hpc can actually consume -- which is the reason it
+  # exists, more than MPI is. See container/Dockerfile.nersc.
+  build-nersc:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      pushed: ${{ steps.push.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Decide whether we publish
+        id: push
+        run: echo "enabled=${{ github.event_name != 'pull_request' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: steps.push.outputs.enabled == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.NERSC_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=jax-${{ github.event.inputs.jax_extra || 'cuda12' }}
+
+      - name: Build
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: container/Dockerfile.nersc
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            JAX_EXTRA=${{ github.event.inputs.jax_extra || 'cuda12' }}
+          cache-from: type=registry,ref=${{ env.NERSC_CACHE_IMAGE }}
+          cache-to: ${{ steps.push.outputs.enabled == 'true' && format('type=registry,ref={0},mode=max,ignore-error=true', env.NERSC_CACHE_IMAGE) || '' }}
+          # Shifter and podman-hpc cannot consume OCI indexes or attestation
+          # manifests. pimm-nersc publishes Docker v2 for the same reason, and
+          # its manifest confirms it: application/vnd.docker.distribution.manifest.v2+json.
+          provenance: false
+          sbom: false
+          outputs: type=image,oci-mediatypes=false,push=${{ steps.push.outputs.enabled == 'true' }}
+          load: ${{ steps.push.outputs.enabled != 'true' }}
+
+      - name: Report what to pull
+        run: |
+          echo "digest: ${{ steps.build.outputs.digest }}"
+          echo "podman-hpc pull ${NERSC_IMAGE}@${{ steps.build.outputs.digest }}"
+
+  test-nersc:
+    needs: build-nersc
+    if: needs.build-nersc.outputs.pushed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # What distinguishes this image from the standard one: the MPI stack must
+      # have survived helix's install, and the manifest must be Docker v2. Both
+      # fail silently otherwise -- a serial h5py still imports, and an OCI
+      # manifest only fails at NERSC, on someone else's machine.
+      - name: MPI survived, and the suite runs
+        env:
+          REF: ${{ env.NERSC_IMAGE }}@${{ needs.build-nersc.outputs.digest }}
+        run: |
+          docker pull "$REF"
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e PYTHONNOUSERSITE=1 -e PYTHONPATH=/work -e HELIX_ROOT=/work \
+            "$REF" /opt/pimm/.venv/bin/python - <<'PY'
+          import h5py, mpi4py, pimm_data, pywt, jax, torch
+          if not h5py.get_config().mpi:
+              raise SystemExit("h5py lost MPI support: this image is the standard one in disguise")
+          from pimm_data.transform import TRANSFORMS
+          names = set(TRANSFORMS.module_dict)
+          assert "Densify" in names, "pimm_data lost Densify"
+          for gone in ("AddNoise", "Digitize"):
+              assert gone not in names, f"pimm_data still registers {gone}: lockstep violated"
+          print(f"OK: h5py {h5py.__version__} (MPI), mpi4py {mpi4py.__version__}, "
+                f"pimm_data {pimm_data.__version__}, pywt {pywt.__version__}, "
+                f"jax {jax.__version__}, torch {torch.__version__}")
+          PY
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e PYTHONNOUSERSITE=1 -e PYTHONPATH=/work -e HELIX_ROOT=/work \
+            "$REF" /opt/pimm/.venv/bin/python -m pytest tests -q
+
+      - name: The manifest is Docker v2, not OCI
+        env:
+          REF: ${{ env.NERSC_IMAGE }}@${{ needs.build-nersc.outputs.digest }}
+        run: |
+          mt=$(docker manifest inspect "$REF" | python3 -c 'import sys,json; print(json.load(sys.stdin)["mediaType"])')
+          echo "mediaType: $mt"
+          case "$mt" in
+            application/vnd.docker.distribution.manifest.v2+json) ;;
+            *) echo "Shifter cannot pull $mt" >&2; exit 1 ;;
+          esac
+

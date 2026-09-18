@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+#
+# The helix image for NERSC. Same recipe as container/Dockerfile -- both run
+# container/install.sh -- on a different base.
+#
+# WHAT IS ACTUALLY DIFFERENT, and it is mostly not MPI.
+#
+# 1. The manifest format. Shifter and podman-hpc cannot consume OCI image
+#    indexes or attestation manifests, so this image is published with
+#    `provenance: false` and `oci-mediatypes: false` (see docker.yml). The
+#    standard helix image is OCI and would not pull there. This is the reason a
+#    NERSC variant exists at all -- it applies whether or not you use MPI.
+#
+# 2. The base carries the MPI stack, so helix does not rebuild it. pimm-nersc
+#    already builds MPICH 4.0.2 from source (ABI-compatible with Cray MPICH, so
+#    Perlmutter's host MPI can be injected at runtime), HDF5 1.14.6 with
+#    --enable-parallel into /opt/hdf5, and rebuilds mpi4py and h5py --no-binary
+#    against both. Inheriting it costs one FROM line instead of ~15 minutes of
+#    compiling the same thing again.
+#
+# helix itself uses none of that today: nothing in helix or pimm-data imports
+# mpi4py, opens HDF5 with driver="mpio", or reads h5py.get_config().mpi, and
+# training is single-node DDP over NCCL. The corpus build is an embarrassingly
+# parallel Slurm array whose tasks each write their own shards -- there is no
+# collective I/O to do. So this variant is here for the manifest format and for
+# the day multi-node training or collective reads are wanted, not because the
+# current workload needs MPI.
+#
+#     podman-hpc pull ghcr.io/omaralterkait/helix-nersc@sha256:<digest>
+#
+# Pin the DIGEST, not the tag, for the same reason as the standard image: it is
+# half of a lockstep pair.
+
+# pimm-nersc, by digest: MPICH, parallel HDF5, MPI-enabled mpi4py and h5py.
+FROM ghcr.io/deeplearnphysics/pimm-nersc@sha256:562c9128dbbdd0e45d36da7351576c214cc5941700322f00c0efcc087c118e91
+
+# cuda12 (default) or cpu, exactly as the standard image.
+ARG JAX_EXTRA=cuda12
+
+COPY container/install.sh /opt/helix-build/install.sh
+COPY pyproject.toml /opt/helix-build/pyproject.toml
+
+# install.sh notices the base's MPI-enabled h5py and asserts it survives. Nothing
+# helix installs depends on h5py -- pimm-data goes in with --no-deps -- but a
+# binary wheel replacing the source build would not raise, it would just remove
+# collective I/O, and that is the kind of thing found months later.
+RUN --mount=type=cache,target=/tmp/uvcache \
+    JAX_EXTRA=${JAX_EXTRA} bash /opt/helix-build/install.sh
+
+LABEL helix.purpose="corpus building and FM training at NERSC" \
+      helix.base="ghcr.io/deeplearnphysics/pimm-nersc" \
+      helix.base_digest="sha256:562c9128dbbdd0e45d36da7351576c214cc5941700322f00c0efcc087c118e91" \
+      helix.jax="${JAX_EXTRA}" \
+      helix.variant="nersc"
+
+WORKDIR /work
+CMD ["bash"]

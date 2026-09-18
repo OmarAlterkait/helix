@@ -100,6 +100,14 @@ echo "pimm-data revision: $PIMM_DATA_REV (from ${PIMM_DATA_REV_SOURCE:-$HELIX_PY
 #               cuda12_local is not an option: it wants a system cuDNN and this
 #               image has none -- /usr/local/cuda has the runtime and nvcc, but
 #               libcudnn arrives only as torch's pip wheel.
+# Does the base ship an MPI-enabled h5py? The NERSC base (pimm-nersc) rebuilds
+# h5py from source against a parallel HDF5, and a binary wheel pulled in later
+# would silently replace it with a serial one -- the image would still import,
+# and collective I/O would simply not be available. Recorded here, asserted after.
+H5PY_MPI_BEFORE=$("$VENV/bin/python" -c \
+    "import h5py; print(int(bool(h5py.get_config().mpi)))" 2>/dev/null || echo 0)
+[ "$H5PY_MPI_BEFORE" = "1" ] && echo "base ships MPI-enabled h5py; will verify it survives"
+
 "$VENV/bin/python" - <<'PYSNAP' > /tmp/nvidia_before.txt
 import importlib.metadata as m
 for d in sorted(m.distributions(), key=lambda d: d.metadata["Name"] or ""):
@@ -149,6 +157,21 @@ if moved:
         "nvidia-* requirements match torch 2.10+cu126.")
 print("  torch's own CUDA wheels: unchanged")
 PYGUARD
+
+# h5py must still be the one the base built. Nothing helix installs depends on
+# h5py -- pimm-data goes in with --no-deps, and PyWavelets/pytest/jax do not want
+# it -- so this should never fire. It is here because if it ever does, the symptom
+# at NERSC is not an error: it is collective I/O quietly being unavailable.
+if [ "$H5PY_MPI_BEFORE" = "1" ]; then
+    H5PY_MPI_AFTER=$("$VENV/bin/python" -c \
+        "import h5py; print(int(bool(h5py.get_config().mpi)))" 2>/dev/null || echo 0)
+    [ "$H5PY_MPI_AFTER" = "1" ] || {
+        echo "FATAL: h5py lost its MPI support during this install."
+        echo "       The base built h5py from source against a parallel HDF5 and"
+        echo "       something here replaced it with a binary wheel. Find what"
+        echo "       pulled h5py in and give it --no-deps."; exit 1; }
+    echo "  h5py: still MPI-enabled"
+fi
 
 df -h "$TMPDIR" | tail -1
 
