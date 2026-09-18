@@ -110,4 +110,4 @@ include = ["helix*"]
 #
 # THIS REVISION IS LOCKSTEP WITH helix. It must equal PIMM_DATA_REV in
 # container/helix-train.def; tests/test_lockstep_pin.py asserts that.
-pimm-data = { git = "https://github.com/OmarAlterkait/pimm-data", rev = "6b2656ab32336131783176d49b09d0a77007607d" }
+pimm-data = { git = "https://github.com/OmarAlterkait/pimm-data", rev = "2b20573ca14f1d06bcc40df8ee8c4e38b13fd94a" }

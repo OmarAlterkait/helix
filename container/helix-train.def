@@ -117,7 +117,7 @@ From: ghcr.io/deeplearnphysics/pimm@sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c
     # must move together: the AddNoise/Digitize registration is LOCKSTEP with
     # helix, and an environment that straddles the boundary move raises
     # KeyError on the second registration.
-    PIMM_DATA_REV=6b2656ab32336131783176d49b09d0a77007607d
+    PIMM_DATA_REV=2b20573ca14f1d06bcc40df8ee8c4e38b13fd94a
 
     # Replace the stale 0.3.0 rather than shadow it. An editable .pth or a
     # PYTHONPATH entry would leave two copies resolvable and make which one wins

@@ -597,7 +597,7 @@ requires-dist = [
     { name = "jax", extras = ["cuda12"], marker = "extra == 'jax-gpu'", specifier = ">=0.4.20" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.6" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "pimm-data", marker = "extra == 'pimm'", git = "https://github.com/OmarAlterkait/pimm-data?rev=6b2656ab32336131783176d49b09d0a77007607d" },
+    { name = "pimm-data", marker = "extra == 'pimm'", git = "https://github.com/OmarAlterkait/pimm-data?rev=2b20573ca14f1d06bcc40df8ee8c4e38b13fd94a" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-benchmark", marker = "extra == 'dev'" },
     { name = "pywavelets", specifier = ">=1.4" },
@@ -2094,7 +2094,7 @@ wheels = [
 [[package]]
 name = "pimm-data"
 version = "0.4.0"
-source = { git = "https://github.com/OmarAlterkait/pimm-data?rev=6b2656ab32336131783176d49b09d0a77007607d#6b2656ab32336131783176d49b09d0a77007607d" }
+source = { git = "https://github.com/OmarAlterkait/pimm-data?rev=2b20573ca14f1d06bcc40df8ee8c4e38b13fd94a#2b20573ca14f1d06bcc40df8ee8c4e38b13fd94a" }
 dependencies = [
     { name = "h5py" },
     { name = "hdf5plugin" },
