@@ -86,8 +86,16 @@ def test_recipe_builders_run():
 def test_the_builder_registers_before_it_composes():
     """scripts/build_coeff_corpus.py must import this module, not rely on
     pimm_data pulling it in. Checked as source, because running the builder
-    needs real shards and a GPU."""
-    src = open("scripts/build_coeff_corpus.py", encoding="utf-8").read()
+    needs real shards and a GPU.
+
+    Resolved through helix.paths.repo() rather than opened by relative path: the
+    test read "scripts/build_coeff_corpus.py" from the process CWD, so it passed
+    only when pytest happened to be invoked from the repo root and raised
+    FileNotFoundError from anywhere else. It was the one relative open() in the
+    suite."""
+    from helix.paths import repo
+
+    src = (repo() / "scripts" / "build_coeff_corpus.py").read_text(encoding="utf-8")
     i_import = src.find("import helix.data.transforms")
     i_use = src.find('type="AddNoise"')
     assert i_import != -1, "builder composes AddNoise but never registers it"
