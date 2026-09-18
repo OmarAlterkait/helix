@@ -234,7 +234,6 @@ PYCHECK
     helix.purpose  corpus building and FM training in one image
     helix.base     ghcr.io/deeplearnphysics/pimm v0.5.1
     helix.base_digest sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c6803d69e012f770d927b7a776bf
-    helix.built    2026-09-17
     helix.jax      {{ JAX_EXTRA }}
 
 %help
