@@ -159,7 +159,9 @@ apptainer exec -B /sdf,/lscratch $HELIX_IMAGE \
   /opt/pimm/.venv/bin/python -m pytest tests -q
 ```
 
-Expect **492 passed, 54 skipped**. The skips are real-data and GPU tests; a skip
+Expect **507 passed, 54 skipped** where the corpus is present, or **504 passed,
+57 skipped** without it — `tests/test_bins.py` has three tests that need a real
+corpus and skip without one. The other skips are real-data and GPU tests; a skip
 because data is absent looks identical to a skip because the machine has no GPU,
 which is why `tests/_paths.py` exists — read its docstring if the count differs.
 
@@ -212,14 +214,22 @@ and whether it is required, optional, or lineage only.
 The short version, assuming the corpus is already across, is that **very little
 else is large**:
 
+**Nothing else is required.** The plan is to retrain at the receiving site
+rather than continue a run mid-flight, and that makes every checkpoint optional
+— they are baselines to compare against, not inputs.
+
 | | what | size |
 |---|---|---|
-| required | the bin table `coeff_bins_r1_tau05_run0027575715_v2.pt` | 8 KB |
 | required | the image — or rebuild it from the def, which is equivalent | 9.17 GB |
-| to evaluate | `coeff-fm-cooldown-r1-8run/model/model_ema.pth` + `provenance.json` + `config.py` | 226 MB |
-| to continue | `coeff-fm-train-r1-8run/model/last/`, plus a few `iter_*.pth` near the plateau | ~1.5 GB |
-| optional | the m113 artifact, for the cross-corpus comparison | 226 MB |
+| derive, don't copy | the bin grid — `scripts/derive_coeff_bins.py` reproduces it from the corpus | 8 KB |
+| for comparison | `coeff-fm-cooldown-r1-8run/model/model_ema.pth` + `provenance.json` + `config.py` | 226 MB |
+| for comparison | the m113 artifact, for the cross-corpus number | 226 MB |
 | do not move | 397 retired research checkpoints — not self-contained, see §8 | 160 GB |
+
+So beyond the corpus the floor is **one container**, and it can be built rather
+than shipped. Bring the two comparison checkpoints if you want to reproduce the
+numbers in `docs/SCIENCE.md`; skip them and the first run simply has nothing to
+be measured against.
 
 Two things that look like separate items but live **inside** the corpus tree and
 travel with it — provided it was copied whole rather than filtered on
@@ -233,9 +243,60 @@ Check both landed, along with each run's `holdout.json`. Regenerating the probe
 truth requires the source simulation, which is the one input that belongs to a
 different group.
 
-The bin table is **rederivable bit-identically** from the corpus (§1 of the
-inventory has the command and the verification). Copy it anyway — it is eight
-kilobytes — but it is not a single point of failure.
+### The bin grid: derive it — you do not need the original
+
+The categorical head's bin grid is training-set statistics — not recoverable
+from a checkpoint, but fully reproducible from the corpus. **Assume you do not
+have the original file; you do not need it.** Derive it on arrival:
+
+```bash
+python scripts/derive_coeff_bins.py --corpus $HELIX_CORPUS --out bins.pt
+```
+
+`helix/data/data/reference_bins.json` is the **definition** of the production
+grid: the derivation parameters, the corpus it is defined over, and a content
+digest of the result. It is the single source of those parameters —
+`helix.data.bins.DEFAULTS` reads them from it and the CLI's defaults come from
+there, so "what the production grid is" is declared once rather than duplicated
+in argparse. A test asserts the two cannot drift apart.
+
+The command checks **two different things**, because one check cannot cover both:
+
+**Before deriving, it checks the corpus** — one shard header, about a second.
+This catches the confusion that matters most: the pre-tau `coeff_tpc`
+generation against `coeff_tpc_r1`. They differ in which coefficients survive the
+coherent gate, so a grid from one does not describe the other. You get a named
+cause and exit 2 rather than a mismatch four minutes later.
+
+**After deriving, it checks the result against the digest.** This exists because
+the *run* cannot be checked any other way. `basis_digest` hashes the DSP recipe,
+so **all eight r1 runs share it**, and a shard's `/config` carries only
+`band_lengths`, `gids`, `n_wires` and `norm_sigma` — no source-run identifier.
+The directory name is the only other signal and a copy can be renamed. So
+deriving from the wrong one of the eight produces a grid that is entirely
+self-consistent, passes every input check, and is simply not the one existing
+checkpoints were trained against. The digest is the only thing that notices:
+
+    matches the packaged reference grid (coeff_bins_r1_tau05_run0027575715_v2)
+    — this is the grid the released models were trained against
+
+The grid must come from **`run_0027575715`**, with an identical shard set —
+"first 120 events" is defined by dataset order. Note the digest answers "same
+corpus bytes?", not "did I follow the definition?": a corpus legitimately
+*rebuilt* from the simulation would satisfy the definition and still produce a
+different grid, correct for its own data and not comparable to the published
+models.
+
+If you *did* bring the original, you can also compare against it directly:
+
+```bash
+python scripts/derive_coeff_bins.py --verify <original>.pt --corpus $HELIX_CORPUS
+```
+
+which rederives using the parameters the original records and exits non-zero on
+any difference. Verified bit-identical on 2026-09-18; `tests/test_bins.py` keeps
+it that way. The derivation is in `helix.data.bins` (`derive`, `rederive`,
+`compare`, `check_reference`) if you need it from code.
 
 ---
 
@@ -246,7 +307,7 @@ kilobytes — but it is not a single point of failure.
 | check | result |
 |---|---|
 | pimm-data suite | 363 passed, 7 skipped |
-| helix suite, inside the new image | 492 passed, 54 skipped |
+| helix suite, inside the new image | 507 passed, 54 skipped |
 | lockstep guard | 4 passed |
 | image bakes the pinned rev | `2b20573c`, forward model absent from pimm-data and registered by helix |
 | `python -m helix.paths` | all twelve roots resolve |

@@ -1,0 +1,38 @@
+{
+  "_comment": "The DEFINITION of the production bin grid: the parameters it is derived with, the corpus it is derived from, and a content digest of the result. This file is the single source of those parameters -- helix.data.bins reads its defaults here, and scripts/derive_coeff_bins.py takes its argparse defaults from those, so the numbers live in one place.",
+  "name": "coeff_bins_r1_tau05_run0027575715_v2",
+  "params": {
+    "K": 128,
+    "n_bands": 4,
+    "events": 120,
+    "lo_pct": 0.05,
+    "hi_pct": 99.95,
+    "dataset_name": "sim_wire"
+  },
+  "corpus": {
+    "run": "run_0027575715",
+    "generation": "r1 (tau=0.05)",
+    "basis_digest": "8c4542b691e379330928171682a708284a4a4eaf8f5b850955f8789dd0415a4f",
+    "_basis_digest_note": "Checkable BEFORE deriving, and catches the pre-tau/r1 confusion. It does NOT identify which run: basis_digest hashes the DSP recipe, so all eight r1 runs share it.",
+    "_run_note": "Which run cannot be checked from the data. Shard /config carries only band_lengths, gids, n_wires, norm_sigma -- no source-run id -- so the run is knowable only from the directory name. That is why the digests below exist: they are the only thing that detects a grid derived from the wrong run."
+  },
+  "digests": {
+    "edges": "sha256:79485d19f2f800c67e676bf0299b95022d27683b7a0b7c2f4c7f1b1c7058f957",
+    "cent_asinh": "sha256:cae984e7541e32101e921d3dfaef962cdc218da3eed1614a426198be0ca55006",
+    "cent_ratio": "sha256:cf3859b74c238bf4f6286682c519efa186aad20b682655c05384983b561ed19e"
+  },
+  "shapes": {
+    "edges": [
+      4,
+      129
+    ],
+    "cent_asinh": [
+      4,
+      128
+    ],
+    "cent_ratio": [
+      4,
+      128
+    ]
+  }
+}

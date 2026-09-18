@@ -1,131 +1,145 @@
 #!/usr/bin/env python
 """Derive categorical-head bin edges from a coeff corpus.
 
-The FM's value head can predict a coefficient's magnitude as one of K bins
-instead of regressing it. The bins are TRAINING-SET STATISTICS, so they must come
+The algorithm and the reasoning behind it live in ``helix.data.bins``; this is
+the command line over it. The bins are TRAINING-SET STATISTICS, so they must come
 from the corpus a model will be trained on — the edges shipped with m113 were
 derived from the old cache, which used a different (white) noise model.
 
-Algorithm, matching research ``fm/tier1_setup_bins.py``:
+Three modes::
 
-  * work in ``tgt = arcsinh(clean / sigma)`` — the space the head predicts in
-  * K bins UNIFORM in that space over the band's robust range
-    ``[p0.05, p99.95]``. Uniform-in-asinh is log-spaced in raw charge, i.e.
-    constant RELATIVE precision, which is the physically motivated choice —
-    NOT quantile bins, so non-uniform occupancy is expected and correct
-  * outer two bins extended to +-inf so the tails cannot fall off the grid
+    # derive a fresh grid
+    python scripts/derive_coeff_bins.py --corpus <run-dir> --out bins.pt
 
-The one deliberate difference from the research script: it read
-``val_clean`` from the npz cache and divided by a global ``SIGMA=2.6``, because
-that cache stored values already scaled by ``SIGMA/sigma_tab``. The corpus stores
-RAW coefficients, so we divide by the per-``(plane, band)`` ``norm_sigma`` table
-directly. The two are the same quantity — SIGMA cancels — and doing it this way
-means the edges are in exactly the space ``CoeffTokenize`` produces.
+    # reproduce an existing grid, using the parameters it records
+    python scripts/derive_coeff_bins.py --like bins.pt --corpus <run-dir> --out new.pt
 
-Writes ``edges`` (n_band, K+1), ``cent_asinh`` (n_band, K) — the point estimate
-in model space — and ``cent_ratio`` (n_band, K) = E[coeff/sigma | bin], the
-charge read-back centroid.
+    # reproduce it and assert the result matches, writing nothing
+    python scripts/derive_coeff_bins.py --verify bins.pt --corpus <run-dir>
 
-It no longer writes ``cent_lin`` (E[raw ADC | bin]). That table pooled planes
-whose ``norm_sigma`` differ by 22%, nothing consumed it, and ``set_bins`` now
-rejects unknown centroid tables rather than let one bind to the wrong slot. An
-older sidecar that still carries the key applies fine — ``apply_bins`` ignores it.
-
-Usage::
-
-    python scripts/derive_coeff_bins.py --corpus <dir> --out bins.pt [--events 120]
+``--verify`` is the handover check: it proves a receiving site can regenerate the
+grid from its own copy of the corpus rather than carry the file. It exits
+non-zero if the tables differ.
 """
 
 from __future__ import annotations
 
 import argparse
 
-import numpy as np
+from helix.data import bins as binlib
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--corpus", required=True, help="corpus dir (<root>/<run>/)")
-    ap.add_argument("--dataset-name", default="sim_wire")
-    ap.add_argument("--out", required=True, help="output .pt")
-    ap.add_argument("--events", type=int, default=120,
+    ap.add_argument("--corpus", help="corpus dir (<root>/<run>/); with --like or "
+                                     "--verify, defaults to the recorded path")
+    ap.add_argument("--out", help="output .pt (omit only with --verify)")
+    ap.add_argument("--like", help="reuse the derivation parameters this .pt records")
+    ap.add_argument("--verify", help="rederive and compare against this .pt; writes nothing")
+    ap.add_argument("--dataset-name", default=binlib.DEFAULTS["dataset_name"])
+    ap.add_argument("--events", type=int, default=binlib.DEFAULTS["events"],
                     help="events to pool (research used 120)")
-    ap.add_argument("--K", type=int, default=128, help="bins per band")
-    ap.add_argument("--n-bands", type=int, default=4,
+    ap.add_argument("--K", type=int, default=binlib.DEFAULTS["K"], help="bins per band")
+    ap.add_argument("--n-bands", type=int, default=binlib.DEFAULTS["n_bands"],
                     help="bands the tokenizer keeps (D1 and beyond are dropped)")
-    ap.add_argument("--lo-pct", type=float, default=0.05)
-    ap.add_argument("--hi-pct", type=float, default=99.95)
+    ap.add_argument("--lo-pct", type=float, default=binlib.DEFAULTS["lo_pct"])
+    ap.add_argument("--hi-pct", type=float, default=binlib.DEFAULTS["hi_pct"])
     a = ap.parse_args(argv)
 
-    import torch
-    from helix.data import CoeffTPCDataset
-    from helix.model.tokenize import sigma_for_rows
+    if a.like and a.verify:
+        ap.error("--like and --verify both name a reference; pass one")
+    reference = a.like or a.verify
+    if not reference and not a.corpus:
+        ap.error("--corpus is required unless --like or --verify supplies one")
+    if not a.verify and not a.out:
+        ap.error("--out is required unless --verify")
 
-    ds = CoeffTPCDataset(data_root=a.corpus, dataset_name=a.dataset_name,
-                         modalities=("coeff", "coeff_clean"), transform=None)
-    n = min(a.events, len(ds))
-    print(f"pooling {n} of {len(ds)} events from {a.corpus}")
+    # Input-side check first: one shard header, a second, and it names the cause.
+    # It cannot tell WHICH run this is -- see helix.data.bins.check_corpus -- so
+    # it is a cheap filter in front of the content digest, not a replacement.
+    target = a.corpus
+    if target:
+        c = binlib.check_corpus(target, dataset_name=a.dataset_name)
+        if c["status"] == "basis-mismatch":
+            print(f"FATAL: {target}\n"
+                  f"  basis_digest {c['actual']}\n"
+                  f"  expected     {c['expected']}  ({c.get('generation')})\n"
+                  "  A different DSP produced this corpus -- most likely the pre-tau\n"
+                  "  generation rather than r1. They differ in which coefficients\n"
+                  "  survive the coherent gate, so a grid from one does not describe\n"
+                  "  the other. Pass --corpus for the generation you mean.")
+            return 2
+        if c["status"] == "run-name-differs":
+            print(f"note: corpus directory is {c['actual']!r}, the reference grid was "
+                  f"derived from {c['expected']!r}. The name is only a convention, so "
+                  f"this is not conclusive either way -- the digest check below is.")
+        elif c["status"] == "unreadable":
+            print(f"FATAL: no shard found under {target}")
+            return 2
 
-    vals = {b: [] for b in range(a.n_bands)}
-    for i in range(n):
-        s = ds.get_data(i)
-        c, cc = s["coeff"], s["coeff_clean"]
-        meta = c["_meta"]
-        band = np.asarray(c["band"], np.int64)
-        gid = np.asarray(c["plane_gid"], np.int64)
-        clean = np.asarray(cc["value"], np.float32).reshape(-1)
-        keep = band < a.n_bands
-        band, gid, clean = band[keep], gid[keep], clean[keep]
-        sig = np.maximum(sigma_for_rows(gid, band, meta["gids"], meta["norm_sigma"]), 1e-6)
-        t = np.arcsinh(clean / sig).astype(np.float64)
-        # clean/sigma == sinh(t), the DIMENSIONLESS coefficient. This is what a
-        # read-back needs. The alternative — E[raw ADC | bin] — pools planes whose
-        # norm_sigma differ by 22%, biasing a Y-plane coefficient 13% low and a
-        # U/V one 6% high. That cancels on a random mask and does NOT cancel on a
-        # plane mask (measured 0.857 vs 1.021 cross-plane): invisible on the
-        # metric people look at, wrong on the one that matters. It was written
-        # here for four commits and read nowhere; it is not written now.
-        ratio = (clean / sig).astype(np.float64)
-        for b in range(a.n_bands):
-            sel = band == b
-            vals[b].append(t[sel])
-            vals.setdefault(("raw", b), []).append(clean[sel])
-            vals.setdefault(("ratio", b), []).append(ratio[sel])
+    if reference:
+        ref = binlib.load(reference)
+        p = binlib.params_of(ref)
+        corpus = a.corpus or p["corpus"]
+        print(f"reference {reference}: events={p['events']} K={p['K']} "
+              f"n_bands={p['n_bands']} corpus={p['corpus']}")
+        if a.corpus and a.corpus != p["corpus"]:
+            print(f"  deriving from {corpus} instead — the recorded path is where "
+                  f"it lived when it was derived")
+        table = binlib.rederive(ref, corpus=corpus, report=print)
+    else:
+        table = binlib.derive(a.corpus, dataset_name=a.dataset_name,
+                              events=a.events, K=a.K, n_bands=a.n_bands,
+                              lo_pct=a.lo_pct, hi_pct=a.hi_pct, report=print)
 
-    K = a.K
-    edges = np.zeros((a.n_bands, K + 1), np.float32)
-    cent_a = np.zeros((a.n_bands, K), np.float32)
-    cent_r = np.zeros((a.n_bands, K), np.float32)   # E[coeff/sigma | bin]
-    for b in range(a.n_bands):
-        t = np.concatenate(vals[b])
-        v = np.concatenate(vals[("raw", b)])
-        r = np.concatenate(vals[("ratio", b)])
-        lo, hi = np.percentile(t, a.lo_pct), np.percentile(t, a.hi_pct)
-        e = np.linspace(lo, hi, K + 1)
-        idx = np.clip(np.digitize(t, e[1:-1]), 0, K - 1)
-        for k in range(K):
-            m = idx == k
-            if m.any():
-                cent_a[b, k] = t[m].mean()
-                # E[sinh t | bin], MEASURED. Not sinh(E[t | bin]) — the head is
-                # categorical, and a posterior spread over many bins makes
-                # sinh(mean) a 31%-low estimate of the charge (Jensen). The
-                # reference (fm/train.py:125, fm/e7_cat_eval.py:47,
-                # fm/viz_cat.py:25) reads back as sum_k p_k * centroid_k and
-                # never applies sinh to a mean.
-                cent_r[b, k] = r[m].mean()
-            else:                                  # empty bin: fall back to its centre
-                cent_a[b, k] = 0.5 * (e[k] + e[k + 1])
-                cent_r[b, k] = float(np.sinh(cent_a[b, k]))   # tier1_setup_bins.py:41
-        empty = int((np.bincount(idx, minlength=K) == 0).sum())
-        e[0], e[-1] = -1e18, 1e18                  # tails cannot fall off the grid
-        edges[b] = e
-        print(f"  band {b}: n={len(t):>10,}  tgt[{lo:+.2f},{hi:+.2f}]  "
-              f"empty bins={empty}  |coeff|max={np.abs(v).max():.0f}")
+    if a.verify:
+        r = binlib.compare(ref, table)
+        for k, v in r["arrays"].items():
+            print(f"  {k:12s} identical={v['identical']}  "
+                  f"max|diff|={v['max_abs_diff']:.3e}")
+        for k, (x, y) in r["param_mismatches"].items():
+            print(f"  {k}: reference {x!r} != derived {y!r}")
+        if r["identical"]:
+            print("VERIFIED: rederived bit-identically — this grid need not be copied")
+            return 0
+        print("MISMATCH: the rederived grid differs from the reference.\n"
+              "  A grid is the objective a model was trained against, so this is a\n"
+              "  DIFFERENT grid, not a rounding difference. Check that --corpus names\n"
+              "  the SAME run the reference records, with an identical shard set:\n"
+              "  'first N events' is defined by dataset order.")
+        return 1
 
-    torch.save(dict(edges=torch.tensor(edges), cent_asinh=torch.tensor(cent_a),
-                    cent_ratio=torch.tensor(cent_r), K=K, n_bands=a.n_bands,
-                    corpus=a.corpus, events=n), a.out)
+    # Self-check against the packaged fingerprint. A site that arrived without a
+    # copy of the original grid has nothing to --verify against, and deriving
+    # from the wrong run of a multi-run corpus yields a grid that is entirely
+    # self-consistent and simply not the one the released models were trained
+    # on. Nothing else would notice, so this is not opt-in.
+    r = binlib.check_reference(table)
+    ref = r.get("reference") or {}
+    if r["status"] == "match":
+        print(f"matches the packaged reference grid ({ref.get('name')}) — this is "
+              f"the grid the released models were trained against")
+    elif r["status"] == "mismatch":
+        print(f"WARNING: does NOT match the packaged reference grid "
+              f"({ref.get('name')}).")
+        rc = ref.get("corpus") or {}
+        print(f"  The reference was derived from corpus run "
+              f"{rc.get('run')}, generation {rc.get('generation')}.")
+        print("  Same parameters, different numbers means a different corpus run or a\n"
+              "  different shard set. The grid is still usable — it is simply not the\n"
+              "  one existing checkpoints were trained against, so numbers from a model\n"
+              "  trained on it are not comparable to the published ones.")
+    elif r["status"] == "params":
+        pm = ", ".join(f"{k}: reference {x!r} != derived {y!r}"
+                       for k, (x, y) in r["param_mismatches"].items())
+        print(f"note: derived with different parameters from the packaged reference "
+              f"({pm}), so they are not comparable. Deliberate if you meant to change "
+              f"the grid.")
+    else:
+        print("note: no packaged reference fingerprint installed, so this grid could "
+              "not be checked against the released one.")
+
+    binlib.save(table, a.out)
     print(f"wrote {a.out}")
     return 0
 

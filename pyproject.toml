@@ -98,6 +98,11 @@ include = ["helix*"]
 # FileNotFoundError, which an editable install hides completely.
 [tool.setuptools.package-data]
 "helix.tpc" = ["data/*.json", "data/*.npz"]
+# The bin-grid fingerprint. helix.data.bins.check_reference reads it to tell a
+# freshly derived grid from the one the released models were trained against —
+# the only check available to a site that arrived WITHOUT a copy of the original
+# grid. Absent from a wheel, that check silently degrades to "no-reference".
+"helix.data" = ["data/*.json"]
 
 [tool.uv.sources]
 # pimm-data is not on PyPI, so the `pimm` extra needs an explicit source. Pinned

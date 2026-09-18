@@ -13,24 +13,28 @@ site can set the env var rather than recreate the directory layout.
 
 ## Summary
 
+The receiving site intends to **retrain rather than resume**, which collapses
+most of this list: a checkpoint is then a baseline to compare against, not an
+input to anything.
+
 | tier | contents | size |
 |---|---|---|
-| **required** | r1 corpus, bin table, container | **354 GB** |
-| **recommended** | + eval weights, cooldown branch points, m113 artifact | **~356 GB** |
+| **required** | r1 corpus, container | **354 GB** |
+| **for comparison** | + production EMA weights, m113 artifact | **~355 GB** |
 | **optional** | + legacy corpus, full pretraining runs | **580 GB** |
 | **leave behind** | retired research checkpoints, retirement backups | 160 GB |
 
-Almost all of it is the corpus. Everything else required is **9.2 GB of
-container and 8 KB of bin table**, and the container can be rebuilt instead of
-copied. Continuing the training — as opposed to only reproducing its numbers —
-costs about **1.5 GB of selected checkpoints**, not the 112 GB the pretraining
-directories occupy.
+Almost all of it is the corpus. Beyond it the floor is **one 9.2 GB container**,
+which can be rebuilt from the def instead of copied. The bin grid is **derived
+on arrival**, not carried. The two comparison checkpoints are 226 MB each and
+are only needed to reproduce the numbers in `docs/SCIENCE.md`.
 
 ---
 
 ## 1. Required
 
-Without these, nothing trains.
+Without these, nothing trains. There are two, and one of them is derived
+rather than copied.
 
 ### The corpus — 345 GB
 
@@ -47,7 +51,7 @@ mistake that fails later and unhelpfully.
 This generation applies the occupancy gate `tau = 0.05`. Its `basis_digest` is
 `8c4542b6…`, and that digest is what every downstream consumer checks against.
 
-### The bin table — 8.3 KB
+### The bin grid — 8.3 KB, or derive it
 
     $HELIX_ARCHIVE/coeff_bins_r1_tau05_run0027575715_v2.pt
 
@@ -64,14 +68,39 @@ The file records its own parameters, so nothing has to be guessed:
 corpus: .../coeff_tpc_r1/run_0027575715     events: 120     K: 128     n_bands: 4
 ```
 
-Rerunning with exactly those (and the default `--lo-pct 0.05 --hi-pct 99.95`)
-reproduced `edges`, `cent_asinh` and `cent_ratio` with `max|diff| = 0`:
+**Assume it did not travel.** Derive it on arrival; the command checks itself
+against a fingerprint shipped in the repo, so you do not need the original to
+know you got the right grid:
 
 ```bash
-python scripts/derive_coeff_bins.py \
-  --corpus $HELIX_CORPUS_ROOT/coeff_tpc_r1/run_0027575715 \
-  --events 120 --K 128 --n-bands 4 --out bins.pt
+# derive
+python scripts/derive_coeff_bins.py --corpus $HELIX_CORPUS --out bins.pt
+
+# or reproduce an existing grid using the parameters it records, and check
+python scripts/derive_coeff_bins.py --verify <original>.pt --corpus $HELIX_CORPUS
 ```
+
+`helix/data/data/reference_bins.json` declares the grid: its parameters, the
+corpus it is defined over, and a content digest of the result. It is the single
+source of those parameters — `helix.data.bins.DEFAULTS` and the CLI's argparse
+defaults both read from it, so they cannot drift apart.
+
+Two checks run, answering different questions. **Before** deriving, the corpus's
+`basis_digest` is checked — one shard header, about a second — which catches the
+pre-tau generation being used in place of r1 and exits with the cause named.
+**After** deriving, the result is checked against the digest, which exists
+because the *run* cannot be checked any other way: `basis_digest` hashes the DSP
+recipe, so all eight r1 runs share it, and a shard's `/config` holds only
+`band_lengths`, `gids`, `n_wires`, `norm_sigma` — no source-run id. A grid from
+the wrong run is self-consistent, passes every input check, and is not the one
+existing checkpoints were trained against.
+
+`--verify` additionally compares against an original `.pt` if you have one,
+exiting non-zero on any difference; it reproduced `edges`, `cent_asinh` and
+`cent_ratio` with `max|diff| = 0`. The derivation lives in `helix.data.bins`
+(`derive`, `rederive`, `compare`, `check_reference`), and `tests/test_bins.py`
+pins the reproduction, the fingerprint shipping, and both checks' ability to
+detect a wrong grid.
 
 Its other input, the `norm_sigma` table, lives in the corpus under `_calib/`
 and therefore travels with it.
@@ -81,8 +110,8 @@ specifically** — a table from any of the other seven runs would be
 self-consistent but incompatible with the existing checkpoint. And the shard set
 must be identical, since "first 120 events" is defined by dataset order.
 
-So copy it — eight kilobytes removes a class of mistake — but it is not a single
-point of failure, and losing it does not strand the corpus.
+So it need not travel, and the packaged fingerprint means nothing is lost by
+leaving it behind.
 
 Four other bin tables sit beside it and are not interchangeable:
 
@@ -110,10 +139,11 @@ PyWavelets 1.8.0, base `ghcr.io/deeplearnphysics/pimm v0.5.1`.
 
 ---
 
-## 2. Recommended
+## 2. For comparison
 
-Not needed to train from scratch; needed to continue, compare, or reproduce a
-published number.
+None of this is needed to train. It is needed to say whether a new run is better
+than the old one, or to continue from this site's pretraining instead of
+repeating it.
 
 ### Checkpoints — what each is actually for
 
@@ -132,10 +162,13 @@ just as well as the DCP directory.
 
 | purpose | what you need | size |
 |---|---|---|
-| evaluate, or reproduce the published numbers | `coeff-fm-cooldown-r1-8run/model/model_ema.pth` + `provenance.json` + `config.py` | **226 MB** |
-| rerun the cooldown as it was run | `coeff-fm-train-r1-8run/model/last/` | **679 MB** |
-| a longer or earlier cooldown — the top-ranked experiment | a few `iter_*.pth` near the plateau | **226 MB each** |
-| retrain from scratch | nothing | — |
+| **retrain from scratch — the plan** | **nothing** | **—** |
+| compare a new run against the published numbers | `coeff-fm-cooldown-r1-8run/model/model_ema.pth` + `provenance.json` + `config.py` | 226 MB |
+| rerun the cooldown as it was run | `coeff-fm-train-r1-8run/model/last/` | 679 MB |
+| a longer or earlier cooldown without repeating pretraining | a few `iter_*.pth` near the plateau | 226 MB each |
+
+The last two matter only if you want to reuse this site's pretraining rather
+than redo it. Redoing it needs nothing but the corpus.
 
 Pretraining ran 112,500 steps over 3 epochs — 37,500 steps/epoch, checkpointed
 every 225 steps — so the plateau at **epoch 1.78** sits near **step 66,750**.
