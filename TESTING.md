@@ -1,18 +1,37 @@
 # Testing
 
-One image, one command:
+One command, and it names no image:
 
-    IMG=${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}
+    scripts/helix_run.sh python -m pytest tests -q
 
-    cd $HELIX_ROOT
-    apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python -m pytest -q
+The runtime, image and in-image interpreter come from `helix/sites/<site>.yaml`.
+Run `python -m helix.paths` first -- it needs nothing but os/pathlib/yaml, so it
+works outside the container, and it tells you which site was selected and which
+roots resolved.
 
 **Test counts are deliberately not quoted.** They depend on whether pimm is
-importable -- ~40 tests are `@pimm_importable` and SKIP without it -- and
-quoting a number turns every change into a documentation edit. Three commits in
-one session existed only to bump one, and four documents still disagreed
-afterwards. What matters: the suite is green, and you ran it with pimm on the
-path so those ~40 actually execute. Seven failures hid in that gap once.
+importable and on which data roots resolve, and quoting a number turns every
+change into a documentation edit. Three commits in one session existed only to
+bump one, and four documents still disagreed afterwards.
+
+**A skip is not a pass, and that is not hypothetical here.** Two environment
+defects, each invisible, hid tests that had never run at this site:
+
+  * `PYTHONPATH` carried helix but not pimm, so ~40 `@pimm_importable` tests
+    skipped -- every test of the pimm-facing evaluator, launcher and WeightEMA.
+  * the data roots resolved to another site's paths, so ~13 real-corpus tests
+    skipped, including the bin-grid fingerprint that pins the handover claim.
+
+Fixing both took the suite from 500 passed / 61 skipped to 554 passed / 7
+skipped. Fifty-four of those sixty-one skips were defects, not absence.
+
+So check the SHAPE of the skips, not their number. The header prints the site
+and which roots resolved for exactly that reason. Two switches turn a silent
+skip into an error, and a run whose result is meant to mean "this works" should
+set both:
+
+    HELIX_REQUIRE_PIMM=1   pimm not importable is a UsageError, not 40 skips
+    HELIX_REQUIRE_DATA=1   a data root that is not a directory is a UsageError
 
 ## Testing a change to pimm-data
 
@@ -25,8 +44,13 @@ during the consolidation.
 Put the working tree ahead of site-packages:
 
     cd <pimm-data checkout>
-    apptainer exec -B /sdf,/lscratch $IMG env PYTHONNOUSERSITE=1 \
-      PYTHONPATH=$PWD/src /opt/pimm/.venv/bin/python -m pytest -q
+    HELIX_FORWARD_ENV=PYTHONPATH PYTHONPATH=$PWD/src \
+      <helix>/scripts/helix_run.sh python -m pytest -q
+
+(`HELIX_FORWARD_ENV` because helix_run.sh forwards `HELIX_*` and the site's own
+variables; anything else you want inside must be named. A silently dropped
+variable looks exactly like evidence -- it once made a real precision bug look
+like a non-cause.)
 
 Check which copy you got before trusting a result:
 
@@ -41,11 +65,11 @@ rather than the installed copy.
 
 ## Run it in a clean environment
 
-    apptainer exec -B /sdf,/lscratch $IMG \
-      env PYTHONNOUSERSITE=1 /opt/pimm/.venv/bin/python -m pytest -q
+    scripts/helix_run.sh python -m pytest tests -q
 
-`PYTHONNOUSERSITE=1` is worth using deliberately. `-B /sdf` remounts home, so
-anything pip-installed under `~/.local` is visible inside the container. That is
+`helix_run.sh` sets `PYTHONNOUSERSITE=1` for you, and that matters: the site's
+binds include a home directory, so anything pip-installed under `~/.local` is
+visible inside the container. That is
 how the old DSP image appeared to have pimm-data: an editable `.pth` in one
 developer's home pointed at their checkout, and test results measured that way
 were partly an artifact of whose shell ran them.
@@ -60,9 +84,11 @@ check.
   optional dependency reaching a module-scope import before its `importorskip`.
 * **Skips are informative.** `pytest -q -rs` prints the reason for each. Most are
   "needs real production data" or "needs the `pimm` framework", both expected.
-* Tests that need real doraemon shards skip when the data is unreachable rather
-  than failing, so a green run on a machine without `/sdf/data` mounted is not
-  the same claim as a green run with it.
+* Tests that need real simulator shards skip when the data is unreachable rather
+  than failing, so a green run on a machine whose `HELIX_SENSOR_ROOT` does not
+  resolve is not the same claim as a green run where it does. `HELIX_REQUIRE_DATA=1`
+  collapses that distinction into an error, and the header says which roots
+  resolved so the two runs are told apart after the fact.
 
 ## What the suite guards that is easy to break
 
@@ -98,9 +124,10 @@ it from FRESH CLONES with nothing else reachable:
 CR=$SCRATCH/cleanroom && mkdir -p $CR && cd $CR
 git clone <helix> helix && git clone <pimm-data> pimm-data && git clone <pimm> pimm
 cd $CR/helix
-apptainer exec -B /sdf,/lscratch <image> env PYTHONNOUSERSITE=1 \
-  PYTHONPATH=$CR/helix:$CR/pimm-data/src:$CR/pimm \
-  /opt/pimm/.venv/bin/python -m pytest tests/ -q
+HELIX_ROOT=$CR/helix HELIX_PIMM_ROOT=$CR/pimm \
+  HELIX_FORWARD_ENV=PYTHONPATH PYTHONPATH=$CR/pimm-data/src \
+  HELIX_REQUIRE_PIMM=1 HELIX_REQUIRE_DATA=1 \
+  $CR/helix/scripts/helix_run.sh python -m pytest tests/ -q
 ```
 
 Done once (2026-09-17) it found seven failures invisible in the development

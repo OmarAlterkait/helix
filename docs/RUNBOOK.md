@@ -4,12 +4,15 @@ The commands that actually work, in the order you need them. Every path resolves
 through `helix/paths.py`, so the environment variables named here are the only
 things that change between machines.
 
-Everything below runs in ONE image:
+Everything below runs in ONE image, and nothing below names it:
 
-    IMG=/sdf/data/neutrino/omara/images/helix-train.sif
-    PY="apptainer exec --nv -B /sdf $IMG /opt/pimm/.venv/bin/python"
+    PY="scripts/helix_run.sh python"
 
-See `docs/ARCHITECTURE.md` §4 for what is in it and how to rebuild it.
+The runtime, image, in-image interpreter and binds are site facts declared in
+`helix/sites/<site>.yaml`. `helix_run.sh` reads them, so the same command works
+under apptainer at S3DF and shifter or podman-hpc at NERSC.
+
+See `docs/ARCHITECTURE.md` §4 for what is in the image and how to rebuild it.
 
 ---
 
@@ -17,22 +20,30 @@ See `docs/ARCHITECTURE.md` §4 for what is in it and how to rebuild it.
 
     python -m helix.paths
 
-Prints every root, whether it came from the environment or a default, and
-whether it exists. **Run this before anything else in a new environment.** The
-defaults are where things live on the machine helix was developed on; they are
-defaults, not truths.
+Prints the selected site, every root, where its value came from, and whether it
+exists -- plus the container and scheduler facts. **Run this before anything
+else in a new environment.** It imports only os/pathlib/yaml, so it works
+outside the container.
+
+The site comes from `HELIX_SITE`, or is auto-detected. There are no fallback
+paths: a root this site does not declare reports `not set` rather than pointing
+at another machine's layout, and asking for it raises rather than returning
+something that cannot exist here.
 
 Then the suites, which need no data:
 
-    cd <your helix checkout>     && $PY -m pytest -q
+    cd <your helix checkout>     && $PY -m pytest tests -q
     cd <your pimm-data checkout> && $PY -m pytest -q
 
 **Test counts are deliberately not quoted.** They depend on whether pimm is
 importable -- ~40 tests are `@pimm_importable` and SKIP without it -- and
 quoting a number turns every change into a documentation edit. Three commits in
 one session existed only to bump one, and four documents still disagreed
-afterwards. What matters: the suite is green, and you ran it with pimm on the
-path so those ~40 actually execute. Seven failures hid in that gap once.
+afterwards. What matters is the SHAPE of the skips, and that you ran it with
+pimm on the path and the data roots resolving, so the ~40 pimm tests and the
+~13 real-corpus tests actually execute. Both gaps hid real failures: seven in
+the pimm gap once, and a 370x DSP accuracy bug in the data gap. `HELIX_REQUIRE_PIMM=1`
+and `HELIX_REQUIRE_DATA=1` turn each silent skip into an error -- see TESTING.md.
 
 If you see fewer passes and more skips, something optional is missing and the
 skip reasons say which (`pytest -q -rs`). If you see a COLLECTION ERROR, the
@@ -465,17 +476,31 @@ Corpora currently on disk:
 
 ## 6. Where things are
 
-| what | where |
-|---|---|
-| corpora | `/sdf/data/neutrino/omara/` (`HELIX_CORPUS_ROOT`) |
-| run outputs | `/sdf/data/neutrino/omara/exp/helix` (`HELIX_EXP`) |
-| bin tables, converted checkpoints | `/sdf/data/neutrino/omara/archive` (`HELIX_ARCHIVE`) |
-| retired research checkpoints | `.../archive/fm_research_ckpts/` (413 files, 165 GB) |
-| retired caches (record only) | `.../archive/retirement-backups/` |
-| the image | `/sdf/data/neutrino/omara/images/helix-train.sif` |
+Ask, rather than read a table that can only be right about one machine:
 
-Nothing large belongs on `/sdf/group` — it is a 10 TB quota that was at 100%
-until 742 GB of dead cache and stray checkpoints were cleared off it.
+    python -m helix.paths
+
+| what | root |
+|---|---|
+| corpora | `HELIX_CORPUS_ROOT` |
+| ONE corpus (a run dir) | `HELIX_CORPUS` |
+| run outputs | `HELIX_EXP` |
+| bin tables, converted checkpoints | `HELIX_ARCHIVE` |
+| simulator shards the corpus is built from | `HELIX_SENSOR_ROOT` |
+| the container | `container:` in the site profile, NOT a root |
+
+That last row is the one that used to be wrong in a way that mattered.
+`HELIX_IMAGE` was a root typed as a filesystem path to a `.sif`, which cannot
+describe a site whose image is a registry reference — so it reported MISSING
+while the image was fine, and the scripts feeding it to `apptainer exec` had
+nowhere to learn that apptainer is not installed there.
+
+Two per-site notes that do not generalise: at S3DF nothing large belongs on
+`/sdf/group` (a 10 TB quota that was at 100% until 742 GB of dead cache was
+cleared), and the retired research checkpoints live under
+`<HELIX_ARCHIVE>/fm_research_ckpts/` (413 files, 165 GB) with retirement
+backups beside them. At NERSC `$SCRATCH` is purged on inactivity, so nothing
+durable — including a pulled image — should live there alone.
 
 ### The old research checkpoints
 

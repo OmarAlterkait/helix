@@ -121,8 +121,11 @@ Both front-ends call the same script, which is why they cannot drift, and that
 script reads the pimm-data revision out of `pyproject.toml` rather than carrying
 its own — collapsing what used to be three pin sites in helix to one.
 
-The site default remains `/sdf/data/neutrino/omara/images/helix-train.sif`
-(`HELIX_IMAGE`); it is now a *pulled* artifact rather than a hand-built one.
+The image is a *pulled* artifact rather than a hand-built one, and WHICH image —
+and which runtime consumes it — is declared per site under `container:` in
+`helix/sites/<site>.yaml`, not by a `HELIX_IMAGE` path. A `.sif` path cannot
+describe a registry reference, which is what NERSC needs; the third front-end
+above exists because Shifter and podman-hpc cannot consume OCI manifests.
 
 This section used to say the two-container split was correct and not friction.
 That was wrong, and the way it was wrong is worth recording, because the

@@ -190,9 +190,11 @@ git clone git@github.com:OmarAlterkait/pimm-data.git
 git clone -b coeff-fm git@github.com:DeepLearnPhysics/pimm-private.git pimm
 ```
 
-**2. Point the environment at your paths.** Every external path is an env var
-with a default naming the machine helix was developed on. Set the ones that
-differ; see §5.
+**2. Pick or write a site profile.** External paths, the container and the
+scheduler are declared in `helix/sites/<site>.yaml`. `s3df` and `nersc` ship;
+adding a third site is a YAML file, not a code change. `HELIX_SITE` selects one,
+or it is auto-detected. Any single value is still overridable by its env var.
+See §5.
 
 **3. Ask the code where it thinks everything is.**
 
@@ -200,18 +202,23 @@ differ; see §5.
 python -m helix.paths
 ```
 
-It prints all twelve roots, whether each came from the environment or a default,
-and whether it exists. Anything marked missing will fail later in a way that
-looks like a code bug. Fix this first.
+It prints the selected site, every root, where its value came from and whether
+it exists, plus the container and scheduler facts. It imports only
+os/pathlib/yaml, so it runs outside the container.
 
-**4. Build the image** (§3), or point `HELIX_IMAGE` at an existing one.
+`MISSING` means declared-but-absent and will fail later in a way that looks like
+a code bug. `not set` means this site does not have that thing at all, which is
+a legitimate answer: NERSC has no pre-tau corpus, so `HELIX_LEGACY_CORPUS` is
+declared null there. Fix the first; the second is information.
+
+**4. Get the image.** Pull the one CI built (§3), or build it. Which runtime
+consumes it is a site fact, not something you pass: apptainer at S3DF, shifter
+or podman-hpc at NERSC.
 
 **5. Run the tests.**
 
 ```bash
-apptainer exec -B /sdf,/lscratch $HELIX_IMAGE \
-  env PYTHONNOUSERSITE=1 PYTHONPATH=$PWD \
-  /opt/pimm/.venv/bin/python -m pytest tests -q
+scripts/helix_run.sh python -m pytest tests -q
 ```
 
 **Green, with no failures.** Counts are deliberately not quoted here — see
@@ -220,11 +227,23 @@ on what data is present, so a number turns every change into a documentation
 edit. Three commits in one session once existed only to bump one, and four
 documents still disagreed afterwards.
 
-What matters is the shape of the skips, not their number. A skip because data is
-absent looks identical to a skip because the machine has no GPU, which is why
-`tests/_paths.py` exists — read its docstring if something looks wrong. The suite
-also runs clean on a DSP-only install (`pip install -e .`, no torch): everything
-needing torch, pimm-data or a corpus skips itself by name rather than failing.
+What matters is the shape of the skips, not their number — and a skip is not a
+pass. Two environment defects, each invisible, hid tests that had never run at
+the second site: `PYTHONPATH` carrying helix but not pimm (~40 `@pimm_importable`
+tests), and data roots pointing at the first site's paths (~13 real-corpus
+tests). Fixing both took the suite from 500 passed / 61 skipped to 554 passed /
+7 skipped, and the ~13 included a 370x DSP accuracy bug in the jax backend that
+nothing else would have caught.
+
+So run it with **`HELIX_REQUIRE_PIMM=1 HELIX_REQUIRE_DATA=1`** when the result is
+meant to mean "this works" — each turns its silent skip into an error at
+startup. The header prints the site and which roots resolved, so a run can be
+told apart from another one after the fact. See `TESTING.md`.
+
+The suite also runs clean on a DSP-only install (`pip install -e .`, no torch):
+everything needing torch, pimm-data or a corpus skips itself by name rather than
+failing. Note `helix.paths` now imports PyYAML at module scope, so PyYAML is a
+base dependency — that claim is worth re-checking rather than inherited.
 
 **6. Smoke the whole path with no data at all.** `docs/RUNBOOK.md` §0b builds a
 synthetic corpus from `pimm_data.testing` and runs corpus → train → probe end to
@@ -239,8 +258,8 @@ Only after §0b passes is it worth pointing anything at real data.
 
 ## 5. Environment
 
-Twelve roots, all overridable, all listed by `python -m helix.paths`. The ones
-that matter most:
+Declared per site in `helix/sites/<site>.yaml`, all overridable by env var, all
+listed by `python -m helix.paths`. The ones that matter most:
 
 | variable | what it points at |
 |---|---|
@@ -249,15 +268,24 @@ that matter most:
 | `HELIX_SENSOR_ROOT` | simulator output the corpus is built from |
 | `HELIX_ARCHIVE` | bin tables, eval artifacts |
 | `HELIX_EXP` | where runs write |
-| `HELIX_IMAGE` | the container |
 | `HELIX_PIMM_ROOT` | the pimm checkout |
 | `HELIX_PIMM_DATA_SRC` | a pimm-data checkout's `src/` |
 | `HELIX_LEGACY_CORPUS` | the pre-tau corpus — m113 only |
 
-Two defaults will not resolve anywhere but the original site and should be set
-explicitly: `HELIX_SENSOR_ROOT` points into `/sdf/data/neutrino/doraemon/`,
-which belongs to a different group, and `HELIX_OPTICAL_DATA` points into
-another user's home directory.
+**The container is NOT a root.** It used to be `HELIX_IMAGE`, typed as a
+filesystem path to a `.sif` — which cannot describe a site whose image is a
+registry reference, so the root reported MISSING while the image was fine. It is
+now a `container:` block declaring runtime, image, in-image interpreter and
+binds. The scheduler is likewise a `scheduler:` block, split by job kind,
+because `#SBATCH` cannot read variables and those values had nowhere else to
+live. `scripts/helix_run.sh` and `scripts/helix_env.sh` read both.
+
+**A site may legitimately not have a root.** Declare it `null` and it reports
+`not set` rather than MISSING; asking for it raises with a named cause rather
+than returning another site's literal. NERSC declares `HELIX_JAXTPC_ROOT`,
+`HELIX_LEGACY_CORPUS` and `HELIX_OPTICAL_DATA` null. The consequence to know:
+a config needing such a root fails at import, so a test that merely LOADS
+configs must catch `SiteError` and skip.
 
 **One environment rule.** Do not put a pimm-data checkout on `PYTHONPATH` next
 to the image's installed copy. Two resolvable copies make which one wins depend
@@ -393,7 +421,7 @@ it that way. The derivation is in `helix.data.bins` (`derive`, `rederive`,
 | helix suite, DSP-only install, no data | green — skips, does not fail |
 | lockstep guard | 4 passed |
 | image bakes the pinned rev | `2b20573c`, forward model absent from pimm-data and registered by helix |
-| `python -m helix.paths` | all twelve roots resolve |
+| `python -m helix.paths` | site detected; every declared root resolves |
 
 The helix suite was run against the image's own baked pimm-data with no
 `PYTHONPATH` override — the deliverable validating itself rather than a

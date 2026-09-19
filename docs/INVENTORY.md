@@ -53,7 +53,11 @@ This generation applies the occupancy gate `tau = 0.05`. Its `basis_digest` is
 
 ### The bin grid — 8.3 KB, or derive it
 
-    $HELIX_ARCHIVE/coeff_bins_r1_tau05_run0027575715_v2.pt
+    $HELIX_ARCHIVE/<reference_bins.json "name">.pt
+
+(the name is DECLARED in `helix/data/data/reference_bins.json` and read by
+`helix.data.bins.reference_table()`; it was retyped as `_v2` in five places and
+all five went stale when the grid was re-derived)
 
 The categorical bin grid the model's objective is defined over. Derived from
 training-set statistics by `scripts/derive_coeff_bins.py`, and not recoverable
@@ -117,7 +121,7 @@ Four other bin tables sit beside it and are not interchangeable:
 
 | file | belongs to |
 |---|---|
-| `coeff_bins_r1_tau05_run0027575715_v2.pt` | **the production r1 model** |
+| `<reference_bins.json name>.pt` | **the production r1 grid** — `_v2` fingerprints the S3DF corpus, `_v3` the NERSC copy; they are NOT interchangeable, see that file's `_rerecord_note` |
 | `coeff_bins_r1_tau05_run0027575715.pt` | superseded r1 revision |
 | `coeff_bins_run0027575715.pt` | pre-tau corpus |
 | `coeff_bins_k4_run0027575715.pt` | pre-tau, k=4 variant |

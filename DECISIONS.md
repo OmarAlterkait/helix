@@ -39,6 +39,14 @@ Re-deriving would move the grid less than the noise already in it, while costing
 value-CE comparability with every earlier run and invalidating every trained
 K=128 head. Ship `coeff_bins_r1_tau05_run0027575715_v2.pt`.
 
+*Since:* the grid was re-derived at the second site, because the corpus there is
+not byte-identical to the one v2 fingerprints (same run, same `basis_digest`,
+different arrays; cause not established). The DECISION above is unchanged --
+bins are not re-derived when the corpus GROWS -- but the shipped name is no
+longer a literal. It is declared in `helix/data/data/reference_bins.json` and
+read by `helix.data.bins.reference_table()`. A number produced against v3 is not
+comparable with one against v2; see that file's `_rerecord_note`.
+
 *Would overturn it:* a run whose bins differ from run 1's by materially more than
 the 0.16-bin-width yardstick — i.e. evidence the runs are not one distribution.
 

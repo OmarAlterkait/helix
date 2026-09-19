@@ -34,23 +34,39 @@ through its registries. Nothing else imports either.
 
 ## Commands
 
-Everything runs in one container (`docs/ARCHITECTURE.md` §4):
+Everything runs in one container, and NOTHING names it. The runtime, image,
+in-image interpreter and binds are site facts declared in
+`helix/sites/<site>.yaml`; `scripts/helix_run.sh` reads them.
 
 ```bash
-IMG=${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}
-PY="apptainer exec -B /sdf,/lscratch $IMG /opt/pimm/.venv/bin/python"
-
-$PY -m helix.paths                 # FIRST: every external path, its source, whether it exists
-$PY -m pytest -q                   # green; ~40 skip unless pimm is on the path
+python -m helix.paths              # FIRST: site, every root, its source, whether it exists
+scripts/helix_run.sh python -m pytest tests -q
+scripts/helix_run.sh python scripts/build_coeff_corpus.py --shard ... --out ...
 ```
 
-`env PYTHONNOUSERSITE=1` is worth adding: `-B /sdf` remounts home, so anything
-pip-installed under `~/.local` is visible inside the container and a green run
-may be yours alone. When editing pimm-data, put its working tree ahead of the
-installed copy with `PYTHONPATH=<pimm-data>/src` — the image INSTALLS pimm-data,
-so a plain pytest there tests the baked copy, not your edits.
+`helix.paths` needs only os/pathlib/yaml, so it runs outside the container too —
+run it first, always. It picks the site from `HELIX_SITE` or auto-detects
+(`$NERSC_HOST`, `/sdf`). `source scripts/helix_env.sh` exports the same values
+into a shell, for `#SBATCH` and for pimm's launcher, neither of which can read
+them any other way.
 
-See `docs/RUNBOOK.md` for corpus → train → eval → probe.
+`helix_run.sh` handles what used to be spelled out per call site:
+`PYTHONNOUSERSITE=1` (a bound home makes `~/.local` packages visible inside the
+image, so a green run can be yours alone), `PYTHONPATH=pimm:helix`, the site's
+own environment, and an explicit bind of both checkouts.
+
+When editing pimm-data, put its working tree ahead of the installed copy with
+`PYTHONPATH=<pimm-data>/src` — the image INSTALLS pimm-data, so a plain pytest
+tests the baked copy, not your edits.
+
+**Two runtimes at NERSC, and the choice is not cosmetic.** podman-hpc is
+interactive and SINGLE-NODE: it does not inject NERSC's NCCL plugin at all, and
+measured 1.23 GiB/s across nodes against shifter's 4.9. shifter is the
+multi-node runtime and the one pimm's launcher drives. `helix_run.sh` picks
+podman-hpc when interactive; pass `HELIX_INTERACTIVE=0` to force shifter.
+
+See `docs/RUNBOOK.md` for corpus → train → eval → probe, and
+`configs/launch/README.md` for getting a run onto the scheduler.
 
 ## Structural patterns worth knowing
 
@@ -99,9 +115,25 @@ planes are contiguous). For a second modality those four roles separate; see
   checkout and every shard records `git_dirty: True`; `coeff_verify` then
   refuses it. This cost a 344 GB rebuild once.
 - **`#SBATCH` directives cannot read shell variables**, so `--account`,
-  `--output` and `--partition` are literal. The corpus build (turing) and
-  training (ampere) need DIFFERENT accounts — `sacctmgr -n show assoc
-  user=$USER format=Account,Partition,QOS` lists yours.
+  `--output` and `--partition` are literal. That is why scheduler facts live in
+  the site profile and reach `sbatch` as CLI flags (which override `#SBATCH`),
+  via `scripts/helix_env.sh`. The corpus build and training may need DIFFERENT
+  accounts — they do at S3DF, because authorisation is per partition — which is
+  why `scheduler:` is split by job kind. `sacctmgr -n show assoc user=$USER
+  format=Account,Partition,QOS` lists yours.
+- **A root a site does not have is `null`, not a wrong path.** `helix.paths`
+  refuses an unconfigured root rather than inventing one, so a config that needs
+  it fails at import with a named cause. That is correct for RUNNING it, and it
+  means a test that merely LOADS configs must tell "absent at this site" apart
+  from "broken" — catch `SiteError` and skip. Two tests already do.
+- **The global batch IS the rank count.** The FM takes one event per rank (no
+  event separation — `MULTI_EVENT_BATCHING.md`), and the trainer raises if
+  `batch_size != world_size`. It is derived from `WORLD_SIZE`, never written
+  down; a literal is right at exactly one GPU count.
+- **GPFS does not support the locks HDF5 and uv take.** Every real-shard read at
+  NERSC fails `OSError: [Errno 524] unable to lock file` without
+  `HDF5_USE_FILE_LOCKING=FALSE`, which the site profile's `env:` sets. `uv` hits
+  the same thing on its cache; point `UV_CACHE_DIR` at node-local `/tmp`.
 - **A corpus run may have gaps.** `run_0027670361` is missing source files
   51-56 and 94-97; 180 shards / 17,999 events is complete for it, not a failure.
 - **The probe's extraction loop is the long pole.** 2.5M patches over 388
