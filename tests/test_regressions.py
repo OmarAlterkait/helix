@@ -185,11 +185,18 @@ def test_the_converted_m113_checkpoint_records_its_own_operating_point():
     """
     torch = pytest.importorskip("torch")
 
-    from helix.paths import archive
+    from helix.paths import resolve
 
     from helix.model.artifact import inspect
 
-    ckpt = archive("fm_m113_artifact")
+    # resolve(), not archive(): archive() RAISES when HELIX_ARCHIVE is not
+    # configured, which happens before `exists()` can decline. A site that does
+    # not declare the root, and a site that declares it but has no artifact
+    # under it, are both "cannot check this here" and both want a skip.
+    _arch, _ = resolve("HELIX_ARCHIVE")
+    if _arch is None:
+        pytest.skip("HELIX_ARCHIVE is not configured at this site")
+    ckpt = _arch / "fm_m113_artifact"
     if not ckpt.exists():
         pytest.skip(f"m113 artifact absent: {ckpt}")
     art = inspect(str(ckpt))                      # no weights: this is metadata

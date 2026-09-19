@@ -432,7 +432,7 @@ def test_configs_leave_no_module_objects_in_the_namespace():
         ns = {}
         try:
             exec(compile(path.read_text(), str(path), "exec"), ns)
-        except (FileNotFoundError, _SiteError) as e:
+        except (FileNotFoundError, _SiteError, SystemExit) as e:
             # Some configs resolve a checkpoint or a bin table AT MODULE SCOPE, so
             # executing them needs that data present. coeff_fm_encode.py reaches
             # for the m113 artifact under HELIX_ARCHIVE, which exists on the
@@ -446,6 +446,13 @@ def test_configs_leave_no_module_objects_in_the_namespace():
             # is the pre-tau corpus and exists only where it was built. Refusing
             # is correct for RUNNING the config; it says nothing about whether the
             # config leaks module objects, which is what is under test here.
+            #
+            # SystemExit is the third spelling of the same thing, and the one a
+            # CI runner hits FIRST: every coeff_fm config refuses to execute
+            # without HELIX_ROOT, because it cannot self-locate (pimm executes a
+            # temp copy, so __file__ is the copy) and a wrong checkout is a
+            # correctness bug rather than an inconvenience. With no site and no
+            # environment, that refusal fires before any root is even consulted.
             #
             # Skip that config rather than fail: the contract under test is about
             # module objects leaking into the namespace, and a config that cannot
