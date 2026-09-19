@@ -50,9 +50,16 @@ ARG JAX_EXTRA=cuda12
 #     NCCL INFO Using network Socket
 #     Channel 00/0 : 0[0] -> 8[0] [send] via NET/Socket/4
 #
-# Measured on 16 GPUs across 4 nodes, all-reduce bus bandwidth plateaued at
-# ~4.9 GiB/s from 226 MiB upward -- a bandwidth ceiling, not a latency effect.
-# The 59.2M-parameter fp32 gradient buffer (226 MiB) took 82 ms per step.
+# Measured on 16 GPUs across 4 nodes, before and after, all-reduce of the
+# 226 MiB fp32 gradient buffer:
+#
+#     without libnl (NET/Socket):  82.3 ms    4.9 GiB/s bus
+#     with libnl    (NET/OFI cxi):  6.95 ms   59.5 GiB/s bus
+#
+# 11.8x. With it the provider reports "Selected Provider is cxi (found 4 nics)"
+# and "Using aws-ofi-nccl 1.6.0"; without it, "Using network Socket". The step
+# cost of data-parallel scaling goes from 16% to 1.6%, which is the difference
+# between 128 GPUs being a compromise and being free.
 #
 # It cannot be worked around at runtime: shifter OVERWRITES LD_LIBRARY_PATH with
 # its module paths, so a libnl staged on $SCRATCH is unreachable. Verified.

@@ -87,13 +87,24 @@ class FMTrainer(Trainer):
         model = super().build_model()
 
         world = comm.get_world_size()
-        want = getattr(self.cfg, "ddp_bf16_grads", None)
-        if want is None:
-            # Default ON only for multi-node: within one node the reduction runs
-            # over NVLink, where the bytes are not the bottleneck and the two
-            # casts are pure overhead.
-            per_node = int(getattr(self.cfg, "num_gpu_per_node", 0) or 0)
-            want = world > max(per_node, 1)
+        # DEFAULT OFF, and the reason is a measurement that overturned the one
+        # this hook was written for.
+        #
+        # It was added when the inter-node all-reduce took 82 ms of a ~503 ms
+        # step -- 16% -- because NCCL was falling back to TCP sockets for want of
+        # libnl in the image (see container/Dockerfile.nersc). Halving the bytes
+        # was worth real gradient noise at that ratio.
+        #
+        # With the Slingshot provider actually loading (NET/OFI, cxi, 4 nics) the
+        # same 226 MiB all-reduce takes 6.95 ms -- 59.5 GiB/s bus, 11.8x faster --
+        # which is 1.6% of a 428 ms step. Compression can now save at most 0.81%
+        # of step time, and it is not free: bf16 gradients lose mantissa on the
+        # small updates that matter late in a cooldown.
+        #
+        # Kept, rather than deleted, because the ratio moves with the model: a
+        # wider model, or a site whose fabric is slower, can put it back in range.
+        # Turn it on with ddp_bf16_grads = True and measure, do not assume.
+        want = bool(getattr(self.cfg, "ddp_bf16_grads", False))
         if not want or world < 2 or not hasattr(model, "register_comm_hook"):
             return model
 
