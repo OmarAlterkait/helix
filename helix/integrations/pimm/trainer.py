@@ -55,6 +55,67 @@ class FMTrainer(Trainer):
                 f"failing. Set batch_size to the number of ranks.")
         return super().build_train_loader()
 
+    def build_model(self):
+        """Build as pimm does, then make the gradient all-reduce cheaper.
+
+        Why this is worth a subclass hook. The FM takes ONE event per rank, so
+        scaling is entirely data-parallel and the per-step cost is
+        ``compute + all_reduce(gradients)``. The gradient buffer is the whole
+        model in fp32 -- 226 MiB at 59.2M parameters -- and it crosses the
+        network every single step. Measured on 16 GPUs over 4 nodes, that
+        all-reduce took 82 ms. At 128 GPUs it is the term that decides whether
+        the run is worth launching, so it is the term to attack.
+
+        pimm's ``parallel_model`` already sets ``broadcast_buffers=False``,
+        ``find_unused_parameters=False`` and ``static_graph=True``, which are the
+        right defaults. It does NOT register a communication hook, and there is
+        no config surface for one (grepped: no ``register_comm_hook``,
+        ``bf16_compress`` or ``gradient_as_bucket_view`` anywhere in pimm).
+
+        ``bf16_compress_hook`` casts each bucket to bfloat16 for the all-reduce
+        and back afterwards, halving the bytes on the wire. The model already
+        trains under ``enable_amp`` with ``amp_dtype: bfloat16``, so activations
+        and the forward are bf16 already; reducing gradients at the same
+        precision does not introduce a dtype the run was not already using. It is
+        not free -- gradient noise rises slightly -- which is why it is a config
+        flag (``ddp_bf16_grads``) rather than unconditional, and why it defaults
+        to ON only above one node, where the wire cost exists at all.
+
+        Set ``ddp_bf16_grads = False`` to disable, or ``True`` to force it on a
+        single node (useful when measuring its effect in isolation).
+        """
+        model = super().build_model()
+
+        world = comm.get_world_size()
+        want = getattr(self.cfg, "ddp_bf16_grads", None)
+        if want is None:
+            # Default ON only for multi-node: within one node the reduction runs
+            # over NVLink, where the bytes are not the bottleneck and the two
+            # casts are pure overhead.
+            per_node = int(getattr(self.cfg, "num_gpu_per_node", 0) or 0)
+            want = world > max(per_node, 1)
+        if not want or world < 2 or not hasattr(model, "register_comm_hook"):
+            return model
+
+        try:
+            from torch.distributed.algorithms.ddp_comm_hooks import (
+                default_hooks as _ddp_hooks,
+            )
+            model.register_comm_hook(None, _ddp_hooks.bf16_compress_hook)
+        except Exception as exc:                                  # noqa: BLE001
+            # Never fail a run over an optimisation. Say so loudly instead: a
+            # silently absent hook looks exactly like one that is working.
+            if comm.is_main_process():
+                print(f"[helix] bf16 gradient compression NOT enabled: {exc}")
+            return model
+
+        if comm.is_main_process():
+            n = sum(p.numel() for p in unwrap_model(model).parameters())
+            print(f"[helix] bf16 gradient compression ON "
+                  f"({n/1e6:.1f}M params: {n*4/2**20:.0f} MiB -> {n*2/2**20:.0f} MiB "
+                  f"per all-reduce, world_size={world})")
+        return model
+
     def build_optimizer(self):
         """Take param groups from the MODEL rather than from name matching.
 
