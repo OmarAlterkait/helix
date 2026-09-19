@@ -1,0 +1,36 @@
+# Chained training on a preemptible QOS. The default strategy.
+#
+#   scripts/submit_helix.sh --recipe configs/launch/nersc-preempt.yaml
+#
+# Carries no path, no account and no image -- see _common.yaml for why, and
+# scripts/submit_helix.sh for where they come from.
+#
+# time_min is a GUARANTEE, not a request: the job cannot be preempted before it,
+# so every link makes at least that much progress. NERSC's preempt QOS REJECTS a
+# job without one ("Job request does not match any supported policy"), which is
+# why it is named here rather than left to the site profile -- it is a property
+# of choosing this strategy, not of the machine.
+#
+# Chaining here is submitit timeout/requeue: ONE job requeued N-1 times, not a
+# dependency chain of separate jobs. It works because NERSC runs
+# PreemptMode=REQUEUE. S3DF runs CANCEL, which is why
+# scripts/submit_coeff_fm_train.sh chains with --dependency=afterany and warns
+# that --requeue bought nothing there. That warning is site-specific; it does not
+# apply here.
+_base_: [_common.yaml]
+
+resources:
+  time: "24:00:00"
+  time_min: "02:00:00"
+  nnodes: 1
+  nproc_per_node: 4
+  # `qos` comes from the site profile (scheduler.train.qos) via submit_helix.sh,
+  # so "which queue is the preemptible one" stays a site fact.
+  #
+  # signal_delay_s is left at pimm's default of 120. NOTE that exceeds NERSC's
+  # preempt GraceTime of 60s, so on PREEMPTION -- as opposed to walltime expiry
+  # -- a checkpoint has one minute, not two. Measure a real checkpoint write at
+  # model size before trusting either number.
+
+chain:
+  jobs: 8
