@@ -61,8 +61,15 @@ else
 fi
 [ -f "$H/helix/paths.py" ] || { echo "FATAL: $H is not a helix checkout (set HELIX_ROOT)"; exit 1; }
 CFG=${CFG:-$H/configs/pimm/coeff_fm_train_8run.py}
-IMG=${IMG:-${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}}
-PIMM=${PIMM_ROOT:-/sdf/group/neutrino/omara/pimm-fm}
+# Both from the site profile. PIMM_ROOT was a SECOND name for a root
+# helix.paths already owns as HELIX_PIMM_ROOT, with its own S3DF literal.
+source "$H/scripts/helix_env.sh"
+IMG=${IMG:-${HELIX_CONTAINER_IMAGE:-}}
+PIMM=${PIMM_ROOT:-${HELIX_PIMM_ROOT:-}}
+# The container invocation, once. It was spelled out nine times below as
+# `apptainer exec -B /sdf,/lscratch "$IMG" /opt/pimm/.venv/bin/python`, and every
+# part of that is site-specific.
+RUN=("$H/scripts/helix_run.sh")
 
 # K=128 at full event size needs Ampere: the logits are (n_cells, n_slot, K),
 # ~2.4 GB for one event, and the backward doubles it. An 11 GB Turing card is
@@ -80,8 +87,8 @@ PIMM=${PIMM_ROOT:-/sdf/group/neutrino/omara/pimm-fm}
 # are deliberately testing an unreleased pimm-data, and know that the run's
 # provenance.json is then the only record of it.
 export PYTHONPATH="$PIMM:$H"
-read -r SAVE TOTAL < <(apptainer exec -B /sdf,/lscratch "$IMG" \
-  env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python - "$CFG" <<'PY'
+read -r SAVE TOTAL < <("${RUN[@]}" \
+  env PYTHONPATH="$PYTHONPATH" "$HELIX_CONTAINER_PYTHON" - "$CFG" <<'PY'
 import sys
 from pimm.utils.config import Config
 c = Config.fromfile(sys.argv[1])
@@ -164,8 +171,8 @@ fi
 # same, while still allowing the legitimate empty case through.
 _RESOLVER_ERR=$(mktemp)
 set +e
-WEIGHT=$(apptainer exec -B /sdf,/lscratch "$IMG" \
-  env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python -m pimm.utils.path \
+WEIGHT=$("${RUN[@]}" \
+  env PYTHONPATH="$PYTHONPATH" "$HELIX_CONTAINER_PYTHON" -m pimm.utils.path \
   latest-checkpoint "$SAVE/model" 2>"$_RESOLVER_ERR")
 _RESOLVER_RC=$?
 set -e
@@ -194,8 +201,8 @@ if [ -n "$WEIGHT" ]; then
   # reached through different _base_ paths still compares equal.
   _PREV_CFG="$SAVE/config.py"
   if [ -f "$_PREV_CFG" ] && [ "${ALLOW_RESUME:-0}" != "1" ]; then
-    _MINE=$(apptainer exec -B /sdf,/lscratch "$IMG" \
-      env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python - "$CFG" <<'PY' 2>/dev/null
+    _MINE=$("${RUN[@]}" \
+      env PYTHONPATH="$PYTHONPATH" "$HELIX_CONTAINER_PYTHON" - "$CFG" <<'PY' 2>/dev/null
 import sys, hashlib, re
 from pimm.utils.config import Config
 def _fingerprint(path):
@@ -208,8 +215,8 @@ def _fingerprint(path):
 print(_fingerprint(sys.argv[1]))
 PY
 )
-    _THEIRS=$(apptainer exec -B /sdf,/lscratch "$IMG" \
-      env PYTHONPATH="$PYTHONPATH" /opt/pimm/.venv/bin/python - "$_PREV_CFG" <<'PY' 2>/dev/null
+    _THEIRS=$("${RUN[@]}" \
+      env PYTHONPATH="$PYTHONPATH" "$HELIX_CONTAINER_PYTHON" - "$_PREV_CFG" <<'PY' 2>/dev/null
 import sys, hashlib, re
 from pimm.utils.config import Config
 def _fingerprint(path):
@@ -275,7 +282,7 @@ export HDF5_USE_FILE_LOCKING=FALSE
 # So check before committing the link, and REQUEUE rather than exit: a bad node
 # then costs a trip through the queue instead of a place in the chain. The sleep
 # is not politeness — without it a requeue that lands on the same node hot-loops.
-if ! apptainer exec --nv -B /sdf,/lscratch "$IMG" /opt/pimm/.venv/bin/python -c '
+if ! "${RUN[@]}" python -c '
 import sys, torch
 n = torch.cuda.device_count()
 assert n >= 4, f"only {n} GPU(s) visible"
@@ -288,6 +295,6 @@ for i in range(4):
   exit 0
 fi
 
-srun --kill-on-bad-exit=1 apptainer exec --nv -B /sdf,/lscratch "$IMG" \
-  /opt/pimm/.venv/bin/python -m pimm.train \
+srun --kill-on-bad-exit=1 "${RUN[@]}" \
+  "$HELIX_CONTAINER_PYTHON" -m pimm.train \
     --config-file "$CFG" --num-gpus 4 --options $OPTS

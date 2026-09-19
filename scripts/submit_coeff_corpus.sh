@@ -112,7 +112,11 @@ fi
   echo "FATAL: no scripts/build_coeff_corpus.py under H=$H."
   echo "       Set HELIX_ROOT to the checkout, or sbatch from it."
   exit 1; }
-SRC=${SRC_ROOT:-/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor}
+source "$(dirname "${BASH_SOURCE[0]}")/helix_env.sh"
+# HELIX_SENSOR_ROOT is the declared name for this root. SRC_ROOT was a SECOND
+# spelling with its own S3DF literal, so setting the documented variable did
+# nothing here. It is kept as a deprecated override.
+SRC=${SRC_ROOT:-${HELIX_SENSOR_ROOT:?HELIX_SENSOR_ROOT not resolved; run python -m helix.paths}}
 # The R1 root, matching the DEFAULT gate below. It used to name .../coeff_tpc,
 # which is the PRE-R1 corpus: `--tau` unset means DetectorConfig's 0.05, so the
 # ordinary default invocation built r1-gated shards and wrote them into the tree
@@ -124,7 +128,11 @@ SRC=${SRC_ROOT:-/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor}
 # legacy gate rule, which this builder no longer offers: set OUT_ROOT explicitly
 # and build with scripts/build_coeff_corpus_legacy.py on the legacy-corpus-repro
 # branch. Extending it from here would silently mix two gate rules in one tree.
-OUT=${OUT_ROOT:-/sdf/data/neutrino/omara/coeff_tpc_r1}
+# The r1 generation under the declared corpus root. OUT_ROOT was the second
+# spelling; calibrate_norm_sigma.sh's copy of it defaulted to the PRE-TAU
+# `coeff_tpc` while this one said `coeff_tpc_r1` -- two scripts in one pipeline
+# disagreeing about which corpus generation they were building.
+OUT=${OUT_ROOT:-${HELIX_CORPUS_ROOT:?HELIX_CORPUS_ROOT not resolved}/coeff_tpc_r1}
 NORM=${NORM_SIGMA:-$OUT/_calib/norm_sigma_global.npy}
 EVENTS_PER_SHARD=${EVENTS_PER_SHARD:-200}   # = one source file
 SHARDS_PER_RUN=${SHARDS_PER_RUN:-100}      # = files per run
@@ -142,9 +150,15 @@ KG_ARG=""; [ -n "$KGATE" ] && KG_ARG="--kgate $KGATE"
 # `${CONTAINER-...}` without the colon on purpose: an explicitly empty
 # CONTAINER= still selects bare metal, for an environment that genuinely has the
 # stack installed. Only an UNSET variable takes the default.
-CONTAINER=${CONTAINER-${HELIX_IMAGE:-/sdf/data/neutrino/omara/images/helix-train.sif}}
+# From the SITE PROFILE, via helix_env.sh -- not a literal, and not the old
+# HELIX_IMAGE root, which was typed as a path to a .sif and cannot describe a
+# registry reference. CONTAINER= (empty) still selects bare metal.
+CONTAINER=${CONTAINER-${HELIX_CONTAINER_IMAGE:-}}
 if [ -n "$CONTAINER" ]; then
-  PY=(singularity exec --nv -B /sdf,/lscratch "$CONTAINER" python3)
+  # The runtime, binds and in-image interpreter all come from the site profile.
+  # This was `singularity exec --nv -B /sdf,/lscratch ... python3`, every part of
+  # which is S3DF-only: there is no singularity at NERSC and no /sdf to bind.
+  PY=("$(dirname "${BASH_SOURCE[0]}")/helix_run.sh" python)
   # helix only. pimm-data comes from the image at its PINNED revision; a
   # checkout here would shadow it and the corpus would be built by code the pin
   # does not describe -- which every shard then records as its provenance.

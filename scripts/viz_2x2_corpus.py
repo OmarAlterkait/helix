@@ -40,6 +40,21 @@ import os
 
 import numpy as np
 
+from helix.paths import packaged, root as _root
+
+
+def _opt_root(name):
+    """A root's value, or None if this site does not declare it.
+
+    argparse defaults must not raise at import time: a caller who passes the
+    flag explicitly should not need the site to declare a root they are not
+    using. Returning None makes the flag required only when it has to be.
+    """
+    try:
+        return str(_root(name))
+    except Exception:
+        return None
+
 
 GS = 64   # gate block width; the artifacts are exactly this wide
 
@@ -187,17 +202,23 @@ def regenerate_noisy(shard_path, run, ev, geom_path, npz):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", default="/sdf/data/neutrino/omara/coeff_tpc/run_0027575715")
+    # Was the PRE-TAU corpus as a literal default -- a different DSP generation
+    # whose coefficients an r1-derived grid does not describe.
+    ap.add_argument("--corpus", default=_opt_root("HELIX_LEGACY_CORPUS"),
+                    help="coeff corpus run dir (default: HELIX_LEGACY_CORPUS)")
     ap.add_argument("--dataset-name", default="sim_wire")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--event", type=int, default=0, help="POSITION within the shard")
     ap.add_argument("--planes", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--source-root",
-                    default="/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor")
+                    default=_opt_root("HELIX_SENSOR_ROOT"))
     ap.add_argument("--split", default="run_0027575715")
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json")
     ap.add_argument("--npz",
-                    default="/sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz")
+                    # helix SHIPS this (helix/tpc/data/noise_spectrum.npz) precisely so a clone
+                    # needs no JAXTPC checkout. build_coeff_corpus.py already prefers
+                    # the packaged copy; this script never got the fix.
+                    default=str(packaged("noise_spectrum.npz")))
     ap.add_argument("--r1-tau", type=float, default=0.0,
                     help="R1 occupancy tolerance: subtract a large |M| when at most "
                          "this FRACTION of the block's wires were flagged. 0.0 = "

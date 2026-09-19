@@ -178,7 +178,19 @@ def main():
                          "$HELIX_JAXTPC_ROOT/config/noise_spectrum.npz when set")
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json",
                     help="plane registry (pimm_data.geometry.load_plane_registry)")
-    ap.add_argument("--dataset-name", default="wire_test_00_00_02")
+    # `sim_wire`, from the same declaration the readers and every other script
+    # take it from. The old default was "wire_test_00_00_02" -- the name of a
+    # SIMULATION DIRECTORY, not a dataset -- which produced shards that no reader
+    # can glob (readers look for f"{dataset_name}_coeff_*.h5"). Every caller
+    # passed --dataset-name sim_wire, so the default was reachable only by
+    # someone who did not know to, which is the definition of a trap.
+    # Default None, resolved after the sys.path bootstrap below. The old default
+    # was "wire_test_00_00_02" -- the name of a SIMULATION DIRECTORY, not a
+    # dataset -- and it produced shards no reader can glob (readers look for
+    # f"{dataset_name}_coeff_*.h5", helix/data/coeff_reader.py). Every caller
+    # passed --dataset-name sim_wire, so the default was reachable only by
+    # someone who did not know to pass it: a trap, not a convenience.
+    ap.add_argument("--dataset-name", default=None)
     ap.add_argument("--kgate", type=str, default=None,
                     help="coherent-gate threshold in units of the per-band coherent "
                          "scale. None -> DetectorConfig's default (3.0), which is "
@@ -240,21 +252,44 @@ def main():
     # helix-consolidate's code instead — including over PYTHONPATH.
     ap.add_argument("--helix-root",
                     default=str(Path(__file__).resolve().parent.parent))
-    ap.add_argument("--pimm-src", default="/sdf/group/neutrino/omara/pimm-data/src")
+    # Default None and resolved BELOW, not here: helix is not importable at
+    # argparse time -- this script deliberately puts it on sys.path only in
+    # _add_repo_paths, so that --helix-root governs which checkout is used. The
+    # literal this replaces (/sdf/group/neutrino/omara/pimm-data/src) ignored
+    # HELIX_PIMM_DATA_SRC, which exists in helix.paths for this one consumer.
+    ap.add_argument("--pimm-src", default=None)
     args = ap.parse_args()
+
+    # helix_root first, which is derived from __file__ and always available;
+    # that makes helix.paths importable so the rest can be resolved.
+    _add_repo_paths(args.helix_root, None)
+    from helix.paths import resolve as _resolve                  # noqa: E402
+    if args.pimm_src is None:
+        _ps, _ = _resolve("HELIX_PIMM_DATA_SRC")
+        args.pimm_src = str(_ps) if _ps else None
     _add_repo_paths(args.helix_root, args.pimm_src)
+
+    # Same story for the dataset name: it is declared once in
+    # helix/data/data/reference_bins.json and read by helix.data.bins.DEFAULTS,
+    # and importing that needs pimm_data, which needs the sys.path above.
+    if args.dataset_name is None:
+        from helix.data.bins import DEFAULTS as _BIN_DEFAULTS    # noqa: E402
+        args.dataset_name = _BIN_DEFAULTS["dataset_name"]
 
     # Resolve --npz here, because argparse cannot: the packaged copy's location
     # depends on where helix was installed, and $HELIX_JAXTPC_ROOT may not be
     # set. A literal default could not fall back, and the literal it used to
     # carry was one person's JAXTPC checkout.
     #
-    # os.environ, NOT helix.paths.root(): root() returns the S3DF DEFAULT when
-    # the variable is unset, so on any other machine it would hand back a path
-    # that does not exist and the packaged copy would never be reached.
+    # `resolve`, not `root`: root() RAISES when a site does not declare
+    # HELIX_JAXTPC_ROOT, and "this site has no JAXTPC checkout" is the normal
+    # case that must fall through to the packaged copy. resolve() returns None
+    # for it instead. (This used to read os.environ directly, because root()
+    # once returned an S3DF literal whenever the variable was unset -- that
+    # default is gone, so the workaround is too.)
     if args.npz is None:
-        from helix.paths import packaged
-        _jx = os.environ.get("HELIX_JAXTPC_ROOT")
+        from helix.paths import packaged, resolve as _resolve
+        _jx, _ = _resolve("HELIX_JAXTPC_ROOT")
         _cand = Path(_jx) / "config" / "noise_spectrum.npz" if _jx else None
         args.npz = str(_cand) if (_cand and _cand.exists()) else str(packaged("noise_spectrum.npz"))
     if not Path(args.npz).exists():
