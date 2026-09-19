@@ -119,7 +119,10 @@ def main(argv=None):
     # The one bins loader, in helix.integrations.pimm.model. This grew its own
     # copy -- an artifact branch and a sidecar branch -- in the same change that
     # was fixing a "one reader" bug. Two readers is what the bug was.
-    from helix.integrations.pimm.model import _load_bins
+    # helix.model.artifact, NOT helix.integrations.pimm.model: that package's
+    # __init__ patches pimm.engines at import time, and the image ships no
+    # pimm -- so this last stage of the no-data smoke path could not run there.
+    from helix.model.artifact import load_bins as _load_bins
     from helix.model.checkpoint import apply_bins
 
     bins = _load_bins(a.bins_from)

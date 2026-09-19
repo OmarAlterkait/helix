@@ -82,33 +82,12 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
 
 
 def _load_bins(path):
-    """Bin edges from either a bins sidecar or a checkpoint that carries them.
+    """Moved to :func:`helix.model.artifact.load_bins`; kept as the name this
+    module's callers already use.
 
-    The sidecar is its own shape — `scripts/derive_coeff_bins.py` writes a bare
-    ``edges`` mapping, which is not a checkpoint and has no architecture — so it is read
-    here rather than taught to `helix.model.artifact`. Everything else is a
-    checkpoint and goes to the one reader.
-
-    The directory test comes FIRST and is not cosmetic: an eval artifact is a
-    directory, and `torch.load` on one raises ``IsADirectoryError`` before any
-    of the code that would have coped. That is the same shape of bug as
-    `load_probe_model` learning about export dirs while its sibling did not.
+    It needs nothing from pimm, and importing it from THIS package dragged in
+    the import-time patches in ``__init__``, which fail where pimm is absent --
+    including the image, which ships none by design.
     """
-    import os
-
-    from helix.model.artifact import inspect
-
-    if not os.path.isdir(path):
-        import torch
-        blob = torch.load(path, map_location="cpu", weights_only=False)
-        if isinstance(blob, dict) and "edges" in blob:      # the sidecar
-            return blob
-    bins = inspect(path).op.bins
-    if bins is None:
-        raise ValueError(
-            f"{path}: no bin edges found. Expected a bins sidecar (an 'edges' "
-            f"mapping from scripts/derive_coeff_bins.py), or a checkpoint that carries "
-            f"them — an eval artifact does, and a `pimm export` keeps them in "
-            f"the weights as the persistent `bin_edges` buffer, so it reports "
-            f"none here and needs none.")
-    return bins
+    from helix.model.artifact import load_bins
+    return load_bins(path)

@@ -440,3 +440,43 @@ def build(art, *, device=None, eval_mode=True):
         for p in model.parameters():
             p.requires_grad_(False)
     return model
+
+
+def load_bins(path):
+    """Bin edges from either a bins sidecar or a checkpoint that carries them.
+
+    The sidecar is its own shape — `scripts/derive_coeff_bins.py` writes a bare
+    ``edges`` mapping, which is not a checkpoint and has no architecture — so it
+    is read here rather than pushed through :func:`inspect`. Everything else is a
+    checkpoint and goes to the one reader, which is this module by design.
+
+    The directory test comes FIRST and is not cosmetic: an eval artifact is a
+    directory, and ``torch.load`` on one raises ``IsADirectoryError`` before any
+    of the code that would have coped. That is the same shape of bug as
+    ``load_probe_model`` learning about export dirs while its sibling did not.
+
+    It lives HERE rather than in ``helix.integrations.pimm.model``, where it was
+    written, because it needs nothing from pimm -- only os, torch and this
+    module. Importing it from there dragged in
+    ``helix/integrations/pimm/__init__.py``, which applies import-time patches to
+    ``pimm.engines``; in an environment with no pimm that is a
+    ``ModuleNotFoundError``. The image deliberately ships no pimm, so
+    ``scripts/smoke_train_fm.py`` -- the last stage of the documented no-data
+    smoke path -- could not run there at all.
+    """
+    import os
+
+    if not os.path.isdir(path):
+        import torch
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(blob, dict) and "edges" in blob:      # the sidecar
+            return blob
+    bins = inspect(path).op.bins
+    if bins is None:
+        raise ValueError(
+            f"{path}: no bin edges found. Expected a bins sidecar (an 'edges' "
+            f"mapping from scripts/derive_coeff_bins.py), or a checkpoint that "
+            f"carries them — an eval artifact does, and a `pimm export` keeps "
+            f"them in the weights as the persistent `bin_edges` buffer, so it "
+            f"reports none here and needs none.")
+    return bins
