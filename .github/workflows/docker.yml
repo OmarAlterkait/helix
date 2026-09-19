@@ -219,8 +219,13 @@ jobs:
               # legitimately select ZERO and write_holdout refuses, correctly.
               $PY scripts/write_holdout.py --corpus $W/corpus/run_synth \
                   --dataset-name sim_wire --train 0.6 --val 0.2 --probe 0.2
+              # --allow-foreign-basis: the fixture is a DIFFERENT DSP generation
+              # by construction, so its basis_digest cannot match the packaged
+              # reference. Without the flag this step exits 2 and the documented
+              # RUNBOOK 0b path cannot run at all -- which is why this job failed.
               $PY scripts/derive_coeff_bins.py --corpus $W/corpus/run_synth \
-                  --dataset-name sim_wire --out $W/bins.pt --events 100 --K 128
+                  --dataset-name sim_wire --out $W/bins.pt --events 100 --K 128 \
+                  --allow-foreign-basis
               # loss must DECREASE from about ln(128) = 4.85, where an untrained
               # categorical head starts
               $PY scripts/smoke_train_fm.py --corpus $W/corpus/run_synth \

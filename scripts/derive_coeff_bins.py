@@ -44,6 +44,17 @@ def main(argv=None):
                     help="bands the tokenizer keeps (D1 and beyond are dropped)")
     ap.add_argument("--lo-pct", type=float, default=binlib.DEFAULTS["lo_pct"])
     ap.add_argument("--hi-pct", type=float, default=binlib.DEFAULTS["hi_pct"])
+    # The basis check below exists to catch the pre-tau/r1 confusion, which is a
+    # real hazard: those generations differ in which coefficients survive the
+    # gate, so a grid from one does not describe the other. But a SYNTHETIC
+    # corpus is a legitimately different generation and the caller knows it --
+    # docs/RUNBOOK.md 0b builds one from pimm_data.testing and derives a grid
+    # over it, and without an escape hatch that documented path cannot run at
+    # all. It is opt-in and it says what it did.
+    ap.add_argument("--allow-foreign-basis", action="store_true",
+                    help="derive from a corpus whose basis_digest is not the "
+                         "packaged reference generation (synthetic corpora, or a "
+                         "deliberately different DSP)")
     a = ap.parse_args(argv)
 
     if a.like and a.verify:
@@ -60,15 +71,21 @@ def main(argv=None):
     target = a.corpus
     if target:
         c = binlib.check_corpus(target, dataset_name=a.dataset_name)
-        if c["status"] == "basis-mismatch":
+        if c["status"] == "basis-mismatch" and not a.allow_foreign_basis:
             print(f"FATAL: {target}\n"
                   f"  basis_digest {c['actual']}\n"
                   f"  expected     {c['expected']}  ({c.get('generation')})\n"
                   "  A different DSP produced this corpus -- most likely the pre-tau\n"
                   "  generation rather than r1. They differ in which coefficients\n"
                   "  survive the coherent gate, so a grid from one does not describe\n"
-                  "  the other. Pass --corpus for the generation you mean.")
+                  "  the other. Pass --corpus for the generation you mean, or\n"
+                  "  --allow-foreign-basis if you MEANT a different generation.")
             return 2
+        if c["status"] == "basis-mismatch":
+            print(f"note: --allow-foreign-basis: deriving from basis_digest "
+                  f"{c['actual'][:12]}…, which is NOT the packaged reference "
+                  f"generation ({c.get('generation')}). The resulting grid describes "
+                  f"THIS corpus and is not comparable with the released models.")
         if c["status"] == "run-name-differs":
             print(f"note: corpus directory is {c['actual']!r}, the reference grid was "
                   f"derived from {c['expected']!r}. The name is only a convention, so "
