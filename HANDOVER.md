@@ -214,11 +214,17 @@ apptainer exec -B /sdf,/lscratch $HELIX_IMAGE \
   /opt/pimm/.venv/bin/python -m pytest tests -q
 ```
 
-Expect **507 passed, 54 skipped** where the corpus is present, or **504 passed,
-57 skipped** without it — `tests/test_bins.py` has three tests that need a real
-corpus and skip without one. The other skips are real-data and GPU tests; a skip
-because data is absent looks identical to a skip because the machine has no GPU,
-which is why `tests/_paths.py` exists — read its docstring if the count differs.
+**Green, with no failures.** Counts are deliberately not quoted here — see
+`TESTING.md`, which explains why: they depend on whether pimm is importable and
+on what data is present, so a number turns every change into a documentation
+edit. Three commits in one session once existed only to bump one, and four
+documents still disagreed afterwards.
+
+What matters is the shape of the skips, not their number. A skip because data is
+absent looks identical to a skip because the machine has no GPU, which is why
+`tests/_paths.py` exists — read its docstring if something looks wrong. The suite
+also runs clean on a DSP-only install (`pip install -e .`, no torch): everything
+needing torch, pimm-data or a corpus skips itself by name rather than failing.
 
 **6. Smoke the whole path with no data at all.** `docs/RUNBOOK.md` §0b builds a
 synthetic corpus from `pimm_data.testing` and runs corpus → train → probe end to
@@ -382,8 +388,9 @@ it that way. The derivation is in `helix.data.bins` (`derive`, `rederive`,
 
 | check | result |
 |---|---|
-| pimm-data suite | 363 passed, 7 skipped |
-| helix suite, inside the new image | 507 passed, 54 skipped |
+| pimm-data suite | green |
+| helix suite, inside the new image | green |
+| helix suite, DSP-only install, no data | green — skips, does not fail |
 | lockstep guard | 4 passed |
 | image bakes the pinned rev | `2b20573c`, forward model absent from pimm-data and registered by helix |
 | `python -m helix.paths` | all twelve roots resolve |

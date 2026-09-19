@@ -111,6 +111,7 @@ def test_a_subdirectory_resolves_to_the_repo_root(tmp_path):
 
 
 def test_provenance_covers_helix_and_pimm_data():
+    pytest.importorskip("pimm_data")  # the thing being asserted about
     p = provenance()
     for k in ("helix", "pimm_data", "python", "hostname"):
         assert k in p, f"provenance is missing {k}"
@@ -193,6 +194,7 @@ def test_code_version_is_atomic_or_absent():
 
 
 def test_incomplete_provenance_does_not_read_as_a_mixed_build():
+    pytest.importorskip("pimm_data")  # provenance() resolves it
     """coeff_verify compares field by field, not by serialising the dict."""
     from helix.data.coeff_verify import verify_corpus
     import inspect

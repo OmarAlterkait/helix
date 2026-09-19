@@ -132,7 +132,7 @@ def test_torch_digitize_matches_the_numpy_formula():
     the forward model. It asserts the FORMULA rather than importing an
     oracle across the boundary.
     """
-    import torch
+    torch = pytest.importorskip("torch")
     from helix.tpc import dense_ops
 
     g = {0: torch.randn(2, 4, 8) * 30}

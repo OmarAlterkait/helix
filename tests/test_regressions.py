@@ -183,7 +183,7 @@ def test_the_converted_m113_checkpoint_records_its_own_operating_point():
     fixture. Skips if the archived checkpoint is absent -- it is a data artifact,
     not source.
     """
-    import torch
+    torch = pytest.importorskip("torch")
 
     from helix.paths import archive
 

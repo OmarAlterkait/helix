@@ -262,7 +262,7 @@ def test_backends_agree_to_a_documented_tolerance_not_exactly():
     was never going to match.
     """
     import numpy as np
-    import torch
+    torch = pytest.importorskip("torch")
 
     from helix.tpc.coherent_gate_ops_numpy import gate_band as gb_np
     from helix.tpc.coherent_gate_ops_torch import gate_band as gb_t

@@ -79,7 +79,8 @@ def test_visushrink_supplied_sigma():
 
 
 def test_decomposition_viz_runs():
-    import matplotlib; matplotlib.use("Agg")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
     from helix.optical import decompose, plot_decomposition
     sig = _chunks()[0]
     bands, scales, names = decompose(sig, wavelet="coif3", level=6)

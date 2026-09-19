@@ -141,7 +141,7 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
     The edges are training-set statistics, so the model cannot invent them. This
     pins that the failure is an actionable error at BUILD time rather than an
     assertion on the first forward, and that a bins path satisfies it."""
-    import torch
+    torch = pytest.importorskip("torch")
     from helix.model import build_fm
 
     m = build_fm(dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
@@ -369,6 +369,7 @@ def test_rewritten_config_is_importable_without_helix_on_the_path(tmp_path):
     a process whose sys.path does NOT contain helix — and asserts the rewritten
     file repairs it.
     """
+    pytest.importorskip("pimm_data")  # the subprocess imports it via the config
     import subprocess
     import sys
     from pathlib import Path
