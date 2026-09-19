@@ -1,6 +1,6 @@
 {
   "_comment": "The DEFINITION of the production bin grid: the parameters it is derived with, the corpus it is derived from, and a content digest of the result. This file is the single source of those parameters -- helix.data.bins reads its defaults here, and scripts/derive_coeff_bins.py takes its argparse defaults from those, so the numbers live in one place.",
-  "name": "coeff_bins_r1_tau05_run0027575715_v2",
+  "name": "coeff_bins_r1_tau05_run0027575715_v3",
   "params": {
     "K": 128,
     "n_bands": 4,
@@ -14,13 +14,15 @@
     "generation": "r1 (tau=0.05)",
     "basis_digest": "8c4542b691e379330928171682a708284a4a4eaf8f5b850955f8789dd0415a4f",
     "_basis_digest_note": "Checkable BEFORE deriving, and catches the pre-tau/r1 confusion. It does NOT identify which run: basis_digest hashes the DSP recipe, so all eight r1 runs share it.",
-    "_run_note": "Which run cannot be checked from the data. Shard /config carries only band_lengths, gids, n_wires, norm_sigma -- no source-run id -- so the run is knowable only from the directory name. That is why the digests below exist: they are the only thing that detects a grid derived from the wrong run."
+    "_run_note": "Which run cannot be checked from the data. Shard /config carries only band_lengths, gids, n_wires, norm_sigma -- no source-run id -- so the run is knowable only from the directory name. That is why the digests below exist: they are the only thing that detects a grid derived from the wrong run.",
+    "_site_note": "v3 is recorded against the NERSC copy of the corpus at $CFS/m5238/users/oalter/coeff_tpc_r1/run_0027575715 (19,999 events, 100 coeff + 100 coeff_clean shards, every shard built on a 2080 Ti at helix c646886)."
   },
   "digests": {
-    "edges": "sha256:79485d19f2f800c67e676bf0299b95022d27683b7a0b7c2f4c7f1b1c7058f957",
-    "cent_asinh": "sha256:cae984e7541e32101e921d3dfaef962cdc218da3eed1614a426198be0ca55006",
-    "cent_ratio": "sha256:cf3859b74c238bf4f6286682c519efa186aad20b682655c05384983b561ed19e"
+    "edges": "sha256:8faca247eef2991b42b8fb85c3de8ac6993f81c7e654d4b9a6549902c196880d",
+    "cent_asinh": "sha256:f0414ef0c1f3f708d2bc78a26aeedc8834d3f1a0856cb4c9596ff36345e43cc4",
+    "cent_ratio": "sha256:357916e7b6282435655886f4461d18d7d20543b25eaa0ef49c7eee34b4937239"
   },
+  "_rerecord_note": "v2 named the S3DF corpus and its digests were edges 79485d19, cent_asinh cae984e7, cent_ratio cf3859b7. Deriving with IDENTICAL params from the NERSC corpus -- same run, same basis_digest 8c4542b6, check_corpus ok -- produced all three differently, so the two corpora are not the same bytes and the cause was not established. The grids that v2 fingerprints are the ones the S3DF-published checkpoints were trained against; no such checkpoint was transferred here, and the plan is to retrain, so v3 fingerprints the corpus that will actually be trained on. A number produced here is therefore NOT comparable with a number in docs/SCIENCE.md.",
   "shapes": {
     "edges": [
       4,
