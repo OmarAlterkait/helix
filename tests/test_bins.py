@@ -126,7 +126,11 @@ def test_rederiving_the_production_grid_reproduces_it_bit_identically():
     pytest.importorskip("torch")
     from helix.paths import archive
 
-    ref_path = os.path.join(str(archive()), "coeff_bins_r1_tau05_run0027575715_v2.pt")
+    # From reference_bins.json's declared name, not a literal. This said `_v2`
+    # while the JSON said `_v3`, and because the guard below SKIPS on absence the
+    # drift was silent -- the test that exists to check the handover claim simply
+    # stopped running.
+    ref_path = str(binlib.reference_table())
     if not os.path.exists(ref_path):
         pytest.skip(f"reference grid absent: {ref_path}")
 
