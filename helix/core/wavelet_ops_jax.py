@@ -22,6 +22,40 @@ from helix.core.dwt_matrix import build_dwt_matrices
 _cache: dict = {}
 
 
+
+#: The matmul DWT must accumulate at full float32 precision.
+#:
+#: Measured on a (6, 4336) float32 image against a float64 pywt reference, coif3
+#: level 4, on an A100:
+#:
+#:     x @ Wf  (default precision)   rms_abs 1.4e-02   median_rel 2.6e-04
+#:     precision=HIGHEST             rms_abs 4.2e-06   median_rel 6.2e-08
+#:
+#: a 3,300x improvement, which takes this backend from ~370x WORSE than the torch
+#: backend (rms_abs 3.7e-05) to slightly better than numpy (5.9e-06).
+#:
+#: Why it matters here and not for an ordinary matmul: this DWT contracts over
+#: the WHOLE signal (4,336 terms) in one dot product, where pywt cascades short
+#: per-level filters. At reduced precision that long accumulation cancels
+#: catastrophically on small coefficients -- worst-case relative error reached
+#: 3.5 (350%) on near-zero coefficients, while the max ABSOLUTE error stayed at
+#: 0.08 and so did not move any survive/discard decision. That is why
+#: tests/test_corpus_acceptance.py saw identical coefficient SETS and differing
+#: VALUES, and why the difference was invisible until a real shard was read.
+#:
+#: Set in the code, not via JAX_DEFAULT_MATMUL_PRECISION: needing full precision
+#: is a property of the matmul-DWT formulation, not of a machine, and an
+#: environment variable would have to be forwarded correctly by every launcher
+#: and container runtime in the path. It was not, which is how this was first
+#: misdiagnosed as "not a precision problem".
+_DWT_PRECISION = jax.lax.Precision.HIGHEST
+
+
+def _dwt_matmul(a, b):
+    """``a @ b`` at full float32 precision. See :data:`_DWT_PRECISION`."""
+    return jax.lax.dot_general(a, b, (((a.ndim - 1,), (0,)), ((), ())),
+                               precision=_DWT_PRECISION)
+
 def _matrices(wavelet, n_ticks, level, mode):
     key = (wavelet, n_ticks, level, mode)
     if key not in _cache:
@@ -51,7 +85,7 @@ def _universal_core(x, Wf, lf, sigma, slices_tuple, scale, func, per_band):
     detail band) for all bands — optical. True: per-band MAD sigma broadcast to
     each band's coeffs — TPC (colored noise). ``lf`` selects keep-approx vs
     threshold-approx. Returns (thresholded coeffs, per-band reporting sigma, count)."""
-    coeffs = x @ Wf
+    coeffs = _dwt_matmul(x, Wf)
     band_sigma = jnp.array([jnp.median(jnp.abs(coeffs[:, a:b])) / 0.6745
                             for (a, b) in slices_tuple])
     if per_band:
@@ -91,7 +125,7 @@ def sparsify(image, wavelet: str, level: int, mode: str, th: ThresholdSpec, sigm
                             wavelet=wavelet, level=level, mode=mode)
 
     # ---- non-universal (topk / energy): eager ----
-    coeffs = x @ Wf                                  # (n_sig, n_coeffs)
+    coeffs = _dwt_matmul(x, Wf)                                  # (n_sig, n_coeffs)
     band_sigma = jnp.array([jnp.median(jnp.abs(coeffs[:, s])) / 0.6745 for s in slices])
     approx = slices[0]
     detail = slice(approx.stop, coeffs.shape[1])
@@ -137,7 +171,7 @@ def reconstruct(coeffs, wavelet: str, level: int, mode: str, n_time: int):
         flat = jnp.asarray(coeffs)
         rec_len = n_time
     Wi = _matrices(wavelet, rec_len, level, mode)[1]
-    return (flat @ Wi)[..., :n_time]
+    return _dwt_matmul(flat, Wi)[..., :n_time]
 
 
 # ---- the transform/threshold seam (mirrors wavelet_ops_numpy) --------------
@@ -157,7 +191,7 @@ def wavedec(image, wavelet: str, level: int, mode: str):
     x = jnp.asarray(image, dtype=jnp.float32)
     lev = _eff_level(x.shape[-1], wavelet, level)
     Wf, _, slices, _, _ = _matrices(wavelet, x.shape[-1], lev, mode)
-    flat = x @ Wf
+    flat = _dwt_matmul(x, Wf)
     return FlatBands(flat, [s.stop - s.start for s in slices]), lev
 
 
