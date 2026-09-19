@@ -11,12 +11,13 @@ Deliberately from scratch rather than from m113:
   * m113 is d=512 and a full event is ~31-40k tokens; training it needs more than
     an 11 GB Turing card has, while the wiring is identical at any width
 
-Run (Turing, 1 GPU)::
+Run (one GPU is enough for this config)::
 
-    srun --partition=turing --account=mli:cider-ml --gpus=1 --cpus-per-task=4 \\
-         --mem=16384M --time=0:30:00 singularity exec --nv -B /sdf,/lscratch \\
-         /sdf/data/neutrino/omara/images/helix-train.sif \\
-         bash -lc 'python3 -m pimm.train --config-file .../coeff_fm_smoke.py'
+    scripts/helix_run.sh python3 -m pimm.train --config-file <this file>
+
+`helix_run.sh` resolves the container runtime, image and interpreter from
+`helix.paths.container()` for whatever site you are on -- apptainer at S3DF,
+shifter/podman-hpc at NERSC -- so the invocation does not name any of them.
 """
 
 # Put helix AND the pimm-data checkout on sys.path BEFORE custom_imports is read.
@@ -53,24 +54,32 @@ Run (Turing, 1 GPU)::
 import os as _os
 import sys as _sys
 
-for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix"),):
-    _p = _os.environ.get(_v) or _p
-    # Cannot self-locate here: pimm copies the config to a temp file before
-    # executing it, so __file__ is the copy, and helix is not importable yet --
-    # putting it on the path is this block's whole job. So the default is a
-    # literal, and the only defence is to REFUSE a path that is not there.
-    # Without this, a wrong or absent checkout surfaces much later as a bare
-    # ImportError from custom_imports with the real ModuleNotFoundError
-    # swallowed by import_modules_from_strings -- after a job has queued and
-    # started.
-    if not _os.path.isdir(_p):
-        raise SystemExit(
-            f"{_v} does not exist: {_p}\n"
-            f"  Set {_v} to your checkout. This config cannot derive it: pimm\n"
-            f"  executes a temp copy, so __file__ points at the copy, and helix\n"
-            f"  is not importable until this block puts it on sys.path.")
-    if _p not in _sys.path:
-        _sys.path.insert(1, _p)
+_p = _os.environ.get("HELIX_ROOT")
+# Cannot self-locate here: pimm copies the config to a temp file before
+# executing it, so __file__ is the copy, and helix is not importable yet --
+# putting it on the path is this block's whole job.
+#
+# There is deliberately NO fallback. This used to default to
+# /sdf/group/neutrino/omara/helix, which is the one hardcoded path that could
+# not be fixed by site profiles (helix.paths is not importable yet, by
+# construction). At any other site that literal is a directory which does not
+# exist, so the SystemExit below fired and the real message -- "set HELIX_ROOT"
+# -- was buried under a path nobody recognised. Requiring the variable says the
+# same thing without pretending one machine is the default.
+#
+# Refusing loudly matters: without it, a wrong or absent checkout surfaces much
+# later as a bare ImportError from custom_imports, with the real
+# ModuleNotFoundError swallowed by import_modules_from_strings -- after a job
+# has queued and started.
+if not _p or not _os.path.isdir(_p):
+    raise SystemExit(
+        f"HELIX_ROOT is {'not set' if not _p else f'not a directory: {_p}'}.\n"
+        f"  Set it to your helix checkout. This config cannot derive it: pimm\n"
+        f"  executes a temp copy, so __file__ points at the copy, and helix\n"
+        f"  is not importable until this block puts it on sys.path.\n"
+        f"  scripts/submit_helix.sh exports it from helix.paths for you.")
+if _p not in _sys.path:
+    _sys.path.insert(1, _p)
 # REQUIRED, not tidiness. Config._file2dict keeps every module-level name that
 # does not start with `__` (pimm/utils/config.py:261-262), so these would enter
 # the config dict as MODULE OBJECTS. Config.dump then renders
@@ -83,7 +92,7 @@ for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix"),):
 # config and re-reads the dump, and a PosixPath would not survive that.
 from helix.paths import root as _root                      # noqa: E402
 
-del _os, _sys, _v, _p
+del _os, _sys, _p
 
 custom_imports = dict(
     imports=["helix.integrations.pimm"],
@@ -104,16 +113,26 @@ CORPUS = str(_root("HELIX_CORPUS"))
 # is computed from the GATED coefficients, so it moves when the gate does.
 # m113's came from the old white-noise cache and are mis-sized per band here —
 # see NOISE_BANDS.md.
-# K=128 needs Ampere: the logits are (n_cells, n_slot, K), ~2.4 GB at a full event.
 #
-# _v2 re-derives the same corpus at the same --events: `edges` and `cent_asinh`
-# come out BIT-IDENTICAL, so this changes no loss and no trained weight. What it
-# adds is `cent_ratio` = E[coeff/sigma | bin], MEASURED — the charge read-back
-# table. The v1 sidecar had none, so `set_bins` derives it from the edges, and a
-# derived table under-reads sum|centroid| by ~2.7-3.0% per band (the two open
-# outer bins run ~24% low, since a closed-form centroid has to invent a finite
-# edge for them). It also drops `cent_lin`, which nothing read.
-BINS = str(_root("HELIX_ARCHIVE") / "coeff_bins_r1_tau05_run0027575715_v2.pt")
+# The NAME comes from helix/data/data/reference_bins.json, which is already the
+# DEFINITION of the production grid -- its derivation parameters, the corpus it
+# is defined over, and a digest of the result. It used to be retyped here as a
+# literal, and in four other places, while nothing read the field that declares
+# it. When the grid was re-derived against this site's corpus the JSON went to
+# `_v3` and every literal still said `_v2`: this config then named a file that
+# does not exist, and would have named a WRONG one had a stale `_v2` been lying
+# in the archive. A hardcoded filename is a hardcoded path one level down.
+#
+# What the versions mean: v1 carried no `cent_ratio`, so `set_bins` derived the
+# charge read-back table from the edges and under-read sum|centroid| by ~2.7-3.0%
+# per band (the two open outer bins ~24% low, a closed-form centroid having to
+# invent a finite edge). v2 added it as a MEASURED E[coeff/sigma | bin]. v3 is v2's
+# derivation re-run against the corpus at THIS site; see reference_bins.json's
+# _rerecord_note for why its digests differ and what that costs.
+#
+# K=128 needs Ampere: the logits are (n_cells, n_slot, K), ~2.4 GB at a full event.
+from helix.data.bins import reference_table as _reference_table   # noqa: E402
+BINS = str(_reference_table())
 
 # ---------------------------------------------------------------------------
 # run
@@ -142,9 +161,33 @@ save_path = str(_root("HELIX_EXP") / "coeff_fm_train")
 # (default_config_parser: `batch_size_val is None or batch_size_val % world_size
 # == 0`). batch_size_val = 1 therefore aborts any multi-rank launch at setup,
 # before a single step runs — found by the first real 4-GPU launch.
-batch_size = 4                # 4 ranks x 1 event = m113's effective batch
-batch_size_val = 4            # likewise 1 event per rank
-batch_size_test = 4
+# DERIVED from the world size, not hardcoded, because the only correct value IS
+# the rank count: the FM takes exactly one event per rank, so global batch ==
+# number of GPUs, and helix.integrations.pimm.trainer raises if they disagree.
+#
+# A literal 4 meant every launch at any other width was wrong before it started
+# -- right on 4 ranks, fatal on 1 and on 16 -- and the number had to be edited in
+# three configs to change GPU count. That makes a batch-size/LR scaling study,
+# which is exactly a sweep over rank counts, an editing exercise.
+#
+# torchrun (via pimm's scripts/train.sh) exports WORLD_SIZE before the config is
+# read, so in a job this is the true rank count. The fallback matters only where
+# WORLD_SIZE is absent: `pimm submit` preflight on the login node, and a bare
+# single-process load. Getting the fallback "wrong" is safe -- the trainer's
+# guard fires with a named cause rather than training something subtly different.
+#
+# NOTE this is the GLOBAL batch. Raising the PER-GPU batch is not available:
+# the model has no event separation, so two events in one forward attend across
+# each other, and MULTI_EVENT_BATCHING.md measures that it would buy no
+# throughput anyway (the GPU saturates ~8x below one event). Scale by ranks.
+from helix.paths import world_size as _world_size            # noqa: E402
+_WORLD = _world_size()
+# ALL THREE are global and all three are asserted divisible by world_size
+# (default_config_parser). batch_size_val = 1 aborts any multi-rank launch at
+# setup, before a single step runs -- found by the first real 4-GPU launch.
+batch_size = _WORLD           # 1 event per rank
+batch_size_val = _WORLD
+batch_size_test = _WORLD
 num_worker = 4
 
 epoch = 25                    # m113 saw each event ~25x; see STEPS below
@@ -359,8 +402,9 @@ hooks = [
 
 train = dict(type="FMTrainer")
 
-# _root is used above and must NOT survive into the config dict: Config._file2dict
-# keeps every module-level name not starting with `__`, and Config.dump then
-# renders it as a function repr that yapf rejects -- the same failure the
-# `del _os, _sys` above exists for.
-del _root
+# _root and _reference_table are used above and must NOT survive into the config
+# dict: Config._file2dict keeps every module-level name not starting with `__`
+# (pimm/utils/config.py:262), and Config.dump then renders each as a function
+# repr that yapf rejects -- the same failure the `del _os, _sys` above exists for.
+# A single leading underscore does NOT protect a name here; only `__` does.
+del _root, _reference_table, _WORLD, _world_size

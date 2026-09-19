@@ -21,13 +21,13 @@ worth reading. During the stable phase the raw weights sit at full LR noise and
 weights ARE annealed, so the EMA stops being load-bearing and — see the
 CheckpointSaver note below — checkpoint selection starts to mean something.
 
-Run (4 GPUs, as the stable phase)::
+Run (one GPU is enough for this config)::
 
-    srun --partition=ampere --account=mli:cider-ml --gpus=4 --ntasks=4 \\
-         --cpus-per-task=8 --mem=256G --time=4:00:00 \\
-         singularity exec --nv -B /sdf,/lscratch \\
-         /sdf/data/neutrino/omara/images/helix-train.sif \\
-         bash -lc 'python3 -m pimm.train --config-file .../coeff_fm_cooldown.py'
+    scripts/helix_run.sh python3 -m pimm.train --config-file <this file>
+
+`helix_run.sh` resolves the container runtime, image and interpreter from
+`helix.paths.container()` for whatever site you are on -- apptainer at S3DF,
+shifter/podman-hpc at NERSC -- so the invocation does not name any of them.
 """
 
 # The sys.path bootstrap lives in the BASE config and runs when pimm execs it
@@ -85,8 +85,9 @@ _base_ = ["./coeff_fm_train_8run.py"]
 # already — see scripts/submit_coeff_fm_train.sh.
 #
 # Loading it needs no centroid backfill: the 8-run checkpoints carry bin_edges,
-# bin_cent_asinh and bin_cent_ratio, and the v2 sidecar this config inherits is
-# the same table they were trained against, so `apply_bins` reports no delta. If
+# bin_cent_asinh and bin_cent_ratio, and the sidecar this config
+# inherits (reference_bins.json's declared name) must be the same table they
+# were trained against, so `apply_bins` reports no delta. If
 # it ever does report one here, stop — the model would be annealing against a
 # grid it was not trained on.
 weight = str(_root("HELIX_EXP") / "coeff-fm-train-r1-8run" / "model" / "last")
@@ -107,16 +108,34 @@ resume = False
 # run 1 alone, both converged, differ by 0.129% of a band's span — 0.81x the
 # sampling noise of the shipped table. A subset of an iid corpus is the same
 # corpus. See coeff_fm_train_8run.py.
-RUNS = [
-    "run_0027575715", "run_0027587651", "run_0027651463",
-]
-_over = dict(data_root=str(_root("HELIX_CORPUS").parent), split=RUNS)
+# The FIRST THREE of whatever the corpus declares, rather than three retyped run
+# ids. `_calib/RUNS.txt` is written once by hand and is what both build phases
+# read; a copy of the corpus carrying a different subset would otherwise be
+# annealed against names that may not be in it. The count is the deliberate part
+# (N_TRAIN_EVENTS below was resolved for three runs), the identities are not.
+from helix.data.identity import corpus_runs as _corpus_runs    # noqa: E402
+_CORPUS_ROOT = str(_root("HELIX_CORPUS").parent)
+RUNS = _corpus_runs(_CORPUS_ROOT)[:3]
+if len(RUNS) != 3:
+    raise SystemExit(
+        f"cooldown anneals on 3 runs and N_TRAIN_EVENTS was resolved for 3, but "
+        f"_calib/RUNS.txt names only {len(RUNS)}.")
+_over = dict(data_root=_CORPUS_ROOT, split=RUNS)
 data = dict(train=dict(**_over), val=dict(**_over), test=dict(**_over))
 
 epoch = 1
 N_TRAIN_EVENTS = 57_059          # resolved from the identity split over RUNS
-batch_size = 4
-STEPS = N_TRAIN_EVENTS * epoch // batch_size          # 14,264
+# Inherited from the base, which derives it from WORLD_SIZE. NOT restated here:
+# the only correct global batch is the rank count (one event per rank), so a
+# literal would be right at exactly one GPU count and wrong at every other --
+# which is precisely what a batch-size/LR scaling sweep varies.
+#
+# STEPS below needs the same number, and `batch_size` is NOT in scope yet: a
+# derived config executes BEFORE pimm merges `_base_`, so the base's value does
+# not exist here. Take it from the same source the base does.
+from helix.paths import world_size as _world_size               # noqa: E402
+_WORLD = _world_size()
+STEPS = N_TRAIN_EVENTS * epoch // _WORLD          # 14,264
 
 # No warmup: the model is already trained. Warmup exists to keep a COLD
 # transformer stable; re-warming an annealing run just delays the anneal.
@@ -164,4 +183,6 @@ hooks = [
          evaluator_every_n_steps=EVAL_EVERY),
 ]
 
-del _root
+# _corpus_runs and _CORPUS_ROOT too: only a `__` prefix keeps a name out of the
+# dumped config, and a function repr there is a yapf syntax error.
+del _root, _corpus_runs, _CORPUS_ROOT, _WORLD, _world_size

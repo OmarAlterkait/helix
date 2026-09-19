@@ -44,10 +44,15 @@ _base_ = ["./coeff_fm_train.py"]
 # shard came from. The base points `data_root` at ONE run directory, which is why
 # this cannot be expressed as a bare data_root change.
 CORPUS_ROOT = str(_root("HELIX_CORPUS").parent)
-RUNS = [
-    "run_0027575715", "run_0027587651", "run_0027651463", "run_0027654870",
-    "run_0027663748", "run_0027668746", "run_0027670361", "run_0027719646",
-]
+# READ from the corpus's own `_calib/RUNS.txt` rather than retyped here. That
+# file is hand-written and is step zero of a build (docs/RUNBOOK.md §1) -- both
+# build phases abort without it -- so it is the closest thing the corpus has to
+# a declaration of what it contains, and the build side already reads it
+# (submit_coeff_corpus.sh, calibrate_norm_sigma.sh). Only the training configs
+# retyped it, which meant a corpus copy carrying a DIFFERENT subset would train
+# happily on whatever the literal named.
+from helix.data.identity import corpus_runs as _corpus_runs    # noqa: E402
+RUNS = _corpus_runs(CORPUS_ROOT)
 
 _over = dict(data_root=CORPUS_ROOT, split=RUNS)
 data = dict(train=dict(**_over), val=dict(**_over), test=dict(**_over))
@@ -63,6 +68,23 @@ data = dict(train=dict(**_over), val=dict(**_over), test=dict(**_over))
 #
 #   train 150,239   val 4,641   probe 3,111   (= 157,991)
 N_TRAIN_EVENTS = 150_239
+#: The corpus this was resolved against: 8 runs, 157,991 events. Recorded so the
+#: literal above can be CHECKED rather than merely asserted in prose.
+#:
+#: Why the literal is still the value: resolving the split exactly means reading
+#: `n_events` from every shard header (790 of them), which is seconds -- fine
+#: once, far too slow on every config load, and `pimm submit` loads this config
+#: on the login node during preflight as well as in the job. So the exact check
+#: lives in tests/test_pimm_config_contract.py, which can afford it, and the
+#: cheap invariant lives here.
+N_EVENTS_TOTAL = 157_991
+if len(RUNS) != 8:
+    raise SystemExit(
+        f"this config's budget was resolved over 8 runs ({N_EVENTS_TOTAL:,} events) "
+        f"but _calib/RUNS.txt names {len(RUNS)}: {', '.join(RUNS)}.\n"
+        f"  N_TRAIN_EVENTS and therefore STEPS would be wrong -- a job that looks\n"
+        f"  fine and is the wrong length. Re-resolve the split for this corpus\n"
+        f"  (scripts/write_holdout.py) and update N_TRAIN_EVENTS/N_EVENTS_TOTAL.")
 
 # epoch=3, NOT the base's 25. This holds the COMPUTE fixed and spends the extra
 # corpus on unique events instead of repeats:
@@ -79,8 +101,17 @@ N_TRAIN_EVENTS = 150_239
 # (the base run took ~11 h on 4 GPUs, so ~3.6 days). That is a different
 # experiment and wants its own config, not a flag flipped here.
 epoch = 3
-batch_size = 4
-STEPS = N_TRAIN_EVENTS * epoch // batch_size
+# Inherited from the base, which derives it from WORLD_SIZE. NOT restated here:
+# the only correct global batch is the rank count (one event per rank), so a
+# literal would be right at exactly one GPU count and wrong at every other --
+# which is precisely what a batch-size/LR scaling sweep varies.
+#
+# STEPS below needs the same number, and `batch_size` is NOT in scope yet: a
+# derived config executes BEFORE pimm merges `_base_`, so the base's value does
+# not exist here. Take it from the same source the base does.
+from helix.paths import world_size as _world_size               # noqa: E402
+_WORLD = _world_size()
+STEPS = N_TRAIN_EVENTS * epoch // _WORLD
 
 WARMUP = max(100, round(0.0040 * STEPS))
 EVAL_EVERY = max(50, round(0.0099 * STEPS))
@@ -104,4 +135,6 @@ hooks = [
     dict(type="CheckpointSaver", save_freq=SAVE_EVERY),
 ]
 
-del _root
+# _corpus_runs too: a single leading underscore does not keep a name out of the
+# dumped config; only `__` does.
+del _root, _corpus_runs, _WORLD, _world_size

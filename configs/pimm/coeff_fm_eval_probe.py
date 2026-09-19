@@ -62,9 +62,19 @@ batch_size_test = 1
 # Config.dump would emit `os = <module 'os'>`, which yapf rejects -- killing the
 # run during setup. Same trap the base file documents.
 import os as _os
-_BINS = (_os.environ.get("COEFF_EVAL_BINS")
-         or "/sdf/data/neutrino/omara/archive/coeff_bins_r1_tau05_run0027575715_v2.pt")
-del _os
+from helix.data.bins import reference_table as _reference_table
+# The fallback was a full S3DF literal -- the only bins reference that bypassed
+# helix.paths entirely, even though this file already imports `_root`. It also
+# named `_v2` while reference_bins.json declares the grid's name, so it went
+# stale the moment the grid was re-derived. Now both the directory and the
+# filename come from their declarations.
+#
+# COEFF_EVAL_BINS survives as an EXPLICIT per-invocation override -- "score this
+# checkpoint against that specific table" is a real thing to want when comparing
+# a model trained on an older grid. It is not a second spelling of HELIX_ARCHIVE:
+# it names one file, not a root.
+_BINS = _os.environ.get("COEFF_EVAL_BINS") or str(_reference_table())
+del _os, _reference_table
 model = dict(bins=_BINS)
 
 # The whole point: BOTH arms on the SAME 388 events.
