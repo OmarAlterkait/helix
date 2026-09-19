@@ -39,31 +39,39 @@ pimm, because ``Config.fromfile`` takes a path::
 import os as _os
 import sys as _sys
 
-for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix"),):
-    _p = _os.environ.get(_v) or _p
-    # Cannot self-locate here: pimm copies the config to a temp file before
-    # executing it, so __file__ is the copy, and helix is not importable yet --
-    # putting it on the path is this block's whole job. So the default is a
-    # literal, and the only defence is to REFUSE a path that is not there.
-    # Without this, a wrong or absent checkout surfaces much later as a bare
-    # ImportError from custom_imports with the real ModuleNotFoundError
-    # swallowed by import_modules_from_strings -- after a job has queued and
-    # started.
-    if not _os.path.isdir(_p):
-        raise SystemExit(
-            f"{_v} does not exist: {_p}\n"
-            f"  Set {_v} to your checkout. This config cannot derive it: pimm\n"
-            f"  executes a temp copy, so __file__ points at the copy, and helix\n"
-            f"  is not importable until this block puts it on sys.path.")
-    if _p not in _sys.path:
-        _sys.path.insert(1, _p)
+_p = _os.environ.get("HELIX_ROOT")
+# Cannot self-locate here: pimm copies the config to a temp file before
+# executing it, so __file__ is the copy, and helix is not importable yet --
+# putting it on the path is this block's whole job.
+#
+# There is deliberately NO fallback. This used to default to
+# /sdf/group/neutrino/omara/helix, which is the one hardcoded path that could
+# not be fixed by site profiles (helix.paths is not importable yet, by
+# construction). At any other site that literal is a directory which does not
+# exist, so the SystemExit below fired and the real message -- "set HELIX_ROOT"
+# -- was buried under a path nobody recognised. Requiring the variable says the
+# same thing without pretending one machine is the default.
+#
+# Refusing loudly matters: without it, a wrong or absent checkout surfaces much
+# later as a bare ImportError from custom_imports, with the real
+# ModuleNotFoundError swallowed by import_modules_from_strings -- after a job
+# has queued and started.
+if not _p or not _os.path.isdir(_p):
+    raise SystemExit(
+        f"HELIX_ROOT is {'not set' if not _p else f'not a directory: {_p}'}.\n"
+        f"  Set it to your helix checkout. This config cannot derive it: pimm\n"
+        f"  executes a temp copy, so __file__ points at the copy, and helix\n"
+        f"  is not importable until this block puts it on sys.path.\n"
+        f"  scripts/submit_helix.sh exports it from helix.paths for you.")
+if _p not in _sys.path:
+    _sys.path.insert(1, _p)
 # REQUIRED, not tidiness. Config._file2dict keeps every module-level name that
 # does not start with `__` (pimm/utils/config.py:261-262), so these would enter
 # the config dict as MODULE OBJECTS. Config.dump then renders
 # `_os = <module 'os' ...>` and yapf rejects it —
 # `YapfError: <unknown>:1:5: invalid syntax` — killing the run during setup,
 # before step 1. Observed on the first launch after the bootstrap was added.
-del _os, _sys, _v, _p
+del _os, _sys, _p
 
 custom_imports`` is mmcv's standard out-of-tree hook, which pimm's
 ``Config.fromfile`` already honours. It imports helix's adapter, which registers

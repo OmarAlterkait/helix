@@ -11,12 +11,13 @@ Deliberately from scratch rather than from m113:
   * m113 is d=512 and a full event is ~31-40k tokens; training it needs more than
     an 11 GB Turing card has, while the wiring is identical at any width
 
-Run (Turing, 1 GPU)::
+Run (one GPU is enough for this config)::
 
-    srun --partition=turing --account=mli:cider-ml --gpus=1 --cpus-per-task=4 \\
-         --mem=16384M --time=0:30:00 singularity exec --nv -B /sdf,/lscratch \\
-         /sdf/data/neutrino/omara/images/helix-train.sif \\
-         bash -lc 'python3 -m pimm.train --config-file .../coeff_fm_smoke.py'
+    scripts/helix_run.sh python3 -m pimm.train --config-file <this file>
+
+`helix_run.sh` resolves the container runtime, image and interpreter from
+`helix.paths.container()` for whatever site you are on -- apptainer at S3DF,
+shifter/podman-hpc at NERSC -- so the invocation does not name any of them.
 """
 
 # Put helix AND the pimm-data checkout on sys.path BEFORE custom_imports is read.
@@ -53,24 +54,32 @@ Run (Turing, 1 GPU)::
 import os as _os
 import sys as _sys
 
-for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix"),):
-    _p = _os.environ.get(_v) or _p
-    # Cannot self-locate here: pimm copies the config to a temp file before
-    # executing it, so __file__ is the copy, and helix is not importable yet --
-    # putting it on the path is this block's whole job. So the default is a
-    # literal, and the only defence is to REFUSE a path that is not there.
-    # Without this, a wrong or absent checkout surfaces much later as a bare
-    # ImportError from custom_imports with the real ModuleNotFoundError
-    # swallowed by import_modules_from_strings -- after a job has queued and
-    # started.
-    if not _os.path.isdir(_p):
-        raise SystemExit(
-            f"{_v} does not exist: {_p}\n"
-            f"  Set {_v} to your checkout. This config cannot derive it: pimm\n"
-            f"  executes a temp copy, so __file__ points at the copy, and helix\n"
-            f"  is not importable until this block puts it on sys.path.")
-    if _p not in _sys.path:
-        _sys.path.insert(1, _p)
+_p = _os.environ.get("HELIX_ROOT")
+# Cannot self-locate here: pimm copies the config to a temp file before
+# executing it, so __file__ is the copy, and helix is not importable yet --
+# putting it on the path is this block's whole job.
+#
+# There is deliberately NO fallback. This used to default to
+# /sdf/group/neutrino/omara/helix, which is the one hardcoded path that could
+# not be fixed by site profiles (helix.paths is not importable yet, by
+# construction). At any other site that literal is a directory which does not
+# exist, so the SystemExit below fired and the real message -- "set HELIX_ROOT"
+# -- was buried under a path nobody recognised. Requiring the variable says the
+# same thing without pretending one machine is the default.
+#
+# Refusing loudly matters: without it, a wrong or absent checkout surfaces much
+# later as a bare ImportError from custom_imports, with the real
+# ModuleNotFoundError swallowed by import_modules_from_strings -- after a job
+# has queued and started.
+if not _p or not _os.path.isdir(_p):
+    raise SystemExit(
+        f"HELIX_ROOT is {'not set' if not _p else f'not a directory: {_p}'}.\n"
+        f"  Set it to your helix checkout. This config cannot derive it: pimm\n"
+        f"  executes a temp copy, so __file__ points at the copy, and helix\n"
+        f"  is not importable until this block puts it on sys.path.\n"
+        f"  scripts/submit_helix.sh exports it from helix.paths for you.")
+if _p not in _sys.path:
+    _sys.path.insert(1, _p)
 # REQUIRED, not tidiness. Config._file2dict keeps every module-level name that
 # does not start with `__` (pimm/utils/config.py:261-262), so these would enter
 # the config dict as MODULE OBJECTS. Config.dump then renders
@@ -83,7 +92,7 @@ for _v, _p in (("HELIX_ROOT", "/sdf/group/neutrino/omara/helix"),):
 # config and re-reads the dump, and a PosixPath would not survive that.
 from helix.paths import root as _root                      # noqa: E402
 
-del _os, _sys, _v, _p
+del _os, _sys, _p
 
 custom_imports = dict(
     imports=["helix.integrations.pimm"],

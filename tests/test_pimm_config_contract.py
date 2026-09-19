@@ -423,6 +423,8 @@ def test_configs_leave_no_module_objects_in_the_namespace():
     import types
     from pathlib import Path
 
+    from helix.paths import SiteError as _SiteError
+
     cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
     checked = []
     missing = []
@@ -430,12 +432,20 @@ def test_configs_leave_no_module_objects_in_the_namespace():
         ns = {}
         try:
             exec(compile(path.read_text(), str(path), "exec"), ns)
-        except FileNotFoundError as e:
+        except (FileNotFoundError, _SiteError) as e:
             # Some configs resolve a checkpoint or a bin table AT MODULE SCOPE, so
             # executing them needs that data present. coeff_fm_encode.py reaches
             # for the m113 artifact under HELIX_ARCHIVE, which exists on the
             # machine helix was developed on and nowhere else -- a CI runner, or
             # any fresh site, has none of it.
+            #
+            # SiteError is the same situation said a different way: a site profile
+            # may declare a root as null ("this site does not have that"), and
+            # helix.paths.root() then refuses rather than handing back another
+            # site's literal. coeff_fm_encode.py needs HELIX_LEGACY_CORPUS, which
+            # is the pre-tau corpus and exists only where it was built. Refusing
+            # is correct for RUNNING the config; it says nothing about whether the
+            # config leaks module objects, which is what is under test here.
             #
             # Skip that config rather than fail: the contract under test is about
             # module objects leaking into the namespace, and a config that cannot

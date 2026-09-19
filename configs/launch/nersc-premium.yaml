@@ -1,0 +1,27 @@
+# Premium: highest priority, no time_min floor, few jobs at a time.
+#
+#   scripts/submit_helix.sh --recipe configs/launch/nersc-premium.yaml \
+#       --resources.qos premium
+#
+# Measured: gpu_premium priority 73440 against gpu_regular's 67679, MaxJobsPU 5,
+# MaxWall 2-00:00:00. Slurm reports UsageFactor 1.0 for every QOS here, so any
+# surcharge is applied in Iris accounting rather than at the scheduler -- the
+# rate was NOT established, and `iris qos` does not expose these names. Confirm
+# it before making this the routine choice.
+#
+# This is for when a result is needed by a deadline, not for leaving running.
+# Everything else should use nersc-preempt.yaml, which is cheaper in queue
+# priority terms and chains cleanly.
+#
+# No chain by default: premium buys priority, and a 48h ceiling usually needs no
+# second allocation. Add --chain.jobs N if the run wants one.
+#
+# As with the interactive recipe, the qos is passed on the command line: premium
+# is a deliberate per-launch choice, not this site's default training queue, so
+# it does not belong in the site profile either.
+_base_: [_common.yaml]
+
+resources:
+  time: "24:00:00"
+  nnodes: 1
+  nproc_per_node: 4

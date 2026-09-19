@@ -1,0 +1,47 @@
+# Shared shape for every helix launch recipe.
+#
+# It carries NO absolute path, NO account and NO image. Those are site facts, and
+# helix/sites/<site>.yaml is where site facts live; scripts/submit_helix.sh reads
+# them through helix.paths and injects them as CLI flags. An earlier version of
+# these recipes wrote `/global/cfs/cdirs/m5238/users/oalter/exp/helix` into three
+# files, which put one value in four places (three recipes plus the roots table)
+# and hardcoded one user's directories into the repository.
+#
+# Why CLI flags rather than YAML. pimm's launch YAML cannot read the environment:
+# `format_string` (pimm/launch/config.py) resolves {placeholders} against the
+# launch config only and hard-exits on an unknown key, and `env:` values are
+# shlex.quote'd at render time (local.py), so a literal $VAR is exported as the
+# five characters `$VAR`. The CLI is the one seam that takes a computed value.
+#
+# `site:` below is DOCUMENTATION of what these expect. It does not take effect:
+# `pimm submit` defaults site to "s3df" (pimm/cli/submit.py) and load_config takes
+# `site or recipe.get("site")`, so the CLI value always wins and the recipe's key
+# is never reached. Omitting --site renders an s3df job with no shifter wrapper
+# and no warning. submit_helix.sh always passes it.
+site: nersc-container
+
+train:
+  # Resolved inside the PIMM checkout, not here: train.sh's -c resolves only
+  # beneath its own configs/. configs/coeff_fm/train_8run.py is a thin pointer
+  # that computes its _base_ from $HELIX_ROOT.
+  config: coeff_fm/train_8run
+
+# Shell, evaluated INSIDE the job, immediately before train.sh. This is the only
+# part of a launch config that can read the environment: setup lines are joined
+# and handed to `bash -c` (pimm/launch/local.py), unlike `env:` which is quoted.
+#
+# It has to be done here rather than in `env:` because train.sh PREPENDS its own
+# code snapshot to PYTHONPATH in every branch, and because the RESOLVED config.py
+# a resumed link reads has had helix's own sys.path block stripped out
+# (`standalone import statements are not retained` -- pimm's config-system.md).
+# So link 1 works from the config's bootstrap and link 2+ would not.
+#
+# `:?` rather than a default: if HELIX_ROOT did not propagate, failing here with
+# a named cause beats failing 40 lines later inside custom_imports.
+setup:
+  - 'export PYTHONPATH="${HELIX_ROOT:?HELIX_ROOT did not reach the job; source scripts/helix_env.sh before submitting}:${HELIX_PIMM_ROOT:?HELIX_PIMM_ROOT did not reach the job}${PYTHONPATH:+:$PYTHONPATH}"'
+
+chain:
+  # Each attempt gets its own W&B run under a stable group, so a chain reads as
+  # one experiment rather than N unrelated ones.
+  wandb_mode: fork

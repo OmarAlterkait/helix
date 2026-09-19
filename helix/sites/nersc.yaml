@@ -1,0 +1,128 @@
+# NERSC Perlmutter.
+#
+# Every value here was established by execution on 2026-09-18/19, not by
+# assumption. Where a value differs from the S3DF equivalent in kind rather than
+# in spelling, the comment says why -- those are the places a straight port
+# breaks.
+name: nersc
+
+# $NERSC_HOST is set in every NERSC shell (login and compute) and nowhere else.
+detect:
+  env: NERSC_HOST
+
+roots:
+  # NOTE the user directory is `oalter`, not S3DF's `omara`.
+  HELIX_CORPUS_ROOT:   $CFS/m5238/users/oalter
+  HELIX_CORPUS:        $CFS/m5238/users/oalter/coeff_tpc_r1/run_0027575715
+  # Unlike S3DF, the simulator output lives in OUR project directory rather than
+  # another group's, so a corpus rebuild is possible here and was not there.
+  HELIX_SENSOR_ROOT:   $CFS/m5238/users/oalter/wire_test_00_00_02/sensor
+  HELIX_ARCHIVE:       $CFS/m5238/users/oalter/archive
+  HELIX_EXP:           $CFS/m5238/users/oalter/exp/helix
+  # $SCRATCH is Lustre and is PURGED on inactivity. Nothing durable belongs here.
+  HELIX_SCRATCH:       $SCRATCH
+  HELIX_PIMM_ROOT:     $HOME/nu/pimm-private
+  HELIX_PIMM_DATA_SRC: $HOME/nu/pimm-data/src
+  # Not present at this site. Declared as null so `python -m helix.paths` reports
+  # "not configured" rather than inheriting an S3DF path that cannot exist here
+  # and then reporting it MISSING, which reads like breakage rather than absence.
+  HELIX_JAXTPC_ROOT:   null
+  HELIX_LEGACY_CORPUS: null
+  HELIX_OPTICAL_DATA:  null
+
+# Environment this site needs set for helix to work at all. Not paths, not
+# scheduler flags -- facts about the machine that some library reads.
+env:
+  # GPFS ($CFS) does not support the POSIX locks HDF5 takes by default, so every
+  # h5py.File() on the corpus or the sensor shards dies with
+  #   OSError: [Errno 524] Unable to synchronously open file (unable to lock file)
+  # This is the single most likely thing to make a fresh NERSC checkout look
+  # broken, and it is invisible until something actually opens a real shard.
+  # pimm's own launch/sites/nersc.yaml sets the same variable, for the same
+  # reason; helix needs it outside pimm's launcher too (corpus build, tests,
+  # coeff_verify), so it is declared here rather than borrowed from there.
+  HDF5_USE_FILE_LOCKING: "FALSE"
+
+container:
+  # There is NO apptainer and NO singularity at NERSC -- not installed, not a
+  # module. shifter is the batch runtime pimm's launcher knows
+  # (pimm/launch/submit.py special-cases runtime: shifter), so it is the default.
+  runtime: shifter
+  # A REGISTRY REFERENCE, not a filesystem path. This is the case the old
+  # single HELIX_IMAGE root could not express.
+  #
+  # The helix-nersc variant exists because Shifter and podman-hpc cannot consume
+  # OCI image indexes; it is published as a Docker v2 manifest. It is NOT
+  # interchangeable with pimm's own pimm-nersc base, which has no helix, no
+  # PyWavelets, and a pimm-data on the wrong side of the forward-model boundary.
+  #
+  # This is a mutable tag while helix pins digests everywhere else. Shifter's
+  # store is keyed by the tag it was pulled under, so resolve the digest at
+  # submit time and record it WITH the run: `shifterimg lookup <tag>`.
+  image: ghcr.io/omaralterkait/helix-nersc:jax-cuda12
+  python: /opt/pimm/.venv/bin/python
+  # shifter needs no -B: NERSC mounts $HOME, $CFS and $SCRATCH into every image.
+  binds: []
+  # shifter --module=. NOT optional for multi-node training.
+  #
+  # `nccl-plugin` injects NERSC's libfabric/Slingshot provider. Without it NCCL
+  # falls back to a generic transport and inter-node collectives run far below
+  # the fabric's capability. Measured on 16 GPUs / 4 nodes, all-reducing a
+  # 0.221 GiB buffer (the fp32 gradient buffer of the 59.2M-parameter FM):
+  #
+  #     without module:  82.3 ms   ->   5.0 GiB/s algorithm bandwidth
+  #
+  # That cost is per step and grows with rank count, so it is precisely the term
+  # that decides whether a 128-GPU run is worth launching. pimm's own
+  # launch/sites/nersc-container.yaml sets the same value.
+  #
+  # `gpu` supplies the NVIDIA driver libraries; the image carries CUDA itself,
+  # which is why single-node work appeared fine without either.
+  module: gpu,nccl-plugin
+  # The INTERACTIVE runtime on the same image. podman-hpc is what a shell session
+  # uses; shifter is what a batch job uses. Both consume the Docker v2 manifest,
+  # which is the whole reason that manifest format was chosen.
+  #
+  # The flags are not optional:
+  #   --group-add keep-groups  $CFS/m5238/users is drwxrws--- m5238. Without the
+  #                            supplementary group the container gets
+  #                            PermissionError on the corpus even though the run
+  #                            directory itself is world-readable.
+  #   --home --cfs --scratch   podman-hpc mount modules; nothing is bound without
+  #                            them.
+  # Also: do NOT pass `-w <a bound path>`. podman validates the workdir against
+  # the image BEFORE applying these modules, so it fails with "workdir does not
+  # exist on container". Use `bash -lc 'cd ... && ...'`.
+  interactive_runtime: podman-hpc
+  interactive_flags: [--gpu, --home, --cfs, --scratch, --group-add, keep-groups]
+
+scheduler:
+  # ONE account covers both kinds here: m5238_g. The CPU account m5238 has a
+  # personal allocation of 0.00 node-hours, so -q regular and -q shared are
+  # rejected at submit time and only the zero-priority `overrun` QOS is
+  # permitted -- which had 275 jobs pending and 0 running when measured. Treat
+  # CPU as unavailable and run everything on GPU nodes.
+  train:
+    account: m5238_g
+    constraint: gpu
+    # NERSC runs PreemptMode=REQUEUE (scontrol show config), the OPPOSITE of
+    # S3DF's CANCEL. So a preempted job comes back and submitit's requeue chain
+    # works. GraceTime on preempt/gpu_preempt is 60s -- below pimm's default
+    # signal_delay_s of 120 -- so a checkpoint has one minute to land.
+    qos: preempt
+    # `preempt` is REJECTED without this: "Job request does not match any
+    # supported policy". It is a guarantee of minimum progress, not a request.
+    time_min: "02:00:00"
+    gpus_flag: gpus-per-node
+  corpus:
+    account: m5238_g
+    constraint: gpu
+    # The build is one GPU per task, which is a fraction of a node: gpu_shared
+    # charges 0.25 node-hr/hr. Its quantum is 32 logical cores per GPU and
+    # memory counts toward that -- `-c 32 --mem=56G` passes, 60G is rejected.
+    qos: shared
+    gpus_flag: gpus
+    # Perlmutter's MaxArraySize is 1000, so the S3DF 0-99 split is not required.
+    # Kept at 100 anyway: the corpus is built one RUN per submission and a run is
+    # at most 100 source files.
+    array: 0-99%32

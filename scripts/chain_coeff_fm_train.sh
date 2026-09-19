@@ -43,7 +43,10 @@ else
 fi
 [ -f "$H/helix/paths.py" ] || { echo "FATAL: $H is not a helix checkout (set HELIX_ROOT)"; exit 1; }
 CFG=${2:-$H/configs/pimm/coeff_fm_train_8run.py}
-ACCT=${ACCOUNT:-mli:default}
+# From the site profile (scheduler.train.account) rather than an S3DF literal.
+# ACCOUNT= still overrides, which is how a one-off run on a different repo works.
+source "$(dirname "${BASH_SOURCE[0]}")/helix_env.sh"
+ACCT=${ACCOUNT:-${HELIX_SLURM_TRAIN_ACCOUNT:-}}
 # EXCLUDE=node[,node] for nodes known to be bad. A node whose GPUs are held
 # still reports healthy to SLURM, so it keeps being offered: sdfampere010 failed
 # links 2, 3, 4 and 5 in about a minute each with "CUDA-capable device(s) is/are
@@ -62,7 +65,7 @@ EXC=${EXCLUDE:-}
 # the allocation is shared, and `normal` is not granted on every account
 # (`sacctmgr -n show assoc user=$USER format=Account,Partition,QOS` lists yours;
 # mli:default and neutrino:default carry preemptable only).
-QOS=${QOS:-}
+QOS=${QOS:-${HELIX_SLURM_TRAIN_QOS:-}}
 # Under the run's own experiment root, not a personal scratch directory. This
 # defaulted to /sdf/data/neutrino/omara/exp/_diag/trainlogs -- one person's
 # diagnostics folder on one cluster, which a recipient cannot write to and which

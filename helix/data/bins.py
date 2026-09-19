@@ -69,6 +69,45 @@ def reference() -> dict[str, Any] | None:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def reference_name() -> str:
+    """The canonical NAME of the production grid, e.g. ``..._v3``.
+
+    The ``.pt`` on disk is conventionally ``<name>.pt`` under ``HELIX_ARCHIVE``,
+    so this is what a config should build that filename from.
+
+    It exists because the name was previously retyped as a literal in five
+    places -- ``configs/pimm/coeff_fm_train.py``, ``coeff_fm_eval_probe.py``,
+    ``tests/test_bins.py`` and twice in ``docs/INVENTORY.md`` -- while
+    ``reference_bins.json`` already declared it and NOTHING read it. When the
+    grid was re-derived and the JSON went to ``_v3``, every one of those five
+    still said ``_v2``: the config then names a file that does not exist, or
+    worse, one that does and holds a grid derived from a different corpus.
+
+    A hardcoded filename is the same bug as a hardcoded path, one level down.
+    """
+    ref = reference()
+    if not ref or not ref.get("name"):
+        raise SystemExit(
+            "reference_bins.json is missing or declares no `name`. It is the "
+            "definition of the production grid; without it the bin table cannot "
+            "be located by name. A wheel built without package-data has no copy."
+        )
+    return str(ref["name"])
+
+
+def reference_table(archive: Any = None) -> Path:
+    """Where the production ``.pt`` lives: ``<archive>/<reference_name()>.pt``.
+
+    ``archive`` defaults to ``helix.paths.root("HELIX_ARCHIVE")``. Imported
+    lazily so this module stays usable with no site configured, which is the
+    case in unit tests that only exercise the digests.
+    """
+    if archive is None:
+        from helix.paths import root as _root
+        archive = _root("HELIX_ARCHIVE")
+    return Path(archive) / f"{reference_name()}.pt"
+
+
 #: Fallback only. The authority is ``data/reference_bins.json`` — see DEFAULTS
 #: below, which reads from it. These values exist so the module still imports
 #: with its package data stripped, not as a second place to edit them.

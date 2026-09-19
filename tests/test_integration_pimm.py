@@ -159,8 +159,24 @@ def test_example_config_declares_the_custom_import():
     """The config is the only place that names the adapter; if the declaration
     drifts, every `type` in it fails to resolve with an unhelpful error."""
     from pimm.utils.config import Config
+    from helix.paths import SiteError
+
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cfg = Config.fromfile(os.path.join(root, "configs", "pimm", "coeff_fm_encode.py"))
+    try:
+        cfg = Config.fromfile(os.path.join(root, "configs", "pimm", "coeff_fm_encode.py"))
+    except SiteError as exc:
+        # coeff_fm_encode.py encodes m113, which trained on the PRE-TAU corpus,
+        # so it resolves HELIX_LEGACY_CORPUS at module scope. A site profile may
+        # declare that root null -- "this site does not have the pre-tau
+        # generation" -- and helix.paths then refuses rather than handing back
+        # another site's literal. Refusing is correct for RUNNING this config and
+        # says nothing about whether it declares the adapter, which is what is
+        # under test.
+        #
+        # This config is the one used here because it is the only one with
+        # batch_size == 1 (the others derive it from WORLD_SIZE), which the
+        # assertions below depend on.
+        pytest.skip(f"config needs a root this site does not configure: {exc}")
     assert "helix.integrations.pimm" in cfg.custom_imports["imports"]
     assert cfg.batch_size == 1, "the FM has no event separation; see MULTI_EVENT_BATCHING.md"
     assert cfg.model["type"] == "Coeff-FM"

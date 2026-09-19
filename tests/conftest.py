@@ -88,6 +88,15 @@ def pytest_configure(config):
 
     See TESTING.md for the full incantation per container.
     """
+    # Site environment BEFORE anything opens a file. HDF5_USE_FILE_LOCKING=FALSE
+    # is the one that matters: GPFS does not support the locks h5py takes by
+    # default, so every real-shard test dies with "Errno 524 ... unable to lock
+    # file" without it. Those tests used to SKIP (their paths did not resolve),
+    # so the suite was green and had never opened a real shard here.
+    from helix import paths as _paths
+    _paths.apply_site_env()
+
+    _require_data()
     if os.environ.get("HELIX_REQUIRE_PIMM") != "1":
         return
     try:
@@ -141,3 +150,55 @@ def jaxtpc_pixel_data_root(tmp_path_factory):
         pytest.skip("pimm_data.testing has no pixel sample builder")
     return _jaxtpc_root("JAXTPC_PIXEL_DATA_ROOT", tmp_path_factory,
                         maker, "jaxtpc_pixel_synth")
+
+
+def pytest_report_header(config):
+    """Say which site is selected and which data roots resolved.
+
+    A skip because data is absent looks exactly like a skip because the machine
+    has no GPU, and the suite prints neither. Putting the site and the roots in
+    the header means a run whose result you are about to quote states what it
+    was actually able to reach.
+    """
+    from helix import paths
+    import tests._paths as tp
+
+    site = paths.site_name() or "NONE (nothing selected or detected)"
+    present = [n for n, v in (("corpus", tp.CORPUS), ("sensor", tp.SENSOR_ROOT),
+                              ("pimm", tp.PIMM_ROOT)) if v and os.path.isdir(v)]
+    absent = [n for n, v in (("corpus", tp.CORPUS), ("sensor", tp.SENSOR_ROOT),
+                             ("pimm", tp.PIMM_ROOT)) if not (v and os.path.isdir(v))]
+    return [f"helix site: {site}",
+            f"helix data: present={','.join(present) or '-'}  "
+            f"absent={','.join(absent) or '-'}"]
+
+
+def _require_data():
+    """`HELIX_REQUIRE_DATA=1` -> a missing data root is an ERROR, not a skip.
+
+    The counterpart to HELIX_REQUIRE_PIMM, and it exists for the same measured
+    reason one level along. Roughly ten test modules gate on
+    `os.path.isdir(CORPUS)` or `os.path.exists(<shard>)` and skip when the path
+    is wrong -- including every test that reads the real corpus, the bin-grid
+    fingerprint check that pins the handover claim, and the corpus-identity
+    guard. A mistyped HELIX_CORPUS, or a site profile naming a directory that
+    was never copied, therefore produces a green run that checked none of it.
+
+    Use it for any run whose result is meant to mean "this corpus is good".
+    """
+    if os.environ.get("HELIX_REQUIRE_DATA") != "1":
+        return
+    import tests._paths as tp
+    from helix import paths
+
+    missing = {n: v for n, v in (("HELIX_CORPUS", tp.CORPUS),
+                                 ("HELIX_SENSOR_ROOT", tp.SENSOR_ROOT))
+               if not (v and os.path.isdir(v))}
+    if missing:
+        detail = "; ".join(f"{k}={v or '(unset)'}" for k, v in missing.items())
+        raise pytest.UsageError(
+            f"HELIX_REQUIRE_DATA=1 but these roots do not resolve to a directory: "
+            f"{detail}. site={paths.site_name() or 'none'}. The real-data tests "
+            f"would have SKIPPED silently. Run `python -m helix.paths`, or unset "
+            f"HELIX_REQUIRE_DATA to accept a no-data run."
+        )

@@ -80,3 +80,44 @@ def check_corpus_matches(recorded, actual, *, where=""):
             "  These are different DSP, so the coefficients differ. Point at the "
             "corpus this run trained on, or evaluate a checkpoint trained on this one.")
     return f"corpus identity OK (basis_digest={b[:12]}…)"
+
+
+def corpus_runs(corpus_root=None) -> list[str]:
+    """The run list, read from the corpus's own ``_calib/RUNS.txt``.
+
+    ``corpus_root`` is the GENERATION directory (the parent of the run dirs and
+    of ``_calib/``), defaulting to ``HELIX_CORPUS``'s parent.
+
+    Why this exists. The eight run ids were retyped as a literal list in
+    ``configs/pimm/coeff_fm_train_8run.py`` and again (the first three) in
+    ``coeff_fm_cooldown.py``, while the BUILD side already reads them from a
+    file: ``scripts/submit_coeff_corpus.sh`` uses ``$OUT/_calib/RUNS.txt`` and
+    ``scripts/calibrate_norm_sigma.sh`` reads ``$CALIB/RUNS.txt``. So the corpus
+    ships its own manifest and the training configs ignored it.
+
+    That matters more than ordinary duplication because ``RUNS.txt`` is not
+    derived -- ``docs/RUNBOOK.md`` calls it "step zero and hand-written", and
+    both build phases abort without it. It is the closest thing the corpus has
+    to a declaration of what it contains, and a copy that carries a different
+    subset would train happily on whatever the literal named.
+
+    The order is preserved as written: the split is keyed on
+    ``blake2b(run/source_file) + event`` and so is order-free, but the run list
+    also feeds ``N_TRAIN_EVENTS`` accounting and a stable order keeps two
+    readings of the same corpus comparable.
+    """
+    import os as _os
+    if corpus_root is None:
+        from helix.paths import root as _root
+        corpus_root = _root("HELIX_CORPUS").parent
+    manifest = _os.path.join(str(corpus_root), "_calib", "RUNS.txt")
+    if not _os.path.isfile(manifest):
+        raise FileNotFoundError(
+            f"no run manifest at {manifest}. _calib/RUNS.txt is hand-written and "
+            f"is step zero of a corpus build (docs/RUNBOOK.md §1); a corpus "
+            f"without it is incomplete, not merely undocumented.")
+    with open(manifest, "r", encoding="utf-8") as fh:
+        runs = fh.read().split()
+    if not runs:
+        raise ValueError(f"{manifest} is empty")
+    return runs

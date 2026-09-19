@@ -31,8 +31,16 @@ set -euo pipefail
 # spectrum, the m113 anchoring and the whole pimm integration. A default-invoked
 # corpus build silently used superseded DSP, and nothing in the output said so.
 H=${HELIX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
-SRC=${SRC_ROOT:-/sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor}
-OUT=${OUT_ROOT:-/sdf/data/neutrino/omara/coeff_tpc}
+source "$(dirname "${BASH_SOURCE[0]}")/helix_env.sh"
+# HELIX_SENSOR_ROOT is the declared name for this root. SRC_ROOT was a SECOND
+# spelling with its own S3DF literal, so setting the documented variable did
+# nothing here. It is kept as a deprecated override.
+SRC=${SRC_ROOT:-${HELIX_SENSOR_ROOT:?HELIX_SENSOR_ROOT not resolved; run python -m helix.paths}}
+# r1, matching submit_coeff_corpus.sh. This defaulted to the PRE-TAU `coeff_tpc`
+# while that script defaulted to `coeff_tpc_r1`, so the calibration and the build
+# it feeds disagreed about the corpus generation -- and norm_sigma is an INPUT to
+# every shard, frozen before any is written.
+OUT=${OUT_ROOT:-${HELIX_CORPUS_ROOT:?HELIX_CORPUS_ROOT not resolved}/coeff_tpc_r1}
 CALIB=$OUT/_calib
 N=${1:-100}
 # norm_sigma is the mean per-event sigma_threshold, and sigma_threshold is

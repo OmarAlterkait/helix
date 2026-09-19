@@ -86,8 +86,14 @@ def _import_jaxtpc():
     so the eviction stays; it is the FAILURE TO RESTORE that was the bug. The
     returned module objects stay valid after being removed from sys.modules.
     """
-    for root in (os.environ.get('JAXTPC_ROOT'),
-                 '/sdf/group/neutrino/omara/JAXTPC'):
+    # HELIX_JAXTPC_ROOT, the name helix.paths declares and every other consumer
+    # uses (scripts/build_coeff_corpus.py, tests/test_corpus_identity.py). This
+    # read a bare JAXTPC_ROOT with an S3DF literal beside it, so setting the
+    # DOCUMENTED variable had no effect on this test and the literal was the only
+    # thing that ever matched.
+    from helix.paths import resolve as _resolve
+    _jx, _ = _resolve('HELIX_JAXTPC_ROOT')
+    for root in (str(_jx) if _jx else None,):
         if not (root and os.path.isdir(os.path.join(root, 'tools'))):
             continue
         saved_path = list(sys.path)

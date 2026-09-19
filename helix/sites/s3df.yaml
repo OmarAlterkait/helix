@@ -1,0 +1,64 @@
+# SLAC S3DF -- the machine helix was developed on.
+#
+# These values were the DEFAULTS baked into helix/paths.py until site profiles
+# existed. That is why they are reproduced here verbatim rather than tidied: this
+# file is a faithful record of what the code used to assume, so that moving to
+# profiles changes WHERE the values live and not WHAT they are. Anything that
+# looks wrong here was wrong before.
+name: s3df
+
+# How this profile is recognised when HELIX_SITE is unset. `path` matches if the
+# directory exists; S3DF is the only site with /sdf mounted.
+detect:
+  path: /sdf
+
+roots:
+  HELIX_CORPUS_ROOT:   /sdf/data/neutrino/omara
+  HELIX_CORPUS:        /sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715
+  # doraemon belongs to a DIFFERENT group. A handover target will not have read
+  # access, which is why docs/INVENTORY.md calls the probe truth irreplaceable.
+  HELIX_SENSOR_ROOT:   /sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor
+  HELIX_ARCHIVE:       /sdf/data/neutrino/omara/archive
+  HELIX_EXP:           /sdf/data/neutrino/omara/exp/helix
+  HELIX_SCRATCH:       $SCRATCH
+  HELIX_PIMM_ROOT:     /sdf/group/neutrino/omara/pimm-fm
+  HELIX_PIMM_DATA_SRC: /sdf/group/neutrino/omara/pimm-data/src
+  HELIX_JAXTPC_ROOT:   /sdf/group/neutrino/omara/JAXTPC
+  # The PRE-TAU corpus generation, for m113 only. helix/data/identity.py refuses
+  # to mix it with r1; see docs/SCIENCE.md.
+  HELIX_LEGACY_CORPUS: /sdf/data/neutrino/omara/coeff_tpc/run_0027575715
+  # Another user's home directory. Out of scope for the wire FM.
+  HELIX_OPTICAL_DATA:  /sdf/home/y/youngsam/sw/dune/sim/goop/data/light_output.h5
+
+# The container, as four facts rather than one path. `HELIX_IMAGE` used to be a
+# single root typed as a filesystem path to a .sif, which cannot describe a site
+# whose image is a registry reference -- see nersc.yaml.
+container:
+  runtime: apptainer
+  image: /sdf/data/neutrino/omara/images/helix-train.sif
+  # The interpreter INSIDE the image. Not a host path.
+  python: /opt/pimm/.venv/bin/python
+  # -B targets. /lscratch is node-local; /sdf carries every root above.
+  binds: [/sdf, /lscratch]
+
+# Scheduler facts, split by job KIND because they genuinely differ here.
+scheduler:
+  train:
+    # `neutrino:default@ampere` carries ONLY the preemptable QOS, and preemption
+    # at S3DF CANCELS rather than requeues, so a job longer than the preemption
+    # window cannot finish on it. See TODO.md.
+    account: mli:cider-ml
+    partition: ampere
+    qos: normal
+    gpus_flag: gpus
+  corpus:
+    # A DIFFERENT account: authorisation is per partition, and mli:cider-ml does
+    # not cover turing while mli:default does. The DSP is architecture-sensitive
+    # (turing and A100 disagree on 0.016% of surviving coefficients), so the
+    # corpus is built on turing only -- see DECISIONS.md.
+    account: mli:default
+    partition: turing
+    qos: normal
+    gpus_flag: gpus
+    # MaxArraySize is 100 here, so one run per array submission.
+    array: 0-99%32

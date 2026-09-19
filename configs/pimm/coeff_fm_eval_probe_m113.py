@@ -38,11 +38,19 @@ guard was silently inert on this route, so the refusal is new, not a regression.
 _base_ = ["./coeff_fm_eval_probe.py"]
 
 import os as _os
-CKPT = _os.environ.get("COEFF_EVAL_CKPT",
-                       "/sdf/data/neutrino/omara/archive/fm_m113_artifact")
-_CORPUS = (_os.environ.get("COEFF_EVAL_CORPUS")
-           or "/sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715")
-del _os
+# Both fallbacks were S3DF literals that duplicated roots helix.paths already
+# owns -- HELIX_ARCHIVE and HELIX_CORPUS -- under a THIRD set of variable names.
+# A derived config runs before `_base_` is processed, so this cannot borrow the
+# base's `_root` and imports its own; helix is importable because the launcher
+# exports PYTHONPATH (same argument as coeff_fm_train_8run.py).
+#
+# The COEFF_EVAL_* variables stay as explicit per-invocation overrides: this
+# config exists to score ONE named artifact against ONE named corpus, and saying
+# so on the command line is the point of it.
+from helix.paths import archive as _archive, root as _pathroot
+CKPT = _os.environ.get("COEFF_EVAL_CKPT") or str(_archive("fm_m113_artifact"))
+_CORPUS = _os.environ.get("COEFF_EVAL_CORPUS") or str(_pathroot("HELIX_CORPUS"))
+del _os, _archive, _pathroot
 
 # bins=None is load-bearing: build_coeff_fm falls back to the artifact's own
 # inlined table only when nothing else is supplied.

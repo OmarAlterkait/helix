@@ -1,0 +1,42 @@
+# A long run reached through many short interactive slots.
+#
+#   scripts/submit_helix.sh --recipe configs/launch/nersc-interactive-chain.yaml \
+#       --resources.qos interactive --interactive
+#
+# A DIFFERENT mechanism from nersc-preempt.yaml. `--interactive` with
+# chain.jobs > 1 does not use submitit requeue: it installs an scron watchdog
+# that drives sequential blocking salloc attempts independently of the login
+# session (pimm/launch/watchdog.py). Inspect them with `pimm watchdog ls`.
+#
+# pimm is explicit that this path is weaker: "Interactive salloc installs no
+# preemption signal and pimm has no timeout handler, so a walltime kill and a
+# crash share the same nonzero exit code. We disambiguate with checkpoint
+# progress" -- a link that produced no new complete checkpoint is treated as a
+# crash and the chain STOPS rather than spinning on the same failure. So the
+# checkpoint cadence must be comfortably inside the walltime below, or a healthy
+# run looks like a crash and the chain ends early.
+#
+# The interactive QOS is measured MaxWall 04:00:00 and MaxJobsPU 2, so the links
+# are sequential (which a chain is anyway) and nothing here may exceed four hours.
+# The qos itself is passed on the command line rather than set here: it is not
+# the site's DEFAULT training queue, so it does not belong in the site profile,
+# and naming it in the recipe would be a second place to change it.
+_base_: [_common.yaml]
+
+interactive: true
+
+resources:
+  time: "04:00:00"
+  nnodes: 4
+  nproc_per_node: 4
+
+chain:
+  jobs: 32
+
+# The watchdog is what makes a 32-link interactive chain survive the login
+# session ending. It runs under the cron QOS, which both m5238 and m5238_g carry.
+# Left commented in pimm's own nersc.yaml, so it has to be stated somewhere.
+watchdog:
+  qos: cron
+  interval_min: 5
+  time: "1-00:00:00"

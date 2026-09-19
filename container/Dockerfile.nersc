@@ -37,6 +37,31 @@ FROM ghcr.io/deeplearnphysics/pimm-nersc@sha256:562c9128dbbdd0e45d36da7351576c21
 # cuda12 (default) or cpu, exactly as the standard image.
 ARG JAX_EXTRA=cuda12
 
+# libnl, WITHOUT WHICH EVERY MULTI-NODE ALL-REDUCE RUNS OVER TCP.
+#
+# NERSC injects its Slingshot NCCL plugin at runtime via `shifter
+# --module=nccl-plugin`, which mounts /opt/udiImage/modules/nccl-plugin/. That
+# plugin links against libnl-3.so.200, and NERSC ships its OTHER dependencies in
+# the module's own deps/lib (libfabric, libcxi, libgdrapi, libjson-c) but not
+# that one -- it expects the image to provide it. This image had no libnl at all,
+# so the plugin failed to load and NCCL silently fell back:
+#
+#     NCCL INFO NET/Plugin: libnl-3.so.200: cannot open shared object file
+#     NCCL INFO Using network Socket
+#     Channel 00/0 : 0[0] -> 8[0] [send] via NET/Socket/4
+#
+# Measured on 16 GPUs across 4 nodes, all-reduce bus bandwidth plateaued at
+# ~4.9 GiB/s from 226 MiB upward -- a bandwidth ceiling, not a latency effect.
+# The 59.2M-parameter fp32 gradient buffer (226 MiB) took 82 ms per step.
+#
+# It cannot be worked around at runtime: shifter OVERWRITES LD_LIBRARY_PATH with
+# its module paths, so a libnl staged on $SCRATCH is unreachable. Verified.
+#
+# `--no-install-recommends` and the list cleanup keep this to a few hundred KiB.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libnl-3-200 libnl-route-3-200 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY container/install.sh /opt/helix-build/install.sh
 COPY pyproject.toml /opt/helix-build/pyproject.toml
 
@@ -52,6 +77,15 @@ LABEL helix.purpose="corpus building and FM training at NERSC" \
       helix.base_digest="sha256:562c9128dbbdd0e45d36da7351576c214cc5941700322f00c0efcc087c118e91" \
       helix.jax="${JAX_EXTRA}" \
       helix.variant="nersc"
+
+# Fail the BUILD if libnl is absent, rather than a 128-GPU run six hours in.
+# `ldconfig -p` is what the dynamic loader itself will consult, so this checks
+# the thing that actually matters rather than that a package is marked installed.
+RUN ldconfig -p | grep -q 'libnl-3\.so\.200' \
+ || (echo "FATAL: libnl-3.so.200 not in the loader cache. NERSC's NCCL" \
+          "Slingshot plugin links against it; without it NCCL falls back to" \
+          "TCP sockets and every inter-node all-reduce runs at a fraction of" \
+          "fabric bandwidth, silently." >&2; exit 1)
 
 WORKDIR /work
 CMD ["bash"]

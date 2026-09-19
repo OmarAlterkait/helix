@@ -35,11 +35,31 @@ import argparse
 import numpy as np
 import torch
 
-CORPUS = "/sdf/data/neutrino/omara/coeff_tpc/run_0027575715"
+from helix.paths import archive as _archive, root as _root
+
+# Resolved, not hardcoded. The literal here was the PRE-TAU corpus
+# (coeff_tpc, not coeff_tpc_r1) -- a different DSP generation, whose
+# coefficients a grid derived from r1 does not describe. As an argparse default
+# that is the worst kind of wrong: it runs.
+#
+# Both are resolved LAZILY, inside main(), because a site may legitimately not
+# declare HELIX_LEGACY_CORPUS at all (NERSC does not) and importing this module
+# must not fail for a caller who passes --corpus explicitly.
+def _default_corpus():
+    try:
+        return str(_root("HELIX_LEGACY_CORPUS"))
+    except Exception:
+        return None
+
+
 # m113's eval artifact. Its edges are INLINED (it predates bin_edges being a
 # persistent buffer), so it doubles as a bins source -- but a corpus of your own
 # wants its own table: scripts/derive_coeff_bins.py --corpus <dir> --out <pt>.
-ARCHIVE = "/sdf/data/neutrino/omara/archive/fm_m113_artifact"
+def _default_archive():
+    try:
+        return str(_archive("fm_m113_artifact"))
+    except Exception:
+        return None
 
 # Per-cell keys the dense (fused / categorical) loss path needs. The sparse
 # cell/slot view is deliberately not carried: it indexes the per-event cell axis
@@ -50,9 +70,16 @@ PER_CELL = ("inp", "occ", "valid", "tgt", "band_id", "plane_id", "t_phys",
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--corpus", default=CORPUS)
-    ap.add_argument("--bins-from", default=ARCHIVE,
-                    help="converted checkpoint to take categorical bin edges from")
+    # `required` is decided by whether the site declares the root at all, so a
+    # site that has the legacy corpus keeps the convenience default and one that
+    # does not gets "--corpus is required" instead of a path into another
+    # cluster's filesystem.
+    _corpus, _bins = _default_corpus(), _default_archive()
+    ap.add_argument("--corpus", default=_corpus, required=_corpus is None,
+                    help="coeff corpus run dir (default: HELIX_LEGACY_CORPUS)")
+    ap.add_argument("--bins-from", default=_bins, required=_bins is None,
+                    help="converted checkpoint to take categorical bin edges from "
+                         "(default: HELIX_ARCHIVE/fm_m113_artifact)")
     ap.add_argument("--events", type=int, default=4)
     ap.add_argument("--steps", type=int, default=16)
     ap.add_argument("--n-cells", type=int, default=6000,
