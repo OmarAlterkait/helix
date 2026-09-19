@@ -498,7 +498,12 @@ def main():
         # clean, while a surviving build log shows 12 shards imported corpus.py
         # from a different worktree.
         code=_code_version(),
-        pimm_data_src=os.path.abspath(args.pimm_src),
+        # May be None: --pimm-src defaults to HELIX_PIMM_DATA_SRC, and a site
+        # need not declare one -- the image INSTALLS pimm-data at the pinned
+        # revision, so a checkout is the deliberate override, not the norm.
+        # abspath(None) raises, which is how this broke the CI smoke job at
+        # stage 2 and masked everything after it.
+        pimm_data_src=(os.path.abspath(args.pimm_src) if args.pimm_src else None),
         # The GPU generation is part of the build, not the environment: the
         # torch DSP path is architecture-sensitive (turing vs A100 differ on
         # 0.016% of surviving coefficients for identical code and input), so a
