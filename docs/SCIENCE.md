@@ -141,7 +141,49 @@ lives at `archive/fm_m113_artifact` — weights digest
 
 ---
 
-## 5. Open
+## 5. Learning rate and batch size
+
+**The shipped learning rate is well below optimal, at every batch size tested.**
+`configs/pimm/coeff_fm_train.py` carries `lr=1.1e-3`, inherited from the m113
+lineage where it was tuned at batch 4 and never re-tuned. Measured 2026-09-19 on
+NERSC A100s, 16,000 events per arm, warmup pinned to a fixed 4% of steps so the
+schedule shape is identical across arms:
+
+| lr | B=4 | B=8 | B=16 |
+|---|---|---|---|
+| 5.5e-4  | 3.6543 | 3.8183 | 3.9399 |
+| 1.1e-3 *(shipped)* | 3.5610 | 3.7555 | 3.9017 |
+| **2.2e-3** | **3.4715** | 3.7419 | 3.8839 |
+| **4.4e-3** | 3.4793 | **3.7370** | **3.8702** |
+| 8.8e-3  | — | — | 3.9757 |
+| 1.76e-2 | — | — | 4.0612 |
+| 3.52e-2 | — | — | 4.1039 |
+
+(final `val`; lower is better)
+
+**Noise floor = 0.0026 val.** Two runs identical but for the seed gave 3.5652 and
+3.5626 — so anything above ~0.003 is signal. The shipped rate costs **0.094 val
+at B=4**, 36x that floor. This is not a large-batch problem; it applies to the
+four-GPU configuration as it stands.
+
+**LR\* scales as sqrt(B).** 2.2e-3 at B=4 to 4.4e-3 at B=16 is 2x over a 4x
+batch range. Extrapolating, B=128 wants **~1.2e-2**. The B=16 curve is resolved
+over 64x and has a clean interior minimum, degrading gracefully above rather than
+diverging — so the usable range is wide, but the optimum is distinct and the
+penalty is asymmetric: 8.8e-3 is worse than 5.5e-4. **Err low.**
+
+**At fixed DATA, fewer steps costs real progress**, and learning rate does not
+buy it back. At each batch's own best lr: 3.4715 (B=4, 4000 steps) ->
+3.7370 (B=8, 2000) -> 3.8702 (B=16, 1000). Monotone, and ~100x the noise floor
+per halving.
+
+That last row is why "3 epochs" is the wrong way to size a large-batch run. At
+B=128 three epochs is 3,521 steps against the production run's 112,679. Whether
+the larger batch earns that back by making more progress PER STEP is a separate
+measurement — fixed steps, data varying — and it is the one that decides whether
+128 GPUs is cheap or merely fast.
+
+## 6. Open
 
 **Charge R2 is unrun.** It is the metric that would separate "the model
 represents charge" from "the model represents where charge is".
@@ -153,7 +195,7 @@ Re-derive them per corpus (`scripts/derive_coeff_bins.py`), never inherit them.
 
 ---
 
-## 6. What the retired cache was, and why it could not be reused
+## 7. What the retired cache was, and why it could not be reused
 
 540 GB of per-event `.npz` (199,990 events, built Jun 13) was deleted on
 2026-09-11. It is recorded here because "we threw away 540 GB of training data"
