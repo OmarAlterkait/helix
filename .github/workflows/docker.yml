@@ -21,16 +21,30 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    # only spend a 9 GB build when something that changes the image changed
+    # The IMAGE changes with container/**, pyproject.toml and uv.lock. But the
+    # test and smoke jobs run helix and scripts INSIDE it -- neither is baked in,
+    # both arrive by PYTHONPATH -- so a change to those is exactly a change this
+    # workflow should check, and excluding them meant nothing ever did.
+    #
+    # Three separate breakages of the documented no-data smoke path accumulated
+    # behind that gap, and it had not completed in CI since 5a2da65.
+    #
+    # Adding them is cheap: when only helix/ or scripts/ change, the Dockerfile's
+    # COPY layers (install.sh, pyproject.toml) are untouched, so `cache-from` is
+    # a hit and the build is a pull rather than a 9 GB rebuild.
     paths:
       - 'container/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - 'helix/**'
+      - 'scripts/**'
       - '.github/workflows/docker.yml'
   pull_request:
     paths:
       - 'container/**'
       - 'pyproject.toml'
+      - 'helix/**'
+      - 'scripts/**'
       - '.github/workflows/docker.yml'
   workflow_dispatch:
     inputs:
