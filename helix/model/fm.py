@@ -41,10 +41,19 @@ from helix.model.mask import make_mask
 # of (-8, 8) — measured 6379 vs 360 on one batch. A default that re-tasks every
 # existing consumer is the wrong place to express a per-run choice, so the
 # training recipe opts in explicitly instead.
+#
+# fast_path selects the permuted-residual forward (helix.model.fastpath) and the
+# sparse-active categorical head (helix.model.head). Together they measured
+# 1.33x faster and 0.59x the memory on an A100 at the corpus median event, with
+# the loss unchanged to <0.001% across five real events -- docs/PERFORMANCE.md
+# §7b. It is OFF by default because it is a per-run choice: the trunk is
+# bit-exact but the head's fp32 summation order is not, so a run that turns it
+# on is not byte-comparable with one that did not, even though the difference is
+# two orders of magnitude below the step's own backward nondeterminism.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
-                   alpha=0.0, beta=0.0, varb=None)
+                   alpha=0.0, beta=0.0, varb=None, fast_path=False)
 
 
 class FMModel(nn.Module):
@@ -416,6 +425,21 @@ class FMModel(nn.Module):
                 f"{'losses_cat' if self.n_bins > 0 else 'losses_fused' if self.loss_fused else 'losses'}"
                 f"; helix.model.tokenize.to_fm() emits all of them")
 
+    def _fast_train_ok(self):
+        """Is this instance eligible for the fast training path?
+
+        Every condition is a capability the fast path does not implement, not a
+        preference: it is written for the grouped/serial attention (``_sched``),
+        the categorical head, FiLM conditioning, and the masked-only objective.
+        Anything else silently falls back rather than training something
+        different.
+        """
+        return (getattr(self, "fast_path", False)
+                and hasattr(self, "_sched")          # SerialFMModel only
+                and self.n_bins > 0
+                and not self.vis_w
+                and self.cond != "adaln")
+
     def forward(self, batch, tok_mask=None):
         """pimm Trainer contract: ``model(batch) -> dict`` carrying ``loss``.
 
@@ -426,6 +450,16 @@ class FMModel(nn.Module):
         B.setdefault("n_cells", B["plane_id"].shape[0])
         self.require_batch_keys(B)
         m = self.make_mask(B) if tok_mask is None else tok_mask
+        if self._fast_train_ok():
+            from helix.model.fastpath import forward_feat as _fast_feat
+            from helix.model.head import cat_head_sparse
+            assert torch.isfinite(self.bin_edges).all(), \
+                ("n_bins > 0 requires set_bins(edges) before forward() — the "
+                 "edges buffer is still unset (NaN).")
+            feat, rows = _fast_feat(self, B, m, masked_only=True)
+            bce, vloss = cat_head_sparse(self, feat, B, m, rows=rows)
+            return {"loss": bce + vloss, "bce": bce.detach(),
+                    "val": vloss.detach(), "masked_frac": m.float().mean().detach()}
         occ, val, logvar = self.raw_heads(B, m)
         if self.n_bins > 0:
             assert torch.isfinite(self.bin_edges).all(), \

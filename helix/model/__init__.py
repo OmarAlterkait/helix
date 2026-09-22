@@ -24,6 +24,9 @@ _LAZY = {
     "losses_fused": "helix.model.loss",
     "losses_cat": "helix.model.loss",
     "make_mask": "helix.model.mask",
+    "apply_rope_fused": "helix.model.rope",
+    "rope_tables": "helix.model.rope",
+    "cat_head_sparse": "helix.model.head",
 }
 
 __all__ = sorted(_LAZY) + ["tokenize"]

@@ -120,6 +120,14 @@ class SerialFMModel(FMModel):
         return out
 
     def forward_feat(self, B, tok_mask, return_ctx=False):
+        # The permuted-residual implementation is bit-exact against the body
+        # below (tests/test_fast_path.py asserts max|delta| == 0) and costs one
+        # gather per block instead of three gathers and a scatter. return_ctx
+        # and AdaLN are not implemented there, so they fall back.
+        if (getattr(self, "fast_path", False) and not return_ctx
+                and self.cond != "adaln"):
+            from helix.model.fastpath import forward_feat as _fast_feat
+            return _fast_feat(self, B, tok_mask)
         N = B["inp"].shape[0]
         at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
         aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w)
