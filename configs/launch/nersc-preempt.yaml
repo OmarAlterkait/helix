@@ -29,8 +29,14 @@ resources:
   #
   # signal_delay_s is left at pimm's default of 120. NOTE that exceeds NERSC's
   # preempt GraceTime of 60s, so on PREEMPTION -- as opposed to walltime expiry
-  # -- a checkpoint has one minute, not two. Measure a real checkpoint write at
-  # model size before trusting either number.
+  # -- a checkpoint has one minute, not two.
+  #
+  # Measured 2026-09-20, so neither number has to be trusted on faith. A save at
+  # this model size writes three files of 226 MiB each (EMA, last/weights,
+  # iter_N) to Lustre: 4 s for the whole burst from a 4-node run, 11 s from a
+  # 1-node run. Against a 60 s grace that is 5-18% of the window, so the default
+  # holds with room, and the thing to re-measure is model SIZE -- the margin is
+  # in the file count and the width, not in the schedule.
 
 chain:
   jobs: 8

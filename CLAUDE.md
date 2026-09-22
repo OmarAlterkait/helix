@@ -24,9 +24,11 @@ the learned representation knows where charge is.
 `helix.core` and `helix.tpc` must NEVER import `pimm_data`. `helix.data` and
 `helix.integrations` may, and do. This is not style: pimm-data requires
 `torch>=2.5` and `hdf5plugin` unconditionally, while helix's base install is
-numpy/h5py/PyWavelets/scipy. `tests/test_boundary.py` enforces it with three
+numpy/h5py/PyWavelets/scipy. `tests/test_boundary.py` enforces it with five
 complementary checks — read its docstring before moving code between
-subpackages.
+subpackages. One of them runs the other way: `helix.data` MAY import pimm-data,
+but `bins` and `identity` inside it must not, or a login node cannot load the
+training config.
 
 Only two directories import an external package. `helix/data/*` reaches
 pimm-data through 9 public symbols; `helix/integrations/pimm/*` reaches pimm
@@ -64,6 +66,15 @@ interactive and SINGLE-NODE: it does not inject NERSC's NCCL plugin at all, and
 measured 1.23 GiB/s across nodes against shifter's 4.9. shifter is the
 multi-node runtime and the one pimm's launcher drives. `helix_run.sh` picks
 podman-hpc when interactive; pass `HELIX_INTERACTIVE=0` to force shifter.
+
+**Submitting does NOT happen in the container**, because sbatch is not in it.
+`scripts/make_launcher_env.sh` builds the small host-side environment pimm calls
+launcher-only — its dependency list minus pimm-data, plus helix's base install —
+and `scripts/submit_helix.sh` finds it with no flag. Two things keep that
+environment sufficient: `helix/data/__init__.py` resolves the reader and the
+dataset lazily, so reading the bin table does not pull torch, and pimm's launch
+preflight loads the training config with `import_custom_modules=False`. The
+second is a LOCAL change in the pimm checkout; a fresh clone needs it again.
 
 See `docs/RUNBOOK.md` for corpus → train → eval → probe, and
 `configs/launch/README.md` for getting a run onto the scheduler.

@@ -6,8 +6,18 @@ image**; every site fact is injected by `scripts/submit_helix.sh` from
 `helix/sites/<site>.yaml` via `helix.paths`.
 
 ```bash
+scripts/make_launcher_env.sh                                   # ONCE per machine
 scripts/submit_helix.sh --recipe configs/launch/nersc-preempt.yaml --dry-run
 ```
+
+`make_launcher_env.sh` exists because **submission does not happen inside the
+container**: sbatch is not in the image, so `pimm submit` runs on the login node,
+where the image's interpreter is not available either. pimm documents this case
+-- "Login nodes and remote submission hosts may need only YAML parsing, Tyro,
+and Submitit... It cannot import the full model stack" -- and the script builds
+exactly that, reading pimm's dependency list out of its own `pyproject.toml`
+(minus pimm-data) and adding helix's base install, which preflight needs to load
+the training config. `submit_helix.sh` finds the result with no flag.
 
 | recipe | shape |
 |---|---|
@@ -15,6 +25,10 @@ scripts/submit_helix.sh --recipe configs/launch/nersc-preempt.yaml --dry-run
 | `nersc-interactive-chain.yaml` | 4 nodes x 4h, `chain.jobs: 32`, scron watchdog. Pass `--interactive --resources.qos interactive`. |
 | `nersc-premium.yaml` | highest priority, no floor, no chain. Pass `--resources.qos premium`. |
 | `_common.yaml` | what all three inherit: the config pointer and the runtime `setup:` |
+
+`signal_delay_s` vs NERSC's 60 s preempt `GraceTime` used to be listed below as
+unsettled. It is settled: a save at this model size writes 3 x 226 MiB and takes
+4 s from a 4-node run, 11 s from a 1-node run. See `nersc-preempt.yaml`.
 
 ## The three-way split, which is the whole design
 
@@ -25,7 +39,7 @@ resolution rules, and each of helix's values has to go to the right one.
 |---|---|---|
 | **recipe** | here, in helix | `--recipe PATH` accepts an absolute path (`pimm/launch/config.py` resolves it with `Path(recipe)`), so helix keeps its own launch shapes. |
 | **site profile** | pimm's `launch/sites/` | `--site` takes a bare NAME resolved under pimm's own directory. helix cannot supply one, so it selects pimm's and overrides what it must. |
-| **training config** | pimm's `configs/` | `train.sh -c` resolves only beneath that checkout. Hence the two-line pointer at `pimm-private/configs/coeff_fm/train_8run.py`, which computes its `_base_` from `$HELIX_ROOT`. |
+| **training config** | pimm's `configs/` | `train.sh -c` resolves only beneath that checkout. Hence the pointer at `pimm-private/configs/coeff_fm/train_8run.py`, which takes helix's location from `$HELIX_ROOT` and falls back to the sibling layout. Its fallback is a RELATIVE `_base_` string on purpose: `Config._file2dict` imports a TEMP COPY of the config, so `__file__` names the copy and a path computed from it resolves to `/helix`. |
 
 ## Launch YAML cannot read the environment
 
@@ -70,9 +84,13 @@ helix's `.gitignore` covers `exp/` but not `slurm_logs`.
 
 ## Not settled
 
-* `signal_delay_s` defaults to 120, but NERSC's preempt `GraceTime` is 60s — so
-  on preemption a checkpoint has one minute, not two. Measure a real checkpoint
-  write at model size before trusting either.
+* The pimm checkout carries a local change that is NOT upstream:
+  `pimm/launch/config.py` loads the training config with
+  `import_custom_modules=False`. Preflight reads three integers and does not
+  need the registry modules; running them pulls torch onto the submitting host
+  and breaks the launcher-only environment pimm itself documents. A fresh clone
+  of pimm needs it reapplied, and the symptom is `No module named 'torch'` at
+  submit time.
 * The code snapshot copies `scripts tools pimm` and **not** helix, so a chain
   freezes pimm and not helix. Point `HELIX_ROOT` at a git worktree pinned to one
   commit for the duration of a chain — that is what the variable is for.

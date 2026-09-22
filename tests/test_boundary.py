@@ -49,19 +49,36 @@ CLEAN = ["helix", "helix.core", "helix.tpc", "helix.model.tokenize",
 #: moving across the boundary is a deliberate edit to this file, not a silent
 #: change in behaviour.
 #:
-#: The two entries need different environments, which is the split itself: the
-#: corpus-builder image can import helix.data, but only the training image has
-#: ``pimm``, so the hooks check runs there and skips here.
-#: helix.data.transforms is listed SEPARATELY from helix.data on purpose.
-#: helix/data/__init__.py imports only coeff_reader and coeff_dataset, so
-#: importing the package never executes transforms.py -- and transforms.py is
-#: reached by STRING through the transform registry, so no other test named it
-#: either. It shipped with four broken code paths and both suites stayed green.
-#: A module addressed only by string has to be imported somewhere on purpose.
+#: The entries need different environments, which is the split itself: the
+#: corpus-builder image can import the dataset module, but only the training
+#: image has ``pimm``, so the hooks check runs there and skips here.
+#:
+#: Each is named by its OWN module path, and the package ``helix.data`` is no
+#: longer among them (see LIGHT_INSIDE_HEAVY). ``helix.data.transforms`` was
+#: always listed separately, and for a reason worth keeping: it is reached by
+#: STRING through the transform registry, so no other test named it either. It
+#: shipped with four broken code paths and both suites stayed green. A module
+#: addressed only by string has to be imported somewhere on purpose.
 MAY_IMPORT_PIMM_DATA = [
-    ("helix.data", ["pimm_data"]),
+    ("helix.data.coeff_reader", ["pimm_data"]),
+    ("helix.data.coeff_dataset", ["pimm_data"]),
     ("helix.data.transforms", ["pimm_data", "torch"]),
 ]
+
+#: Modules INSIDE the heavy package that must nonetheless import clean.
+#:
+#: ``helix.data`` may import pimm_data; these three do not need to, and the
+#: point of listing them is that Python makes it easy to lose that by accident.
+#: A package's ``__init__`` runs before any submodule of it, so an eager
+#: re-export in ``helix/data/__init__.py`` puts torch behind ``import
+#: helix.data.bins`` without either file changing. It did, and `pimm submit`
+#: died on a login node because helix's training config reads the bin table at
+#: module scope while pimm's documented launcher environment has "only YAML
+#: parsing, Tyro, and Submitit".
+#:
+#: ``bins`` needs numpy and ``identity`` needs h5py -- both are base deps, so
+#: unlike the list above this one needs no importorskip.
+LIGHT_INSIDE_HEAVY = ["helix.data", "helix.data.bins", "helix.data.identity"]
 
 # helix.integrations.pimm.hooks is deliberately in NEITHER list.
 #
@@ -149,6 +166,26 @@ def test_the_allowed_side_really_does_need_it(mod, needs):
         pytest.importorskip(req)
     assert "pimm_data" in _heavy_imports(mod), (
         f"{mod} no longer imports pimm_data -- move it to CLEAN"
+    )
+
+
+@pytest.mark.parametrize("mod", LIGHT_INSIDE_HEAVY)
+def test_the_light_modules_of_a_heavy_package_stay_light(mod):
+    """Corpus metadata is readable wherever the corpus is, launcher included.
+
+    This is the check the DSP-only install cannot make for itself: that install
+    has neither torch nor pimm_data, so it cannot tell whether these modules
+    merely happen to work or are guaranteed to. Running it in a full
+    environment -- where an accidental dependency WOULD resolve -- is what makes
+    the guarantee testable.
+    """
+    pulled = _heavy_imports(mod)
+    assert not pulled, (
+        f"{mod} pulled in {sorted(pulled)}. It is inside helix.data, which may "
+        f"import pimm_data, but it must not: `pimm submit` loads helix's "
+        f"training config on the submitting host, and that host is entitled to "
+        f"be a launcher-only environment. If the eager import came from "
+        f"helix/data/__init__.py, add the name to its _LAZY table instead."
     )
 
 

@@ -88,7 +88,8 @@ SITES_DIR = Path(__file__).resolve().parent / "sites"
 #: HELIX_CORPUS is. Only the VALUES are site-specific.
 ROOTS: dict[str, str] = {
     "HELIX_CORPUS_ROOT":   "parent of built coeff corpora",
-    "HELIX_CORPUS":        "ONE corpus (a run dir)",
+    "HELIX_CORPUS":        "ONE corpus (a run dir), on the fastest filesystem",
+    "HELIX_CORPUS_DURABLE": "the same corpus where it is KEPT, not read",
     "HELIX_SENSOR_ROOT":   "simulator sensor shards",
     "HELIX_ARCHIVE":       "bin tables, converted ckpts",
     "HELIX_EXP":           "run outputs",
