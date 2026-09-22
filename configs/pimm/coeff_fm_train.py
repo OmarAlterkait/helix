@@ -188,7 +188,70 @@ _WORLD = _world_size()
 batch_size = _WORLD           # 1 event per rank
 batch_size_val = _WORLD
 batch_size_test = _WORLD
-num_worker = 4
+
+# num_worker is GLOBAL, like the three above: pimm divides it
+# (`cfg.num_worker_per_gpu = cfg.num_worker // world_size`, engines/defaults.py).
+# The literal 4 that used to sit here therefore meant 4 workers per GPU on ONE
+# GPU, 1 on four, and ZERO from eight GPUs up -- at which point every batch is
+# read inline on the training process and there is no prefetch at all.
+#
+# Measured on the scaling ladder, 400 steps per rung, same corpus and same
+# model, the only difference being the rank count:
+#
+#     1x1   4 workers/gpu   data wait 0.006 s   step 0.148 s
+#     1x4   1 worker /gpu   data wait 0.006 s   step 0.166 s
+#     4x1   1 worker /gpu   data wait 0.006 s   step 0.162 s
+#     2x4   0 workers/gpu   data wait 0.107 s   step 0.296 s
+#     4x4   0 workers/gpu   data wait 0.110 s   step 0.311 s
+#
+# That cliff is the whole of what looked like "multi-node training is
+# inefficient". It is not the interconnect: 4x1 puts the same all-reduce on the
+# fabric instead of NVLink and costs -2.4%. It was a constant that stopped
+# meaning what it says above eight ranks, and the production target is 128.
+#
+# WHY 4 AND NOT MORE. A Perlmutter GPU node has 128 logical CPUs over 4 GPUs, so
+# 32 per GPU are available and the obvious reading is that this number should be
+# large. It should not. Sweeping it at 16 GPUs, 400 steps per rung:
+#
+#     0 /gpu   data 0.104 s   step 0.294 s
+#     1 /gpu   data 0.006 s   step 0.213 s     <- the knee is here
+#     4 /gpu   data 0.006 s   step 0.213 s
+#     8 /gpu   data 0.006 s   step 0.216 s
+#    16 /gpu   data 0.006 s   step 0.218 s
+#    32 /gpu   data 0.006 s   step 0.217 s
+#
+# The whole effect is 0 -> 1. One prefetch worker per GPU already covers a
+# 0.21 s step, and from there to 32 -- 512 worker processes across the 16 GPUs --
+# the curve is flat to within 2%. So the idle CPUs are real and this workload
+# has no use for them: it is latency-bound on one prefetch, not throughput-bound
+# on many.
+#
+# A Perlmutter GPU node has 128 logical CPUs over 4 GPUs, so 32 per GPU exist and
+# there is no reason to ask for fewer than the pipeline could ever want. 16 is
+# half of what the node has, comfortably past the knee, and measured to cost
+# nothing; the remaining headroom absorbs a 1-10M event corpus touching far more
+# shards with a colder page cache than the 19k-event run above.
+#
+# Written as a per-GPU number times the rank count so it means the same thing at
+# every scale, which the literal it replaced did not.
+WORKERS_PER_GPU = 16
+num_worker = WORKERS_PER_GPU * _WORLD
+
+# Length bucketing: megabatch width in STEPS, 0 = off (pimm's ordinary order).
+#
+# One event per rank, and DDP makes a step cost the SLOWEST rank. Corpus events
+# span 39,462 to 759,710 coefficients -- 2.75x -- so a step costs the largest
+# event among the ranks, and the penalty grows with rank count. Measured against
+# the single-GPU mean step of 0.153 s: 1.08x at 4 GPUs, 1.49x at 32, 1.59x at
+# 128. That is the ENTIRE gap to linear scaling; the fabric costs -2.4% and the
+# filesystem nothing. Bucketing is worth ~1.59x at 128 GPUs, and more above it.
+#
+# OFF by default, and it should stay off until the A/B against LOSS is in. Making
+# batches size-homogeneous is a real change to the sampling distribution, not
+# just a scheduling trick -- a throughput win that costs convergence is not a
+# win. The megabatch and the block shuffle bound the damage (see
+# helix/integrations/pimm/sampler.py); they do not eliminate it.
+bucket_by_size = 0
 
 epoch = 25                    # m113 saw each event ~25x; see STEPS below
 eval_epoch = 1
@@ -285,9 +348,17 @@ optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95))
 # re-resolving is a visible inconsistency rather than a silent rescale.
 N_TRAIN_EVENTS = 19_034
 STEPS = N_TRAIN_EVENTS * epoch // batch_size
-WARMUP = max(100, round(0.0040 * STEPS))
-EVAL_EVERY = max(50, round(0.0099 * STEPS))
-SAVE_EVERY = max(50, round(0.0020 * STEPS))
+
+# Cadences come from helix.core.cadence, which is the ONE place the rule lives.
+# It used to be three lines here and three more in coeff_fm_train_8run.py, and
+# the duplicate shadowed a fix to this file. Read that module for what each
+# quantity is derived from, and why a fraction of STEPS was the wrong shape.
+from helix.core.cadence import cadence as _cadence                # noqa: E402
+
+_C = _cadence(N_TRAIN_EVENTS, epoch, batch_size, model["d"], model["d_base"])
+STEPS, WARMUP = _C["STEPS"], _C["WARMUP"]
+EVAL_EVERY, SAVE_EVERY = _C["EVAL_EVERY"], _C["SAVE_EVERY"]
+del _cadence, _C
 
 scheduler = dict(type="WSDStableLR", warmup=WARMUP)
 
@@ -346,8 +417,23 @@ _common = dict(
 #   train 19,034   val 577   probe 388   (= 19,999, the whole corpus)
 HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
 
+# Largest event a rank may be handed. Measured on a 40 GB A100: the five
+# largest events in a run (697k-725k coefficients) each run OUT OF MEMORY in one
+# forward/backward, while the median (271k) peaks near 13 GiB. One event per rank
+# means a step draws the p_(1-1/N) size quantile, so at 512 ranks the top 0.1%
+# arrives in roughly every other step -- and a rank that OOMs leaves the other
+# 511 blocked in a collective until the watchdog fires.
+#
+# 600,000 drops 183 events of 157,991: 0.12% of events, 0.27% of coefficients.
+# Applied to TRAIN only; val and test keep the full size distribution so the
+# reported metric is not quietly measured on an easier subset.
+#
+# None disables it, which is right on a card with room. Raise it on hbm80g.
+MAX_EVENT_SIZE = 600_000
+
 data = dict(
-    train=dict(**_common, holdout=HOLDOUT, split_role="train"),
+    train=dict(**_common, holdout=HOLDOUT, split_role="train",
+               max_event_size=MAX_EVENT_SIZE),
     val=dict(**_common, holdout=HOLDOUT, split_role="val"),
     test=dict(**_common, holdout=HOLDOUT, split_role="val"),
 )

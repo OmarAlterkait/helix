@@ -113,10 +113,21 @@ from helix.paths import world_size as _world_size               # noqa: E402
 _WORLD = _world_size()
 STEPS = N_TRAIN_EVENTS * epoch // _WORLD
 
-WARMUP = max(100, round(0.0040 * STEPS))
-EVAL_EVERY = max(50, round(0.0099 * STEPS))
-SAVE_EVERY = max(50, round(0.0020 * STEPS))
-scheduler = dict(type="WSDStableLR", warmup=WARMUP)
+# The cadences come from helix.core.cadence -- the ONE place the rule lives.
+# They used to be three lines here and three more in the base config, and the
+# duplicate silently shadowed a fix applied to the base.
+#
+# Note what is NOT here: WARMUP and `scheduler`. Warmup is driven by model
+# WIDTH, and `model` is not in scope in a derived config (same reason
+# `batch_size` is not, two comments above). Since this config does not change
+# the model, the base's width-scaled warmup flows through the merge unchanged --
+# which is correct, and the only way to avoid restating the width here.
+from helix.core.cadence import eval_every as _eval_every         # noqa: E402
+from helix.core.cadence import save_every as _save_every         # noqa: E402
+
+EVAL_EVERY = _eval_every(STEPS)
+SAVE_EVERY = _save_every(STEPS)
+del _eval_every, _save_every
 
 save_path = str(_root("HELIX_EXP") / "coeff-fm-train-r1-8run")
 

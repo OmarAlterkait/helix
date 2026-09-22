@@ -232,6 +232,33 @@ class CoeffTPCReader(ShardReaderBase):
         pos = self._id2pos[path][int(event_id)]
         return self._h5data[file_idx], pos, path
 
+    def event_sizes(self):
+        """Coefficients per event, aligned with this reader's global index.
+
+        Read from ``/coord/event_offset`` alone -- one small ``(n_events+1,)``
+        int64 array per shard -- so the whole corpus is sized without touching a
+        single coefficient. 150k events cost a few seconds and a few megabytes.
+
+        It exists for length bucketing (``helix.integrations.pimm.sampler``):
+        one event per rank plus a 2.75x spread in event size means a DDP step
+        costs the largest event in the batch, and knowing the sizes in advance is
+        what lets a step be made homogeneous. Anything else that needs to reason
+        about cost per event -- a memory estimate, a shard-balance check -- wants
+        the same table.
+        """
+        self._ensure_open()
+        n = len(self)
+        out = np.empty(n, dtype=np.int64)
+        offsets = {}
+        for i in range(n):
+            f, pos, path = self._locate_flat(i)
+            off = offsets.get(path)
+            if off is None:
+                off = f["coord"]["event_offset"][:]
+                offsets[path] = off
+            out[i] = int(off[pos + 1]) - int(off[pos])
+        return out
+
     def read_event(self, idx):
         """One event → flat dict of coeff rows (sliced by ``event_offset`` at the
         physical event's write position).
