@@ -8,6 +8,15 @@ re-derived from scratch.
 Written 2026-08-06, against `helix.model` at the point where the tokenizer gained
 its inverse.
 
+**Re-measured 2026-09-21 on A100 and H200 — see `docs/PERFORMANCE.md`.** Section
+8 below says to re-measure if training moves to that hardware; it has. The
+saturation point moved from ~4,000 cells to ~16,000-24,000, so one event is
+1.4-2x past it rather than 8-10x, and the section-6 work was prototyped
+(`tools/profile/p10_eventaware.py`, bit-exact at K=1) and measured at **1.20x**
+over sequential accumulation at K=6, for 3.6x the memory. The conclusion below
+stands; the margin behind it does not. Two changes that need no batching at all
+are worth 1.30x together and cut memory 42%.
+
 ---
 
 ## 1. TL;DR

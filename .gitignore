@@ -30,6 +30,11 @@ report/
 *.npy
 *.h5
 *.png
+# ...except a figure a document renders. Same exception shape as the packaged
+# npz above. NOT docs/figures/: the `figures/` rule higher up excludes that
+# directory outright, and git cannot re-include a file whose parent directory
+# is excluded.
+!docs/img/*.png
 *.zip
 *.out
 *.err
