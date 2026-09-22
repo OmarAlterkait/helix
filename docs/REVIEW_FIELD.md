@@ -604,14 +604,135 @@ by a second agent but not by the one that reported it.
 
 ---
 
+## 9b. Measured verdicts
+
+Four of the free diagnostics in §10 have been run. Three changed a verdict above
+and one found something no review asked about. Scripts: `tools/profile/i1`-`i4`.
+
+### I1 — the corpus is not a fixed template. §5's caveat closes.
+
+300 events spread across the run, Jaccard on the `(plane, band, wire-block,
+tick-block)` cell sets:
+
+| | |
+|---|---:|
+| Jaccard between unrelated event pairs | **0.238** (p5 0.224, p95 0.251) |
+| cells present in ALL 100 events | **0** |
+| union over 100 events | 161,707 vs 32,064 mean per event |
+| per-band token count, CV | 0.055 - 0.126 |
+
+No cell is universal and no band is an event-independent floor. The effective
+independent-token count is not collapsed, so §5's "if the governing unit is
+events, the small-data warnings return" resolves in favour of the token count,
+and 219M is supported. Events do share ~40 % of the smaller one's cells, which
+is the detector's active volume, not a template.
+
+### I2 — the boundary cluster is retired, and §1.5 is INVERTED.
+
+Candidate cross-plane partners (same volume, different view, coincident in
+TOFF-corrected drift time), co-block fraction per layer and as a union over the
+12-layer cycle:
+
+| regime | L1 plane | L2 time | L3 plane+wire | L4 time-rolled | union |
+|---|---:|---:|---:|---:|---:|
+| train (visible 25 %) | 0.049 | 0.998 | 0.063 | 0.992 | **1.000** |
+| probe (all tokens) | 0.000 | 0.986 | 0.010 | 0.968 | **1.000** |
+
+Union recall is 1.000 in every regime and at every block size tested (0.999 at
+`gp/gd x 0.5`), against the 0.95 threshold the review set for itself. **Cross-
+plane pairs meet only in the drift-ordered layers, and essentially always
+there** — the schedule does the job it was designed for. So Reformer's
+own+neighbour (§3), the decoder's fixed partition (§1.4) and the
+plane-straddling blocks (§1.5) buy nothing on this measure.
+
+**§1.5's recommendation is a regression, not a cleanup.** The 5-of-8 straddling
+blocks are the ONLY cross-plane contact the plane-major layers have; making them
+plane-pure would take 0.049/0.063 to exactly zero.
+
+Note §1.2's predicted train-vs-probe gap is visible here in the right direction:
+the plane-major layers do 0.049/0.063 of cross-plane mixing at training and
+0.000/0.010 at probe time.
+
+### I3 — the padding defect is worse than documented; the proposed fix is not free.
+
+Trained cooldown weights, at the real training token count (T ~ 7,630, pad 562),
+each variant against its OWN pad-masked reference:
+
+| | median relative deviation | tokens > 10 % |
+|---|---:|---:|
+| padding effect, shipped geometry | **0.112** | **53.4 %** |
+| padding effect, ceil geometry | 0.022 | 6.0 % |
+| **partition change** (ceil vs shipped, both pad-masked) | **0.988** | 99.9 % |
+
+The attended padding moves the median token's encoder output by **11 % of the
+mean feature magnitude** — far worse than `MULTI_EVENT_BATCHING.md`'s "8 % of
+tokens > 1 %", which §1.1 correctly identified as quoted at the wrong operating
+point.
+
+But **the `ceil` fix changes the model about nine times more than the defect it
+removes** (0.99 vs 0.11 median). It re-partitions the token set, so no existing
+checkpoint is interpretable under it. §1.1's "two lines, free, slightly fewer
+FLOPs" is wrong about "free": it is a new-run change exactly like the defect.
+
+The change that IS cheap in model terms is pad-MASKING the shipped geometry:
+identical partition, removes the 11 %, costs the flash kernel. That, not the
+`ceil` fix, is what a next run should adopt. `helix/model/fastpath.py`
+preserves the shipped contract deliberately, and this is why.
+
+### I4 — the encoder has massive activations, and no register token to put them in.
+
+I3's sanity check showed mean |feature| 1.47 against max 954 in the same tensor.
+Followed up on the cooldown checkpoint, per encoder layer:
+
+| layer | median \|f\| | max \|f\| | max/median | tokens > 100x median | channels |
+|---:|---:|---:|---:|---:|---:|
+| 1-6 | 0.18 - 0.33 | 12 - 18 | 47 - 70 | **0** | 0 |
+| 7 | 0.379 | 64 | 170 | 133 | 4.8 |
+| 9 | 0.528 | 82 | 155 | 134 | 4.0 |
+| 10 | 0.712 | 497 | **703** | **4,695** | 8.5 |
+| 12 | 1.107 | 932 | **847** | **5,421** | 7.5 |
+
+**Layers 1-6 are clean. The pollution appears at layer 7 and explodes at layer
+10.** By layer 12 it is **17.7 % of tokens** and ~8 channels.
+
+The carriers are physically identified, and the identification is unambiguous.
+The top 16 tokens at layer 12 are **all band 3** (the finest kept band) and carry
+**1-2 active slots against an event mean of 7.30**, spread across all six planes
+and the whole drift window:
+
+| \|f\|max | plane | band | active slots |
+|---:|---:|---:|---:|
+| 926.0 | 4 | 3 | 1 |
+| 914.7 | 4 | 3 | 1 |
+| 906.4 | 0 | 3 | 1 |
+| 898.4 | 5 | 3 | 1 |
+
+This is the Darcet, Oquab, Mairal, Bojanowski signature exactly (ICLR 2024,
+arXiv:2309.16588): a ViT with no CLS or register token repurposes its **lowest-
+information patch tokens** as high-norm scratch space, and the damage lands on
+dense/spatial readout. helix has no CLS, no BOS and no register token, and its
+downstream is a dense 3D localisation probe on frozen features.
+
+**Consequence for every probe number in `docs/SCIENCE.md`.** The probe reads
+layer 12 by default (`scripts/run_probe.py`), where ~18 % of rows are dominated
+by ~8 scratch channels. §5's MIM-Refiner citation said intermediate layers hold
+the better representation; this supplies the mechanism, and it says *which*
+layers: 6 is the last clean one, and the cliff is between 9 and 10. Probing
+every layer of an existing checkpoint costs one evaluation pass and may
+retroactively change the recorded negative results — the dead angle probes in
+particular.
+
+This was not on any review's list. It came out of a sanity check.
+
 ## 10. Ranked plan
 
 **Free, no training.**
-1. Cell-set Jaccard overlap between random event pairs (§5) — decides whether the
-   corpus is as large as it looks.
-2. Co-block recall for truth-matched cross-plane token pairs, per layer and as a
-   union over the schedule (§3) — decides whether the boundary items or the
-   positional items are where the science is.
+1. ~~Cell-set Jaccard overlap~~ — **done, §9b I1.** Corpus is not a template.
+2. ~~Co-block recall~~ — **done, §9b I2.** Union 1.000; the boundary cluster is
+   retired and §1.5 is inverted.
+2b. **Probe every encoder layer of the cooldown checkpoint** — promoted to the
+   top by §9b I4. Layers 1-6 are free of massive activations, layer 12 (what the
+   probe reads) is 17.7 % polluted. One evaluation pass.
 3. Oracle bin read-back (§2) — closes the bin-count question permanently.
 4. Run the existing 3D probe on every encoder block of an existing checkpoint
    (§5) — may retroactively change recorded negative results.
