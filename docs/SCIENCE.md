@@ -143,6 +143,19 @@ lives at `archive/fm_m113_artifact` — weights digest
 
 ## 5. Learning rate and batch size
 
+> **READ THIS FIRST (2026-09-20).** Every arm below at B >= 8 ran with
+> `num_worker_per_gpu = 0`, and pimm derives the per-rank seed as
+> `cfg.seed + rank * num_worker_per_gpu` -- so every rank got the SAME seed and
+> drew the SAME mask. Sixteen events masked identically is not sixteen
+> independent draws, and it costs **0.18-0.24 val at every step** (measured: the
+> same B=16 config re-run after the fix is uniformly that much better). The B=4
+> arms are clean (`per_gpu = 1`); the B=8 and B=16 arms are NOT. Treat the
+> sqrt(B) claim and the matched-step table as unestablished until re-run. The
+> fix is in `configs/pimm/coeff_fm_train.py` (`WORKERS_PER_GPU * _WORLD`).
+>
+> What SURVIVES: the B=4 learning-rate curve, and everything in the S(B)
+> subsection at the end, which was measured after the fix.
+
 **The shipped learning rate is well below optimal, at every batch size tested.**
 `configs/pimm/coeff_fm_train.py` carries `lr=1.1e-3`, inherited from the m113
 lineage where it was tuned at batch 4 and never re-tuned. Measured 2026-09-19 on
@@ -183,7 +196,145 @@ the larger batch earns that back by making more progress PER STEP is a separate
 measurement — fixed steps, data varying — and it is the one that decides whether
 128 GPUs is cheap or merely fast.
 
-## 6. Open
+### How many GPUs a batch can usefully use: S(B), measured clean
+
+Steps to reach `val = 3.25`, every arm on the same code path, eval cadence and
+post-fix seeding:
+
+| B | steps | model `S_min(1 + B_crit/B)` |
+|---|---|---|
+| 4 | >6,000 (budget ran out; model says ~7,500) | — |
+| 8 | **4,750** | 4,679 |
+| 16 | **3,250** | 3,250 |
+| 32 | **2,250** | 2,536 |
+| 128 | **2,000** | 2,000 |
+
+**B_crit = 12.5, S_min = 1,821 steps**, mean error 4% over a 16x range in batch.
+The fit uses only B=16 and B=128; **B=8 is held out and predicted to 1.5%**,
+which is the reason to believe the two parameters mean something rather than
+merely interpolating four points.
+
+The curve is everywhere sub-linear, which the earlier contaminated numbers were
+not -- they implied a 16->32 speedup FASTER than perfect scaling, which this
+model cannot produce and which should have been read as a broken measurement
+rather than a finding.
+
+What it means for sizing a run **at this horizon**: past B ~ 12 the step count
+flattens toward S_min, so no batch beats ~1,800 steps to this loss. B=128 uses 8x
+the compute of B=16 to save 1.6x the steps -- **5x worse per GPU-hour**. Large
+batch buys wall clock, not efficiency.
+
+The qualifier is load-bearing. `B_crit` GROWS as training proceeds (Section 5's
+gradient-noise measurement puts it at ~step^0.8, and the two methods agree at
+~12 for this horizon), so a 10^5-10^6 step run on a 1-10M event corpus will
+support a far larger batch than 12. Do not carry 12 forward as a constant.
+
+
+## 6. Throughput: what multi-node training actually costs
+
+**The gap to linear scaling is event-size variance, not the network.** Measured
+2026-09-20 on Perlmutter A100s, 400 steps per rung, one event per rank:
+
+| GPUs | workers/GPU | s/step | data wait | events/s | vs linear |
+|---|---|---|---|---|---|
+| 1 | 4 | 0.148 | 0.006 | 6.8 | 100% |
+| 4 (1 node) | 1 | 0.166 | 0.006 | 24.1 | 89% |
+| 4 (4 nodes) | 1 | 0.162 | 0.006 | 24.7 | 91% |
+| 8 | **0** | 0.296 | 0.108 | 27.0 | 50% |
+| 16 | **0** | 0.311 | 0.110 | 51.4 | 48% |
+| 32 | 4 | 0.229 | 0.006 | 139.7 | 65% |
+| 64 | 4 | 0.236 | 0.006 | 271.2 | 63% |
+| 128 | 1 / 4 / 16 | 0.241 / 0.244 / 0.241 | 0.006 | ~527 | 61% |
+
+Three things are ruled out by that table and are worth stating because each was
+the first guess at some point:
+
+* **Not the interconnect.** `4x1` and `1x4` run the SAME global batch with the
+  same work per rank and differ only in whether the all-reduce crosses the
+  fabric or stays on NVLink. It costs **-2.4%** -- the fabric version is
+  marginally faster. (This is after the libnl fix; before it, NCCL fell back to
+  TCP and the same all-reduce took 11.8x longer.)
+* **Not the filesystem.** At 128 GPUs, 1 / 4 / 16 workers per GPU -- 128 to 2,048
+  concurrent Lustre readers -- give 0.241 / 0.244 / 0.241 s with the data wait
+  pinned at 0.006 s.
+* **Not the dataloader, any more.** The 50% and 48% rows are a config bug:
+  `num_worker` is a GLOBAL count that pimm divides by world size, so the shipped
+  literal 4 became ZERO workers per GPU above eight ranks and every batch was
+  read inline. See `configs/pimm/coeff_fm_train.py`.
+
+**What it is.** The FM takes one event per rank and DDP makes a step cost the
+SLOWEST rank. Events are not the same size: over 1,600 corpus events the
+coefficient count runs **39,462 to 759,710, a 2.77x spread**. So a step costs the
+MAXIMUM of N draws from that distribution, not the mean, and the penalty grows
+with N.
+
+That is not an analogy, it is the model. Fitting step time against event size on
+ONE GPU -- where no rank waits for another -- gives
+
+    step = 91 ms + 0.228 us per 1,000 coefficients        R^2 = 0.88
+
+and feeding those two constants plus the corpus size distribution into
+`a + b * E[max of N]` predicts every other rung with **nothing fitted to the
+multi-node data**:
+
+| GPUs | predicted | measured | error |
+|---|---|---|---|
+| 1 | 152.7 ms | 148.0 | +3.2% |
+| 4 | 176.6 ms | 166.0 | +6.4% |
+| 32 | 204.4 ms | 229.0 | -10.7% |
+| 64 | 212.7 ms | 236.0 | -9.9% |
+| 128 | 220.2 ms | 244.0 | -9.8% |
+
+The residual is systematic -- the model under-predicts by a near-constant ~10%
+from 32 GPUs up -- and that residual is the genuine all-reduce and sync cost a
+single-GPU fit cannot contain. So: **~90% of the multi-node penalty is event-size
+stragglers and ~10% is communication.**
+
+**The obvious fix does not work, and that is the result.** If a step costs the
+largest event in it, bucketing events by size so every rank gets comparable work
+should remove `E[max]` from the expression and leave `a + b * mean` = 153 ms at
+any node count -- 1.6x at 128 GPUs. It was implemented
+(`helix/integrations/pimm/sampler.py`, `bucket_by_size`) and measured at 16 GPUs
+against an otherwise identical run:
+
+| | median s/step | final val | var_expl |
+|---|---|---|---|
+| bucketing off | 0.198 | **3.4023** | **0.4436** |
+| bucketing on | 0.214 | 3.5189 | 0.3667 |
+
+**8% slower AND 0.117 worse val**, the latter consistent at every matched step
+from 1,000 on and ~45x the 0.0026 seed-to-seed noise floor. Both arms ran 3,000
+steps at B=16 with the same seed and rate; only the sampler differed.
+
+The ordering itself is correct -- unit tests pin within-step max/mean below 1.15
+against ~1.5 for a random batch -- so the batches really are homogeneous, the
+step times simply do not follow, and the convergence cost that homogeneity was
+always going to risk is real rather than hypothetical. Whatever cancels the
+straggler gain (a per-node resource contended by all four GPUs when every rank
+is large at once is the obvious candidate) was not worth chasing: a few percent
+of step time is not where the returns are.
+
+So the predictive model in the table above stands as a DESCRIPTION -- it forecasts
+five node counts from two single-GPU constants -- but not as a lever. The 61%
+scaling efficiency at 128 GPUs is what the machine gives, and a few percent
+either way is not worth chasing.
+
+`bucket_by_size` stays **0**. The code is kept because it is tested and costs
+nothing switched off, and because the same machinery would be needed if event
+sizes ever became far more skewed than 2.77x.
+
+**A caution learned the hard way.** The first A/B measured nothing. The flag was
+set, the trainer logged "length bucketing ON", and the sampler then fell back to
+pimm's ordinary order because the REGISTERED dataset wrapper
+(`helix/integrations/pimm/data.py`) did not forward `event_sizes()` -- the third
+time that wrapper's re-declaration has hidden something the inner dataset
+gained, and the first time it degraded instead of raising. Both arms were
+identical runs and the 8% between them was noise. Check that a run did what its
+config said before reading a number off it.
+
+---
+
+## 7. Open
 
 **Charge R2 is unrun.** It is the metric that would separate "the model
 represents charge" from "the model represents where charge is".
@@ -195,7 +346,7 @@ Re-derive them per corpus (`scripts/derive_coeff_bins.py`), never inherit them.
 
 ---
 
-## 7. What the retired cache was, and why it could not be reused
+## 8. What the retired cache was, and why it could not be reused
 
 540 GB of per-event `.npz` (199,990 events, built Jun 13) was deleted on
 2026-09-11. It is recorded here because "we threw away 540 GB of training data"
