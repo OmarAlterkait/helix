@@ -510,7 +510,7 @@ dataloader workers per GPU, and jobs whose batch script exited 0 while an `srun`
 inside it had failed.
 
 ```bash
-scripts/audit_runs.py $SCRATCH/helix_work/sweep [more roots]
+scripts/audit_runs.py <runs_dir> [<runs_dir> ...]   # each holds one save_path per run
 ```
 
 It reads what each run recorded about itself -- `resolved_config.json`,

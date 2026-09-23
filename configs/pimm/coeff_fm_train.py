@@ -226,15 +226,15 @@ batch_size_test = _WORLD
 # has no use for them: it is latency-bound on one prefetch, not throughput-bound
 # on many.
 #
-# A Perlmutter GPU node has 128 logical CPUs over 4 GPUs, so 32 per GPU exist and
-# there is no reason to ask for fewer than the pipeline could ever want. 16 is
-# half of what the node has, comfortably past the knee, and measured to cost
-# nothing; the remaining headroom absorbs a 1-10M event corpus touching far more
-# shards with a colder page cache than the 19k-event run above.
+# How many a GPU can have is a NODE fact, so the number lives in the site profile
+# (`scheduler.train.workers_per_gpu`), not here: a Perlmutter GPU node has 32
+# logical CPUs per GPU and NERSC declares 16. A site that declares nothing gets
+# 4, which is safe on any GPU node: the whole measured effect is 0 -> 1.
 #
 # Written as a per-GPU number times the rank count so it means the same thing at
 # every scale, which the literal it replaced did not.
-WORKERS_PER_GPU = 16
+from helix.paths import scheduler as _scheduler                 # noqa: E402
+WORKERS_PER_GPU = int(_scheduler("train", "workers_per_gpu") or 4)
 num_worker = WORKERS_PER_GPU * _WORLD
 
 # Length bucketing: megabatch width in STEPS, 0 = off (pimm's ordinary order).
@@ -429,6 +429,12 @@ HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
 # reported metric is not quietly measured on an easier subset.
 #
 # None disables it, which is right on a card with room. Raise it on hbm80g.
+#
+# This is a limit of the CURRENT MODEL on a 40 GB card, not of the data: it is
+# set by where this model's peak memory crosses 40 GB. A more memory-efficient
+# model is planned, and this number is expected to change with it -- re-measure
+# with scripts/probe_largest_events.py on the new model and raise it, or set it
+# to None, rather than carrying 600,000 forward.
 MAX_EVENT_SIZE = 600_000
 
 data = dict(
@@ -493,4 +499,4 @@ train = dict(type="FMTrainer")
 # (pimm/utils/config.py:262), and Config.dump then renders each as a function
 # repr that yapf rejects -- the same failure the `del _os, _sys` above exists for.
 # A single leading underscore does NOT protect a name here; only `__` does.
-del _root, _reference_table, _WORLD, _world_size
+del _root, _reference_table, _WORLD, _world_size, _scheduler

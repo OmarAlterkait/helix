@@ -27,7 +27,9 @@ steps `env`, so step->arm mapping needs `srun --job-name=<tag>` to be added
 before that is automatic. Treat a nonzero derived code as "inspect this job",
 not "discard this run".
 
-Usage:  scripts/audit_runs.py /pscratch/sd/o/oalter/helix_work/sweep [more roots]
+Usage:  scripts/audit_runs.py <runs_dir> [<runs_dir> ...]
+
+Each <runs_dir> holds one directory per run (a pimm save_path).
 """
 from __future__ import annotations
 
@@ -110,10 +112,10 @@ def problems(r: dict) -> list:
         # The seed does collapse (pimm derives it as seed + rank*workers_per_gpu),
         # but the streams decorrelate within a step or two, so this is NOT a
         # reason to discard a loss curve. The measured cost is throughput:
-        # 0 workers is ~44% slower per step than 1+. These runs are sound as
-        # loss measurements and WRONG as step-time measurements -- and step
-        # times from this campaign sized every job in the preempt program.
-        out.append("0 workers/GPU -- step times unusable (~44% slow), loss ok")
+        # In-process loading measured ~44% slower per step than 1+ worker at 16
+        # GPUs. These runs are sound as loss measurements and not comparable as
+        # step-time measurements.
+        out.append("0 workers/GPU -- loss ok, step times not comparable")
     return out
 
 

@@ -74,9 +74,11 @@ N_TRAIN_EVENTS = 150_239
 #: Why the literal is still the value: resolving the split exactly means reading
 #: `n_events` from every shard header (790 of them), which is seconds -- fine
 #: once, far too slow on every config load, and `pimm submit` loads this config
-#: on the login node during preflight as well as in the job. So the exact check
-#: lives in tests/test_pimm_config_contract.py, which can afford it, and the
-#: cheap invariant lives here.
+#: on the login node during preflight as well as in the job. So only the cheap
+#: invariant below is checked. NOTHING verifies the literal itself: an earlier
+#: version of this comment said tests/test_pimm_config_contract.py did, and no
+#: test ever has. If the holdout or the run list changes, re-resolve it with
+#: scripts/write_holdout.py.
 N_EVENTS_TOTAL = 157_991
 if len(RUNS) != 8:
     raise SystemExit(

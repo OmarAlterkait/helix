@@ -116,7 +116,10 @@ def eval_every(steps, eval_seconds=20.0, step_seconds=0.25, overhead=0.02,
     return min(max(floor, max(1, steps // target_count)), ceiling)
 
 
-def cadence(n_train_events, epochs, batch_size, d, d_base, **kw):
+def cadence(n_train_events, epochs, batch_size, d, d_base, *,
+            warmup_base_steps=500, step_seconds=0.25, overhead=0.02,
+            ckpt_seconds=11.0, save_target_count=20,
+            eval_seconds=20.0, eval_target_count=50):
     """All three, plus the step budget they derive from.
 
     Returns ``dict(STEPS, WARMUP, SAVE_EVERY, EVAL_EVERY)`` so a config can do
@@ -125,16 +128,19 @@ def cadence(n_train_events, epochs, batch_size, d, d_base, **kw):
         STEPS, WARMUP = _c["STEPS"], _c["WARMUP"]
 
     and there is exactly one place where the rule lives.
+
+    Keyword-only and explicit, not ``**kw``: a filtered ``**kw`` dropped a
+    misspelled name in silence, and one ``target_count`` reached the save
+    cadence but not the eval cadence -- one name, two behaviours.
     """
     steps = n_train_events * epochs // batch_size
     return dict(
         STEPS=steps,
-        WARMUP=warmup_steps(steps, d, d_base,
-                            base_steps=kw.get("warmup_base_steps", 500)),
-        SAVE_EVERY=save_every(steps, **{k: v for k, v in kw.items()
-                                        if k in ("ckpt_seconds", "step_seconds",
-                                                 "overhead", "target_count")}),
-        EVAL_EVERY=eval_every(steps, **{k: v for k, v in kw.items()
-                                        if k in ("eval_seconds", "step_seconds",
-                                                 "overhead")}),
+        WARMUP=warmup_steps(steps, d, d_base, base_steps=warmup_base_steps),
+        SAVE_EVERY=save_every(steps, ckpt_seconds=ckpt_seconds,
+                              step_seconds=step_seconds, overhead=overhead,
+                              target_count=save_target_count),
+        EVAL_EVERY=eval_every(steps, eval_seconds=eval_seconds,
+                              step_seconds=step_seconds, overhead=overhead,
+                              target_count=eval_target_count),
     )
