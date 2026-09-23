@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -97,6 +98,20 @@ def pytest_configure(config):
     _paths.apply_site_env()
 
     _require_data()
+
+    # `-q` suppresses pytest_report_header, and that header is the ONE thing
+    # that makes a green run quotable: it names the site and says which data
+    # roots resolved. The documented command in CLAUDE.md is `pytest tests -q`,
+    # so the default invocation was hiding exactly the line that distinguishes
+    # "568 passed against the real corpus" from "568 passed against nothing".
+    # Print it ourselves when pytest will not.
+    # Written to stderr rather than through the terminal reporter: at
+    # pytest_configure time the reporter has not begun its session output, and
+    # anything handed to it there is swallowed. stderr is not.
+    if config.get_verbosity() < 0:
+        for line in pytest_report_header(config):
+            print(line, file=sys.stderr)
+
     if os.environ.get("HELIX_REQUIRE_PIMM") != "1":
         return
     try:
@@ -161,7 +176,15 @@ def pytest_report_header(config):
     was actually able to reach.
     """
     from helix import paths
-    import tests._paths as tp
+    # `import _paths`, not `import tests._paths`. helix's tests/ has no
+    # __init__.py, so `tests` is only ever a NAMESPACE package -- and a
+    # namespace package loses to any regular `tests` package on sys.path.
+    # The pimm checkout ships one, and helix_run.sh puts that checkout on
+    # PYTHONPATH, so inside the container this line resolved to pimm's
+    # tests and died with ModuleNotFoundError before a single test ran.
+    # Every test module in this directory already says `from _paths import
+    # ...`; these two lines were the only ones that did not.
+    import _paths as tp
 
     site = paths.site_name() or "NONE (nothing selected or detected)"
     present = [n for n, v in (("corpus", tp.CORPUS), ("sensor", tp.SENSOR_ROOT),
@@ -188,7 +211,7 @@ def _require_data():
     """
     if os.environ.get("HELIX_REQUIRE_DATA") != "1":
         return
-    import tests._paths as tp
+    import _paths as tp          # see pytest_report_header for why not tests._paths
     from helix import paths
 
     missing = {n: v for n, v in (("HELIX_CORPUS", tp.CORPUS),

@@ -39,7 +39,11 @@ from pimm_data.builder import DATASETS
 from pimm_data import ShardEventDataset
 
 from helix.core.coeff_io import coord_digest
+import logging
+
 from helix.data.coeff_reader import CoeffTPCReader
+
+logger = logging.getLogger(__name__)
 
 
 @DATASETS.register_module()
@@ -64,6 +68,7 @@ class CoeffTPCDataset(ShardEventDataset):
         exclude_range=None,
         holdout=None,
         split_role=None,
+        max_event_size=None,
     ):
         # strict by DEFAULT, unlike the other datasets. A coeff corpus is built
         # by hundreds of independent jobs, and four separate failure shapes —
@@ -99,11 +104,57 @@ class CoeffTPCDataset(ShardEventDataset):
         self._split_role = split_role
         self._canonical_reader = self.coeff_reader or self.coeff_clean_reader
         self._build_joint_index(source_label=f"CoeffTPCDataset({data_root!r})")
+        self._max_event_size = max_event_size
 
         super().__init__(
             split=split, data_root=data_root,
             transform=transform, ignore_index=ignore_index, loop=loop,
         )
+        # AFTER super().__init__, because `data_list` is what the base class
+        # builds there. Calling it before gets an AttributeError, and calling it
+        # before the joint index exists would filter against the wrong table.
+        self._drop_oversize_events()
+
+    def _drop_oversize_events(self):
+        """Remove events too large to fit in GPU memory.
+
+        The model takes ONE event per rank, so a step costs the largest event in
+        it, and peak memory grows with the coefficient count -- the categorical
+        head alone is ``(n_cells, n_slot, K)``. Measured on a 40 GB A100: the
+        five largest events in a run (697k-725k coefficients) all run out of
+        memory in a single forward/backward, while the median event (271k) peaks
+        around 13 GiB.
+
+        This only bites at SCALE, which is why it can sit unnoticed. Each step
+        draws one event per rank, so the largest in a step is the p_(1-1/N)
+        quantile: at 16 ranks the top 0.1% appears every few hundred steps, at
+        512 ranks it appears in roughly every other step. And a single rank
+        running out of memory does not fail fast -- it leaves every other rank
+        blocked in a collective until the NCCL watchdog fires.
+
+        Over the eight-run corpus a 600,000-coefficient cap drops 183 events of
+        157,991: **0.12% of events and 0.27% of coefficients**. That is the whole
+        cost of removing the failure mode.
+
+        ``None`` disables it, which is right for single-GPU work where the tail
+        is harmless and dropping data would be gratuitous.
+        """
+        if not self._max_event_size:
+            return
+        r = self._canonical_reader
+        if r is None or not hasattr(r, "event_sizes"):
+            return
+        import numpy as _np
+        sizes = _np.asarray(r.event_sizes(), dtype=_np.int64)
+        keep = [i for i in self.data_list if sizes[i] <= self._max_event_size]
+        dropped = len(self.data_list) - len(keep)
+        if dropped:
+            logger.info(
+                "CoeffTPCDataset: dropped %d of %d events over %d coefficients "
+                "(%.2f%%) -- they do not fit in GPU memory one-per-rank",
+                dropped, len(self.data_list), self._max_event_size,
+                100.0 * dropped / max(1, len(self.data_list)))
+        self.data_list = keep
 
     def event_identity(self, idx):
         """``(run, source_file, event)`` — the SIMULATION event, hashed to ints.
@@ -153,6 +204,22 @@ class CoeffTPCDataset(ShardEventDataset):
             if t is not None:
                 out.append(t)
         return out
+
+    def event_sizes(self):
+        """Per-event coefficient counts, aligned with THIS dataset's index.
+
+        The reader's table is over its own global index; ``data_list`` is this
+        split's selection into it (holdout, event_range, max_len), so the two are
+        only the same while data_list is ``range(n)``. Mapping through it is what
+        keeps a size table usable after a split narrows the corpus -- the same
+        distinction ``get_data`` makes one line below.
+        """
+        r = self._canonical_reader
+        if r is None or not hasattr(r, "event_sizes"):
+            return None
+        import numpy as _np
+        sizes = _np.asarray(r.event_sizes(), dtype=_np.int64)
+        return sizes[_np.asarray(self.data_list, dtype=_np.int64)]
 
     def get_data(self, idx):
         # data_list VALUES are event ids. Identical to `idx % len(...)` while

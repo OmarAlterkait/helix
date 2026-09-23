@@ -53,7 +53,50 @@ class FMTrainer(Trainer):
                 f"requires exactly 1: it has no event separation, so a larger "
                 f"per-GPU batch trains attention ACROSS unrelated events without "
                 f"failing. Set batch_size to the number of ranks.")
-        return super().build_train_loader()
+
+        # Length bucketing, off unless the config asks (`bucket_by_size`, the
+        # megabatch width in STEPS; 0 disables). See
+        # helix.integrations.pimm.sampler for the measurement that motivates it:
+        # a step costs the largest event among the ranks, events span 2.75x, and
+        # that is the whole of the gap to linear scaling at 128 GPUs.
+        #
+        # Patched around the super() call rather than at import time because the
+        # decision is a CONFIG one and _compat runs before any config exists. The
+        # symbol is restored in `finally` so a run that raises here cannot leave
+        # pimm's sampler replaced for whatever runs next in the same process --
+        # which, in a test session, is another test.
+        mega = int(getattr(self.cfg, "bucket_by_size", 0) or 0)
+        if mega <= 0:
+            return super().build_train_loader()
+
+        import pimm.engines.train as _pt
+        from helix.integrations.pimm.sampler import bucketed_sampler_class
+
+        original = _pt.StatefulRandomSampler
+        _pt.StatefulRandomSampler = bucketed_sampler_class(
+            original, mega=mega, log=getattr(self, "logger", None))
+        try:
+            loader = super().build_train_loader()
+        finally:
+            _pt.StatefulRandomSampler = original
+        # Claiming ON is not the same as being ON. The sampler falls back to
+        # pimm's ordinary order when the dataset cannot supply sizes, and the
+        # first A/B of this feature compared two IDENTICAL runs for exactly that
+        # reason: the flag was set, this line said "ON", and the registered
+        # wrapper did not forward `event_sizes()`. A flag that is SET must take
+        # effect or say so here, where the run can still be stopped.
+        if getattr(getattr(loader, "dataset", None), "event_sizes", None) is None:
+            raise RuntimeError(
+                f"bucket_by_size={mega} but "
+                f"{type(getattr(loader, 'dataset', None)).__name__} exposes no "
+                f"event_sizes(); the sampler would silently fall back to pimm's "
+                f"ordinary order and the run would not be doing what the config "
+                f"says. Forward event_sizes() on the registered wrapper.")
+        if hasattr(self, "logger"):
+            self.logger.info(
+                f"length bucketing ON: megabatch = {mega} steps "
+                f"({mega * comm.get_world_size()} events)")
+        return loader
 
     def build_model(self):
         """Build as pimm does, then make the gradient all-reduce cheaper.

@@ -111,5 +111,19 @@ PY
 }
 
 eval "$_helix_env_out"
+
+# Export the interpreter this script searched for, so the next script does not
+# repeat the search and -- more to the point -- does not skip it. submit_helix.sh
+# defaulted to a bare `python3`, which on a Perlmutter LOGIN node is the 3.6 OS
+# interpreter: `pimm submit` died on `from __future__ import annotations` in
+# pimm/cli/main.py, three lines in, after this script had already printed its
+# banner and found a perfectly good 3.11. Finding an interpreter and then not
+# telling anyone is the bug.
+#
+# It is also the first candidate on a re-source, which is what makes the choice
+# stable across a session -- and it is re-validated there like any other, so a
+# stale export cannot outlive the interpreter it names.
+export HELIX_PYTHON="$_helix_env_py"
+
 unset _helix_env_out _helix_env_py
 unset -f _helix_env_root _helix_env_pick_py

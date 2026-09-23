@@ -120,7 +120,31 @@ for a in "$@"; do
 done
 set -- "${FIXED[@]}"
 
-PIMM_PY=${HELIX_PIMM_PYTHON:-python3}
+# `python3` is NOT a safe default here: on a Perlmutter login node it is the 3.6
+# OS interpreter and `pimm submit` dies on pimm/cli/main.py line 3. helix_env.sh,
+# sourced above, has already searched for a >= 3.8 interpreter and exports it as
+# HELIX_PYTHON; use that. HELIX_PIMM_PYTHON still overrides, for the case where
+# pimm needs a DIFFERENT interpreter from the one that can read a site profile.
+#
+# This must be a HOST interpreter, not the container's: `pimm submit` calls
+# sbatch, which does not exist inside the image. It needs pimm importable, which
+# on this host the system python3.11 satisfies, and it loads the training config
+# during preflight -- so helix must be importable too, which the PYTHONPATH set
+# above arranges.
+#
+# The default walks three steps, cheapest first: an explicit override, then the
+# launcher venv scripts/make_launcher_env.sh builds (which is the only one of
+# the three guaranteed to have tyro and submitit), then the interpreter
+# helix_env.sh found.
+_launcher_venv=${HELIX_LAUNCHER_VENV:-${HELIX_SCRATCH:-/nonexistent}/helix-launcher-venv}
+if [ -n "${HELIX_PIMM_PYTHON:-}" ]; then
+  PIMM_PY=$HELIX_PIMM_PYTHON
+elif [ -x "$_launcher_venv/bin/python" ]; then
+  PIMM_PY=$_launcher_venv/bin/python
+else
+  PIMM_PY=${HELIX_PYTHON:-python3}
+fi
+unset _launcher_venv
 echo "submit_helix.sh: site=$HELIX_SITE pimm-site=$PIMM_SITE" >&2
 echo "                 exp_root=$HELIX_EXP repo_root=$HELIX_PIMM_ROOT" >&2
 exec "$PIMM_PY" -m pimm.cli submit "${ARGS[@]}" "$@"

@@ -116,7 +116,8 @@ class CoeffTPCDataset(Dataset):
     def __init__(self, data_root, split="", dataset_name="coeff_tpc",
                  modalities=("coeff", "coeff_clean"), transform=None, loop=1,
                  max_len=-1, strict_lengths=True, event_range=None,
-                 exclude_range=None, holdout=None, split_role=None):
+                 exclude_range=None, holdout=None, split_role=None,
+                 max_event_size=None):
         super().__init__()
         from helix.data import CoeffTPCDataset as _DS
         # Split parameters must be FORWARDED. This wrapper re-declares the inner
@@ -133,11 +134,25 @@ class CoeffTPCDataset(Dataset):
                           transform=None, loop=loop, max_len=max_len,
                           strict_lengths=strict_lengths,
                           event_range=event_range, exclude_range=exclude_range,
-                          holdout=holdout, split_role=split_role)
+                          holdout=holdout, split_role=split_role,
+                          max_event_size=max_event_size)
         self.transform = Compose(transform)
 
     def __len__(self):
         return len(self._inner)
+
+    def event_sizes(self):
+        """Per-event coefficient counts, forwarded from the inner dataset.
+
+        THE THIRD TIME the re-declaration noted in ``__init__`` has hidden
+        something the inner dataset gained. Configs -- and pimm's sampler --
+        resolve THIS class, so a method that exists only on the inner one is
+        invisible. Here the symptom was worse than a TypeError: length bucketing
+        asked the dataset for sizes, got nothing, logged one line and trained
+        normally, so the A/B that was supposed to measure bucketing measured two
+        identical runs and the 8% difference between them was noise.
+        """
+        return self._inner.event_sizes()
 
     def get_data(self, idx):
         """The raw nested sample, untransformed."""

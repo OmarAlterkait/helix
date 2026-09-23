@@ -12,8 +12,19 @@ detect:
 
 roots:
   # NOTE the user directory is `oalter`, not S3DF's `omara`.
-  HELIX_CORPUS_ROOT:   $CFS/m5238/users/oalter
-  HELIX_CORPUS:        $CFS/m5238/users/oalter/coeff_tpc_r1/run_0027575715
+  # TRAINING reads from $SCRATCH, which is LUSTRE. $CFS is GPFS -- a capacity and
+  # collaboration filesystem that NERSC explicitly steers I/O-heavy jobs away
+  # from. The distinction was invisible while every throughput measurement used
+  # ONE run (200 shards, 45 GB) that fits entirely in a node's 256 GB page cache;
+  # the production corpus is 1,580 shards and 345 GB and does not. At 512 ranks
+  # the per-rank index build is ~1,580 file opens EACH, so the filesystem under
+  # it stops being a detail.
+  #
+  # $SCRATCH is purged on inactivity, so the durable copy stays on $CFS and is
+  # named below rather than forgotten. Re-stage with scripts/stage_corpus.sh.
+  HELIX_CORPUS_ROOT:   $SCRATCH
+  HELIX_CORPUS:        $SCRATCH/coeff_tpc_r1/run_0027575715
+  HELIX_CORPUS_DURABLE: $CFS/m5238/users/oalter/coeff_tpc_r1
   # Unlike S3DF, the simulator output lives in OUR project directory rather than
   # another group's, so a corpus rebuild is possible here and was not there.
   HELIX_SENSOR_ROOT:   $CFS/m5238/users/oalter/wire_test_00_00_02/sensor
@@ -114,6 +125,10 @@ scheduler:
     # supported policy". It is a guarantee of minimum progress, not a request.
     time_min: "02:00:00"
     gpus_flag: gpus-per-node
+    # Dataloader workers per GPU. A GPU node has 128 logical CPUs over 4 GPUs;
+    # 16 is half of the 32 per GPU. Measured flat from 1 to 32 -- the only cost
+    # is at 0 -- so this is headroom for a larger corpus, not a tuned value.
+    workers_per_gpu: 16
   corpus:
     account: m5238_g
     constraint: gpu

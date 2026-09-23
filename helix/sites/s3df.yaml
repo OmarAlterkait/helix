@@ -15,6 +15,8 @@ detect:
 roots:
   HELIX_CORPUS_ROOT:   /sdf/data/neutrino/omara
   HELIX_CORPUS:        /sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715
+  # One filesystem here, so there is no staged/durable split to record.
+  HELIX_CORPUS_DURABLE: null
   # doraemon belongs to a DIFFERENT group. A handover target will not have read
   # access, which is why docs/INVENTORY.md calls the probe truth irreplaceable.
   HELIX_SENSOR_ROOT:   /sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor

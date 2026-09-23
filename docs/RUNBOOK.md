@@ -237,6 +237,42 @@ code.
 
 ## 2. Train
 
+### On a site whose scheduler is reached through `pimm submit` (NERSC)
+
+    scripts/make_launcher_env.sh                                   # ONCE per machine
+    scripts/submit_helix.sh --recipe configs/launch/nersc-preempt.yaml
+
+The strategies are `configs/launch/*.yaml` and their trade-offs are written in
+each file; `--dry-run` prints the rendered sbatch script without submitting, and
+is the cheapest way to check that a change did what you meant.
+
+**Why there is a separate environment for submitting.** `pimm submit` calls
+sbatch, which does not exist inside the container, so it runs on the login node
+-- where the container's interpreter is not available either. pimm documents
+this case and calls it the launcher-only environment: YAML, Tyro and Submitit,
+"cannot import the full model stack". `make_launcher_env.sh` builds exactly that
+on scratch, reading the dependency list out of pimm's own `pyproject.toml` so it
+cannot go stale, minus pimm-data. `submit_helix.sh` finds it with no flag.
+
+Two things had to change for that to be true, and both are the same shape --
+something cheap made expensive by where it was spelled:
+
+* `helix/data/__init__.py` imported the reader and the dataset eagerly, so
+  reading the bin table (numpy) or the corpus run list (h5py) pulled torch and
+  pimm-data with them. Both names are lazy now; `tests/test_boundary.py` pins it.
+* pimm's launch preflight loads the training config to check batch-size
+  divisibility, and ran its `custom_imports` to do it. It reads three integers,
+  so it now loads with `import_custom_modules=False`. **This is a local change in
+  the pimm checkout** (`pimm/launch/config.py`) -- if you re-clone pimm, expect
+  submission to fail with `No module named 'torch'` until it is reapplied.
+
+Also local to the pimm checkout: `configs/coeff_fm/train_8run.py`, a pointer at
+helix's real config. `train.sh`'s `-c` resolves only beneath pimm's own
+`configs/`, so an absolute path from another repository cannot be passed. The
+pointer takes helix's location from `$HELIX_ROOT`, which `helix_env.sh` exports.
+
+### On S3DF
+
 ONE launcher. `launch/` was the predecessor and is retired -- `scripts/` ran
 every current result (the 8-run's 16 links, 8run_plane's 12, and both cooldowns)
 and carries the config-fingerprint resume guard, the QOS knob and the helix code
@@ -465,6 +501,36 @@ and the failure is a plausible NUMBER, not an error.
 If the guard refuses, do not work around it. Find the corpus the checkpoint was
 trained on.
 
+### The other guard: did the run do what its label says?
+
+`identity.py` protects the corpus. Nothing protected the *parameters*, and a
+campaign of 66 runs accumulated three kinds of quiet damage: a directory called
+`steps_b8` that trained at B=16's learning rate, 13 runs that trained with 0
+dataloader workers per GPU, and jobs whose batch script exited 0 while an `srun`
+inside it had failed.
+
+```bash
+scripts/audit_runs.py <runs_dir> [<runs_dir> ...]   # each holds one save_path per run
+```
+
+It reads what each run recorded about itself -- `resolved_config.json`,
+`run_metadata.json`, `provenance.json` -- and joins the `SLURM_JOB_ID` in
+provenance to `sacct`. Run it before trusting a plot. Two things to know:
+
+* **`sacct` is the authority on whether a run failed**, not the log and not the
+  wrapper's exit code. `DerivedExitCode` is the highest exit code of any job
+  step, so it reports a failed `srun` even when the batch script around it
+  exited 0. It is per JOB, though, and one job here produced up to nine runs --
+  so treat a nonzero value as "inspect this job", not "discard this run".
+  `srun --job-name=<tag>` makes the step rows self-describing and the
+  attribution automatic; the harness does not pass it yet.
+* **0 workers/GPU does not invalidate a loss curve.** pimm derives the per-rank
+  seed as `seed + rank * num_worker_per_gpu`, so at 0 every rank starts from the
+  same RNG state -- but the mask draw advances by a per-event amount and the
+  streams decorrelate within a step or two. What it *does* invalidate is a step
+  TIME: in-process loading measured ~44% slower. Those runs are sound as loss
+  and unusable as throughput.
+
 Corpora currently on disk:
 
 | corpus | gate | use |
@@ -501,6 +567,27 @@ cleared), and the retired research checkpoints live under
 `<HELIX_ARCHIVE>/fm_research_ckpts/` (413 files, 165 GB) with retirement
 backups beside them. At NERSC `$SCRATCH` is purged on inactivity, so nothing
 durable — including a pulled image — should live there alone.
+
+### Diagnostic scripts
+
+Not part of any pipeline; each answers one question that has already been asked
+the expensive way at least once.
+
+| script | question | needs GPUs |
+|---|---|---|
+| `scripts/audit_runs.py` | did these runs do what their labels say? | no |
+| `scripts/probe_peak_memory.py` | how does peak memory grow with event size? | yes |
+| `scripts/probe_largest_events.py` | does the corpus's WORST event actually fit? | yes |
+| `scripts/measure_noise_scale.py` | what batch size stops paying (`B_simple`)? | yes |
+
+`probe_largest_events.py` exists because `probe_peak_memory.py` is not enough:
+fitting memory against event size and extrapolating to the maximum applied a
+2.77x max/mean ratio to an already-large sampled event and overstated the answer
+by ~40%. The five largest events are cheap to just run.
+
+`measure_noise_scale.py` reports the SGD-derived `B_simple`, which is known to
+UNDERSTATE the critical batch size for Adam. Read it as a floor, and prefer a
+measured `S(B)` curve where one exists.
 
 ### The old research checkpoints
 

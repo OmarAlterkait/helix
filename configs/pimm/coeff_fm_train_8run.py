@@ -74,9 +74,11 @@ N_TRAIN_EVENTS = 150_239
 #: Why the literal is still the value: resolving the split exactly means reading
 #: `n_events` from every shard header (790 of them), which is seconds -- fine
 #: once, far too slow on every config load, and `pimm submit` loads this config
-#: on the login node during preflight as well as in the job. So the exact check
-#: lives in tests/test_pimm_config_contract.py, which can afford it, and the
-#: cheap invariant lives here.
+#: on the login node during preflight as well as in the job. So only the cheap
+#: invariant below is checked. NOTHING verifies the literal itself: an earlier
+#: version of this comment said tests/test_pimm_config_contract.py did, and no
+#: test ever has. If the holdout or the run list changes, re-resolve it with
+#: scripts/write_holdout.py.
 N_EVENTS_TOTAL = 157_991
 if len(RUNS) != 8:
     raise SystemExit(
@@ -113,10 +115,21 @@ from helix.paths import world_size as _world_size               # noqa: E402
 _WORLD = _world_size()
 STEPS = N_TRAIN_EVENTS * epoch // _WORLD
 
-WARMUP = max(100, round(0.0040 * STEPS))
-EVAL_EVERY = max(50, round(0.0099 * STEPS))
-SAVE_EVERY = max(50, round(0.0020 * STEPS))
-scheduler = dict(type="WSDStableLR", warmup=WARMUP)
+# The cadences come from helix.core.cadence -- the ONE place the rule lives.
+# They used to be three lines here and three more in the base config, and the
+# duplicate silently shadowed a fix applied to the base.
+#
+# Note what is NOT here: WARMUP and `scheduler`. Warmup is driven by model
+# WIDTH, and `model` is not in scope in a derived config (same reason
+# `batch_size` is not, two comments above). Since this config does not change
+# the model, the base's width-scaled warmup flows through the merge unchanged --
+# which is correct, and the only way to avoid restating the width here.
+from helix.core.cadence import eval_every as _eval_every         # noqa: E402
+from helix.core.cadence import save_every as _save_every         # noqa: E402
+
+EVAL_EVERY = _eval_every(STEPS)
+SAVE_EVERY = _save_every(STEPS)
+del _eval_every, _save_every
 
 save_path = str(_root("HELIX_EXP") / "coeff-fm-train-r1-8run")
 
