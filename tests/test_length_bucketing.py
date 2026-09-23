@@ -16,7 +16,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from helix.integrations.pimm.sampler import bucketed_sampler_class
+# The ordering logic needs no pimm, but it lives in helix.integrations.pimm, whose
+# __init__ imports pimm -- so without pimm this module cannot be imported at all,
+# and an unguarded import fails collection for the WHOLE run. Skip instead, like
+# the other pimm-gated modules; HELIX_REQUIRE_PIMM=1 makes a missing pimm a
+# startup error (tests/conftest.py), so the skip is never silent where it matters.
+pytest.importorskip("pimm")
+from helix.integrations.pimm.sampler import bucketed_sampler_class  # noqa: E402
 
 
 class _Base:
