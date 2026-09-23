@@ -113,18 +113,49 @@ resume = False
 # read; a copy of the corpus carrying a different subset would otherwise be
 # annealed against names that may not be in it. The count is the deliberate part
 # (N_TRAIN_EVENTS below was resolved for three runs), the identities are not.
+import os as _os_mod                                            # noqa: E402
+_os_env = _os_mod.environ
 from helix.data.identity import corpus_runs as _corpus_runs    # noqa: E402
 _CORPUS_ROOT = str(_root("HELIX_CORPUS").parent)
-RUNS = _corpus_runs(_CORPUS_ROOT)[:3]
-if len(RUNS) != 3:
+#
+# The run COUNT is the cooldown's length control, and it is now a knob rather
+# than a literal 3. The WSD literature puts the optimum at 10-20% of the stable
+# phase (Hagele et al. 2024, arXiv:2405.18392; Dremov et al. 2025,
+# arXiv:2508.01483) and the K=3 cooldown -- 12.7% -- was still improving when it
+# ended, so the ladder has to reach above it. The counts are RESOLVED, not
+# guessed: tools/profile/i7_resolve_subsets.py builds the identity split for
+# each K and reports it, and its K=3 answer reproduces the 57,059 this file
+# carried as a literal, which is what licenses the rest of the table.
+#
+#   K   train events   steps (world=4)   % of the 112,679-step stable phase
+#   1         19,034            4,758       4.2
+#   2         38,021            9,505       8.4
+#   3         57,059           14,264      12.7   <- the run that exists
+#   4         76,052           19,013      16.9
+#   5         95,095           23,773      21.1
+#   8        150,239           37,559      33.3
+#
+# HELIX_COOLDOWN_RUNS selects K. It is HELIX_-prefixed so helix_run.sh forwards
+# it into the container without anything having to name it; unset means 3, so
+# every existing invocation is unchanged.
+_N_TRAIN_BY_K = {1: 19_034, 2: 38_021, 3: 57_059, 4: 76_052,
+                 5: 95_095, 8: 150_239}
+_K = int(_os_env.get("HELIX_COOLDOWN_RUNS", "3"))
+if _K not in _N_TRAIN_BY_K:
     raise SystemExit(
-        f"cooldown anneals on 3 runs and N_TRAIN_EVENTS was resolved for 3, but "
-        f"_calib/RUNS.txt names only {len(RUNS)}.")
+        f"HELIX_COOLDOWN_RUNS={_K} has no resolved train-event count. Add it by "
+        f"running tools/profile/i7_resolve_subsets.py -- do NOT interpolate, "
+        f"the split is keyed on event identity and is not linear in K.")
+RUNS = _corpus_runs(_CORPUS_ROOT)[:_K]
+if len(RUNS) != _K:
+    raise SystemExit(
+        f"cooldown anneals on {_K} runs and N_TRAIN_EVENTS was resolved for "
+        f"{_K}, but _calib/RUNS.txt names only {len(RUNS)}.")
 _over = dict(data_root=_CORPUS_ROOT, split=RUNS)
 data = dict(train=dict(**_over), val=dict(**_over), test=dict(**_over))
 
 epoch = 1
-N_TRAIN_EVENTS = 57_059          # resolved from the identity split over RUNS
+N_TRAIN_EVENTS = _N_TRAIN_BY_K[_K]   # resolved from the identity split over RUNS
 # Inherited from the base, which derives it from WORLD_SIZE. NOT restated here:
 # the only correct global batch is the rank count (one event per rank), so a
 # literal would be right at exactly one GPU count and wrong at every other --
@@ -157,7 +188,12 @@ EVAL_EVERY = max(50, round(0.0099 * STEPS))
 # disk.
 SAVE_EVERY = max(250, round(0.05 * STEPS))
 
-save_path = str(_root("HELIX_EXP") / "coeff-fm-cooldown-r1-8run")
+# The arms must not share a save_path: they are the same config at different
+# lengths, and a shared directory would have them overwrite each other's
+# checkpoints and interleave their train.log. K=3 keeps the original name so
+# the existing run and its artifact stay addressable.
+save_path = str(_root("HELIX_EXP") / ("coeff-fm-cooldown-r1-8run"
+                                     + ("" if _K == 3 else f"-k{_K}")))
 
 # ---------------------------------------------------------------------------
 # hooks — same list as the stable phase, with model_best turned back ON
@@ -185,4 +221,4 @@ hooks = [
 
 # _corpus_runs and _CORPUS_ROOT too: only a `__` prefix keeps a name out of the
 # dumped config, and a function repr there is a yapf syntax error.
-del _root, _corpus_runs, _CORPUS_ROOT, _WORLD, _world_size
+del _root, _corpus_runs, _os_mod, _os_env, _N_TRAIN_BY_K, _K, _CORPUS_ROOT, _WORLD, _world_size

@@ -249,3 +249,33 @@ def test_no_cache_dir_means_no_arm_persistence(tmp_path):
     assert rp._arms_load(None) == {}
     rp._arms_save(None, {"a": {}})            # must not raise, must not create
     assert not list(tmp_path.iterdir())
+
+
+def test_cache_key_covers_attention_geometry():
+    """gp/gd change the features and leave no trace in the weights.
+
+    CLAUDE.md records that `serial`, `rope_split`, `gp` and `gd` "leave NO trace
+    in the weights", so two models differing only in block size share a weights
+    digest. They do not share features: the grouped attention's partition is a
+    function of gp/gd. Before this was in the key, a block-size sweep run into
+    one --cache-dir scored every arm against the first arm's features.
+    """
+    import importlib.util
+    import pathlib
+
+    spec = importlib.util.spec_from_file_location(
+        "_run_probe", pathlib.Path(__file__).resolve().parents[1]
+        / "scripts" / "run_probe.py")
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except SystemExit:                      # argparse at import; the fn is enough
+        pass
+    base = dict(trained="abc", random="def", layer=12, cell_t="grid_center",
+                pw=16, pt=8, n_bands=4, corpus="/c", dataset_name="sim_wire",
+                half=True, truth="/t", corpus_ident="x", dom_threshold=0.5,
+                serial=True, rope_split=False, gp=1024, gd=2048)
+    k = mod._cache_key(**base)
+    for field, other in (("gp", 2048), ("gd", 4096), ("rope_split", True)):
+        assert mod._cache_key(**{**base, field: other}) != k, \
+            f"{field} does not change the cache key"

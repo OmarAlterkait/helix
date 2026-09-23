@@ -158,6 +158,14 @@ def _cache_key(**parts):
     two arms against two different floors. What is deliberately NOT in here is
     ``--max-events``: events are cached by index in the truth artifact's own
     order, so a 400-event run reuses a 100-event run's chunks.
+
+    ``serial``/``rope_split``/``gp``/``gd`` are in here for a reason the weight
+    digest cannot cover: CLAUDE.md records that those four "leave NO trace in
+    the weights", so two models that differ only in attention block size have
+    the SAME digest and produced the same key. They do not produce the same
+    features -- the grouped attention's partition is a function of ``gp``/``gd``
+    -- so a block-size sweep run into one ``--cache-dir`` silently scored every
+    arm against the first arm's features.
     """
     blob = json.dumps(parts, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
@@ -379,6 +387,10 @@ def main(argv=None):
             trained=_weights_digest_or_none(model_t),
             random=_weights_digest_or_none(model_r),
             layer=a.layer, cell_t=pcfg.cell_t, pw=pcfg.pw, pt=pcfg.pt,
+            # Not recoverable from the weights -- see the docstring.
+            serial=getattr(model_t, "gp", None) is not None,
+            rope_split=getattr(model_t, "rope_split", None),
+            gp=getattr(model_t, "gp", None), gd=getattr(model_t, "gd", None),
             n_bands=pcfg.n_bands, corpus=corpus, dataset_name=a.dataset_name,
             # Precision is part of the key: a half cache and a full one hold
             # different numbers, so they must not be read as one another's.
