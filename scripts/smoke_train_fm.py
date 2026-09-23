@@ -88,6 +88,12 @@ def main(argv=None):
                          "at a full event on the m113 config — cap it to fit.")
     ap.add_argument("--d", type=int, default=256)
     ap.add_argument("--blocks", type=int, default=4)
+    ap.add_argument("--fast-path", action="store_true",
+                    help="permuted-residual forward + sparse-active head "
+                         "(helix.model.fastpath / .head). The trunk is "
+                         "bit-exact; the head re-orders an fp32 sum. Smoking "
+                         "BOTH is the point: the fast path had never been run "
+                         "through a training loop, only through a benchmark.")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--wd", type=float, default=0.05)
     a = ap.parse_args(argv)
@@ -115,7 +121,8 @@ def main(argv=None):
                mup=True, d_base=128)
     # rope_split is explicit for the same reason the configs pin it: it leaves no
     # trace in the weights, and defaulting it is what made m113 unevaluable.
-    model = build_fm(cfg, serial=True, rope_split=False).to(dev)
+    model = build_fm(cfg, serial=True, rope_split=False,
+                     fast_path=a.fast_path).to(dev)
     # The one bins loader, in helix.integrations.pimm.model. This grew its own
     # copy -- an artifact branch and a sidecar branch -- in the same change that
     # was fixing a "one reader" bug. Two readers is what the bug was.
