@@ -134,6 +134,15 @@ def _blocks(model):
     if not getattr(model, "compile_blocks", False):
         return self_block, cross_block
     if not _COMPILED:
+        # Room for every variant. Measured: each block function specialises on a
+        # mod-8 alignment of the group size, a fusion-size threshold and grad
+        # mode (train vs eval) -- 8 recompiles per rank, exactly dynamo's default
+        # limit, and PAST the limit it runs that function eagerly without saying
+        # so. Recompiles all landed in the first 500 steps; this keeps them there.
+        import torch._dynamo as _dyn
+        for knob in ("recompile_limit", "cache_size_limit"):
+            if hasattr(_dyn.config, knob):
+                setattr(_dyn.config, knob, max(64, getattr(_dyn.config, knob)))
         _COMPILED["self"] = torch.compile(self_block, dynamic=True)
         _COMPILED["cross"] = torch.compile(cross_block, dynamic=True)
     return _COMPILED["self"], _COMPILED["cross"]

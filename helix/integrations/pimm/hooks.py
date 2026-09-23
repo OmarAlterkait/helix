@@ -215,6 +215,7 @@ class WeightEMA(HookBase):
         self.max_drift = max_drift
         self.on_drift = on_drift
         self._shadow = None
+        self._plan = None     # (shadows, live params, other keys, live tensors), built once
         self._step = 0
         self._pnames = None
 
@@ -356,21 +357,43 @@ class WeightEMA(HookBase):
         if comm.get_rank() != 0:
             return
         self._step = int(getattr(self.trainer, "global_step", self._step + 1))
-        sd = self._model().state_dict()
         if self._shadow is None:
+            sd = self._model().state_dict()
             self._shadow = {k: v.detach().clone().float() for k, v in sd.items()}
             return
         d = self.decay
-        avg = self._averaged_names()
-        for k, v in sd.items():
+        if self._plan is None:
+            # Built ONCE. state_dict() tensors alias the live parameters' storage
+            # and the optimizer updates in place, so the references stay current.
+            # Rebuilding the dict and looping per tensor every step was hundreds
+            # of kernel launches and a Python loop on rank 0 alone -- which, in a
+            # launch-bound step, made rank 0 the straggler every other rank waited
+            # for at the all-reduce.
+            sd = self._model().state_dict()
+            avg = self._averaged_names()
+            shadows, live, other = [], [], {}
+            for k, v in sd.items():
+                sh = self._shadow.get(k)
+                if sh is not None and sh.device != v.device:
+                    sh = sh.to(v.device)                  # belt and braces
+                    self._shadow[k] = sh
+                if (sh is not None and k in avg and v.dtype == torch.float32
+                        and sh.shape == v.shape):
+                    shadows.append(sh); live.append(v.detach())
+                else:
+                    other[k] = v                          # buffers, non-fp32: as before
+            self._plan = (shadows, live, other, avg)
+        shadows, live, other, avg = self._plan
+        if shadows:
+            # sh + (1-d)(v - sh) == sh*d + v*(1-d): the same update, a handful of
+            # kernels for all parameters, and exactly v when sh == v (no drift).
+            torch._foreach_lerp_(shadows, live, 1.0 - d)
+        for k, v in other.items():
             sh = self._shadow.get(k)
-            if sh is not None and sh.device != v.device:
-                sh = sh.to(v.device)                  # belt and braces
-                self._shadow[k] = sh
-            if sh is None or k not in avg or not v.is_floating_point():
-                self._shadow[k] = v.detach().clone().float()
-            else:
+            if sh is not None and v.is_floating_point() and k in avg:
                 sh.mul_(d).add_(v.detach().float(), alpha=1.0 - d)
+            else:
+                self._shadow[k] = v.detach().clone().float()
         self._maybe_save()
 
     def _maybe_save(self):
