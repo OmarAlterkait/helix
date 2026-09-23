@@ -724,6 +724,84 @@ particular.
 
 This was not on any review's list. It came out of a sanity check.
 
+### I5-I7 — the rest of the free diagnostics
+
+**I5, plane-pure blocks (settles §1.5 for good).** Recomputing co-block recall
+under a partition that never spans a plane:
+
+| | plane-major layers | drift layers | union |
+|---|---:|---:|---:|
+| shipped | 0.0704 | 0.9913 | **1.0000** |
+| plane-pure | **0.0000** | 0.9913 | **1.0000** |
+
+The straddle IS the plane-major layers' only cross-plane contact — so my reading
+of I2 was right about the mechanism — but the union does not move, because the
+drift layers deliver every pair on their own. §1.5 is neither the cleanup the
+review proposed nor the regression I called it. It costs nothing. Both readings
+were overstated.
+
+**I6, the metric and three tests on the existing checkpoint.**
+
+*The categorical head is calibrated.* Over 5.4M held-out slots the PIT has
+**mean 0.512, std 0.289** against the 0.5 / 0.2887 a uniform PIT gives. This is
+the single most consequential measurement in this document: the read-back is a
+posterior mean, a posterior mean is MMSE-optimal by construction, and the
+forecast is calibrated — so **`var_expl` = 0.708 is at its Bayes limit and no
+loss change can raise it.** `docs/SCIENCE.md`'s "calibrated posterior" diagnosis
+is now measured rather than argued, and §2's reframing follows: judge objective
+changes on CE/CRPS, and expect their upside in optimisation quality, not in the
+headline number.
+
+*Oracle read-back* `var_expl = 0.999917` over 7.2M slots. Bin resolution costs
+0.008 % of variance. Bin count is closed.
+
+*Pad-mask A/B at inference:* ΔCE **−0.00048** (0.016 %), ΔCRPS −0.00010,
+Δvar_expl +0.00005. The direction confirms §1.1's defect; the magnitude retires
+it as a priority. (Inference only — a training-time cost is unmeasured, but
+bounded low by this.)
+
+*Carrier reconstruction is the OPPOSITE of the Darcet signature.* Matched on
+active-slot count, the massive-activation tokens reconstruct **better**:
+
+| active slots | carrier CE | other CE |
+|---:|---:|---:|
+| 1 | **0.352** | 0.602 |
+| 2 | **0.597** | 1.199 |
+| 3 | **0.886** | 1.965 |
+
+They are not sacrificed scratch space. With the layer sweep below, §9b I4's
+register-token reading does not survive its own follow-up.
+
+**The probe layer sweep** (`d_over_geo_r`, geometry floor `fisher_r` = 0.1067):
+
+| layer | `d_over_geo_r` | massive-activation tokens |
+|---:|---:|---:|
+| 6 | **−0.0106** | 0 |
+| 9 | +0.3500 | 134 |
+| 12 | +0.3327 | 5,421 |
+
+Layer 6 — the last one free of massive activations — is *at the geometry floor*.
+L9 and L12 differ by 1.5 SEM. So the pollution is not measurably costing the
+probe, and "probe an earlier layer" is not a free win.
+
+### The probe's resolving power — read this before designing any experiment
+
+The geometry arm's per-group r has **std 0.344 over 897 groups**, so the
+standard error on the mean is **0.0115**.
+
+| effect size | groups needed | ≈ events |
+|---:|---:|---:|
+| 0.03 | 526 | ~90 |
+| 0.02 | 1,183 | ~200 |
+| 0.01 | 4,733 | **~790 — more than the 388-event probe split contains** |
+
+**The probe cannot adjudicate anything below ~0.013 on this corpus, ever.** A
+model-size change clears that comfortably; an objective-side change almost
+certainly does not. That is why CRPS and the per-slot CE — means over millions
+of token-slots, with standard errors orders of magnitude tighter — belong in
+`CoeffFMEvaluator` permanently, and why several plausible-sounding experiments
+are underpowered by construction rather than by budget.
+
 ## 10. Ranked plan
 
 **Free, no training.**

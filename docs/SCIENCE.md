@@ -1,5 +1,16 @@
 # Science record
 
+> **The posterior-width diagnosis is now measured.** Over 5.4M held-out slots
+> the categorical head's PIT has mean 0.512 and std 0.289, against the
+> 0.5 / 0.2887 of a uniform PIT — the forecast is calibrated. The read-back is a
+> posterior mean, which is MMSE-optimal by construction, so `var_expl` = 0.708
+> is at its Bayes limit and **no loss change can raise it**. Reconstruction is
+> finished as an optimisation target; the remaining headroom is in the
+> representation, which is what the probe measures. See
+> `docs/REVIEW_FIELD.md` §9b, and note the probe's resolving power (~0.013)
+> recorded in the same section before designing a comparison against it.
+
+
 What was measured, what it means, and what is still open. Numbers here come from
 runs on this cluster; where a claim was later refuted, the refutation is recorded
 rather than the claim quietly removed.
