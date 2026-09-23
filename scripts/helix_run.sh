@@ -99,6 +99,11 @@ for k in ${HELIX_FORWARD_ENV:-}; do
   fi
 done
 
+# Run from the checkout under every runtime (podman-hpc already did): Python
+# puts the working directory ahead of PYTHONPATH, so a caller standing in another
+# checkout would otherwise import that tree's code.
+cd "$HELIX_ROOT"
+
 case "$RUNTIME" in
   apptainer|singularity)
     ARGS=("$RUNTIME" exec --nv)

@@ -11,7 +11,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
-P = "/sdf/data/neutrino/omara/exp/helix/profiling/out"
+from common import prof_out                                  # noqa: E402
+
+P = prof_out()
 d = json.load(open(f"{P}/p23_before_after.json"))
 D = json.load(open(f"{P}/p25_distribution.json"))
 sweep = sorted([r for r in d["synth"] if "speedup" in r], key=lambda r: r["n_cells"])

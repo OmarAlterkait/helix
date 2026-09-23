@@ -1,7 +1,7 @@
 """Stage 2: probe a checkpoint against the per-pixel truth artifact.
 
     python scripts/run_probe.py --checkpoint /path/fm.pt \
-        --corpus /sdf/data/neutrino/omara/coeff_tpc/run_0027575715 \
+        --corpus <corpus run dir> \
         --tag m113 --out probe_results.jsonl
 
 Verifies the truth artifact against the split it claims to describe, extracts

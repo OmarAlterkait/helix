@@ -425,20 +425,26 @@ class FMModel(nn.Module):
                 f"{'losses_cat' if self.n_bins > 0 else 'losses_fused' if self.loss_fused else 'losses'}"
                 f"; helix.model.tokenize.to_fm() emits all of them")
 
-    def _fast_train_ok(self):
-        """Is this instance eligible for the fast training path?
+    def _fast_train_blocker(self):
+        """Why this instance cannot take the fast training path, or None.
 
         Every condition is a capability the fast path does not implement, not a
         preference: it is written for the grouped/serial attention (``_sched``),
         the categorical head, FiLM conditioning, and the masked-only objective.
-        Anything else silently falls back rather than training something
-        different.
         """
-        return (getattr(self, "fast_path", False)
-                and hasattr(self, "_sched")          # SerialFMModel only
-                and self.n_bins > 0
-                and not self.vis_w
-                and self.cond != "adaln")
+        if not hasattr(self, "_sched"):
+            return "this is not the serial (grouped-attention) model"
+        if self.n_bins <= 0:
+            return "the value head is not categorical (n_bins=0)"
+        if self.vis_w:
+            return "vis_w > 0 needs the visible-slot pairs, which it does not form"
+        if self.cond == "adaln":
+            return "cond='adaln' is not implemented there"
+        return None
+
+    def _fast_train_ok(self):
+        """Requested AND eligible. forward() raises when requested but not."""
+        return getattr(self, "fast_path", False) and self._fast_train_blocker() is None
 
     def forward(self, batch, tok_mask=None):
         """pimm Trainer contract: ``model(batch) -> dict`` carrying ``loss``.
@@ -450,6 +456,15 @@ class FMModel(nn.Module):
         B.setdefault("n_cells", B["plane_id"].shape[0])
         self.require_batch_keys(B)
         m = self.make_mask(B) if tok_mask is None else tok_mask
+        # A requested fast path that cannot be honoured RAISES rather than
+        # falling back: the fallback trains at the old speed and roughly twice
+        # the memory, so a run sized for the fast path -- step budgets, and the
+        # max_event_size it no longer needs -- would silently be the wrong run.
+        if getattr(self, "fast_path", False):
+            why = self._fast_train_blocker()
+            if why is not None:
+                raise ValueError(f"fast_path=True, but {why}. Set fast_path=False "
+                                 f"for this configuration.")
         if self._fast_train_ok():
             from helix.model.fastpath import forward_feat as _fast_feat
             from helix.model.head import cat_head_sparse
@@ -480,6 +495,22 @@ class FMModel(nn.Module):
 
 for _k, _v in _TRAIN_OPTS.items():       # class defaults; build_fm overrides per instance
     setattr(FMModel, _k, _v)
+
+
+def fm_keys():
+    """Every model-config key build_fm consumes: FMModel and SerialFMModel
+    constructor parameters, the train options, and ``serial``.
+
+    build_fm IGNORES anything else, deliberately -- it also rebuilds models from
+    checkpoint metadata, which carries fields that are not arguments. A training
+    config is different: every key in it is meant to do something, so the
+    training entry point checks against this set rather than ignoring.
+    """
+    import inspect
+    from helix.model.serial import SerialFMModel
+    return ((set(inspect.signature(FMModel.__init__).parameters)
+             | set(inspect.signature(SerialFMModel.__init__).parameters)
+             | set(_TRAIN_OPTS) | {"serial"}) - {"self", "args", "kw"})
 
 
 def build_fm(cfg=None, **kw):

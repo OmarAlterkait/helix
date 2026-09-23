@@ -259,8 +259,21 @@ def gpu_info():
                 smcount=p.multi_processor_count, torch=torch.__version__)
 
 
+def prof_out():
+    """Where profiling results go: $PROF_OUT, else <HELIX_EXP>/profiling/out.
+
+    Resolved through helix.paths like every other root, so it is right on any
+    site and names no one's directory. No site and no $PROF_OUT fails loudly.
+    """
+    env = os.environ.get("PROF_OUT")
+    if env:
+        return env
+    from helix.paths import exp
+    return str(exp("profiling", "out"))
+
+
 def emit(tag, payload):
-    out = os.environ.get("PROF_OUT", "/sdf/data/neutrino/omara/exp/helix/profiling/out")
+    out = prof_out()
     os.makedirs(out, exist_ok=True)
     path = os.path.join(out, f"{tag}.json")
     payload = dict(payload)

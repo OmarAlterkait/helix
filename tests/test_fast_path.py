@@ -151,7 +151,7 @@ def test_gradients_match():
 
 def test_fast_train_path_declines_what_it_cannot_do():
     """Every gate is a capability, not a preference: anything the fast head does
-    not implement must fall back rather than train a different objective."""
+    not implement is declined rather than trained as a different objective."""
     m = _model()
     m.fast_path = True
     assert m._fast_train_ok()
@@ -160,3 +160,30 @@ def test_fast_train_path_declines_what_it_cannot_do():
     m.vis_w = 0.0
     m.n_bins = 0
     assert not m._fast_train_ok(), "the sparse head is categorical-only"
+
+
+def test_requested_but_ineligible_fast_path_raises():
+    """A requested fast path must take effect or refuse. Falling back would run
+    at the old speed and memory under a config sized for the fast one."""
+    m = _model()
+    m.fast_path = True
+    m.vis_w = 0.5
+    with pytest.raises(ValueError, match="vis_w"):
+        m(make_batch())
+
+
+def test_fm_keys_names_every_option_build_fm_consumes():
+    """The training entry point validates config keys against this set, so it
+    must include the new option and the serial-only parameters."""
+    from helix.model.fm import fm_keys
+    k = fm_keys()
+    assert {"fast_path", "gp", "gd", "rope_split", "serial", "d", "mask_ratio"} <= k
+    assert not ({"self", "args", "kw"} & k)
+
+
+def test_training_entry_point_refuses_an_unknown_model_key():
+    """A key build_fm would ignore must fail the training build, not train the default."""
+    pytest.importorskip("pimm")
+    from helix.integrations.pimm.model import build_coeff_fm
+    with pytest.raises(TypeError, match="fast_pth"):
+        build_coeff_fm(**SMALL, fast_pth=True)

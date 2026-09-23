@@ -28,8 +28,7 @@ import helix.model.serial as S
 from helix.model.loss import bucketize_bins
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--artifact", default="/sdf/data/neutrino/omara/archive/"
-                                      "fm_coolbase_r1_8run_artifact")
+ap.add_argument("--artifact", required=True, help="a promoted eval artifact dir")
 ap.add_argument("--events", type=int, default=24)
 ap.add_argument("--start", type=int, default=19000, help="held-out end of the corpus")
 A = ap.parse_args()

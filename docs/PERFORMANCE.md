@@ -10,8 +10,9 @@ Two GPUs: **A100-SXM4-40GB** (`ampere`, the production card) and **H200 141GB**
 
 Scripts are in `tools/profile/`; each writes a JSON next to its log. Reproduce with
 
-    sbatch --partition ampere --account <acct> --qos normal --gpus 1 \
-      tools/profile/sbatch_run.sh tools/profile/p1_shapes_step.py
+    source scripts/helix_env.sh
+    sbatch -A "$HELIX_SLURM_TRAIN_ACCOUNT" -q "$HELIX_SLURM_TRAIN_QOS" --gpus 1 -o <log> \
+      tools/profile/sbatch_run.sh p1_shapes_step.py
 
 Raw JSON for every table is under
 `$HELIX_EXP/profiling/out/` (A100) and `out_h200/` (H200), with the slurm logs
@@ -1261,8 +1262,9 @@ considerably larger. That is a better use of 40 GB than six events.
   read as evidence of launch-bounding — see the caution in §4. §4's token-count
   sweep is the measurement that separates the two.
 * The `torch.compile` rows were produced by injecting a setuptools wheel on
-  `sys.path` (`tools/profile/sbatch_run_setuptools.sh`), not by rebuilding the
-  image. A real fix goes in `container/install.sh`.
+  `sys.path` from one user's S3DF directory, not by rebuilding the image; that
+  launcher has been removed (it is in git history). A real fix goes in
+  `container/install.sh`.
 * The event-aware prototype is a measurement, not a merge candidate: it lives in
   `tools/profile/`, it has no test, and the decoder's per-event exactness (§8)
   is unfinished.

@@ -24,8 +24,7 @@ import helix.model.serial as S
 from helix.model.fm import rope_angles
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--ckpt", default="/sdf/data/neutrino/omara/exp/helix/"
-                                  "coeff-fm-cooldown-r1-8run/model/model_ema.pth")
+ap.add_argument("--ckpt", required=True, help="a trained checkpoint (.pth)")
 ap.add_argument("--events", type=int, default=4)
 A = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "cpu"

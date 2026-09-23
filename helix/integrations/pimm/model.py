@@ -43,7 +43,17 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
         **cfg: architecture kwargs for ``helix.model.build_fm``.
     """
     from helix.model import build_fm
+    from helix.model.fm import fm_keys
     from helix.model.artifact import inspect, load
+
+    # Config keys only (checkpoint metadata may carry extras). build_fm ignores
+    # unknown keys, so an option this checkout lacks would silently do nothing.
+    unknown = sorted(set(cfg) - fm_keys())
+    if unknown:
+        raise TypeError(
+            f"model config key(s) {unknown} are not FM parameters or train "
+            f"options in this checkout ({__file__}); build_fm would drop them "
+            f"silently. Known: {sorted(fm_keys())}")
     from helix.model.checkpoint import apply_bins, load_state_dict
 
     art = None
