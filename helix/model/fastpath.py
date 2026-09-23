@@ -117,6 +117,28 @@ def cross_block(blk, qp, kvp, qcos, qsin, kcos, ksin, nb, gq, gk):
 
 # ------------------------------------------------------------------ forward
 
+_COMPILED = {}
+
+
+def _blocks(model):
+    """(self_block, cross_block), compiled when the model asks for it.
+
+    One torch.compile per process, dynamic=True: the token count changes every
+    step, and with shapes symbolic a new count does not recompile. Every block
+    shares ONE graph -- inline_inbuilt_nn_modules makes parameters graph inputs
+    rather than guarding on each module -- verified in the image as 1 frame,
+    1 graph, 0 recompiles over 12 blocks x 4 token counts. Compiling the whole
+    block is what pays (docs/PERFORMANCE.md §7c): the MLP alone is already two
+    GEMMs and a GELU, and there is nothing to fuse across.
+    """
+    if not getattr(model, "compile_blocks", False):
+        return self_block, cross_block
+    if not _COMPILED:
+        _COMPILED["self"] = torch.compile(self_block, dynamic=True)
+        _COMPILED["cross"] = torch.compile(cross_block, dynamic=True)
+    return _COMPILED["self"], _COMPILED["cross"]
+
+
 def forward_feat(model, B, tok_mask, masked_only=False):
     """``SerialFMModel.forward_feat``, permuted.
 
@@ -128,6 +150,7 @@ def forward_feat(model, B, tok_mask, masked_only=False):
     zero. The probe wants every row, so this is a TRAINING option, never the
     default contract.
     """
+    _self_blk, _cross_blk = _blocks(model)
     hd = model.d // model.heads
     vis = ~tok_mask
     vis_idx = vis.nonzero(as_tuple=True)[0]
@@ -154,7 +177,7 @@ def forward_feat(model, B, tok_mask, masked_only=False):
             tables[key] = rope_tables(atv[tk], awv[tk] if sched[i][2] else None,
                                       xp.dtype)
         cos, sin = tables[key]
-        xp = self_block(blk, xp, cos, sin, nb, g)
+        xp = _self_blk(blk, xp, cos, sin, nb, g)
     xv = xp[last_inv]
 
     qm = model.mask_tok.expand(mask_idx.numel(), model.d)
@@ -175,7 +198,7 @@ def forward_feat(model, B, tok_mask, masked_only=False):
     kcos, ksin = rope_tables(atv[ik], awv[ik], xv.dtype)
     qp, kvp = qm[iq], xv[ik]
     for blk in model.dec:
-        qp = cross_block(blk, qp, kvp, qcos, qsin, kcos, ksin, nb, gq, gk)
+        qp = _cross_blk(blk, qp, kvp, qcos, qsin, kcos, ksin, nb, gq, gk)
     inv = torch.empty(Tq, dtype=torch.long, device=xv.device)
     inv[oq] = torch.arange(Tq, device=xv.device)
     qm = qp[inv]

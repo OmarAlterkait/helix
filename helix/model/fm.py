@@ -53,7 +53,8 @@ from helix.model.mask import make_mask
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
-                   alpha=0.0, beta=0.0, varb=None, fast_path=False)
+                   alpha=0.0, beta=0.0, varb=None, fast_path=False,
+                   compile_blocks=False)
 
 
 class FMModel(nn.Module):
@@ -460,6 +461,9 @@ class FMModel(nn.Module):
         # falling back: the fallback trains at the old speed and roughly twice
         # the memory, so a run sized for the fast path -- step budgets, and the
         # max_event_size it no longer needs -- would silently be the wrong run.
+        if getattr(self, "compile_blocks", False) and not getattr(self, "fast_path", False):
+            raise ValueError("compile_blocks=True compiles the fast path's blocks; it does "
+                             "nothing without fast_path=True. Set both, or neither.")
         if getattr(self, "fast_path", False):
             why = self._fast_train_blocker()
             if why is not None:

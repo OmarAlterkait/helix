@@ -187,3 +187,22 @@ def test_training_entry_point_refuses_an_unknown_model_key():
     from helix.integrations.pimm.model import build_coeff_fm
     with pytest.raises(TypeError, match="fast_pth"):
         build_coeff_fm(**SMALL, fast_pth=True)
+
+
+def test_compile_blocks_without_fast_path_raises():
+    """compile_blocks compiles the fast path's blocks; alone it would do nothing."""
+    m = _model()
+    m.fast_path, m.compile_blocks = False, True
+    with pytest.raises(ValueError, match="compile_blocks"):
+        m(make_batch())
+
+
+def test_compile_blocks_selects_the_compiled_twins():
+    """Creating the wrappers compiles nothing; this checks only the selection."""
+    from helix.model import fastpath as fp
+    m = _model()
+    m.fast_path, m.compile_blocks = True, True
+    s, c = fp._blocks(m)
+    assert s is not fp.self_block and c is not fp.cross_block
+    m.compile_blocks = False
+    assert fp._blocks(m) == (fp.self_block, fp.cross_block)

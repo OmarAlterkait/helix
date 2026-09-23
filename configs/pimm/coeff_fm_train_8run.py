@@ -142,7 +142,11 @@ hooks = [
     dict(type="CheckpointLoader"),
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),
-    dict(type="InformationWriter"),
+    # log_frequency is restated because this list replaces the base's wholesale,
+    # and dropping it here once meant a log line -- and a device sync -- every
+    # step. It is also how often InformationWriter reads device scalars back:
+    # every step is still recorded, in one transfer per interval.
+    dict(type="InformationWriter", log_frequency=200),
     dict(type="WeightEMA", decay=0.9999, save_freq=SAVE_EVERY),
     dict(type="CoeffFMEvaluator", every_n_steps=EVAL_EVERY, max_batches=200),
     dict(type="CheckpointSaver", save_freq=SAVE_EVERY),
