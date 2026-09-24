@@ -125,10 +125,12 @@ scheduler:
     # supported policy". It is a guarantee of minimum progress, not a request.
     time_min: "02:00:00"
     gpus_flag: gpus-per-node
-    # Dataloader workers per GPU. A GPU node has 128 logical CPUs over 4 GPUs;
-    # 16 is half of the 32 per GPU. Measured flat from 1 to 32 -- the only cost
-    # is at 0 -- so this is headroom for a larger corpus, not a tuned value.
-    workers_per_gpu: 16
+    # Dataloader workers per GPU. 4, not 16: the step is launch-bound, and 64
+    # workers per node competing for CPU slowed it once a run read more than a
+    # slice of the corpus -- d512 B=16 over 96k events: 0.173 s/step at 16,
+    # 0.139 at 8, 0.135 at 4, with no data wait at 4 (2026-09-24). The earlier
+    # "flat from 1 to 32" was measured on a 48k-event slice, where it is flat.
+    workers_per_gpu: 4
   corpus:
     account: m5238_g
     constraint: gpu
