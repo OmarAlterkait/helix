@@ -88,6 +88,33 @@ def cross_block(blk, q, kv, qcos, qsin, kcos, ksin, nb, gq, gk, c=None):
 _COMPILED = {}
 
 
+def _detach_dynamo_finalizers_at_exit():
+    """Stop dynamo's guard finalizers from running at interpreter exit.
+
+    Each compiled frame's guards hold a weakref.finalize(obj, invalidate) whose
+    guard manager keeps a NON-owning pointer to its cache entry. At exit the
+    atexit pass runs those finalizers after the entries can already be freed,
+    and invalidate() dereferences the dangling pointer: a SIGSEGV after the
+    run has finished and its checkpoint is complete (torch 2.10; seen in ~half
+    of the runs that loaded weights). Nothing needs invalidating at exit, so
+    they are detached first. atexit runs last-registered-first, so weakref's
+    own exit hook is forced to register before this one.
+    """
+    import atexit
+    import weakref
+
+    weakref.finalize(_detach_dynamo_finalizers_at_exit, lambda: None)
+
+    def _detach():
+        from torch._dynamo.guards import CheckFunctionManager
+        for f, info in list(weakref.finalize._registry.items()):
+            fn = getattr(info.func, "func", info.func)      # functools.partial
+            if getattr(fn, "__func__", None) is CheckFunctionManager.invalidate:
+                f.detach()
+
+    atexit.register(_detach)
+
+
 def _blocks(model):
     """(self_block, cross_block), compiled when ``model.compile_blocks``.
 
@@ -110,6 +137,7 @@ def _blocks(model):
     if not _COMPILED:
         import torch._dynamo as _dyn
         _dyn.config.optimize_ddp = False
+        _detach_dynamo_finalizers_at_exit()
         for knob in ("recompile_limit", "cache_size_limit"):
             if hasattr(_dyn.config, knob):
                 setattr(_dyn.config, knob, max(64, getattr(_dyn.config, knob)))
