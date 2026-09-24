@@ -123,7 +123,7 @@ _CORPUS_ROOT = str(_root("HELIX_CORPUS").parent)
 # phase (Hagele et al. 2024, arXiv:2405.18392; Dremov et al. 2025,
 # arXiv:2508.01483) and the K=3 cooldown -- 12.7% -- was still improving when it
 # ended, so the ladder has to reach above it. The counts are RESOLVED, not
-# guessed: tools/profile/i7_resolve_subsets.py builds the identity split for
+# guessed: scripts/resolve_cooldown_subsets.py builds the identity split for
 # each K and reports it, and its K=3 answer reproduces the 57,059 this file
 # carried as a literal, which is what licenses the rest of the table.
 #
@@ -144,7 +144,7 @@ _K = int(_os_env.get("HELIX_COOLDOWN_RUNS", "3"))
 if _K not in _N_TRAIN_BY_K:
     raise SystemExit(
         f"HELIX_COOLDOWN_RUNS={_K} has no resolved train-event count. Add it by "
-        f"running tools/profile/i7_resolve_subsets.py -- do NOT interpolate, "
+        f"running scripts/resolve_cooldown_subsets.py -- do NOT interpolate, "
         f"the split is keyed on event identity and is not linear in K.")
 RUNS = _corpus_runs(_CORPUS_ROOT)[:_K]
 if len(RUNS) != _K:

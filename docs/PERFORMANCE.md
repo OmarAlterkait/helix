@@ -8,11 +8,10 @@ n_bins=128, `serial=True`, gp=1024, gd=2048, 59,150,848 parameters) on real
 Two GPUs: **A100-SXM4-40GB** (`ampere`, the production card) and **H200 141GB**
 (`hopper`). torch 2.10.0+cu126.
 
-Scripts are in `tools/profile/`; each writes a JSON next to its log. Reproduce with
-
-    source scripts/helix_env.sh
-    sbatch -A "$HELIX_SLURM_TRAIN_ACCOUNT" -q "$HELIX_SLURM_TRAIN_QOS" --gpus 1 -o <log> \
-      tools/profile/sbatch_run.sh p1_shapes_step.py
+The measurement scripts (`tools/profile/p*`, `i1`-`i6`) are on the
+`perf/fast-path` branch, not on main: they compare hand-built variants of a
+formulation that no longer exists, and §7f says where the result lives now. Each
+wrote a JSON next to its log.
 
 Raw JSON for every table is under
 `$HELIX_EXP/profiling/out/` (A100) and `out_h200/` (H200), with the slurm logs
@@ -1076,39 +1075,33 @@ ranks "a bigger model" second after the cooldown:
 5. If the science wants more cross-plane reach, **buy `gp`/`gd`** — it is priced
    in time only and attention is a fifth of the arithmetic.
 
-## 7f. Where the fast path lives, and how to turn it on
+## 7f. Where it lives now
 
-§7b-§7d's changes are implemented on the `perf/fast-path` branch, behind one
-flag, off by default:
+§7b-§7d's changes are no longer an option: they are the model's only
+implementation. The "shipped" column in this document is the formulation they
+replaced.
 
-| module | what it replaces |
+| where | what it replaced |
 |---|---|
-| `helix/model/rope.py` | `layers.apply_rope` — 14 strided kernels become 7 contiguous ones, tables built once per forward instead of per call. **Bit-exact in fp32.** |
-| `helix/model/fastpath.py` | `SerialFMModel.forward_feat` — the residual stream is carried permuted and padded, so a block costs one gather instead of three gathers and a scatter, and the whole decoder costs two gathers and one scatter instead of twelve and four. **Bit-exact.** |
-| `helix/model/head.py` | `losses_cat` at `vis_w == 0` — the value head and its cross-entropy are evaluated only at the `(cell, slot)` pairs the objective weights. Same sum, different accumulation order. |
+| `helix/model/layers.py` `rope_tables` / `apply_rope_tables` | the strided `apply_rope` — tables built once per layout, not per call. **Bit-exact in fp32.** |
+| `helix/model/serial.py` | the per-block gather/scatter — the residual stream is carried in grouped, padded order, one gather per block, and the decoder is permuted once for the whole stack. **Bit-exact**, AdaLN included. |
+| `helix/model/head.py` `cat_head_sparse` | `losses_cat` over the full grid, whenever `n_bins > 0` and `vis_w == 0` — only the masked rows are decoded, and the value head runs only on the slots the objective weights. Same sum, different fp32 accumulation order (<1e-5 relative). |
+| `compile_blocks` (training config: on) | `torch.compile` of `serial.self_block` / `cross_block`, dynamic shapes. |
 
-Turn it on by adding `fast_path=True` to a config's `model` dict; `build_fm`
-applies it as an instance attribute like the other training-policy options.
+`tests/test_serial.py` keeps the replaced formulation as the reference and
+asserts the trunk with `torch.equal` and the objective within a stated
+tolerance. `vis_w > 0` and `n_bins == 0` still use the dense heads, as does the
+evaluator, which needs every row.
 
-**Why it is off by default.** The trunk is bit-exact, but the head's fp32
-summation order is not, so a run with it on is not byte-comparable with one
-without — even though the difference (<0.001 % on the loss across five real
-events) is two orders of magnitude below the step's own backward
-nondeterminism. That is a per-run choice, and `_TRAIN_OPTS` is where per-run
-choices live.
-
-**What it declines to do.** `FMModel._fast_train_ok` gates on the categorical
-head, `vis_w == 0`, FiLM conditioning and `SerialFMModel`; `forward_feat` also
-declines `return_ctx`. Every gate is a capability the fast path does not
-implement, so anything else falls back rather than training a different
-objective. `tests/test_fast_path.py` asserts the trunk equality as
-`torch.equal`, not a tolerance.
+Measured on Perlmutter A100-40GB, B=16 (4 nodes), steady state: 0.217 s/step
+before, 0.170 without compile, 0.139 with (1.56x). Compilation adds ~4-5
+minutes at the start of every job, which pays back after ~10k steps.
 
 **What it deliberately preserves.** The padding contract — `npad = ceil(T/g)*g`
-with the last token duplicated and attended — is reproduced exactly, including
-the `rope_tables(ang_t, None)` behaviour that leaves a disabled axis's dims
-unrotated. Both are defects (`docs/REVIEW_FIELD.md` §1.1, §1.3); fixing them
-changes the model, so they belong to a run, not to a speedup.
+with the last token duplicated and attended — and the `ang_w=None` behaviour
+that leaves a disabled axis's dims unrotated. Both are defects
+(`docs/REVIEW_FIELD.md` §1.1, §1.3); fixing them changes the model, so they
+belong to a run, not to a speedup.
 
 ## 8. Event-aware packing: a working prototype
 

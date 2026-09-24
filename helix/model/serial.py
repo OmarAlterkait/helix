@@ -1,79 +1,113 @@
 """SerialFMModel — the production variant (grouped/serialised attention).
 
-Extracted verbatim from ``fm/model_serial.py``; this is the class the live runs
-used, so it is what ``build_fm`` returns by default.
+FMModel with a grouped 4-order serial encoder and a grouped-cross decoder. It
+reuses ALL FMModel weights (same Block/CrossBlock params), so it warm-starts
+from a full-attention checkpoint.
+
+rope_split=True  -> axial (t,wire) RoPE on plane-order layers, TIME-ONLY on
+                    drift-order layers + decoder (the fix).
+rope_split=False -> global (t,wire) RoPE everywhere (the full-attn behaviour).
+
+Each encoder block attends within groups of ``g`` tokens taken along one of
+four orders; the decoder's masked queries cross-attend visible tokens in
+drift-time groups. Groups are padded to ``npad = ceil(T/g)*g`` with the last
+token repeated, and those pads are attended unmasked.
+
+The residual stream is CARRIED in grouped, padded order. LayerNorm, qkv, the
+projection, the MLP and both residual adds are row-wise, so only attention cares
+about order, and a block costs one gather composing the previous layout with
+this one instead of gathering q, k, v and scattering the output back. The
+decoder's query and key orders are the same in every block, so it is permuted
+once before the stack and back once after. The arithmetic is the plain
+per-block formulation's, bit for bit (tests/test_serial.py keeps that
+formulation as the reference).
 """
-"""SerialFMModel: FMModel with the grouped 3-order serial encoder + grouped-cross decoder.
-Reuses ALL FMModel weights (same Block/CrossBlock params) -> warm-starts from a full-attention ckpt.
-rope_split=True  -> axial (t,wire) RoPE on plane-order layers, TIME-ONLY on drift-order + decoder (the fix).
-rope_split=False -> global (t,wire) RoPE everywhere (matches the full-attn model's behavior).
-"""
-import torch, torch.nn.functional as F
-from helix.model.fm import FMModel, apply_rope, rope_angles
+import torch
+import torch.nn.functional as F
+
+from helix.model.fm import FMModel, rope_angles
+from helix.model.layers import apply_rope_tables, rope_tables
 
 
-def uniform_attn(q, k, v, order, g):
-    T, h, hd = q.shape; npad = ((T + g - 1) // g) * g; nb = npad // g
-    def grp(x):
-        b = x.new_empty(npad, h, hd); b[:T] = x[order]
-        if npad > T: b[T:] = x[order[-1]]
-        return b.view(nb, g, h, hd).permute(0, 2, 1, 3)
-    o = F.scaled_dot_product_attention(grp(q), grp(k.to(q.dtype)), grp(v.to(q.dtype)))
-    o = o.permute(0, 2, 1, 3).reshape(npad, h, hd)[:T]
-    out = o.new_empty(T, h, hd); out[order] = o; return out
+def _pad_idx(order, T, npad):
+    """`order`, then its last token repeated up to `npad`, as one gather index."""
+    return order[torch.arange(npad, device=order.device).clamp(max=T - 1)]
 
 
-def grouped_cross(q, k, v, oq, ok, g):
-    Tq, h, hd = q.shape; Tk = k.shape[0]; nb = (max(Tq, Tk) + g - 1) // g
-    def grp(x, order, T):
-        gg = (T + nb - 1) // nb; npad = nb * gg
-        b = x.new_empty(npad, h, hd); b[:T] = x[order]
-        if npad > T: b[T:] = x[order[-1]]
-        return b.view(nb, gg, h, hd).permute(0, 2, 1, 3)
-    o = F.scaled_dot_product_attention(grp(q, oq, Tq), grp(k.to(q.dtype), ok, Tk), grp(v.to(q.dtype), ok, Tk))
-    gq = ((Tq + nb - 1) // nb); o = o.permute(0, 2, 1, 3).reshape(nb * gq, h, hd)[:Tq]
-    out = o.new_empty(Tq, h, hd); out[oq] = o; return out
+def _inverse(order):
+    inv = torch.empty_like(order)
+    inv[order] = torch.arange(order.numel(), device=order.device)
+    return inv
 
 
-def _self(blk, x, at, aw, order, g, c=None):
-    """Block.forward re-implemented over grouped attention. It MUST mirror every
-    branch Block has, AdaLN included — a missing branch here is silently dead
-    conditioning, not an error."""
-    T, d = x.shape
+def self_block(blk, x, cos, sin, nb, g, c=None):
+    """Block.forward over a stream already in grouped, padded order. It MUST
+    mirror every branch Block has, AdaLN included — a missing branch here is
+    silently dead conditioning, not an error."""
+    P, d = x.shape
     if blk.adaln:
         sa, ba, ga, sm, bm, gm = blk.ada(c).chunk(6, -1)
         hh = blk.n1(x) * (1 + sa) + ba
     else:
         hh = blk.n1(x)
     q, k, v = blk.qkv(hh).chunk(3, -1)
-    q = apply_rope(q.view(T, blk.h, blk.hd), at, aw)
-    k = apply_rope(k.view(T, blk.h, blk.hd), at, aw)
-    o = uniform_attn(q, k, v.view(T, blk.h, blk.hd), order, g)
-    ao = blk.proj(o.reshape(T, d))
+    q = apply_rope_tables(q.view(P, blk.h, blk.hd), cos, sin)
+    k = apply_rope_tables(k.view(P, blk.h, blk.hd), cos, sin)
+    grp = lambda t: t.view(nb, g, blk.h, blk.hd).permute(0, 2, 1, 3)
+    o = F.scaled_dot_product_attention(grp(q), grp(k), grp(v.view(P, blk.h, blk.hd)))
+    ao = blk.proj(o.permute(0, 2, 1, 3).reshape(P, d))
     x = x + (ga * ao if blk.adaln else ao)
     if blk.adaln:
         return x + gm * blk.mlp(blk.n2(x) * (1 + sm) + bm)
     return x + blk.mlp(blk.n2(x))
 
 
-def _cross(blk, q, kv, qat, qaw, kat, kaw, oq, okv, g, c=None):
-    """CrossBlock.forward re-implemented over grouped attention — same mirroring
-    obligation as _self."""
-    Tq, Tk = q.shape[0], kv.shape[0]
+def cross_block(blk, q, kv, qcos, qsin, kcos, ksin, nb, gq, gk, c=None):
+    """CrossBlock.forward over query and key sets already in grouped, padded
+    order — same mirroring obligation as self_block."""
+    Pq, Pk = q.shape[0], kv.shape[0]
     if blk.adaln:
         sa, ba, ga, sm, bm, gm = blk.ada(c).chunk(6, -1)
         hq = blk.nq(q) * (1 + sa) + ba
     else:
         hq = blk.nq(q)
-    qh = apply_rope(blk.q(hq).view(Tq, blk.h, blk.hd), qat, qaw)
+    qh = apply_rope_tables(blk.q(hq).view(Pq, blk.h, blk.hd), qcos, qsin)
     k, v = blk.kv(blk.nk(kv)).chunk(2, -1)
-    kh = apply_rope(k.view(Tk, blk.h, blk.hd), kat, kaw)
-    o = grouped_cross(qh, kh, v.view(Tk, blk.h, blk.hd), oq, okv, g)
-    ao = blk.proj(o.reshape(Tq, blk.h * blk.hd))
+    kh = apply_rope_tables(k.view(Pk, blk.h, blk.hd), kcos, ksin)
+    o = F.scaled_dot_product_attention(
+        qh.view(nb, gq, blk.h, blk.hd).permute(0, 2, 1, 3),
+        kh.view(nb, gk, blk.h, blk.hd).permute(0, 2, 1, 3),
+        v.view(Pk, blk.h, blk.hd).view(nb, gk, blk.h, blk.hd).permute(0, 2, 1, 3))
+    ao = blk.proj(o.permute(0, 2, 1, 3).reshape(Pq, blk.h * blk.hd))
     q = q + (ga * ao if blk.adaln else ao)
     if blk.adaln:
         return q + gm * blk.mlp(blk.n2(q) * (1 + sm) + bm)
     return q + blk.mlp(blk.n2(q))
+
+
+_COMPILED = {}
+
+
+def _blocks(model):
+    """(self_block, cross_block), compiled when ``model.compile_blocks``.
+
+    One torch.compile per process with dynamic shapes, so a new token count does
+    not recompile, and every block shares one graph (parameters are graph
+    inputs). Each function still specialises on a mod-8 alignment of the group
+    size, a fusion-size threshold and grad mode: 8 recompiles per rank, all in
+    the first few hundred steps, which is exactly dynamo's default limit — and
+    past the limit it runs eagerly without saying so. Hence the headroom.
+    """
+    if not model.compile_blocks:
+        return self_block, cross_block
+    if not _COMPILED:
+        import torch._dynamo as _dyn
+        for knob in ("recompile_limit", "cache_size_limit"):
+            if hasattr(_dyn.config, knob):
+                setattr(_dyn.config, knob, max(64, getattr(_dyn.config, knob)))
+        _COMPILED["self"] = torch.compile(self_block, dynamic=True)
+        _COMPILED["cross"] = torch.compile(cross_block, dynamic=True)
+    return _COMPILED["self"], _COMPILED["cross"]
 
 
 class SerialFMModel(FMModel):
@@ -81,14 +115,16 @@ class SerialFMModel(FMModel):
         super().__init__(*args, **kw)
         self.rope_split, self.gp, self.gd = rope_split, gp, gd
 
-    def _sched(self, plane, t, wire):
+    def _layouts(self, plane, t, wire):
+        """The encoder's distinct (order, group size, wire RoPE on) layouts;
+        block i uses ``layouts[i % 4]``."""
         bp = plane.double()
         o_pt = torch.argsort(bp * 1e9 + t.double())
         o_pw = torch.argsort(bp * 1e13 + wire.double() * 1e6 + t.double())
         o_t = torch.argsort(t.double()); o_ts = torch.roll(o_t, self.gd // 2)
         dw = not self.rope_split                                   # drift-layer wire RoPE: off if split
         cell = [(o_pt, self.gp, True), (o_t, self.gd, dw), (o_pw, self.gp, True), (o_ts, self.gd, dw)]
-        return (cell * ((len(self.enc) + 3) // 4))[:len(self.enc)]
+        return cell[:len(self.enc)]
 
     def _emb(self, B, idx=None):
         band, plane = B["band_id"], B["plane_id"]
@@ -100,60 +136,87 @@ class SerialFMModel(FMModel):
             g, b = self.film(band[sel], plane[sel], B["wirefeat"][sel]); x = g * x + b
         return x + self.band_emb(band[sel]) + self.plane_emb(plane[sel])
 
+    def _angles(self, B):
+        hd = self.d // self.heads
+        return (rope_angles(B["t_phys"], hd, *self.lam_t),
+                rope_angles(B["wire_pos"], hd, *self.lam_w))
+
+    def _encode(self, B, idx, at, aw, c, layers=()):
+        """The encoder over rows ``idx`` of B (None = all) -> (x, {layer: x}),
+        both in natural order. ``at``/``aw``/``c`` are already those rows'."""
+        sel = slice(None) if idx is None else idx
+        x = self._emb(B, idx)
+        T = x.shape[0]
+        lay = []
+        for o, g, uw in self._layouts(B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel]):
+            npad = ((T + g - 1) // g) * g
+            pi = _pad_idx(o, T, npad)
+            cos, sin = rope_tables(at[pi], aw[pi] if uw else None, x.dtype)
+            lay.append((pi, _inverse(o), npad // g, g, cos, sin,
+                        None if c is None else c[pi]))
+        # layout j's padded rows, gathered from layout j-1's padded stream
+        step = [lay[j - 1][1][lay[j][0]] for j in range(len(lay))]
+        self_blk, _ = _blocks(self)
+        xp, out = x[lay[0][0]], {}
+        for i, blk in enumerate(self.enc):
+            j = i % len(lay)
+            if i:
+                xp = xp[step[j]]
+            _, inv, nb, g, cos, sin, cp = lay[j]
+            xp = self_blk(blk, xp, cos, sin, nb, g, cp)
+            if i + 1 in layers:
+                out[i + 1] = xp[inv]
+        return xp[inv], out
+
     def encode(self, B):
-        at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
-        aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w)
-        x = self._emb(B); sched = self._sched(B["plane_id"], B["t_phys"], B["wire_pos"])
+        """Per-token encoder representation with ALL tokens visible (no masking).
+        This is the frozen feature the deconvolution probe reads."""
+        at, aw = self._angles(B)
         c = self._cond(B) if self.cond == "adaln" else None
-        for blk, (o, g, uw) in zip(self.enc, sched):
-            x = _self(blk, x, at, aw if uw else None, o, g, c)
-        return x
+        return self._encode(B, None, at, aw, c)[0]
 
     def encode_layers(self, B, layers):
-        at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
-        aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w)
-        x = self._emb(B); sched = self._sched(B["plane_id"], B["t_phys"], B["wire_pos"]); out = {}
+        """Per-token features after each requested encoder block (1-based). {k: (N,d)}."""
+        at, aw = self._angles(B)
         c = self._cond(B) if self.cond == "adaln" else None
-        for i, (blk, (o, g, uw)) in enumerate(zip(self.enc, sched), 1):
-            x = _self(blk, x, at, aw if uw else None, o, g, c)
-            if i in layers: out[i] = x
-        return out
+        return self._encode(B, None, at, aw, c, layers)[1]
 
-    def forward_feat(self, B, tok_mask, return_ctx=False):
-        # The permuted-residual implementation is bit-exact against the body
-        # below (tests/test_fast_path.py asserts max|delta| == 0) and costs one
-        # gather per block instead of three gathers and a scatter. return_ctx
-        # and AdaLN are not implemented there, so they fall back.
-        if (getattr(self, "fast_path", False) and not return_ctx
-                and self.cond != "adaln"):
-            from helix.model.fastpath import forward_feat as _fast_feat
-            return _fast_feat(self, B, tok_mask)
-        N = B["inp"].shape[0]
-        at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
-        aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w)
-        vis = ~tok_mask; vis_idx = vis.nonzero(as_tuple=True)[0]; mask_idx = tok_mask.nonzero(as_tuple=True)[0]
-        xv = self._emb(B, vis_idx); atv, awv = at[vis], aw[vis]
-        sched = self._sched(B["plane_id"][vis], B["t_phys"][vis], B["wire_pos"][vis])
+    def forward_feat(self, B, tok_mask, masked_only=False):
+        """(N, d) decoded features; ``masked_only`` -> (masked rows, their
+        indices), for an objective that reads nothing else."""
+        at, aw = self._angles(B)
+        vis = ~tok_mask
+        vis_idx, mask_idx = vis.nonzero(as_tuple=True)[0], tok_mask.nonzero(as_tuple=True)[0]
         c = self._cond(B) if self.cond == "adaln" else None
-        cv = c[vis] if c is not None else None
-        for blk, (o, g, uw) in zip(self.enc, sched):
-            xv = _self(blk, xv, atv, awv if uw else None, o, g, cv)
+        atv, awv = at[vis], aw[vis]
+        xv, _ = self._encode(B, vis_idx, atv, awv, None if c is None else c[vis])
+
         # CrossMAE decoder (grouped, drift-time): masked queries x-attend visible
         qm = self.mask_tok.expand(mask_idx.numel(), self.d)
-        if c is not None:
-            qm = qm.to(xv.dtype)                # identity enters through AdaLN, not additively
-        else:
+        if c is None:                           # with AdaLN, identity enters there instead
             if self.film is not None:
                 g_, b_ = self.film(B["band_id"][tok_mask], B["plane_id"][tok_mask], B["wirefeat"][tok_mask]); qm = g_ * qm + b_
-            qm = (qm + self.band_emb(B["band_id"][tok_mask]) + self.plane_emb(B["plane_id"][tok_mask])).to(xv.dtype)
-        atm, awm = at[tok_mask], aw[tok_mask]
+            qm = qm + self.band_emb(B["band_id"][tok_mask]) + self.plane_emb(B["plane_id"][tok_mask])
+        qm = qm.to(xv.dtype)
+        Tq, Tk = qm.shape[0], xv.shape[0]
         oq = torch.argsort(B["t_phys"][tok_mask].double()); okv = torch.argsort(B["t_phys"][vis].double())
+        nb = (max(Tq, Tk) + self.gd - 1) // self.gd
+        gq, gk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
+        iq, ik = _pad_idx(oq, Tq, nb * gq), _pad_idx(okv, Tk, nb * gk)
         # Decoder ALWAYS keeps axial (wire) RoPE: it needs the wire address to know which wire it
         # reconstructs -- dropping it froze recon (var_expl ~2%, same as wire_rope=0). rope_split
-        # only affects the ENCODER cross-plane (drift-order) layers, via `dw` in _sched.
-        cm = c[tok_mask] if c is not None else None
+        # only affects the ENCODER cross-plane (drift-order) layers, via `dw` in _layouts.
+        qcos, qsin = rope_tables(at[tok_mask][iq], aw[tok_mask][iq], qm.dtype)
+        kcos, ksin = rope_tables(atv[ik], awv[ik], xv.dtype)
+        cm = None if c is None else c[tok_mask][iq]
+        _, cross_blk = _blocks(self)
+        qp, kvp = qm[iq], xv[ik]
         for blk in self.dec:
-            qm = _cross(blk, qm, xv, atm, awm, atv, awv, oq, okv, self.gd, cm)
-        x = torch.zeros(N, self.d, dtype=xv.dtype, device=xv.device)
+            qp = cross_blk(blk, qp, kvp, qcos, qsin, kcos, ksin, nb, gq, gk, cm)
+        qm = qp[_inverse(oq)]
+
+        if masked_only:
+            return self.dec_norm(qm), mask_idx
+        x = torch.zeros(B["inp"].shape[0], self.d, dtype=xv.dtype, device=xv.device)
         x = x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm)
-        return (self.dec_norm(x), xv) if return_ctx else self.dec_norm(x)
+        return self.dec_norm(x)

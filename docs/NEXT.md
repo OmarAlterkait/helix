@@ -33,7 +33,8 @@ measure an objective-side change. `var_expl` is pinned; the probe is too coarse.
 
 **To test before trusting it.** Reproduce the three numbers above from the
 evaluator on the same held-out split (CE 2.941, CRPS 0.6717, PIT 0.512/0.289) —
-if the evaluator disagrees with `tools/profile/i6_metrics.py`, one of them is
+if the evaluator disagrees with `tools/profile/i6_metrics.py` (on the
+`perf/fast-path` branch), one of them is
 wrong. Then confirm the metric MOVES on a change `var_expl` cannot see; a metric
 that never separates two models is not yet earning its place.
 
@@ -47,9 +48,9 @@ that never separates two models is not yet earning its place.
 
 ## 2. The RoPE bandwidth fix
 
-**Measured.** `helix/model/layers.py:36` — when an axis is disabled,
+**Measured.** `helix/model/layers.py` `rope_tables` — when an axis is disabled,
 `apply_rope` leaves that half of every head **unrotated** rather than
-reallocating it to the live axis. `tests/test_fast_path.py` asserts this
+reallocating it to the live axis. `tests/test_serial.py` asserts this
 behaviour, so it is a fact about the code, not a reading of it.
 
 **The consequence.** The result the production setting rests on — "removing wire

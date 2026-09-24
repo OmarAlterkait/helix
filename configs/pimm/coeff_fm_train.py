@@ -309,6 +309,10 @@ model = dict(
     # m113 masked whole planes on 10% of steps. Without it nothing ever forces
     # cross-plane triangulation — a different pretraining task, not a nudge.
     plane_frac=0.1,
+    # torch.compile of the block functions: ~1.2x steady-state at B=16, for ~5
+    # minutes' compilation at the start of every job (requeues included). Off
+    # for anything short enough that the compile would not pay back (~10k steps).
+    compile_blocks=True,
 )
 
 # betas are NOT AdamW's default here. m113 used (0.9, 0.95) (mae_ddp.py:110);

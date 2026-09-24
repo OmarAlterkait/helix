@@ -12,10 +12,11 @@ its inverse.
 8 below says to re-measure if training moves to that hardware; it has. The
 saturation point moved from ~4,000 cells to ~16,000-24,000, so one event is
 1.4-2x past it rather than 8-10x, and the section-6 work was prototyped
-(`tools/profile/p10_eventaware.py`, bit-exact at K=1) and measured at **1.20x**
+(`tools/profile/p10_eventaware.py` on the `perf/fast-path` branch, bit-exact at K=1) and measured at **1.20x**
 over sequential accumulation at K=6, for 3.6x the memory. The conclusion below
 stands; the margin behind it does not. Two changes that need no batching at all
-are worth 1.30x together and cut memory 42%.
+are worth 1.30x together and cut memory 42%; both are now the model's only
+implementation (`docs/PERFORMANCE.md` §7f).
 
 ---
 
@@ -73,9 +74,9 @@ wants several events resident, **re-measure before acting on this document**.
 `helix/model/serial.py` contains zero references to offsets, batches or event
 boundaries. Attention runs over whatever tokens it is given:
 
-* `_sched` sorts **globally** (`argsort(plane*1e9 + t)`), so tokens from
+* `_layouts` sorts **globally** (`argsort(plane*1e9 + t)`), so tokens from
   different events interleave and share attention groups.
-* `uniform_attn` / `grouped_cross` pad to a multiple of `g` over the **whole**
+* the grouped attention (`serial._encode` / `forward_feat`, via `_pad_idx`) pads to a multiple of `g` over the **whole**
   input, not per event.
 
 Setting `batch_size=2` therefore does not fail — it silently trains a model whose
@@ -133,7 +134,7 @@ Four changes, all in `helix/model/`:
    counts, no leading zero — pimm-data's convention). Absent ⇒ one event ⇒
    today's behaviour exactly.
 
-2. **Event-major ordering in `_sched`.** Vectorised, no Python loop over events:
+2. **Event-major ordering in `_layouts`.** Vectorised, no Python loop over events:
 
    ```python
    o = torch.argsort(key)                                   # within-event key order
@@ -143,7 +144,7 @@ Four changes, all in `helix/model/`:
    `batch_idx` comes from `offset_to_batch(offset)` (helix needs its own
    3-line copy; it must not import pimm-data).
 
-3. **Per-event padding in `uniform_attn` / `grouped_cross`.** They already pad to
+3. **Per-event padding in the grouped attention (`_pad_idx`).** It already pads to
    a multiple of `g` (`npad = ((T + g - 1) // g) * g`); make that per event so no
    attention group ever spans two events. **At B=1 this computes the same `npad`
    as today**, so the single-event path stays bit-identical — check it against
@@ -197,10 +198,10 @@ Reopen this if any of these becomes true:
 
 ## The grouped-attention padding attends its own padding
 
-`helix/model/serial.py:19` (`uniform_attn`) and `:31` (`grouped_cross`) pad the
+`helix/model/serial.py` (`_pad_idx`, for both the encoder and the decoder) pads the
 final block to a multiple of the group size by DUPLICATING the last real token:
 
-    if npad > T: b[T:] = x[order[-1]]
+    order[torch.arange(npad).clamp(max=T - 1)]
 
 and then call `F.scaled_dot_product_attention` with **no mask**, so the real
 tokens in that block attend to the copies. This document previously described

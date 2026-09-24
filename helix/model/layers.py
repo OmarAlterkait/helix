@@ -23,18 +23,36 @@ def rope_angles(pos, dim, lam_min=2.0, lam_max=10000.0):
     return pos[:, None].float() * inv[None, :]                 # (T, half/2)
 
 
+def rope_tables(ang_t, ang_w, dtype=None):
+    """-> (cos, sin), each ``(T, 1, hd/2)``: the time half, then the wire half.
+
+    Built once per token layout rather than inside every block. ``ang_w=None``
+    leaves the wire half unrotated (cos 1, sin 0) rather than reallocating it to
+    time -- a known defect (docs/REVIEW_FIELD.md §1.3), kept because changing it
+    changes the model."""
+    if ang_w is None:
+        c = torch.cat([torch.cos(ang_t), torch.ones_like(ang_t)], -1)
+        s = torch.cat([torch.sin(ang_t), torch.zeros_like(ang_t)], -1)
+    else:
+        c = torch.cat([torch.cos(ang_t), torch.cos(ang_w)], -1)
+        s = torch.cat([torch.sin(ang_t), torch.sin(ang_w)], -1)
+    if dtype is not None:
+        c, s = c.to(dtype), s.to(dtype)
+    return c[:, None, :].contiguous(), s[:, None, :].contiguous()
+
+
+def apply_rope_tables(x, cos, sin):
+    """x: (T, H, hd) rotated pairwise, (2i, 2i+1) by angle i, from precomputed
+    tables. A (T, H, hd/2, 2) view makes this a few contiguous kernels."""
+    T, h, hd = x.shape
+    v = x.view(T, h, hd // 2, 2)
+    a, b = v[..., 0], v[..., 1]
+    return torch.stack([a * cos - b * sin, b * cos + a * sin], -1).view(T, h, hd)
+
+
 def apply_rope(x, ang_t, ang_w):
     """x: (T, H, hd). First half of hd rotated by time, second half by wire."""
-    h2 = x.shape[-1] // 2
-
-    def rot(v, ang):
-        c = torch.cos(ang)[:, None, :].repeat_interleave(2, -1)
-        s = torch.sin(ang)[:, None, :].repeat_interleave(2, -1)
-        v2 = torch.stack([-v[..., 1::2], v[..., 0::2]], -1).reshape_as(v)
-        return v * c + v2 * s
-    xt = rot(x[..., :h2], ang_t)
-    xw = rot(x[..., h2:], ang_w) if ang_w is not None else x[..., h2:]
-    return torch.cat([xt, xw], -1)
+    return apply_rope_tables(x, *rope_tables(ang_t, ang_w))
 
 
 # ---- response conditioning -------------------------------------------------

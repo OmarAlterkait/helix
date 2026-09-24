@@ -105,7 +105,7 @@ cross-plane pairs those blocks create are (latest-drift of plane p,
 earliest-drift of plane p+1) — physically unrelated. The "plane-major" layers
 are not within-plane.
 
-`tools/profile/p10_eventaware.py` already implements per-segment block plans for
+`tools/profile/p10_eventaware.py` (on the `perf/fast-path` branch) already implements per-segment block plans for
 the multi-event case; the same machinery applied per *plane* fixes 1.1, 1.5 and
 the roll wraparound in one change.
 
@@ -607,7 +607,7 @@ by a second agent but not by the one that reported it.
 ## 9b. Measured verdicts
 
 Four of the free diagnostics in §10 have been run. Three changed a verdict above
-and one found something no review asked about. Scripts: `tools/profile/i1`-`i4`.
+and one found something no review asked about. Scripts: `tools/profile/i1`-`i4`, on the `perf/fast-path` branch.
 
 ### I1 — the corpus is not a fixed template. §5's caveat closes.
 
@@ -676,7 +676,7 @@ FLOPs" is wrong about "free": it is a new-run change exactly like the defect.
 
 The change that IS cheap in model terms is pad-MASKING the shipped geometry:
 identical partition, removes the 11 %, costs the flash kernel. That, not the
-`ceil` fix, is what a next run should adopt. `helix/model/fastpath.py`
+`ceil` fix, is what a next run should adopt. `helix/model/serial.py`
 preserves the shipped contract deliberately, and this is why.
 
 ### I4 — the encoder has massive activations, and no register token to put them in.

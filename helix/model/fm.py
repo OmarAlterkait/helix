@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from helix.model.layers import (rope_angles, apply_rope, ResponseFiLM,
                                 Block, CrossBlock)
+from helix.model.head import cat_head_sparse
 from helix.model.loss import losses, losses_fused, losses_cat
 from helix.model.mask import make_mask
 
@@ -42,19 +43,14 @@ from helix.model.mask import make_mask
 # existing consumer is the wrong place to express a per-run choice, so the
 # training recipe opts in explicitly instead.
 #
-# fast_path selects the permuted-residual forward (helix.model.fastpath) and the
-# sparse-active categorical head (helix.model.head). Together they measured
-# 1.33x faster and 0.59x the memory on an A100 at the corpus median event, with
-# the loss unchanged to <0.001% across five real events -- docs/PERFORMANCE.md
-# §7b. It is OFF by default because it is a per-run choice: the trunk is
-# bit-exact but the head's fp32 summation order is not, so a run that turns it
-# on is not byte-comparable with one that did not, even though the difference is
-# two orders of magnitude below the step's own backward nondeterminism.
+# compile_blocks runs the serial model's block functions through torch.compile
+# (dynamic shapes): ~1.2x steady-state for ~5 minutes' compilation per job, so
+# the training config turns it on and everything else (tests, probes, smoke
+# runs) leaves it off.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
-                   alpha=0.0, beta=0.0, varb=None, fast_path=False,
-                   compile_blocks=False)
+                   alpha=0.0, beta=0.0, varb=None, compile_blocks=False)
 
 
 class FMModel(nn.Module):
@@ -259,7 +255,7 @@ class FMModel(nn.Module):
                 out[i] = x
         return out
 
-    def forward_feat(self, B, tok_mask, return_ctx=False):
+    def forward_feat(self, B, tok_mask, masked_only=False):
         # --- conditioning is known for ALL tokens (band/plane/wire/pos are inputs,
         #     not predicted), so it can be applied to visible AND masked positions ---
         N = B["inp"].shape[0]
@@ -300,7 +296,8 @@ class FMModel(nn.Module):
                 qm = blk(qm, xv, atm, awm, atv, awv, cm)          # masked x-attend visible (full set, RoPE both sides)
             x = torch.zeros(N, self.d, dtype=xv.dtype, device=xv.device)
             x = x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm)   # visible=encoder feats, masked=decoded
-            return (self.dec_norm(x), xv) if return_ctx else self.dec_norm(x)
+            x = self.dec_norm(x)
+            return (x[mask_idx], mask_idx) if masked_only else x
 
         # --- (default) full-self-attention decoder over ALL N tokens ---
         xm = self.mask_tok.expand(N, self.d)
@@ -311,7 +308,11 @@ class FMModel(nn.Module):
         x = xm.to(xv.dtype).index_copy(0, vis_idx, xv)           # overwrite visible w/ encoder out
         for blk in self.dec:
             x = blk(x, at, aw, c)                                 # decoder over full N
-        return (self.dec_norm(x), xv) if return_ctx else self.dec_norm(x)   # (N, d) per-cell features
+        x = self.dec_norm(x)                                      # (N, d) per-cell features
+        if masked_only:
+            mask_idx = tok_mask.nonzero(as_tuple=True)[0]
+            return x[mask_idx], mask_idx
+        return x
 
     def raw_heads(self, B, tok_mask):
         """Raw head outputs — the research ``forward`` verbatim, renamed so
@@ -426,27 +427,6 @@ class FMModel(nn.Module):
                 f"{'losses_cat' if self.n_bins > 0 else 'losses_fused' if self.loss_fused else 'losses'}"
                 f"; helix.model.tokenize.to_fm() emits all of them")
 
-    def _fast_train_blocker(self):
-        """Why this instance cannot take the fast training path, or None.
-
-        Every condition is a capability the fast path does not implement, not a
-        preference: it is written for the grouped/serial attention (``_sched``),
-        the categorical head, FiLM conditioning, and the masked-only objective.
-        """
-        if not hasattr(self, "_sched"):
-            return "this is not the serial (grouped-attention) model"
-        if self.n_bins <= 0:
-            return "the value head is not categorical (n_bins=0)"
-        if self.vis_w:
-            return "vis_w > 0 needs the visible-slot pairs, which it does not form"
-        if self.cond == "adaln":
-            return "cond='adaln' is not implemented there"
-        return None
-
-    def _fast_train_ok(self):
-        """Requested AND eligible. forward() raises when requested but not."""
-        return getattr(self, "fast_path", False) and self._fast_train_blocker() is None
-
     def forward(self, batch, tok_mask=None):
         """pimm Trainer contract: ``model(batch) -> dict`` carrying ``loss``.
 
@@ -457,34 +437,20 @@ class FMModel(nn.Module):
         B.setdefault("n_cells", B["plane_id"].shape[0])
         self.require_batch_keys(B)
         m = self.make_mask(B) if tok_mask is None else tok_mask
-        # A requested fast path that cannot be honoured RAISES rather than
-        # falling back: the fallback trains at the old speed and roughly twice
-        # the memory, so a run sized for the fast path -- step budgets, and the
-        # max_event_size it no longer needs -- would silently be the wrong run.
-        if getattr(self, "compile_blocks", False) and not getattr(self, "fast_path", False):
-            raise ValueError("compile_blocks=True compiles the fast path's blocks; it does "
-                             "nothing without fast_path=True. Set both, or neither.")
-        if getattr(self, "fast_path", False):
-            why = self._fast_train_blocker()
-            if why is not None:
-                raise ValueError(f"fast_path=True, but {why}. Set fast_path=False "
-                                 f"for this configuration.")
-        if self._fast_train_ok():
-            from helix.model.fastpath import forward_feat as _fast_feat
-            from helix.model.head import cat_head_sparse
-            assert torch.isfinite(self.bin_edges).all(), \
-                ("n_bins > 0 requires set_bins(edges) before forward() — the "
-                 "edges buffer is still unset (NaN).")
-            feat, rows = _fast_feat(self, B, m, masked_only=True)
-            bce, vloss = cat_head_sparse(self, feat, B, m, rows=rows)
-            return {"loss": bce + vloss, "bce": bce.detach(),
-                    "val": vloss.detach(), "masked_frac": m.float().mean().detach()}
-        occ, val, logvar = self.raw_heads(B, m)
         if self.n_bins > 0:
             assert torch.isfinite(self.bin_edges).all(), \
                 ("n_bins > 0 requires set_bins(edges) before forward() — the "
                  "edges buffer is still unset (NaN). They are training-set "
                  "statistics the model cannot invent.")
+        if self.n_bins > 0 and not self.vis_w:
+            # Only masked rows enter this objective, so only they are decoded,
+            # and the value head is evaluated only on the slots it weights.
+            feat, rows = self.forward_feat(B, m, masked_only=True)
+            bce, vloss = cat_head_sparse(self, feat, B, rows)
+            return {"loss": bce + vloss, "bce": bce.detach(), "val": vloss.detach(),
+                    "masked_frac": m.float().mean().detach()}
+        occ, val, logvar = self.raw_heads(B, m)
+        if self.n_bins > 0:
             bce, vloss = losses_cat(occ, val, B, m, self.bin_edges, vis_w=self.vis_w)
         elif self.loss_fused:
             bce, vloss = losses_fused(occ, val, logvar, B, m, vis_w=self.vis_w,
@@ -538,6 +504,9 @@ def build_fm(cfg=None, **kw):
             f"{opts.get('dec_mode', 'self')!r}); pass serial=False for the "
             f"full-attention model")
     train = {k: opts.pop(k) for k in list(opts) if k in _TRAIN_OPTS}
+    if train.get("compile_blocks") and cls is not SerialFMModel:
+        raise ValueError("compile_blocks compiles the serial model's blocks; "
+                         "the full-attention model (serial=False) has none")
     arch = set(inspect.signature(cls.__init__).parameters) | \
         set(inspect.signature(FMModel.__init__).parameters)
     model = cls(**{k: v for k, v in opts.items() if k in arch and k != "self"})

@@ -430,7 +430,9 @@ def build(art, *, device=None, eval_mode=True):
     from helix.model import build_fm
     from helix.model.checkpoint import load_state_dict
 
-    model = build_fm(dict(art.arch))
+    # compile_blocks is how the training run executed, not what it learned; an
+    # eval rebuild should not pay minutes of compilation for it.
+    model = build_fm({k: v for k, v in art.arch.items() if k != "compile_blocks"})
     if art.state_dict is not None:
         load_state_dict(model, art.state_dict, bins=art.op.bins)
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
