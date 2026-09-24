@@ -239,9 +239,13 @@ def _arm_key(probe, name, a):
     The fit parameters belong here, not in the feature cache's directory name:
     `folds`/`epochs`/`seeds` change the NUMBER but not the features, so changing
     them must invalidate a fitted arm while still reusing the extraction that
-    cost the GPU hour.
+    cost the GPU hour. So must `--max-events`: the feature cache is shared
+    across event counts (chunks are keyed by index), and without it a 200-event
+    run silently reused a 388-event fit and reported it as its own. Absent when
+    unset, so full-run keys written before it stay valid.
     """
-    return f"{probe}:{name}:f{a.folds}:e{a.epochs}:s{a.seeds}:r{a.random_seed}"
+    n = f":n{a.max_events}" if getattr(a, "max_events", 0) else ""
+    return f"{probe}:{name}:f{a.folds}:e{a.epochs}:s{a.seeds}:r{a.random_seed}{n}"
 
 
 def _arms_load(cache_dir):

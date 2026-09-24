@@ -279,3 +279,16 @@ def test_cache_key_covers_attention_geometry():
     for field, other in (("gp", 2048), ("gd", 4096), ("rope_split", True)):
         assert mod._cache_key(**{**base, field: other}) != k, \
             f"{field} does not change the cache key"
+
+
+def test_a_fitted_arm_is_keyed_by_event_count():
+    """The feature cache is shared across --max-events; a fitted arm must not be.
+    A 200-event run once reused a 388-event fit and reported it as its own."""
+    import argparse
+    rp = _rp()
+    a = argparse.Namespace(folds=5, epochs=40, seeds=3, random_seed=0, max_events=0)
+    full = rp._arm_key("mlp", "trained", a)
+    a.max_events = 200
+    part = rp._arm_key("mlp", "trained", a)
+    assert full != part
+    assert full == "mlp:trained:f5:e40:s3:r0"      # full-run keys unchanged
