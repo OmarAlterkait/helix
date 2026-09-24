@@ -93,6 +93,27 @@ def _fit(points):
     return c0, c1
 
 
+def _crop(batch, frac):
+    """One event cut to a contiguous window of `frac` of its cells in drift time.
+
+    Every per-cell tensor is indexed; the sparse (cell, slot, target) triple is
+    dropped because it indexes the uncropped event and the categorical objective
+    reads the dense grid instead."""
+    import torch
+    n = batch["plane_id"].shape[0]
+    k = max(1, int(round(frac * n)))
+    order = torch.argsort(batch["t_phys"])
+    start = int(torch.randint(0, n - k + 1, ()))
+    idx = order[start:start + k].sort().values
+    out = {}
+    for key, v in batch.items():
+        if key in ("cell", "slot", "target", "offset", "n_cells"):
+            continue
+        out[key] = v[idx] if torch.is_tensor(v) and v.dim() and v.shape[0] == n else v
+    out["n_cells"] = k
+    return out
+
+
 def main(argv=None):
     # pimm's own DictAction, not a hand-rolled `k, _, v = s.partition("=")`.
     # The difference is not cosmetic: a hand-rolled split leaves every value a
@@ -122,6 +143,11 @@ def main(argv=None):
                          "the largest B and 2^k at B = max_batch / 2^k.")
     ap.add_argument("--out", default=None, help="append one JSON row here")
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--keep-frac", type=float, default=1.0,
+                    help="crop each event to a random contiguous drift-time "
+                         "window holding this fraction of its cells. Comparing "
+                         "per-event B_simple across fractions says whether the "
+                         "EVENT or the CELL is the unit the noise scale counts.")
     a = ap.parse_args(argv)
 
     import torch
@@ -180,6 +206,8 @@ def main(argv=None):
                 it = iter(loader)
                 raw = next(it)
             batch = move_batch_to_device(raw, device)
+            if a.keep_frac < 1.0:
+                batch = _crop(batch, a.keep_frac)
 
             model.zero_grad(set_to_none=False)
             out = model(batch)

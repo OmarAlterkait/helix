@@ -284,14 +284,20 @@ class WSDCooldownLR(_LambdaLR):
 
     Being a LambdaLR, this scales each param group's own ``base_lr``, so muP's
     per-group ratios survive without the ``max_lr`` expansion OneCycleLR needs.
+
+    ``stable_frac`` holds the LR flat for that fraction of the post-warmup steps
+    before the decay starts, so ONE run can be warmup-stable-decay end to end
+    (e.g. a short branch that must be compared cooled). 0 is the pure cooldown.
     """
 
     def __init__(self, optimizer, total_steps, warmup=0, floor=1e-3,
-                 last_epoch=-1):
+                 stable_frac=0.0, last_epoch=-1):
+        flat = warmup + stable_frac * (total_steps - warmup)
+
         def wsd(s):
             if warmup and s < warmup:
                 return s / warmup                      # research: lr * s / warmup
-            p = (s - warmup) / max(1, total_steps - warmup)
+            p = max(0.0, s - flat) / max(1, total_steps - flat)
             return max(floor, 1.0 - math.sqrt(min(p, 1.0)))
 
         super().__init__(optimizer=optimizer, lr_lambda=wsd, last_epoch=last_epoch)
