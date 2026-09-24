@@ -47,6 +47,17 @@ from __future__ import annotations
 MIN_EVALS = 8
 MIN_SAVES = 2
 
+#: The wall-clock costs the cadences are derived from, measured once and owned
+#: here. Perlmutter A100-40GB, helix 3aa96b2 (one implementation, compiled
+#: blocks), d512, B=16 over four nodes: the steady step, one evaluation of the
+#: 256-event val set (~2-4 s at B=16, longer on fewer ranks), and one save
+#: (3 x 226 MiB: 4 s from four nodes, 11 s from one -- the slower is used).
+#: Re-measure when the model or the card changes; nothing else should restate
+#: them.
+STEP_SECONDS = 0.14
+EVAL_SECONDS = 4.0
+CKPT_SECONDS = 11.0
+
 
 def warmup_steps(steps, d, d_base, base_steps=500):
     """Linear-warmup length, in optimizer steps.
@@ -70,20 +81,18 @@ def warmup_steps(steps, d, d_base, base_steps=500):
     return max(base_steps, min(w, max(1, steps // 5)))
 
 
-def save_every(steps, ckpt_seconds=11.0, step_seconds=0.25, overhead=0.02,
+def save_every(steps, ckpt_seconds=CKPT_SECONDS, step_seconds=STEP_SECONDS, overhead=0.02,
                target_count=20):
     """Checkpoint cadence, in optimizer steps.
 
     A WALL-CLOCK risk decision, not an optimisation one: how much work may a
     preemption destroy, against how much time checkpointing may consume.
 
-    Measured on this model: a save writes 3 x 226 MiB and takes 4 s from a
-    4-node run and 11 s from a 1-node run, against a step of ~0.15-0.26 s.
     Holding checkpoint overhead under `overhead` of wall time needs
 
         save_freq >= ckpt_seconds / (step_seconds * overhead)
 
-    which at the defaults is ~2,200 steps. Independent of batch size, which is
+    which at the measured defaults (CKPT_SECONDS, STEP_SECONDS) is ~3,900 steps. Independent of batch size, which is
     the entire point -- the old floor of 50 steps meant one save every 13 s at
     B=512, and the job would have spent more time deleting checkpoints than
     training.
@@ -100,7 +109,7 @@ def save_every(steps, ckpt_seconds=11.0, step_seconds=0.25, overhead=0.02,
     return min(max(floor, max(1, steps // target_count)), ceiling)
 
 
-def eval_every(steps, eval_seconds=20.0, step_seconds=0.25, overhead=0.02,
+def eval_every(steps, eval_seconds=EVAL_SECONDS, step_seconds=STEP_SECONDS, overhead=0.02,
                target_count=50):
     """Evaluation cadence, in optimizer steps.
 
@@ -117,9 +126,9 @@ def eval_every(steps, eval_seconds=20.0, step_seconds=0.25, overhead=0.02,
 
 
 def cadence(n_train_events, epochs, batch_size, d, d_base, *,
-            warmup_base_steps=500, step_seconds=0.25, overhead=0.02,
-            ckpt_seconds=11.0, save_target_count=20,
-            eval_seconds=20.0, eval_target_count=50):
+            warmup_base_steps=500, step_seconds=STEP_SECONDS, overhead=0.02,
+            ckpt_seconds=CKPT_SECONDS, save_target_count=20,
+            eval_seconds=EVAL_SECONDS, eval_target_count=50):
     """All three, plus the step budget they derive from.
 
     Returns ``dict(STEPS, WARMUP, SAVE_EVERY, EVAL_EVERY)`` so a config can do
