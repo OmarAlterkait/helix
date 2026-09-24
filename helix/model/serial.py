@@ -97,11 +97,19 @@ def _blocks(model):
     size, a fusion-size threshold and grad mode: 8 recompiles per rank, all in
     the first few hundred steps, which is exactly dynamo's default limit — and
     past the limit it runs eagerly without saying so. Hence the headroom.
+
+    optimize_ddp is off because dynamo's DDP optimizer splits a compiled graph
+    at DDP's gradient-bucket boundaries, and with dynamic shapes that split
+    fails to compile (BackendCompilerFailed: 'int' object has no attribute
+    'meta'). It only triggers once one block's parameters exceed a 25 MB bucket
+    -- d768 and up -- which is why d512 never showed it. Each compiled region is
+    one block, so DDP still overlaps its all-reduce across blocks without it.
     """
     if not model.compile_blocks:
         return self_block, cross_block
     if not _COMPILED:
         import torch._dynamo as _dyn
+        _dyn.config.optimize_ddp = False
         for knob in ("recompile_limit", "cache_size_limit"):
             if hasattr(_dyn.config, knob):
                 setattr(_dyn.config, knob, max(64, getattr(_dyn.config, knob)))

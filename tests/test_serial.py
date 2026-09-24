@@ -302,6 +302,10 @@ def test_compile_blocks_selects_the_compiled_blocks():
     assert s is not serial.self_block and c is not serial.cross_block
     m.compile_blocks = False
     assert serial._blocks(m) == (serial.self_block, serial.cross_block)
+    # d768+ blocks exceed a DDP bucket; dynamo's DDP graph split then fails to
+    # compile under dynamic shapes, so it must be off whenever we compile.
+    import torch._dynamo
+    assert torch._dynamo.config.optimize_ddp is False
 
 
 def test_compile_blocks_on_the_full_attention_model_raises():
