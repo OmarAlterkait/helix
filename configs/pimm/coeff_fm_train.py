@@ -421,24 +421,18 @@ _common = dict(
 #   train 19,034   val 577   probe 388   (= 19,999, the whole corpus)
 HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
 
-# Largest event a rank may be handed. Measured on a 40 GB A100: the five
-# largest events in a run (697k-725k coefficients) each run OUT OF MEMORY in one
-# forward/backward, while the median (271k) peaks near 13 GiB. One event per rank
-# means a step draws the p_(1-1/N) size quantile, so at 512 ranks the top 0.1%
-# arrives in roughly every other step -- and a rank that OOMs leaves the other
-# 511 blocked in a collective until the watchdog fires.
+# Largest event a rank may be handed, in coefficients. On the current model it
+# is NOT a memory limit: the largest events in the corpus peak at 17.8 / 26.6 /
+# 35.5 GiB at d512 / d768 / d1024 on a 40 GB A100 (scripts/probe_largest_events.py,
+# 2026-09-23). It is kept because one event per rank makes every step wait for
+# the largest event any rank drew -- at 512 ranks the top 0.1% arrives roughly
+# every other step -- and because d1024 has only ~10% headroom without it.
 #
-# 600,000 drops 183 events of 157,991: 0.12% of events, 0.27% of coefficients.
-# Applied to TRAIN only; val and test keep the full size distribution so the
-# reported metric is not quietly measured on an easier subset.
-#
-# None disables it, which is right on a card with room. Raise it on hbm80g.
-#
-# This is a limit of the CURRENT MODEL on a 40 GB card, not of the data: it is
-# set by where this model's peak memory crosses 40 GB. A more memory-efficient
-# model is planned, and this number is expected to change with it -- re-measure
-# with scripts/probe_largest_events.py on the new model and raise it, or set it
-# to None, rather than carrying 600,000 forward.
+# 600,000 drops 183 events of 157,991: 0.12% of events, 0.27% of coefficients,
+# and keeps at most 41,939 cells (the corpus p99.9 in cells is 40,995; memory
+# follows cells, and the two correlate at 0.975). Applied to TRAIN only; val and
+# test keep the full size distribution so the reported metric is not quietly
+# measured on an easier subset. None disables it.
 MAX_EVENT_SIZE = 600_000
 
 data = dict(
