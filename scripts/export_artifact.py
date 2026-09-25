@@ -115,6 +115,16 @@ def main(argv=None):
               f"filled from PatchConfig defaults ({defaults}) and noted in "
               f"provenance.", file=sys.stderr)
 
+    # The model's input width fixes the cell geometry, so a tokenizer that
+    # disagrees with it is wrong, not a choice: the probe would die on a shape
+    # mismatch at best, and at worst tokenize a different pw*pt that happens to fit.
+    n_slot = art.arch.get("n_slot")
+    if n_slot is not None and op.pw * op.pt != int(n_slot):
+        raise SystemExit(
+            f"{a.export_dir}: tokenizer pw={op.pw} pt={op.pt} gives "
+            f"{op.pw * op.pt} slots but the model has n_slot={n_slot}. The "
+            f"recorded tokenizer is not the one these weights trained on.")
+
     corpus = None
     if a.corpus:
         from helix.data.identity import corpus_identity

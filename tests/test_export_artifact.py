@@ -55,6 +55,17 @@ def test_the_weights_flag_is_not_optional(tmp_path):
         _script().main([src, "-o", str(tmp_path / "art")])
 
 
+def test_a_tokenizer_that_does_not_fit_the_model_is_refused(tmp_path):
+    """n_slot is pw * pt. A pw=32 run whose export recorded the base pw=16 was
+    promoted, and the probe then died on a shape mismatch an hour later."""
+    src = make_pimm_export(str(tmp_path / "exp"))
+    cfg = json.load(open(os.path.join(src, "config.json")))
+    cfg["model"]["n_slot"] = 256
+    json.dump(cfg, open(os.path.join(src, "config.json"), "w"))
+    with pytest.raises(SystemExit, match="n_slot=256"):
+        _script().main([src, "-o", str(tmp_path / "art"), "--weights", "ema"])
+
+
 def test_cell_t_is_required_but_pw_and_pt_are_defaulted(tmp_path):
     """The two halves of the operating point are NOT symmetric.
 

@@ -22,7 +22,8 @@ from helix.model.artifact import (
     FORMATS, READABLE, Artifact, OperatingPoint, detect, inspect, load, save,
 )
 
-ARCH = dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1, dec_blocks=1,
+#: n_slot = pw * pt of the operating point below; export_artifact refuses otherwise.
+ARCH = dict(n_slot=128, n_band=4, n_plane=6, d=32, blocks=1, dec_blocks=1,
             heads=4, dec_mode="cross", n_bins=16)
 #: The operating point every readable fixture below encodes. Identical across
 #: formats on purpose: that is the property being tested.
@@ -132,6 +133,18 @@ def test_the_operating_point_survives_every_readable_format(fmt, tmp_path):
     art = inspect(_make(fmt, tmp_path))
     assert art.op == OP, f"{fmt}: {art.op} != {OP}"
     assert art.arch["d"] == ARCH["d"] and art.arch["n_band"] == ARCH["n_band"]
+
+
+def test_an_export_reports_the_tokenizer_its_train_split_used(tmp_path):
+    """A patch-size variant restates the splits' transform and leaves the
+    top-level one (the base config's module variable) stale. The train split
+    is what the weights saw; reading the stale one scored a pw=32 model at 16."""
+    d = make_pimm_export(str(tmp_path / "export"))
+    cfg = json.load(open(os.path.join(d, "config.json")))
+    cfg["data"] = {"train": {"transform": [
+        {"type": "CoeffTokenize", "cfg": dict(TOK, pw=32)}]}}
+    json.dump(cfg, open(os.path.join(d, "config.json"), "w"))
+    assert inspect(d).op.pw == 32
 
 
 @pytest.mark.parametrize("fmt", ["pimm-export", "helix-eval"])

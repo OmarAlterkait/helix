@@ -246,11 +246,18 @@ def export_tokenizer_cfg(path):
     The tokenizer geometry travels in the transform list rather than the model
     section, because it describes how coefficients become tokens, not the
     architecture.
+
+    The TRAIN split's transform is read first: it is what the weights saw. The
+    top-level ``transform`` is only a module variable the base config builds
+    the splits from, so a derived config that restates the splits (a patch-size
+    variant) leaves it stale -- reading it scored a pw=32 model at pw=16.
     """
     cfg_path = _export_config_path(path)
     if cfg_path is None:
         return None
-    for t in (json.load(open(cfg_path)).get("transform") or []):
+    full = json.load(open(cfg_path))
+    train = ((full.get("data") or {}).get("train") or {}).get("transform")
+    for t in (train or full.get("transform") or []):
         if isinstance(t, dict) and t.get("type") == "CoeffTokenize":
             return dict(t.get("cfg") or {})
     return None
