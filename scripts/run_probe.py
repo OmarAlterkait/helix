@@ -309,6 +309,10 @@ def main(argv=None):
                          "arms of an A/B were scored against two different "
                          "controls with nothing recording it.")
     ap.add_argument("--probes", default="mlp,triangulate")
+    ap.add_argument("--save-pred", default=None,
+                    help="directory: write each mlp arm's out-of-fold predictions "
+                         "(u, prediction, event, plane) to <dir>/<tag>_<arm>.npz, "
+                         "refitting any cached arm whose file is missing")
     ap.add_argument("--allow-stale", action="store_true")
     ap.add_argument("--cache-dir", default=None,
                     help="cache extracted features here and RESUME from them. The "
@@ -575,7 +579,9 @@ def main(argv=None):
             # loaded when it is already fitted, so testing availability first
             # would `continue` past a completed arm and drop it from the row.
             k = _arm_key("mlp", name, a)
-            if k in fitted:
+            pred_path = (os.path.join(a.save_pred, f"{a.tag}_{name}.npz")
+                         if a.save_pred else None)
+            if k in fitted and not (pred_path and not os.path.exists(pred_path)):
                 row[name] = fitted[k]
                 print(f"  [mlp] {name:8s} fisher_r={row[name]['fisher_r']:+.4f} "
                       f"(cached)", flush=True)
@@ -586,6 +592,11 @@ def main(argv=None):
             oof, info = fit_probe(X, y, event, plane, n_folds=a.folds,
                                   epochs=a.epochs, seeds=seeds)
             r, rs, minfo = fisher_r(y, oof, event, plane)
+            if pred_path:
+                os.makedirs(a.save_pred, exist_ok=True)
+                np.savez_compressed(pred_path, u=np.asarray(y, np.float32),
+                                    pred=np.asarray(oof, np.float32),
+                                    event=np.asarray(event), plane=np.asarray(plane))
             row[name] = dict(fisher_r=round(r, 4),
                              per_group_r_std=round(float(rs.std()), 4),
                              n_groups=minfo["n_groups"],

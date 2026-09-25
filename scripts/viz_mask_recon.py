@@ -129,9 +129,11 @@ def main():
     ap.add_argument("--n-planes", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--weights", default="ema")
-    ap.add_argument("--planes", type=int, nargs="*", default=None)
-    ap.add_argument("--mask-plane", type=int, default=None,
-                    help="mode=plane only: HIDE exactly this plane_gid instead of "
+    ap.add_argument("--planes", type=int, nargs="*", default=None,
+                    help="planes to DRAW; -1 = every plane in the event")
+    ap.add_argument("--mask-plane", nargs="*", default=None,
+                    help="mode=plane only: HIDE exactly these plane_gids, one case "
+                         "each (or 'all': every plane in the event) instead of "
                          "letting make_mask draw one. --planes chooses what is "
                          "DRAWN, which is a different thing and does not control "
                          "the mask. Sweeping --seed varies the hidden plane only "
@@ -141,16 +143,26 @@ def main():
     ap.add_argument("--zoom", action="store_true",
                     help="crop to a window instead of the whole plane; the "
                          "full plane is the default because that is what the "
-                         "corpus 2x2 figures show")
+                         "corpus 2x2 figures show. Same as --views zoom.")
+    ap.add_argument("--views", nargs="+", default=None, choices=["full", "zoom"],
+                    help="draw each case in these views (e.g. full zoom)")
     ap.add_argument("--value", default="mean", choices=["mode", "mean"],
                     help="categorical read-out. 'mean' closes charge and is "
                          "what the reference reports; 'mode' is the reference's "
                          "bright-pixel-fidelity read-out.")
+    ap.add_argument("--wire", action="store_true",
+                    help="also draw, for the wire with the most hidden charge, "
+                         "the truth waveform against the predicted mean and its "
+                         "exact +-1/2 sigma band, plus the predicted distribution "
+                         "of a few of its masked coefficients")
     ap.add_argument("--out", required=True)
     ap.add_argument("--cell-t", default=None, choices=("grid_center", "centroid"),
                     help="tokenizer cell_t, REQUIRED when the checkpoint records no "
                          "tokenizer. helix configs train grid_center.")
+    ap.add_argument("--per-event-dirs", action="store_true",
+                    help="write each event's figures under <out>/ev<i>/")
     a = ap.parse_args()
+    views = a.views or (["zoom"] if a.zoom else ["full"])
 
     import torch
     import h5py
@@ -216,18 +228,32 @@ def main():
         occ_t = tok["occ"].astype(bool)
         valid = tok["valid"].astype(bool)
         inp, tgt = tok["inp"], tok["tgt"]
+        ev_out = os.path.join(a.out, f"ev{ev_i}") if a.per_event_dirs else a.out
+        os.makedirs(ev_out, exist_ok=True)
 
+        # One case per (mode, hidden plane). --mask-plane turns plane mode into
+        # one deterministic case per named plane instead of make_mask's draw.
+        present = sorted(np.unique(tok["cell_gid"]).tolist())
+        cases = []
         for mode in modes:
+            if mode == "plane" and a.mask_plane:
+                hide = present if a.mask_plane == ["all"] else [int(g) for g in a.mask_plane]
+                cases += [("plane", g) for g in hide]
+            else:
+                cases.append((mode, None))
+
+        clean_cache = None
+        for mode, hide in cases:
             gen = torch.Generator(device=dev).manual_seed(a.seed)
             m = model.make_mask(Bt, mode=mode, ratio=a.ratio,
                                 n_planes=a.n_planes, gen=gen)
-            if mode == "plane" and a.mask_plane is not None:
+            if hide is not None:
                 # Deterministic override of make_mask's randperm draw. Same shape
                 # and dtype, so everything downstream is unchanged; only WHICH
                 # plane is hidden differs.
-                m = Bt["plane_id"] == int(a.mask_plane)
+                m = Bt["plane_id"] == int(hide)
                 if not bool(m.any()):
-                    print(f"    plane {a.mask_plane}: absent from this event, "
+                    print(f"    plane {hide}: absent from this event, "
                           f"skipping", flush=True)
                     continue
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16,
@@ -235,10 +261,11 @@ def main():
                 occ_logit, logits, _ = model.raw_heads(Bt, m)
             occ_logit = occ_logit.float().cpu().numpy()
             # UNITS OF SIGMA (space="ratio"), never asinh — see _centroids.
-            pred = decode_categorical(logits.float().cpu().numpy(),
-                                      tok["cell_band"], centroids,
+            logits = logits.float().cpu().numpy()
+            pred = decode_categorical(logits, tok["cell_band"], centroids,
                                       readout=a.value)
-            del logits
+            if not a.wire:
+                del logits
             if dev.type == "cuda":
                 torch.cuda.empty_cache()
 
@@ -258,7 +285,9 @@ def main():
             # the nonlinearity this decode path exists to avoid.
             v_recon = np.where(mask, pred, np.sinh(inp))
 
-            img_clean, n_clean = _images(ce, tok, occ_clean, tgt, gids, ns, pcfg)
+            if clean_cache is None:                     # same for every case
+                clean_cache = _images(ce, tok, occ_clean, tgt, gids, ns, pcfg)
+            img_clean, n_clean = clean_cache
             img_seen, n_seen = _images(ce, tok, occ_seen, inp, gids, ns, pcfg)
             img_recon, n_recon = _images(ce, tok, occ_recon, v_recon, gids, ns,
                                          pcfg, space="ratio")
@@ -277,8 +306,10 @@ def main():
                   f"clean {n_clean:,} seen {n_seen:,} recon {n_recon:,} | "
                   f"RMSE {rmse:.4f} sigma | occ P {prec:.3f} R {rec:.3f}", flush=True)
 
-            if a.planes is not None:
-                planes = a.planes
+            if hide is not None:
+                planes = [int(hide)]
+            elif a.planes is not None:
+                planes = present if a.planes == [-1] else a.planes
             elif mode == "plane":
                 planes = sorted(np.unique(tok["cell_gid"][mask[:, 0]]).tolist())
             else:
@@ -290,8 +321,160 @@ def main():
                 if gid not in img_clean:
                     print(f"    plane {gid}: not in this event, skipped", flush=True)
                     continue
-                _draw(a, gid, img_clean[gid], img_seen[gid], img_recon[gid],
-                      ev_i, ev, mode, rmse, prec, rec, float(mask.mean()))
+                for view in views:
+                    av = argparse.Namespace(**{**vars(a), "zoom": view == "zoom",
+                                               "out": ev_out})
+                    _draw(av, gid, img_clean[gid], img_seen[gid], img_recon[gid],
+                          ev_i, ev, mode, rmse, prec, rec, float(mask.mean()))
+                if a.wire:
+                    _wire_figure(argparse.Namespace(**{**vars(a), "out": ev_out}),
+                                 gid, ev_i, ev, mode, ce, tok, gids, ns, pcfg,
+                                 logits, occ_logit, centroids, mask, pred,
+                                 img_clean[gid], img_seen[gid], img_recon[gid], bl)
+            if a.wire:
+                del logits
+
+
+_PSI = {}
+
+
+def _synthesis_matrix(basis, band_lengths, n_bands):
+    """Psi: one row per kept coefficient position (band, tau), one column per
+    tick -- the waveform one unit coefficient produces. The inverse DWT is
+    linear, so a wire's waveform is c @ Psi. Built once by inverse-transforming
+    unit impulses with the SAME transform reconstruct() uses; it depends only on
+    the basis and the readout length, never on the event."""
+    import pywt
+    key = (basis.wavelet, basis.mode, basis.n_ticks_raw, tuple(int(b) for b in band_lengths), n_bands)
+    if key not in _PSI:
+        bl = [int(b) for b in band_lengths]
+        rows, offs = [], []
+        for b in range(n_bands):
+            n = bl[b]
+            coeffs = [np.zeros((n, bl[j])) for j in range(len(bl))]
+            coeffs[b][np.arange(n), np.arange(n)] = 1.0
+            rows.append(pywt.waverec(coeffs, basis.wavelet, mode=basis.mode,
+                                     axis=-1)[:, :basis.n_ticks_raw])
+            offs.append(sum(bl[:b]))
+        _PSI[key] = (np.concatenate(rows, 0), offs)
+    return _PSI[key]
+
+
+def _wire_figure(a, gid, ev_i, ev, mode, ce, tok, gids, ns, pcfg, logits, occ_logit,
+                 centroids, mask, pred, clean, seen, recon, band_lengths):
+    """One wire, with the model's own uncertainty carried into ADC exactly.
+
+    The head gives every masked coefficient a full distribution: occupancy
+    probability q and a categorical over bins with centroids c. So its mean is
+    q*sum(p c) and its variance q*sum(p c^2) - mean^2 -- no sampling. The wire's
+    waveform is linear in its coefficients, x = c @ Psi, hence
+
+        E[x]   = mu  @ Psi          Var[x] = v @ Psi**2
+
+    exactly, under the one assumption the head itself makes: coefficients are
+    predicted independently. Visible coefficients are known (variance 0).
+
+    Second figure: the predicted distribution of a few masked coefficients on
+    this wire (the wavelet runs along time, so each belongs to one wire).
+    """
+    from helix.model.tokenize import sigma_for_rows
+    pw, pt, nb = pcfg.pw, pcfg.pt, pcfg.n_bands
+    w = int(np.abs(clean - seen).sum(1).argmax())       # most hidden charge
+    Psi, offs = _synthesis_matrix(ce.basis, band_lengths, nb)
+    mu = np.zeros(Psi.shape[0])
+    var = np.zeros(Psi.shape[0])
+
+    # every token slot on this wire: cells of this plane in wire block w // pw,
+    # slot row w % pw
+    cells = np.where((tok["cell_gid"] == gid) & (tok["cell_wb"] == w // pw))[0]
+    sl = np.arange((w % pw) * pt, (w % pw) * pt + pt)
+    picks = []
+    for ci in cells:
+        b = int(tok["cell_band"][ci])
+        sig = float(sigma_for_rows(np.array([gid]), np.array([b]), gids, ns)[0])
+        for s_ in sl:
+            if not tok["valid"][ci, s_]:
+                continue
+            k = offs[b] + int(tok["cell_tb"][ci]) * pt + s_ % pt
+            if not mask[ci, 0]:                         # visible: known exactly
+                if tok["occ"][ci, s_]:
+                    mu[k] = np.sinh(tok["inp"][ci, s_]) * sig
+                continue
+            x = logits[ci, s_].astype(np.float64)
+            p = np.exp(x - x.max()); p /= p.sum()
+            c = np.asarray(centroids, np.float64)[b]
+            q = 1.0 / (1.0 + np.exp(-float(occ_logit[ci, s_])))
+            m1, m2 = q * (p @ c), q * (p @ c ** 2)
+            mu[k], var[k] = m1 * sig, (m2 - m1 ** 2) * sig ** 2
+            if tok["occ"][ci, s_]:
+                picks.append((abs(float(tok["tgt"][ci, s_])), ci, s_, b, p))
+    mean = mu @ Psi
+    std = np.sqrt(np.maximum(var @ Psi ** 2, 0.0))
+
+    tru = clean[w]
+    thr = 0.05 * max(np.abs(tru).max(), np.abs(mean).max(), 1e-9)
+    on = np.abs(tru) > thr
+    z = np.abs(tru - mean) / np.maximum(std, 1e-9)
+    cov1 = float((z <= 1)[on].mean()) if on.any() else np.nan
+    cov2 = float((z <= 2)[on].mean()) if on.any() else np.nan
+    nz = np.where((np.abs(tru) > thr) | (np.abs(mean) > thr))[0]
+    t0, t1 = ((max(nz.min() - 40, 0), min(nz.max() + 40, tru.size)) if nz.size
+              else (0, tru.size))
+    t = np.arange(t0, t1)
+
+    sub = (f"random {a.ratio:.0%} of tokens hidden" if mode == "random"
+           else f"{a.n_planes} whole plane(s) hidden")
+    stem = os.path.join(a.out, f"wire_{a.tag}_ev{ev_i}_{mode}_plane{gid}_w{w}")
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.fill_between(t, mean[t0:t1] - 2 * std[t0:t1], mean[t0:t1] + 2 * std[t0:t1],
+                    color="tab:red", alpha=0.15, lw=0, label="predicted ±2σ")
+    ax.fill_between(t, mean[t0:t1] - std[t0:t1], mean[t0:t1] + std[t0:t1],
+                    color="tab:red", alpha=0.3, lw=0, label="predicted ±1σ")
+    ax.plot(t, seen[w, t0:t1], color="0.6", lw=0.8, ls=":", label="model input (visible only)")
+    ax.plot(t, tru[t0:t1], color="k", lw=1.3, label="clean truth")
+    ax.plot(t, mean[t0:t1], color="tab:red", lw=1.1, label="predicted mean")
+    ax.set_xlabel("time tick"); ax.set_ylabel("ADC")
+    ax.legend(loc="upper right", fontsize=8, ncol=2)
+    ax.set_title(f"{a.tag}  evt{ev:03d}  {sub}\nplane_gid {gid}, wire {w}: truth within "
+                 f"±1σ on {cov1:.0%} and ±2σ on {cov2:.0%} of signal ticks "
+                 f"(68% / 95% if calibrated)\nexact mean and variance through the "
+                 f"linear inverse DWT; coefficients independent, as the head predicts them",
+                 fontsize=9)
+    fig.tight_layout()
+    fig.savefig(f"{stem}_waveform.png", dpi=130)
+    plt.close(fig)
+
+    picks.sort(key=lambda r: -r[0])
+    if len(picks) > 4:
+        picks = picks[:3] + [picks[len(picks) // 2]]
+    if picks:
+        fig, axs = plt.subplots(1, len(picks), figsize=(4.2 * len(picks), 4.2),
+                                squeeze=False)
+        for j, (_, ci, s_, b, p) in enumerate(picks):
+            axj = axs[0, j]
+            tau = int(tok["cell_tb"][ci]) * pt + s_ % pt
+            xs = np.arcsinh(np.asarray(centroids, np.float64)[b])
+            axj.step(xs, p, where="mid", color="tab:blue", lw=1.0,
+                     label="predicted distribution")
+            axj.axvline(float(tok["tgt"][ci, s_]), color="k", lw=1.3, label="truth")
+            axj.axvline(float(np.arcsinh(pred[ci, s_])), color="tab:red", lw=1.0,
+                        ls="--", label="predicted mean")
+            lo, hi = np.searchsorted(np.cumsum(p), [0.001, 0.999])
+            axj.set_xlim(xs[max(lo - 3, 0)], xs[min(hi + 3, xs.size - 1)])
+            axj.set_xlabel("asinh(value / sigma)")
+            axj.set_title(f"band {b}, tick {tau}", fontsize=9)
+            if j == 0:
+                axj.set_ylabel("probability")
+                axj.legend(fontsize=8)
+        fig.suptitle(f"{a.tag}  evt{ev:03d}  {sub}  plane_gid {gid}, wire {w}: "
+                     f"predicted distribution of masked coefficients on this wire "
+                     f"(brightest first)", fontsize=9)
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        fig.savefig(f"{stem}_coefficients.png", dpi=130)
+        plt.close(fig)
+    print(f"    wire {w}: within 1σ {cov1:.2f}, 2σ {cov2:.2f}  wrote "
+          f"{os.path.basename(stem)}_{{waveform,coefficients}}.png", flush=True)
 
 
 def _f0(clean, other):
