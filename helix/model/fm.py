@@ -43,6 +43,14 @@ from helix.model.mask import make_mask
 # existing consumer is the wrong place to express a per-run choice, so the
 # training recipe opts in explicitly instead.
 #
+# act_ckpt recomputes each serial block's activations in the backward pass
+# instead of storing them: ~1.3x the step for a fraction of the activation
+# memory, which is what lets d > 1024 fit a 40 GB card.
+#
+# pad_mask excludes each attention group's padding (copies of its last token)
+# from the keys. Off reproduces the original model exactly; on is a numerics
+# change, so it is a per-run choice (docs/REVIEW_FIELD.md section 1.1).
+#
 # compile_blocks runs the serial model's block functions through torch.compile
 # (dynamic shapes): ~1.2x steady-state for ~5 minutes' compilation per job, so
 # the training config turns it on and everything else (tests, probes, smoke
@@ -50,14 +58,15 @@ from helix.model.mask import make_mask
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
-                   alpha=0.0, beta=0.0, varb=None, compile_blocks=False)
+                   alpha=0.0, beta=0.0, varb=None, compile_blocks=False,
+                   pad_mask=False, act_ckpt=False)
 
 
 class FMModel(nn.Module):
     def __init__(self, n_slot, n_band, n_plane, n_wirefeat=1, d=128, blocks=4,
                  dec_blocks=2, heads=4, film=("band", "plane", "wire"), nll=False, ffn_mult=4,
                  lam_t=(8.0, 4336.0), lam_w=(32.0, 2048.0), cond="film", dec_mode="self",
-                 mup=False, d_base=128, wire_rope=True, n_bins=0):
+                 mup=False, d_base=128, wire_rope=True, n_bins=0, n_sink=0):
         super().__init__()
         self.d, self.n_slot, self.nll, self.cond, self.heads = d, n_slot, nll, cond, heads
         self.lam_t, self.lam_w = lam_t, lam_w     # per-axis RoPE wavelength band (time / wire)
@@ -125,7 +134,8 @@ class FMModel(nn.Module):
         self.plane_emb = nn.Embedding(n_plane, d)
         self.cond_wire = nn.Sequential(nn.Linear(n_wirefeat, d), nn.SiLU()) if adaln else None
         self.mask_tok = nn.Parameter(torch.zeros(d))
-        self.enc = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale) for _ in range(blocks))
+        self.enc = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale, n_sink)
+                                 for _ in range(blocks))
         if dec_mode == "cross":
             self.dec = nn.ModuleList(CrossBlock(d, heads, ffn_mult, attn_scale, adaln) for _ in range(dec_blocks))
         else:

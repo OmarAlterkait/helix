@@ -81,9 +81,17 @@ class ResponseFiLM(nn.Module):
 
 # ---- transformer block (pre-LN, SDPA full attention with RoPE) -------------
 class Block(nn.Module):
-    def __init__(self, d, heads, ffn_mult=4, adaln=False, attn_scale=None):
+    def __init__(self, d, heads, ffn_mult=4, adaln=False, attn_scale=None, n_sink=0):
         super().__init__()
         self.h, self.hd = heads, d // heads
+        # Attention sinks ("registers"): n_sink learned key/value slots every
+        # query may attend to, position-free (no RoPE). Keys start small and
+        # values at zero, so at init they only absorb attention mass -- the role
+        # the encoder's massive activations otherwise take on. 0 = none.
+        self.n_sink = int(n_sink)
+        if self.n_sink:
+            self.sink_k = nn.Parameter(torch.randn(heads, self.n_sink, self.hd) * 0.02)
+            self.sink_v = nn.Parameter(torch.zeros(heads, self.n_sink, self.hd))
         self.attn_scale = attn_scale          # muP: 1/head_dim (else None => SDPA default 1/sqrt(hd))
         self.adaln = adaln
         self.n1 = nn.LayerNorm(d, elementwise_affine=not adaln)
@@ -105,8 +113,12 @@ class Block(nn.Module):
         q = apply_rope(q.view(T, self.h, self.hd), ang_t, ang_w)
         k = apply_rope(k.view(T, self.h, self.hd), ang_t, ang_w)
         v = v.view(T, self.h, self.hd)
-        o = F.scaled_dot_product_attention(q.transpose(0, 1)[None], k.transpose(0, 1)[None],
-                                           v.transpose(0, 1)[None], scale=self.attn_scale)[0].transpose(0, 1)
+        kh, vh = k.transpose(0, 1)[None], v.transpose(0, 1)[None]
+        if self.n_sink:
+            kh = torch.cat([kh, self.sink_k[None].to(kh.dtype)], 2)
+            vh = torch.cat([vh, self.sink_v[None].to(vh.dtype)], 2)
+        o = F.scaled_dot_product_attention(q.transpose(0, 1)[None], kh, vh,
+                                           scale=self.attn_scale)[0].transpose(0, 1)
         ao = self.proj(o.reshape(T, d))
         x = x + (ga * ao if self.adaln else ao)
         if self.adaln:

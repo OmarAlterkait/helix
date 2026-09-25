@@ -40,7 +40,19 @@ def _inverse(order):
     return inv
 
 
-def self_block(blk, x, cos, sin, nb, g, c=None):
+def _attend(q, k, v, blk, kmask):
+    """SDPA over grouped (nb, h, g, hd) tensors, with the block's attention sinks
+    appended to every group's keys and ``kmask`` (nb, 1, 1, g) excluding padding."""
+    if blk.n_sink:
+        nb = k.shape[0]
+        k = torch.cat([k, blk.sink_k.to(k.dtype).expand(nb, -1, -1, -1)], 2)
+        v = torch.cat([v, blk.sink_v.to(v.dtype).expand(nb, -1, -1, -1)], 2)
+        if kmask is not None:
+            kmask = torch.cat([kmask, kmask.new_ones(nb, 1, 1, blk.n_sink)], -1)
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=kmask)
+
+
+def self_block(blk, x, cos, sin, nb, g, c=None, kmask=None):
     """Block.forward over a stream already in grouped, padded order. It MUST
     mirror every branch Block has, AdaLN included — a missing branch here is
     silently dead conditioning, not an error."""
@@ -54,7 +66,7 @@ def self_block(blk, x, cos, sin, nb, g, c=None):
     q = apply_rope_tables(q.view(P, blk.h, blk.hd), cos, sin)
     k = apply_rope_tables(k.view(P, blk.h, blk.hd), cos, sin)
     grp = lambda t: t.view(nb, g, blk.h, blk.hd).permute(0, 2, 1, 3)
-    o = F.scaled_dot_product_attention(grp(q), grp(k), grp(v.view(P, blk.h, blk.hd)))
+    o = _attend(grp(q), grp(k), grp(v.view(P, blk.h, blk.hd)), blk, kmask)
     ao = blk.proj(o.permute(0, 2, 1, 3).reshape(P, d))
     x = x + (ga * ao if blk.adaln else ao)
     if blk.adaln:
@@ -62,7 +74,7 @@ def self_block(blk, x, cos, sin, nb, g, c=None):
     return x + blk.mlp(blk.n2(x))
 
 
-def cross_block(blk, q, kv, qcos, qsin, kcos, ksin, nb, gq, gk, c=None):
+def cross_block(blk, q, kv, qcos, qsin, kcos, ksin, nb, gq, gk, c=None, kmask=None):
     """CrossBlock.forward over query and key sets already in grouped, padded
     order — same mirroring obligation as self_block."""
     Pq, Pk = q.shape[0], kv.shape[0]
@@ -77,7 +89,8 @@ def cross_block(blk, q, kv, qcos, qsin, kcos, ksin, nb, gq, gk, c=None):
     o = F.scaled_dot_product_attention(
         qh.view(nb, gq, blk.h, blk.hd).permute(0, 2, 1, 3),
         kh.view(nb, gk, blk.h, blk.hd).permute(0, 2, 1, 3),
-        v.view(Pk, blk.h, blk.hd).view(nb, gk, blk.h, blk.hd).permute(0, 2, 1, 3))
+        v.view(Pk, blk.h, blk.hd).view(nb, gk, blk.h, blk.hd).permute(0, 2, 1, 3),
+        attn_mask=kmask)
     ao = blk.proj(o.permute(0, 2, 1, 3).reshape(Pq, blk.h * blk.hd))
     q = q + (ga * ao if blk.adaln else ao)
     if blk.adaln:
@@ -113,6 +126,14 @@ def _detach_dynamo_finalizers_at_exit():
                 f.detach()
 
     atexit.register(_detach)
+
+
+def _ckpt(fn, model):
+    """``fn`` with its activations recomputed in backward when model.act_ckpt."""
+    if not (model.act_ckpt and torch.is_grad_enabled()):
+        return fn
+    from torch.utils.checkpoint import checkpoint
+    return lambda *args: checkpoint(fn, *args, use_reentrant=False)
 
 
 def _blocks(model):
@@ -188,18 +209,20 @@ class SerialFMModel(FMModel):
             npad = ((T + g - 1) // g) * g
             pi = _pad_idx(o, T, npad)
             cos, sin = rope_tables(at[pi], aw[pi] if uw else None, x.dtype)
+            km = ((torch.arange(npad, device=x.device) < T).view(npad // g, 1, 1, g)
+                  if self.pad_mask else None)
             lay.append((pi, _inverse(o), npad // g, g, cos, sin,
-                        None if c is None else c[pi]))
+                        None if c is None else c[pi], km))
         # layout j's padded rows, gathered from layout j-1's padded stream
         step = [lay[j - 1][1][lay[j][0]] for j in range(len(lay))]
-        self_blk, _ = _blocks(self)
+        self_blk = _ckpt(_blocks(self)[0], self)
         xp, out = x[lay[0][0]], {}
         for i, blk in enumerate(self.enc):
             j = i % len(lay)
             if i:
                 xp = xp[step[j]]
-            _, inv, nb, g, cos, sin, cp = lay[j]
-            xp = self_blk(blk, xp, cos, sin, nb, g, cp)
+            _, inv, nb, g, cos, sin, cp, km = lay[j]
+            xp = self_blk(blk, xp, cos, sin, nb, g, cp, km)
             if i + 1 in layers:
                 out[i + 1] = xp[inv]
         return xp[inv], out
@@ -245,10 +268,12 @@ class SerialFMModel(FMModel):
         qcos, qsin = rope_tables(at[tok_mask][iq], aw[tok_mask][iq], qm.dtype)
         kcos, ksin = rope_tables(atv[ik], awv[ik], xv.dtype)
         cm = None if c is None else c[tok_mask][iq]
-        _, cross_blk = _blocks(self)
+        km = ((torch.arange(nb * gk, device=xv.device) < Tk).view(nb, 1, 1, gk)
+              if self.pad_mask else None)
+        cross_blk = _ckpt(_blocks(self)[1], self)
         qp, kvp = qm[iq], xv[ik]
         for blk in self.dec:
-            qp = cross_blk(blk, qp, kvp, qcos, qsin, kcos, ksin, nb, gq, gk, cm)
+            qp = cross_blk(blk, qp, kvp, qcos, qsin, kcos, ksin, nb, gq, gk, cm, km)
         qm = qp[_inverse(oq)]
 
         if masked_only:

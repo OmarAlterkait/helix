@@ -86,21 +86,27 @@ def _grp(x, order, npad, nb, g):
     return b.view(nb, g, h, hd).permute(0, 2, 1, 3)
 
 
-def _uniform_attn(q, k, v, order, g):
+def _uniform_attn(q, k, v, order, g, pad_mask=False):
     T, h, hd = q.shape; npad = ((T + g - 1) // g) * g; nb = npad // g
-    o = F.scaled_dot_product_attention(*(_grp(t, order, npad, nb, g) for t in (q, k, v)))
+    m = (torch.arange(npad) < T).view(nb, 1, 1, g) if pad_mask else None
+    o = F.scaled_dot_product_attention(*(_grp(t, order, npad, nb, g) for t in (q, k, v)),
+                                       attn_mask=m)
     o = o.permute(0, 2, 1, 3).reshape(npad, h, hd)[:T]
     out = o.new_empty(T, h, hd); out[order] = o; return out
 
 
-def _grouped_cross(q, k, v, oq, ok, g):
+def _grouped_cross(q, k, v, oq, ok, g, pad_mask=False):
     Tq, h, hd = q.shape; Tk = k.shape[0]; nb = (max(Tq, Tk) + g - 1) // g
     gq, gk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
+    m = (torch.arange(nb * gk) < Tk).view(nb, 1, 1, gk) if pad_mask else None
     o = F.scaled_dot_product_attention(_grp(q, oq, nb * gq, nb, gq),
                                        _grp(k, ok, nb * gk, nb, gk),
-                                       _grp(v, ok, nb * gk, nb, gk))
+                                       _grp(v, ok, nb * gk, nb, gk), attn_mask=m)
     o = o.permute(0, 2, 1, 3).reshape(nb * gq, h, hd)[:Tq]
     out = o.new_empty(Tq, h, hd); out[oq] = o; return out
+
+
+PAD = {"on": False}      # the reference's pad-masking switch (see the pad_mask test)
 
 
 def _mix(blk, x, ao, c):
@@ -124,7 +130,7 @@ def _self_ref(blk, x, at, aw, order, g, c):
     q, k, v = blk.qkv(_pre(blk, x, c, blk.n1)).chunk(3, -1)
     q = _rope_ref(q.view(T, blk.h, blk.hd), at, aw)
     k = _rope_ref(k.view(T, blk.h, blk.hd), at, aw)
-    o = _uniform_attn(q, k, v.view(T, blk.h, blk.hd), order, g)
+    o = _uniform_attn(q, k, v.view(T, blk.h, blk.hd), order, g, PAD["on"])
     return _mix(blk, x, blk.proj(o.reshape(T, d)), c)
 
 
@@ -133,7 +139,7 @@ def _cross_ref(blk, q, kv, qat, qaw, kat, kaw, oq, okv, g, c):
     qh = _rope_ref(blk.q(_pre(blk, q, c, blk.nq)).view(Tq, blk.h, blk.hd), qat, qaw)
     k, v = blk.kv(blk.nk(kv)).chunk(2, -1)
     kh = _rope_ref(k.view(Tk, blk.h, blk.hd), kat, kaw)
-    o = _grouped_cross(qh, kh, v.view(Tk, blk.h, blk.hd), oq, okv, g)
+    o = _grouped_cross(qh, kh, v.view(Tk, blk.h, blk.hd), oq, okv, g, PAD["on"])
     return _mix(blk, q, blk.proj(o.reshape(Tq, blk.h * blk.hd)), c)
 
 
@@ -319,3 +325,52 @@ def test_an_eval_rebuild_does_not_compile():
     from helix.model.artifact import Artifact, build
     art = Artifact(arch={**SMALL, "compile_blocks": True}, op=None)
     assert build(art, device="cpu").compile_blocks is False
+
+
+# -------------------------------------------------------- pad_mask, sinks
+
+def test_pad_mask_matches_a_reference_that_masks_padding():
+    """pad_mask=True drops each group's padding keys (copies of its last token)."""
+    B, m = make_batch(n_cells=90), _model()          # 90 visible/masked counts leave pads
+    m.pad_mask = True
+    mask = _mask(B["n_cells"])
+    PAD["on"] = True
+    try:
+        with torch.no_grad():
+            got, ref = m.forward_feat(B, mask), _forward_feat_ref(m, B, mask)
+    finally:
+        PAD["on"] = False
+    assert torch.allclose(got, ref, atol=1e-6)
+    m.pad_mask = False
+    with torch.no_grad():
+        assert not torch.allclose(m.forward_feat(B, mask), got, atol=1e-6), \
+            "pad_mask changed nothing -- this batch has no padding to mask"
+
+
+def test_attention_sinks_train_and_are_off_by_default():
+    base = _model()
+    assert all(blk.n_sink == 0 for blk in base.enc)
+    m = _model(n_sink=2)
+    B = make_batch()
+    loss = m.train()(B, tok_mask=_mask(B["n_cells"]))["loss"]
+    loss.backward()
+    for blk in m.enc:
+        assert blk.sink_k.grad is not None and blk.sink_v.grad is not None
+    assert "n_sink" in __import__("helix.model.fm", fromlist=["fm_keys"]).fm_keys()
+
+
+def test_activation_checkpointing_gives_the_same_gradients():
+    B, m = make_batch(), _model()
+    mask = _mask(B["n_cells"])
+
+    def grads():
+        m.zero_grad(set_to_none=True)
+        m.train()(B, tok_mask=mask)["loss"].backward()
+        return {n: p.grad.clone() for n, p in m.named_parameters() if p.grad is not None}
+
+    a = grads()
+    m.act_ckpt = True
+    b = grads()
+    m.act_ckpt = False
+    assert set(a) == set(b)
+    assert all(torch.allclose(a[k], b[k], atol=1e-6, rtol=1e-5) for k in a)

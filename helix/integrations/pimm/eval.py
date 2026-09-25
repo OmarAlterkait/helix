@@ -106,7 +106,7 @@ class CoeffFMEvaluator(HookBase):
     """
 
     def __init__(self, every_n_steps=0, max_batches=None, mask_seed=7,
-                 grid_free=True, mask_mode="random", n_planes=1):
+                 grid_free=True, mask_mode="random", n_planes=1, mask_ratio=None):
         self.every_n_steps = int(every_n_steps)
         self.max_batches = max_batches
         self.mask_seed = int(mask_seed)
@@ -118,6 +118,10 @@ class CoeffFMEvaluator(HookBase):
         # say which task it scored is not interpretable later.
         self.mask_mode = str(mask_mode)
         self.n_planes = int(n_planes)
+        # None scores at the model's own training mask ratio. A fixed value makes
+        # runs trained at DIFFERENT ratios comparable: each is scored on the same
+        # task rather than on the (harder or easier) one it trained on.
+        self.mask_ratio = None if mask_ratio is None else float(mask_ratio)
         # var_expl + charge closure, computed from the SAME forward as the
         # loss (see _forward) — so this is free, not a second pass. Silently
         # inert unless the checkpoint carries the bin centroids.
@@ -315,6 +319,7 @@ class CoeffFMEvaluator(HookBase):
                 # was pure random). Without this, plane_frac makes val loss a
                 # 90/10 mixture and it stops being comparable across runs.
                 mask = core.make_mask(B, mode=self.mask_mode,
+                                      ratio=self.mask_ratio,
                                       n_planes=self.n_planes,
                                       gen=gen)                     # SAME every eval
                 ctx = (torch.autocast(
