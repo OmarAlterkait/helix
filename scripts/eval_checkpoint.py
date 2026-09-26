@@ -109,12 +109,16 @@ def main(argv=None):
 
     from pimm.engines.defaults import default_config_parser, default_setup
     from pimm.engines.train import TRAINERS
+    from pimm.utils.config import DictAction
     from pimm.utils.events import EventStorage
 
+    # Values are typed exactly as pimm's train CLI types them. Kept as raw
+    # strings, `resume=False` was the truthy "False" (a resume attempt on a
+    # weights-only file) and `batch_size=1` was "1".
     opts = {}
     for kv in a.options:
         k, _, v = kv.partition("=")
-        opts[k] = v
+        opts[k] = DictAction._parse_iterable(v)
     cfg = default_config_parser(a.config, opts)
     cfg = default_setup(cfg)
 
