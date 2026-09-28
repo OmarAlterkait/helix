@@ -80,10 +80,29 @@ class ResponseFiLM(nn.Module):
 
 
 # ---- transformer block (pre-LN, SDPA full attention with RoPE) -------------
+def _qk_norms(hd, on):
+    """QK-norm: an RMSNorm over each head's query and key, before RoPE (as OLMo 2
+    and Qwen3 place it). It bounds the attention logits, which otherwise grow with
+    the q/k projections: the qkv biases of the late encoder blocks grew
+    monotonically over a 47k-step d768 run (7 -> 18) and one seed went NaN at
+    19.4k. Off by default: it changes the state dict and the numerics."""
+    if not on:
+        return None, None
+    return nn.RMSNorm(hd, eps=1e-6), nn.RMSNorm(hd, eps=1e-6)
+
+
+def qk_normed(blk, q, k):
+    """(q, k) through the block's QK-norm, or unchanged when it has none."""
+    if blk.qn is None:
+        return q, k
+    return blk.qn(q), blk.kn(k)
+
+
 class Block(nn.Module):
-    def __init__(self, d, heads, ffn_mult=4, adaln=False, attn_scale=None, n_sink=0):
+    def __init__(self, d, heads, ffn_mult=4, adaln=False, attn_scale=None, n_sink=0, qk_norm=False):
         super().__init__()
         self.h, self.hd = heads, d // heads
+        self.qn, self.kn = _qk_norms(self.hd, qk_norm)
         # Attention sinks ("registers"): n_sink learned key/value slots every
         # query may attend to, position-free (no RoPE). Keys start small and
         # values at zero, so at init they only absorb attention mass -- the role
@@ -110,8 +129,9 @@ class Block(nn.Module):
         else:
             h = self.n1(x)
         q, k, v = self.qkv(h).chunk(3, -1)
-        q = apply_rope(q.view(T, self.h, self.hd), ang_t, ang_w)
-        k = apply_rope(k.view(T, self.h, self.hd), ang_t, ang_w)
+        q, k = qk_normed(self, q.view(T, self.h, self.hd), k.view(T, self.h, self.hd))
+        q = apply_rope(q, ang_t, ang_w)
+        k = apply_rope(k, ang_t, ang_w)
         v = v.view(T, self.h, self.hd)
         kh, vh = k.transpose(0, 1)[None], v.transpose(0, 1)[None]
         if self.n_sink:
@@ -135,9 +155,10 @@ class CrossBlock(nn.Module):
     NOTE: queries see the FULL visible set (not a latent summary) — unlike the
     Perceiver bottleneck that capped masked prediction at ~33%."""
 
-    def __init__(self, d, heads, ffn_mult=4, attn_scale=None, adaln=False):
+    def __init__(self, d, heads, ffn_mult=4, attn_scale=None, adaln=False, qk_norm=False):
         super().__init__()
         self.h, self.hd = heads, d // heads
+        self.qn, self.kn = _qk_norms(self.hd, qk_norm)
         self.attn_scale = attn_scale          # muP: 1/head_dim (else None => SDPA default)
         self.adaln = adaln
         # AdaLN modulates the QUERY stream only. Keys/values are encoder output, already
@@ -157,9 +178,10 @@ class CrossBlock(nn.Module):
             hq = self.nq(q) * (1 + sa) + ba
         else:
             hq = self.nq(q)
-        qh = apply_rope(self.q(hq).view(Tq, self.h, self.hd), qa_t, qa_w)
         k, v = self.kv(self.nk(kv)).chunk(2, -1)
-        kh = apply_rope(k.view(Tk, self.h, self.hd), ka_t, ka_w)
+        qh, kh = qk_normed(self, self.q(hq).view(Tq, self.h, self.hd), k.view(Tk, self.h, self.hd))
+        qh = apply_rope(qh, qa_t, qa_w)
+        kh = apply_rope(kh, ka_t, ka_w)
         vh = v.view(Tk, self.h, self.hd)
         o = F.scaled_dot_product_attention(qh.transpose(0, 1)[None], kh.transpose(0, 1)[None],
                                            vh.transpose(0, 1)[None], scale=self.attn_scale)[0].transpose(0, 1)

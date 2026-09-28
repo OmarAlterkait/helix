@@ -66,7 +66,8 @@ class FMModel(nn.Module):
     def __init__(self, n_slot, n_band, n_plane, n_wirefeat=1, d=128, blocks=4,
                  dec_blocks=2, heads=4, film=("band", "plane", "wire"), nll=False, ffn_mult=4,
                  lam_t=(8.0, 4336.0), lam_w=(32.0, 2048.0), cond="film", dec_mode="self",
-                 mup=False, d_base=128, wire_rope=True, n_bins=0, n_sink=0):
+                 mup=False, d_base=128, wire_rope=True, n_bins=0, n_sink=0,
+                 qk_norm=False):
         super().__init__()
         self.d, self.n_slot, self.nll, self.cond, self.heads = d, n_slot, nll, cond, heads
         self.lam_t, self.lam_w = lam_t, lam_w     # per-axis RoPE wavelength band (time / wire)
@@ -134,12 +135,12 @@ class FMModel(nn.Module):
         self.plane_emb = nn.Embedding(n_plane, d)
         self.cond_wire = nn.Sequential(nn.Linear(n_wirefeat, d), nn.SiLU()) if adaln else None
         self.mask_tok = nn.Parameter(torch.zeros(d))
-        self.enc = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale, n_sink)
+        self.enc = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale, n_sink, qk_norm)
                                  for _ in range(blocks))
         if dec_mode == "cross":
-            self.dec = nn.ModuleList(CrossBlock(d, heads, ffn_mult, attn_scale, adaln) for _ in range(dec_blocks))
+            self.dec = nn.ModuleList(CrossBlock(d, heads, ffn_mult, attn_scale, adaln, qk_norm) for _ in range(dec_blocks))
         else:
-            self.dec = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale) for _ in range(dec_blocks))
+            self.dec = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale, 0, qk_norm) for _ in range(dec_blocks))
         self.dec_norm = nn.LayerNorm(d)
         self.occ_head = nn.Linear(d, n_slot)
         _vout = n_slot * (n_bins if n_bins > 0 else (2 if nll else 1))  # cat: K/slot; nll: mu+logvar; else mu

@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from helix.model.fm import FMModel, rope_angles
-from helix.model.layers import apply_rope_tables, rope_tables
+from helix.model.layers import apply_rope_tables, qk_normed, rope_tables
 
 
 def _pad_idx(order, T, npad):
@@ -63,8 +63,9 @@ def self_block(blk, x, cos, sin, nb, g, c=None, kmask=None):
     else:
         hh = blk.n1(x)
     q, k, v = blk.qkv(hh).chunk(3, -1)
-    q = apply_rope_tables(q.view(P, blk.h, blk.hd), cos, sin)
-    k = apply_rope_tables(k.view(P, blk.h, blk.hd), cos, sin)
+    q, k = qk_normed(blk, q.view(P, blk.h, blk.hd), k.view(P, blk.h, blk.hd))
+    q = apply_rope_tables(q, cos, sin)
+    k = apply_rope_tables(k, cos, sin)
     grp = lambda t: t.view(nb, g, blk.h, blk.hd).permute(0, 2, 1, 3)
     o = _attend(grp(q), grp(k), grp(v.view(P, blk.h, blk.hd)), blk, kmask)
     ao = blk.proj(o.permute(0, 2, 1, 3).reshape(P, d))
@@ -83,9 +84,10 @@ def cross_block(blk, q, kv, qcos, qsin, kcos, ksin, nb, gq, gk, c=None, kmask=No
         hq = blk.nq(q) * (1 + sa) + ba
     else:
         hq = blk.nq(q)
-    qh = apply_rope_tables(blk.q(hq).view(Pq, blk.h, blk.hd), qcos, qsin)
     k, v = blk.kv(blk.nk(kv)).chunk(2, -1)
-    kh = apply_rope_tables(k.view(Pk, blk.h, blk.hd), kcos, ksin)
+    qh, kh = qk_normed(blk, blk.q(hq).view(Pq, blk.h, blk.hd), k.view(Pk, blk.h, blk.hd))
+    qh = apply_rope_tables(qh, qcos, qsin)
+    kh = apply_rope_tables(kh, kcos, ksin)
     o = F.scaled_dot_product_attention(
         qh.view(nb, gq, blk.h, blk.hd).permute(0, 2, 1, 3),
         kh.view(nb, gk, blk.h, blk.hd).permute(0, 2, 1, 3),

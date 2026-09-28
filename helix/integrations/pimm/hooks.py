@@ -412,3 +412,65 @@ class WeightEMA(HookBase):
         self._save()
         self.trainer.logger.info(
             f"WeightEMA(decay={self.decay}, step={self._step}) -> {self._path()}")
+
+
+@HOOKS.register_module()
+class FiniteGuard(HookBase):
+    """Skip a step whose gradients are not finite; stop a run whose weights are not.
+
+    The first 47k-step d768 run went NaN at ~19.4k steps and nothing noticed: the
+    job ran to the end, "completed", and its part 2 and a branch cooldown then
+    trained from NaN weights. Two defences, both cheap:
+
+    * ``after_backward`` (gradients unscaled, all-reduced, not yet clipped): if
+      the total gradient norm is not finite, drop every gradient, so the
+      optimizer skips every parameter and its moments are untouched. DDP has
+      already averaged the gradients, so every rank takes the same decision.
+      ``max_skips`` consecutive skips is a divergence, not a bad batch: raise.
+    * ``after_step`` every ``check_every`` steps: if any weight is not finite,
+      raise -- the job fails, so an ``afterok`` successor does not start from it.
+      Placed before CheckpointSaver, so a non-finite model is not the one saved.
+    """
+
+    def __init__(self, check_every=100, max_skips=20):
+        self.check_every = int(check_every)
+        self.max_skips = int(max_skips)
+        self.skipped = 0
+        self._run = 0
+
+    def _params(self):
+        return [p for p in unwrap_model(self.trainer.model).parameters() if p.requires_grad]
+
+    def _step(self):
+        ci = self.trainer.comm_info
+        return ci.get("iter", 0) + ci.get("iter_per_epoch", 0) * ci.get("epoch", 0)
+
+    def after_backward(self):
+        grads = [p.grad for p in self._params() if p.grad is not None]
+        if not grads:
+            return
+        norm = torch.linalg.vector_norm(torch.stack(torch._foreach_norm(grads)))
+        if torch.isfinite(norm):
+            self._run = 0
+            return
+        for p in self._params():
+            p.grad = None
+        self.skipped += 1
+        self._run += 1
+        it = self._step()
+        self.trainer.logger.warning(
+            f"FiniteGuard: non-finite gradient norm ({norm.item()}) at iter {it}; step "
+            f"skipped ({self.skipped} total, {self._run} in a row)")
+        if self._run >= self.max_skips:
+            raise RuntimeError(f"FiniteGuard: {self._run} consecutive non-finite steps "
+                               f"at iter {it} -- the run has diverged")
+
+    def after_step(self):
+        it = self._step() + 1
+        if self.check_every <= 0 or it % self.check_every:
+            return
+        norm = torch.linalg.vector_norm(torch.stack(torch._foreach_norm(self._params())))
+        if not torch.isfinite(norm):
+            raise RuntimeError(f"FiniteGuard: non-finite weights after iter {it} "
+                               f"({self.skipped} steps skipped so far) -- stopping before "
+                               f"a checkpoint is written from them")

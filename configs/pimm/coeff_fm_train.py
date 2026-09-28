@@ -461,6 +461,10 @@ hooks = [
     # stands in for an annealed model until a cooldown is actually run.
     # save_freq matches CheckpointSaver so the EMA and the weights land within a
     # step of each other; the hook logs a warning if they diverge on resume.
+    # Skips a step with non-finite gradients; stops the job (before the EMA and
+    # the checkpoint see them) if the weights go non-finite. A 47k-step d768 run
+    # went NaN at 19.4k and "COMPLETED", and its part 2 then trained from NaN.
+    dict(type="FiniteGuard", check_every=100, max_skips=20),
     dict(type="WeightEMA", decay=0.9999, save_freq=SAVE_EVERY),
     # Was every_n_steps unset -> after_epoch only -> exactly ONE eval, after
     # training. No training curve, and model_best selection was vacuous.

@@ -147,6 +147,7 @@ hooks = [
     # step. It is also how often InformationWriter reads device scalars back:
     # every step is still recorded, in one transfer per interval.
     dict(type="InformationWriter", log_frequency=200),
+    dict(type="FiniteGuard", check_every=100, max_skips=20),   # see coeff_fm_train
     dict(type="WeightEMA", decay=0.9999, save_freq=SAVE_EVERY),
     dict(type="CoeffFMEvaluator", every_n_steps=EVAL_EVERY, max_batches=200),
     dict(type="CheckpointSaver", save_freq=SAVE_EVERY),

@@ -125,20 +125,30 @@ def _pre(blk, x, c, norm):
     return norm(x)
 
 
+def _qkn(blk, q, k):
+    """QK-norm where the reference applies it: per head, before RoPE. The norm
+    modules themselves are the block's -- what is under test is the placement."""
+    if blk.qn is None:
+        return q, k
+    return blk.qn(q), blk.kn(k)
+
+
 def _self_ref(blk, x, at, aw, order, g, c):
     T, d = x.shape
     q, k, v = blk.qkv(_pre(blk, x, c, blk.n1)).chunk(3, -1)
-    q = _rope_ref(q.view(T, blk.h, blk.hd), at, aw)
-    k = _rope_ref(k.view(T, blk.h, blk.hd), at, aw)
+    q, k = _qkn(blk, q.view(T, blk.h, blk.hd), k.view(T, blk.h, blk.hd))
+    q = _rope_ref(q, at, aw)
+    k = _rope_ref(k, at, aw)
     o = _uniform_attn(q, k, v.view(T, blk.h, blk.hd), order, g, PAD["on"])
     return _mix(blk, x, blk.proj(o.reshape(T, d)), c)
 
 
 def _cross_ref(blk, q, kv, qat, qaw, kat, kaw, oq, okv, g, c):
     Tq, Tk = q.shape[0], kv.shape[0]
-    qh = _rope_ref(blk.q(_pre(blk, q, c, blk.nq)).view(Tq, blk.h, blk.hd), qat, qaw)
     k, v = blk.kv(blk.nk(kv)).chunk(2, -1)
-    kh = _rope_ref(k.view(Tk, blk.h, blk.hd), kat, kaw)
+    qh, kh = _qkn(blk, blk.q(_pre(blk, q, c, blk.nq)).view(Tq, blk.h, blk.hd), k.view(Tk, blk.h, blk.hd))
+    qh = _rope_ref(qh, qat, qaw)
+    kh = _rope_ref(kh, kat, kaw)
     o = _grouped_cross(qh, kh, v.view(Tk, blk.h, blk.hd), oq, okv, g, PAD["on"])
     return _mix(blk, q, blk.proj(o.reshape(Tq, blk.h * blk.hd)), c)
 
@@ -207,6 +217,7 @@ CASES = {
     "adaln": dict(cond="adaln"),
     "6_blocks_wrap": dict(blocks=6),       # layouts cycle: block 4 follows block 3
     "2_blocks": dict(blocks=2),            # fewer blocks than layouts
+    "qk_norm": dict(qk_norm=True),
 }
 
 
@@ -374,3 +385,21 @@ def test_activation_checkpointing_gives_the_same_gradients():
     m.act_ckpt = False
     assert set(a) == set(b)
     assert all(torch.allclose(a[k], b[k], atol=1e-6, rtol=1e-5) for k in a)
+
+
+def test_qk_norm_is_off_by_default_and_bounds_the_logits():
+    """Off: no new parameters, so every existing checkpoint loads unchanged. On:
+    each head's query and key have unit RMS before RoPE, whatever the projection
+    bias -- which is the point, since the late qkv biases grew 7 -> 18 in 47k steps."""
+    base = _model()
+    assert all(blk.qn is None for blk in list(base.enc) + list(base.dec))
+    assert not any("qn." in n or "kn." in n for n, _ in base.named_parameters())
+    m = _model(qk_norm=True)
+    assert all(blk.qn is not None for blk in list(m.enc) + list(m.dec))
+    blk = m.enc[0]
+    with torch.no_grad():
+        blk.qkv.bias.fill_(50.0)
+        q = blk.qkv(torch.randn(7, m.d)).chunk(3, -1)[0].view(7, blk.h, blk.hd)
+        rms = blk.qn(q).pow(2).mean(-1).sqrt()
+    assert torch.allclose(rms, torch.ones_like(rms), atol=1e-3)
+    assert "qk_norm" in __import__("helix.model.fm", fromlist=["fm_keys"]).fm_keys()
