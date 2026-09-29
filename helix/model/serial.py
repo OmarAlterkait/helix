@@ -40,6 +40,39 @@ def _inverse(order):
     return inv
 
 
+class _Permute(torch.autograd.Function):
+    """``x[idx]`` where ``idx[:T]`` is a permutation of ``x``'s first ``T`` rows and
+    ``idx[T:]`` (padding) repeats ``idx[T - 1]`` -- every gather in this model.
+
+    Autograd's backward for a gather is a general scatter-add: it sorts the
+    indices and accumulates, 8-11 ms of a 96-118 ms d768 step (7-11 %). A
+    permutation's backward is a gather by its inverse, and the padding's
+    gradients all belong to one row. Same forward; the backward differs from
+    autograd's only in summation order over the padding rows."""
+
+    @staticmethod
+    def forward(ctx, x, idx, T):
+        inv = torch.empty(T, dtype=idx.dtype, device=idx.device)
+        inv[idx[:T]] = torch.arange(T, device=idx.device)
+        ctx.save_for_backward(idx, inv)
+        ctx.T, ctx.n = T, x.shape[0]
+        return x[idx]
+
+    @staticmethod
+    def backward(ctx, gy):
+        idx, inv = ctx.saved_tensors
+        T = ctx.T
+        gx = gy.new_zeros((ctx.n,) + tuple(gy.shape[1:]))
+        gx[:T] = gy[:T][inv]
+        if gy.shape[0] > T:        # index_add_, not gx[idx[T-1]]: a 0-d index is an .item() sync
+            gx.index_add_(0, idx[T - 1:T], gy[T:].sum(0, keepdim=True))
+        return gx, None, None
+
+
+def _permute(x, idx, T):
+    return _Permute.apply(x, idx, T) if torch.is_grad_enabled() and x.requires_grad else x[idx]
+
+
 def _attend(q, k, v, blk, kmask):
     """SDPA over grouped (nb, h, g, hd) tensors, with the block's attention sinks
     appended to every group's keys and ``kmask`` (nb, 1, 1, g) excluding padding."""
@@ -218,16 +251,16 @@ class SerialFMModel(FMModel):
         # layout j's padded rows, gathered from layout j-1's padded stream
         step = [lay[j - 1][1][lay[j][0]] for j in range(len(lay))]
         self_blk = _ckpt(_blocks(self)[0], self)
-        xp, out = x[lay[0][0]], {}
+        xp, out = _permute(x, lay[0][0], T), {}
         for i, blk in enumerate(self.enc):
             j = i % len(lay)
             if i:
-                xp = xp[step[j]]
+                xp = _permute(xp, step[j], T)
             _, inv, nb, g, cos, sin, cp, km = lay[j]
             xp = self_blk(blk, xp, cos, sin, nb, g, cp, km)
             if i + 1 in layers:
-                out[i + 1] = xp[inv]
-        return xp[inv], out
+                out[i + 1] = _permute(xp, inv, T)
+        return _permute(xp, inv, T), out
 
     def encode(self, B):
         """Per-token encoder representation with ALL tokens visible (no masking).
@@ -246,37 +279,41 @@ class SerialFMModel(FMModel):
         """(N, d) decoded features; ``masked_only`` -> (masked rows, their
         indices), for an objective that reads nothing else."""
         at, aw = self._angles(B)
-        vis = ~tok_mask
-        vis_idx, mask_idx = vis.nonzero(as_tuple=True)[0], tok_mask.nonzero(as_tuple=True)[0]
+        # ONE host sync (the visible count) instead of one per boolean-mask index
+        # below: a stable argsort of the mask lists visible rows then masked rows,
+        # each ascending -- the same rows, in the same order, as nonzero().
+        n_vis = int((~tok_mask).sum())
+        order = torch.argsort(tok_mask.to(torch.uint8), stable=True)
+        vis_idx, mask_idx = order[:n_vis], order[n_vis:]
         c = self._cond(B) if self.cond == "adaln" else None
-        atv, awv = at[vis], aw[vis]
-        xv, _ = self._encode(B, vis_idx, atv, awv, None if c is None else c[vis])
+        atv, awv = at[vis_idx], aw[vis_idx]
+        xv, _ = self._encode(B, vis_idx, atv, awv, None if c is None else c[vis_idx])
 
         # CrossMAE decoder (grouped, drift-time): masked queries x-attend visible
         qm = self.mask_tok.expand(mask_idx.numel(), self.d)
         if c is None:                           # with AdaLN, identity enters there instead
             if self.film is not None:
-                g_, b_ = self.film(B["band_id"][tok_mask], B["plane_id"][tok_mask], B["wirefeat"][tok_mask]); qm = g_ * qm + b_
-            qm = qm + self.band_emb(B["band_id"][tok_mask]) + self.plane_emb(B["plane_id"][tok_mask])
+                g_, b_ = self.film(B["band_id"][mask_idx], B["plane_id"][mask_idx], B["wirefeat"][mask_idx]); qm = g_ * qm + b_
+            qm = qm + self.band_emb(B["band_id"][mask_idx]) + self.plane_emb(B["plane_id"][mask_idx])
         qm = qm.to(xv.dtype)
         Tq, Tk = qm.shape[0], xv.shape[0]
-        oq = torch.argsort(B["t_phys"][tok_mask].double()); okv = torch.argsort(B["t_phys"][vis].double())
+        oq = torch.argsort(B["t_phys"][mask_idx].double()); okv = torch.argsort(B["t_phys"][vis_idx].double())
         nb = (max(Tq, Tk) + self.gd - 1) // self.gd
         gq, gk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
         iq, ik = _pad_idx(oq, Tq, nb * gq), _pad_idx(okv, Tk, nb * gk)
         # Decoder ALWAYS keeps axial (wire) RoPE: it needs the wire address to know which wire it
         # reconstructs -- dropping it froze recon (var_expl ~2%, same as wire_rope=0). rope_split
         # only affects the ENCODER cross-plane (drift-order) layers, via `dw` in _layouts.
-        qcos, qsin = rope_tables(at[tok_mask][iq], aw[tok_mask][iq], qm.dtype)
+        qcos, qsin = rope_tables(at[mask_idx][iq], aw[mask_idx][iq], qm.dtype)
         kcos, ksin = rope_tables(atv[ik], awv[ik], xv.dtype)
-        cm = None if c is None else c[tok_mask][iq]
+        cm = None if c is None else c[mask_idx][iq]
         km = ((torch.arange(nb * gk, device=xv.device) < Tk).view(nb, 1, 1, gk)
               if self.pad_mask else None)
         cross_blk = _ckpt(_blocks(self)[1], self)
-        qp, kvp = qm[iq], xv[ik]
+        qp, kvp = _permute(qm, iq, Tq), _permute(xv, ik, Tk)
         for blk in self.dec:
             qp = cross_blk(blk, qp, kvp, qcos, qsin, kcos, ksin, nb, gq, gk, cm, km)
-        qm = qp[_inverse(oq)]
+        qm = _permute(qp, _inverse(oq), Tq)
 
         if masked_only:
             return self.dec_norm(qm), mask_idx

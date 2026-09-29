@@ -40,7 +40,8 @@ def cat_head_sparse(model, feat, B, rows):
     # Group by slot so one GEMM covers every pair sharing a val_head row block.
     o = torch.argsort(si)
     ci_s, bin_s = ci[o], binid[o]
-    cnt = torch.bincount(si[o], minlength=NS)
+    cnt = torch.zeros(NS, dtype=torch.long, device=si.device).scatter_add_(
+        0, si, torch.ones_like(si))                         # bincount would sync for its size
     mx = int(cnt.max())
     starts = torch.cat([cnt.new_zeros(1), cnt.cumsum(0)[:-1]])
     col = torch.arange(mx, device=feat.device)[None, :]

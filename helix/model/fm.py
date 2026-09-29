@@ -362,6 +362,7 @@ class FMModel(nn.Module):
         grew a fourth table the third argument silently bound to the wrong one.
         Keyword-only turns that into a TypeError.
         """
+        self._bins_checked = False
         from helix.model.tokenize import bin_centroids_asinh, bin_centroids_ratio
 
         assert self.n_bins > 0, "set_bins() on a model built with n_bins=0"
@@ -448,7 +449,9 @@ class FMModel(nn.Module):
         B.setdefault("n_cells", B["plane_id"].shape[0])
         self.require_batch_keys(B)
         m = self.make_mask(B) if tok_mask is None else tok_mask
-        if self.n_bins > 0:
+        if self.n_bins > 0 and not getattr(self, "_bins_checked", False):
+            # once per model, not per step: `.all()` into `assert` is a host sync
+            self._bins_checked = True
             assert torch.isfinite(self.bin_edges).all(), \
                 ("n_bins > 0 requires set_bins(edges) before forward() — the "
                  "edges buffer is still unset (NaN). They are training-set "

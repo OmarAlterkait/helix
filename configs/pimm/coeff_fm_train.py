@@ -321,7 +321,9 @@ model = dict(
 # 0.95, so one large gradient damps updates ~50x longer — the opposite of what a
 # large-LR transformer recipe wants, and worst precisely when paired with a
 # too-short warmup.
-optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95))
+# fused=True: one kernel for the whole update instead of foreach passes -- 10 ms -> ~4 ms
+# of a d768 step (5 %), same update to rounding.
+optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95), fused=True)
 # WSD stable phase, as the base run (m113) trained: linear warmup then FLAT.
 #
 #   m113    4,000 warmup steps, then constant 1.1e-3, no horizon baked in

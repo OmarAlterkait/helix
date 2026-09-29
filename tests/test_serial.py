@@ -403,3 +403,21 @@ def test_qk_norm_is_off_by_default_and_bounds_the_logits():
         rms = blk.qn(q).pow(2).mean(-1).sqrt()
     assert torch.allclose(rms, torch.ones_like(rms), atol=1e-3)
     assert "qk_norm" in __import__("helix.model.fm", fromlist=["fm_keys"]).fm_keys()
+
+
+@pytest.mark.parametrize("pad", [0, 5])
+def test_permute_backward_matches_autograd(pad):
+    """The cheap backward (gather by the inverse, padding summed into its row) is
+    autograd's scatter-add, reordered: same gradient to rounding."""
+    from helix.model.serial import _permute
+    g = torch.Generator().manual_seed(0)
+    T, n = 37, 41                                   # source has pad rows of its own
+    perm = torch.randperm(T, generator=g)
+    idx = torch.cat([perm, perm[-1:].repeat(pad)])
+    x1 = torch.randn(n, 8, generator=g, requires_grad=True)
+    x2 = x1.detach().clone().requires_grad_(True)
+    w = torch.randn(T + pad, 8, generator=g)
+    (x1[idx] * w).sum().backward()
+    (_permute(x2, idx, T) * w).sum().backward()
+    assert torch.equal(x1[idx], _permute(x2.detach(), idx, T))
+    assert torch.allclose(x1.grad, x2.grad, atol=1e-6, rtol=1e-6)

@@ -101,18 +101,23 @@ def bucketize_bins(tgt, band_id, edges, K):
     # between identical calls. The original indexed `edges[band_id]` directly and
     # raised IndexError; fail the same way, loudly.
     n_band = edges.shape[0]
-    if band_id.numel() and int(band_id.max()) >= n_band:
-        raise IndexError(
-            f"band_id up to {int(band_id.max())} but `edges` has only {n_band} "
-            f"rows — the bin table does not cover every band present. Derive "
-            f"edges with the same n_bands the tokenizer emits "
-            f"(PatchConfig.n_bands).")
-    binid = torch.empty(tgt.shape, dtype=torch.long, device=tgt.device)
+    msg = (f"band_id >= {n_band}: `edges` has only {n_band} rows — the bin table "
+           f"does not cover every band present. Derive edges with the same n_bands "
+           f"the tokenizer emits (PatchConfig.n_bands).")
+    if band_id.numel():
+        # On GPU an async device assert: `int(band_id.max())` was a host sync every
+        # step (13 per step with the boolean assignments below, ~20 % GPU idle at
+        # d768). On CPU the loud IndexError stays.
+        if band_id.is_cuda:
+            torch._assert_async(band_id.max() < n_band, msg)
+        elif int(band_id.max()) >= n_band:
+            raise IndexError(f"band_id up to {int(band_id.max())} but " + msg)
+    # Bucketize the whole tensor per band and select with `where`: `binid[sel] = ...`
+    # with a boolean `sel` is a nonzero(), i.e. another host sync per band.
+    bb = band_id.reshape(band_id.shape + (1,) * (tgt.dim() - band_id.dim()))
+    binid = torch.zeros(tgt.shape, dtype=torch.long, device=tgt.device)
     for b in range(n_band):
-        sel = band_id == b
-        if sel.any():
-            binid[sel] = torch.bucketize(tgt[sel], edges[b, 1:-1].contiguous(),
-                                         right=True)
+        binid = torch.where(bb == b, torch.bucketize(tgt, edges[b, 1:-1].contiguous(), right=True), binid)
     return binid.clamp(0, K - 1)
 
 
