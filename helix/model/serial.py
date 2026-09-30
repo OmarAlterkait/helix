@@ -65,7 +65,7 @@ class _Permute(torch.autograd.Function):
         gx = gy.new_zeros((ctx.n,) + tuple(gy.shape[1:]))
         gx[:T] = gy[:T][inv]
         if gy.shape[0] > T:        # index_add_, not gx[idx[T-1]]: a 0-d index is an .item() sync
-            gx.index_add_(0, idx[T - 1:T], gy[T:].sum(0, keepdim=True))
+            gx.index_add_(0, idx[T - 1:T], gy[T:].sum(0, keepdim=True).to(gx.dtype))  # sum is fp32 under autocast
         return gx, None, None
 
 
