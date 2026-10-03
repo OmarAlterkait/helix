@@ -357,9 +357,14 @@ class WeightEMA(HookBase):
         if comm.get_rank() != 0:
             return
         self._step = int(getattr(self.trainer, "global_step", self._step + 1))
+        # With bf16 weights (FlatAdamW) the fp32 master lives in the optimizer:
+        # average THAT, both for precision and to stay on the _foreach fast path.
+        masters = getattr(getattr(self.trainer, "optimizer", None), "master_of", None)
+        pmap = dict(self._model().named_parameters()) if masters else {}
         if self._shadow is None:
             sd = self._model().state_dict()
-            self._shadow = {k: v.detach().clone().float() for k, v in sd.items()}
+            self._shadow = {k: (masters[pmap[k]] if k in pmap and pmap[k] in masters else v)
+                            .detach().clone().float() for k, v in sd.items()}
             return
         d = self.decay
         if self._plan is None:
@@ -377,7 +382,10 @@ class WeightEMA(HookBase):
                 if sh is not None and sh.device != v.device:
                     sh = sh.to(v.device)                  # belt and braces
                     self._shadow[k] = sh
-                if (sh is not None and k in avg and v.dtype == torch.float32
+                mv = masters.get(pmap[k]) if masters and k in pmap else None
+                if mv is not None and sh is not None and k in avg and sh.shape == mv.shape:
+                    shadows.append(sh); live.append(mv)            # fp32 master, updated in place
+                elif (sh is not None and k in avg and v.dtype == torch.float32
                         and sh.shape == v.shape):
                     shadows.append(sh); live.append(v.detach())
                 else:

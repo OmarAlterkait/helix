@@ -55,11 +55,22 @@ from helix.model.mask import make_mask
 # (dynamic shapes): ~1.2x steady-state for ~5 minutes' compilation per job, so
 # the training config turns it on and everything else (tests, probes, smoke
 # runs) leaves it off.
+#
+# fused_qk runs QK-norm + RoPE as one Triton kernel each way
+# (helix.model.kernels); the same arithmetic to ~1e-5, so it is an
+# implementation choice, not an architecture one. Needs varlen=True, qk_norm and
+# head dim 64.
+#
+# bf16_params stores every PARAMETER in bfloat16 (buffers such as bin_edges stay
+# fp32). The fp32 master copy then lives in the optimizer (FlatAdamW, which
+# requires it), autocast stops re-casting each weight every forward, and the
+# residual stream follows the weights to bf16. A numerics change: per-run.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None, compile_blocks=False,
-                   pad_mask=False, act_ckpt=False)
+                   pad_mask=False, act_ckpt=False, fused_qk=False,
+                   bf16_params=False)
 
 
 class FMModel(nn.Module):
@@ -526,4 +537,7 @@ def build_fm(cfg=None, **kw):
     model = cls(**{k: v for k, v in opts.items() if k in arch and k != "self"})
     for k, v in train.items():
         setattr(model, k, v)
+    if model.bf16_params:
+        for p in model.parameters():
+            p.data = p.data.to(torch.bfloat16)
     return model
