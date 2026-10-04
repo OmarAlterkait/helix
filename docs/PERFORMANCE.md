@@ -1261,3 +1261,37 @@ considerably larger. That is a better use of 40 GB than six events.
 * The event-aware prototype is a measurement, not a merge candidate: it lives in
   `tools/profile/`, it has no test, and the decoder's per-event exactness (§8)
   is unfinished.
+
+---
+
+## 11. The utilization ceiling, and what kernels bought (2026-09-29 to 10-03)
+
+Measured on one A100 with an emulation of the model that reproduces its FLOPs
+exactly and its step to 5% (d1536, one real 18.5k-token event).
+
+**The architecture is not what holds utilization down.** Switching, one at a
+time, serialised -> global attention, grouped -> global cross-attention, RoPE,
+FiLM, the categorical head and biases moves utilization by at most ~2 points
+(46.7% baseline; all dense-ViT switches together 47.3%). Step time is ~46 ms fixed
++ ~6.1 ms per 1k tokens; the fixed part is small encoder GEMMs (the MAE encoder
+sees 4.6k tokens), AdamW, launch gaps and weight casts.
+
+**The ceiling is the hardware's.** A plain 12-block transformer at d1536 tops out
+at 58% of 312 TF: GEMMs run at 80-90% (tensor pipes 90% busy under Nsight Compute,
+best sustained GEMM 269 TF = 86%), and the ~21% of the step in norms, residuals,
+GELU, casts, QK-norm and RoPE already moves memory at 91% of bandwidth. Wider is
+higher: d768 47%, d2048 61.5%, d3072 62%. Our model additionally padded its
+attention groups (9% of FLOPs) and ran its memory-bound kernels at 69% of bandwidth.
+
+**The kernel package** (all opt-in, helix 3258fed / e0f1b80): `model.varlen`
+(unpadded groups via flash varlen), `model.fused_qk` (Triton QK-norm + RoPE),
+`model.bf16_params` + `optimizer.type=FlatAdamW` (one-kernel AdamW over bf16
+weights, fp32 master), `model.fp32_stream`. Emulated: 1.19x at one event per GPU,
+1.44x with four events packed (packing is not ported). Measured in training (d768,
+4 nodes, 29.2k steps): varlen + fused_qk is 6% faster per step and 0.005 BETTER in
+cooled loss (padded groups attended duplicated tokens); adding bf16 weights is 11%
+faster but 0.010 worse, under investigation (`fp32_stream`). After the package the
+GEMMs sit at 85% of peak and flash attention (FA2, the best kernel available on
+A100 for these shapes) at ~43%; what remains is seven memory-bound families of
+2-4% each. Further gains have to come from fewer FLOPs per event (tokens, decoder),
+not kernels.

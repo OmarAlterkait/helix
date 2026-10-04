@@ -392,3 +392,92 @@ the wrong noise anyway.
 
 Full evidence, and file lists of all 220,333 deleted files, are in
 `$HELIX_ARCHIVE/retirement-backups/caches-retired_2026-09-11/`.
+
+---
+
+## 9. Scaling results after the port (2026-09-24 to 10-04)
+
+All on the 8-run corpus (150,239 training events), muP, WSD schedule, scored at a
+fixed 0.75 mask. "Cooled" = a 10% `(1-sqrt p)` cooldown; laws are fit on cooled
+loss only (the cooldown gain grows with stable length: +0.04 after 4.5k steps,
++0.17 after 47.5k at d512, and rankings at equal steps survive it).
+
+**Recipe now in use:** QK-norm (`model.qk_norm=True`), FiniteGuard, LR 4.4e-3
+with warmup `500*sqrt(d/128)` steps, mask 0.75, `plane_frac` 0.1, 4-block decoder.
+A d768 long run went NaN at 19.4k steps (qkv-bias growth 7 -> 18); QK-norm fixed
+the stability (cooled 2.712 / probe 0.862 vs 2.716-2.724 / 0.83-0.85 without).
+
+**Learning rate.** One LR transfers across width once warmup scales with
+sqrt(d) (d1024 at 4.4e-3 with a 1,414-step warmup: 2.939). The optimum falls with
+run length: d512 B=16 over 44.8k steps prefers 2.2e-3 (2.764) to 4.4e-3 (2.778);
+B=64 cooled prefers 6.2e-3 (2.717) to 8.8e-3 (2.745). The stability edge sits
+4-8x above the optimum; sqrt(B) scaling to B=512 lands inside it.
+
+**Critical batch** (cooled, examples to reach a target): B_crit ~33 events at
+val 2.90, ~40 at 2.85, ~59 at 2.80 (~2M cells). Constant in CELLS, not events:
+cropping events to 1/2 and 1/4 raised B_simple by 2.2x and 5.8x. Large batch
+buys wall clock, not compute.
+
+**Width at equal compute ("tier 1",** ~9,500 s of training on 16 nodes, B=64,
+cooled in-run): d768 2.620 (47k steps), d1024 2.579 (33.2k), d1536 2.579 (17.7k),
+d2048 2.616 (11.5k). Width beats depth (d768x12 2.962 vs d512x24 2.993 at equal
+cost). The cooled fit on 12 points, E 2.47, size exponent 0.35, data ~1.0,
+underpredicts long runs (2.71 predicted for a d768 run that reached 2.585).
+Best cooled loss so far: d1024, LR 6.2e-3, two 16-node slots: 2.519 (var_expl 0.787).
+
+**Repetition** (cooled on each run's own events): d512 loss flat to 77 epochs
+(2.785 at 5 and 19 epochs), +0.011 at 310; d768 +0.046 at 310. The probe is noisy
+(0.70-0.87 across seeds). The 150k-event corpus supports ~10M presentations.
+
+**Seed noise.** Early pairs: 0.002-0.008 in loss, ~0.03 in probe. The QK-norm d768
+pair (29.2k steps, `ab_ref` vs `res_pw16_s1`) differs by 0.023 (2.718 vs 2.741);
+treat single-seed d768 differences below ~0.02 as unresolved.
+
+**Design screens** (d512 and d768): defaults kept. `plane_frac=0` collapses the
+along-wire probe (0.51-0.56); an 8-block decoder gives the best loss and a worse
+probe (0.68-0.77); mask 0.85 probes best (0.866, within noise). Loss does not rank
+representations: rank correlation with the probe is 0.15 over 17 models, and the
+probe itself saturates at ~0.83-0.87 for good d768 models.
+
+---
+
+## 10. Patch size and resolution
+
+Validation loss cannot compare tokenizers (a bigger masked token is a harder
+target), and the along-wire probe scores per patch. `helix.probe.resolution`
+scores frozen features on a fixed 2-wire x 16-tick grid instead
+(`scripts/dump_resolution_truth.py`, then `scripts/eval_resolution.py`): charge
+map, faint-charge detection, floor efficiency at a 1% false-positive rate,
+localisation, close-pair separation, and reconstruction with the same physical
+regions hidden, each with an event-bootstrap interval.
+
+Equal-step runs, d768 QK-norm recipe, 29.2k steps, only the wire patch differs
+(variants in `configs/pimm/variants/`):
+
+| metric | pw8 | pw16 s0 | pw16 s1 | pw32 |
+|---|---|---|---|---|
+| charge map r | 0.967 | 0.938 | 0.939 | 0.892 |
+| faint-cell AUC | 0.708 | 0.685 | 0.688 | 0.666 |
+| floor eff @1% FPR, <0.1 MeV | 0.21 | 0.25 | 0.27 | 0.16 |
+| floor eff @1% FPR, 0.1-0.2 MeV | 0.53 | 0.48 | 0.50 | 0.26 |
+| floor eff @1% FPR, 0.2-0.5 MeV | 0.97 | 0.95 | 0.95 | 0.83 |
+| localisation >1 MeV, wires / ticks | 0.34 / 2.4 | 0.56 / 2.7 | 0.54 / 2.7 | 0.73 / 3.2 |
+| close pairs <=8 wires, dip ratio (lower = resolved) | 0.16 | 0.35 | 0.40 | 0.34 |
+| close pairs 32-64 ticks, dip ratio | 0.04 | 0.14 | 0.18 | 0.19 |
+| reconstruction, same regions hidden (var_expl) | 0.300 | 0.324 | 0.305 | 0.318 |
+
+Doubling the wire extent (pw32) halves floor efficiency at 0.1-0.2 MeV and costs
+~30% in localisation; its raw-input control detects faint deposits BETTER than
+pw16's, so the loss is in the model. Halving it (pw8) sharpens localisation ~40%
+and separates close pairs better, in wire and in time, for 2x the tokens (+17%
+step at d768). The separation gain is not a token-edge artifact: it holds for
+pairs with and without a token boundary between them, and the raw input shows no
+boundary effect. Token reduction should not come from coarser wire patches.
+
+How big a difference is real: two training seeds of pw16 agree to 0.003 on the
+map/AUC metrics, 0.01 wire on energetic localisation and ~0.03 on the dip ratios.
+Floor efficiency is noisier than its event-bootstrap interval suggests: re-drawing
+the truth windows (same model) moved it by ~0.05, because the 1% threshold sits in
+the tail of the background distribution. So pw32's floor loss (~0.23) is real,
+while the pw8-vs-pw16 floor differences (<=0.05) are not resolved.
+Pending: pt4/pt16 (time axis), a second pw32 seed, pw32 at d1024 (capacity).
