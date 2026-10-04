@@ -371,8 +371,9 @@ class SerialFMModel(FMModel):
 
     def _encode_varlen(self, B, sel, x, at, aw, c, layers):
         """_encode with unpadded groups. The stream takes the weights' dtype, so
-        with bf16 weights (``bf16_params``) the residual stream is bf16 too."""
-        x = x.to(self.embed.weight.dtype)
+        with bf16 weights (``bf16_params``) the residual stream is bf16 too --
+        unless ``fp32_stream``."""
+        x = x.to(torch.float32 if self.fp32_stream else self.embed.weight.dtype)
         T, dev = x.shape[0], x.device
         lay = []
         for o, g, uw in self._layouts(B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel]):

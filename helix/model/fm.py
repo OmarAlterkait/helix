@@ -65,12 +65,17 @@ from helix.model.mask import make_mask
 # fp32). The fp32 master copy then lives in the optimizer (FlatAdamW, which
 # requires it), autocast stops re-casting each weight every forward, and the
 # residual stream follows the weights to bf16. A numerics change: per-run.
+#
+# fp32_stream keeps the residual stream fp32 when bf16_params is on (varlen
+# path). The d768 A/B put bf16_params+FlatAdamW 0.010 above the reference in
+# final val loss while varlen alone was 0.005 below it; this isolates whether
+# the stream's rounding is the cause.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None, compile_blocks=False,
                    pad_mask=False, act_ckpt=False, fused_qk=False,
-                   bf16_params=False)
+                   bf16_params=False, fp32_stream=False)
 
 
 class FMModel(nn.Module):
