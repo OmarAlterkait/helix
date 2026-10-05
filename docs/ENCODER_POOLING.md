@@ -208,3 +208,26 @@ So the location-masked pooled encoder's cost against plain pw8 is real and small
 -- map_r -0.012, floor AUC -0.004 to -0.008, wire localisation +5%, 5%-FPR floor
 efficiency -0.04 -- for 26% less step time and better leak-free reconstruction.
 ab_varlen's floor (0.790) is an outlier against this spread, not typical noise.
+
+**Pooled + random masks, two seeds** (res_pw8bp2r / _s1): map_r 0.961 / 0.963,
+floor AUC 0.1-0.2 0.913 / 0.923, 0-0.1 0.803 / 0.820, 5%-FPR efficiency 0.714 /
+0.773, wire loc. 0.2-0.5 1.485 / 1.511, 0.5-1 0.813 / 0.794, time loc. 11.33 /
+11.23. Its seeds differ more in the faintest bin than the others' do.
+
+Two-seed means, pw8 family against pw16 (4 runs):
+
+| | pw16 | pw8 | pw8bp2 (loc.) | pw8bp2r (random) |
+|---|---|---|---|---|
+| map_r | 0.938 | 0.966 | 0.955 | 0.962 |
+| wire loc. 0.2-0.5 / 0.5-1 MeV | 2.06 / 1.39 | 1.45 / 0.84 | 1.53 / 0.86 | 1.50 / 0.80 |
+| time loc. 0.2-0.5 MeV | 12.3 | 11.9 | 11.8 | 11.3 |
+| floor AUC 0.1-0.2 / 0-0.1 MeV | 0.919 / 0.835 | 0.927 / 0.829 | 0.919 / 0.823 | 0.918 / 0.812 |
+| floor eff. 5% FPR 0.1-0.2 MeV | 0.70-0.75 | 0.772 | 0.733 | 0.744 |
+| presence AUC | 0.837 | 0.860 | 0.857 | 0.860 |
+| step time, 4 nodes (s) | ~0.18 | 0.217 | 0.161 | 0.158 |
+
+The random-mask pooled pw8 encoder is within ~0.005 of plain pw8 on map_r and
+localisation (time localisation better), 0.009-0.017 lower in floor AUC, at 27%
+less step time. The whole pw8 family is lower than pw16 in faintest-bin floor AUC
+and higher in low-FPR floor efficiency: finer patches do better where a detection
+threshold is set (low false-positive rate) and worse in the high-FPR part of the ROC.
