@@ -432,6 +432,13 @@ class SerialFMModel(FMModel):
         n_vis = int((~tok_mask).sum())
         order = torch.argsort(tok_mask.to(torch.uint8), stable=True)
         vis_idx, mask_idx = order[:n_vis], order[n_vis:]
+        if masked_only and self.training and self.dec_frac < 1.0:
+            # Partial reconstruction (CrossMAE): decode a random subset of the
+            # masked tokens. The encoder still sees only the visible ones, so its
+            # task is unchanged; the decoder -- a third of the step -- shrinks.
+            n_m = order.numel() - n_vis                          # host ints: no sync
+            keep = torch.randperm(n_m, device=order.device)[:max(1, round(n_m * self.dec_frac))]
+            mask_idx = mask_idx[keep.sort().values]
         c = self._cond(B) if self.cond == "adaln" else None
         atv, awv = at[vis_idx], aw[vis_idx]
         xv, _ = self._encode(B, vis_idx, atv, awv, None if c is None else c[vis_idx])

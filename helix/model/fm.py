@@ -70,12 +70,16 @@ from helix.model.mask import make_mask
 # path). The d768 A/B put bf16_params+FlatAdamW 0.010 above the reference in
 # final val loss while varlen alone was 0.005 below it; this isolates whether
 # the stream's rounding is the cause.
+#
+# dec_frac < 1 decodes only that fraction of the masked tokens in TRAINING
+# (partial reconstruction, CrossMAE); evaluation decodes all of them, so val loss
+# stays comparable. The encoder's input is unchanged.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None, compile_blocks=False,
                    pad_mask=False, act_ckpt=False, fused_qk=False,
-                   bf16_params=False, fp32_stream=False)
+                   bf16_params=False, fp32_stream=False, dec_frac=1.0)
 
 
 class FMModel(nn.Module):

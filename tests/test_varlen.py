@@ -164,3 +164,26 @@ def test_normrope_kernel_matches_the_reference(mode, parts):
                    [w.grad.float() for w in (qn.weight, kn.weight) if w.grad is not None])
     for a, b in zip(*res):
         assert float((a - b).norm() / a.norm()) < 1e-2
+
+
+def test_dec_frac_decodes_a_subset_in_training_only():
+    m = _model(varlen=True).train()
+    m.dec_frac = 1 / 3
+    B = make_batch(**EXACT)
+    mask = _exact_mask(EXACT["n_cells"])                   # 192 masked
+    feat, rows = m.forward_feat(B, mask, masked_only=True)
+    assert rows.numel() == 64 and feat.shape[0] == 64
+    assert bool(mask[rows].all())                          # only masked rows are decoded
+    m.eval()
+    with torch.no_grad():
+        _, rows_eval = m.forward_feat(B, mask, masked_only=True)
+    assert rows_eval.numel() == 192                        # evaluation decodes them all
+
+
+def test_dec_frac_one_is_the_default_path():
+    a, b = _model(varlen=True).train(), _model(varlen=True).train()
+    b.load_state_dict(a.state_dict()); b.dec_frac = 1.0
+    B = make_batch(**EXACT); mask = _exact_mask(EXACT["n_cells"])
+    torch.manual_seed(0); fa, ra = a.forward_feat(B, mask, masked_only=True)
+    torch.manual_seed(0); fb, rb = b.forward_feat(B, mask, masked_only=True)
+    assert torch.equal(ra, rb) and torch.equal(fa, fb)

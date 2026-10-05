@@ -62,12 +62,13 @@ def main():
     dev = torch.device("cuda")
     art = load(a.checkpoint)
     pw, pt = art.op.pw or 16, art.op.pt or 8
-    cfg = PatchConfig(cell_t="grid_center", pw=pw, pt=pt)
+    cfg = PatchConfig(cell_t="grid_center", pw=pw, pt=pt, n_bands=art.op.n_bands or 4)
+    nb = cfg.n_bands
     torch.manual_seed(0)
     models = {"trained": build(art, device=dev, eval_mode=True)}
     torch.manual_seed(0)                                        # the random-init control, seeded
     models["random"] = build(replace(art, state_dict=None), device=dev, eval_mode=True)
-    print(f"[{a.tag}] pw={pw} pt={pt} d={models['trained'].d}", flush=True)
+    print(f"[{a.tag}] pw={pw} pt={pt} bands={nb} d={models['trained'].d}", flush=True)
 
     def fourier(x):
         ang = 2 * np.pi * x[..., None] * np.array([1, 2, 3], np.float32)
@@ -94,8 +95,8 @@ def main():
         pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
         idx = np.where(cks[pos] == pc, order[pos], -1)
         D = feats.shape[1]
-        X = torch.zeros((len(keys), 4 * D), dtype=torch.float16, device=dev)
-        for b in range(4):
+        X = torch.zeros((len(keys), nb * D), dtype=torch.float16, device=dev)
+        for b in range(nb):
             m = idx[:, b] >= 0
             if m.any():
                 X[torch.from_numpy(np.nonzero(m)[0]).to(dev), b * D:(b + 1) * D] = \
@@ -103,7 +104,7 @@ def main():
         dec = (1 << np.asarray(cfg.lev)).astype(np.float64)
         toff = np.asarray(cfg.toff)[g % 3]
         offs = []
-        for b in range(4):
+        for b in range(nb):
             tau = (t + toff) / dec[b] - cfg.delta[b]
             offs += [(w % pw + 0.5) / pw, (tau / pt) % 1.0]
         aux = np.concatenate([(idx >= 0).astype(np.float32), fourier(np.stack(offs, 1).astype(np.float32))], 1)
