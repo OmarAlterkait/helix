@@ -159,8 +159,10 @@ def _vl_attn(q, k, v, cuq, cuk, mq, mk):
 
 def _qk_rope(blk, X, cos, sin, mode, fused):
     """q, k (and v) from a fused projection: QK-norm, then RoPE. ``mode`` as
-    helix.model.kernels.normrope; the unfused path is the reference."""
-    if fused:
+    helix.model.kernels.normrope; the unfused path is the reference, and the one
+    taken off-GPU (the kernel is Triton; a fused_qk checkpoint must still run on
+    CPU)."""
+    if fused and X.is_cuda:
         from helix.model.kernels import normrope
         return normrope(X, cos, sin, blk.qn.weight if mode != "kv" else blk.kn.weight,
                         blk.kn.weight if mode == "qkv" else None, mode)

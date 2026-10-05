@@ -187,3 +187,12 @@ def test_dec_frac_one_is_the_default_path():
     torch.manual_seed(0); fa, ra = a.forward_feat(B, mask, masked_only=True)
     torch.manual_seed(0); fb, rb = b.forward_feat(B, mask, masked_only=True)
     assert torch.equal(ra, rb) and torch.equal(fa, fb)
+
+
+def test_fused_qk_model_runs_on_cpu_through_the_reference_path():
+    a = _model(varlen=True, qk_norm=True, heads=1)          # hd 64: fused_qk is accepted
+    b = _model(varlen=True, qk_norm=True, heads=1)
+    b.load_state_dict(a.state_dict()); b.fused_qk = True
+    B = make_batch(**EXACT); m = _exact_mask(EXACT["n_cells"])
+    with torch.no_grad():
+        torch.testing.assert_close(b.forward_feat(B, m), a.forward_feat(B, m))
