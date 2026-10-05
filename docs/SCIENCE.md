@@ -447,46 +447,36 @@ Validation loss cannot compare tokenizers (a bigger masked token is a harder
 target), and the along-wire probe scores per patch. `helix.probe.resolution`
 scores frozen features on a fixed 2-wire x 16-tick grid instead
 (`scripts/dump_resolution_truth.py`, then `scripts/eval_resolution.py`): charge
-map, faint-charge detection, floor efficiency at a 1% false-positive rate,
-localisation, close-pair separation, and reconstruction with the same physical
-regions hidden, each with an event-bootstrap interval.
+map, faint-charge detection, floor efficiency at a 1% false-positive rate (and
+floor AUC), localisation, close-pair separation, each with an event-bootstrap
+interval. Cells no token covers are predicted 0: the probe never sees an all-zero
+input, and its extrapolated constant used to set window maxima -- the first
+version of this table carried that bug, and it reversed the pw32 conclusion.
 
-> **Window metrics below are being re-evaluated (2026-10-05).** The scoring
-> predicted cells that no token covers with the probe's extrapolated constant,
-> which could set a window's maximum; it now predicts 0 there. The map and AUC
-> rows are unaffected; floor, localisation and separation rows will be replaced.
-> Already re-run: noD2 (A4/D4/D3 only) and pt16 (16 band-ticks), at 0.75x and
-> 0.74x the tokens, both lose faint sensitivity against the baseline's 0.39
-> floor efficiency at 0.1-0.2 MeV (noD2 0.16, pt16 0.13; floor AUC 0.92 ->
-> 0.84 / 0.89), and pt16 loses time localisation (3.1 -> 4.6 ticks).
+Equal-step runs, d768 QK-norm recipe, 29.2k steps, one token change each
+(variants in `configs/pimm/variants/`; tokens per event vs today's 32,480):
 
-Equal-step runs, d768 QK-norm recipe, 29.2k steps, only the wire patch differs
-(variants in `configs/pimm/variants/`):
+| metric | pw8 | pw16 s0 | pw16 s1 | pw32 | pt16 | noD2 |
+|---|---|---|---|---|---|---|
+| tokens vs today | 1.29 | 1.00 | 1.00 | 0.74 | 0.74 | 0.75 |
+| charge map r | 0.967 | 0.938 | 0.939 | 0.891 | 0.888 | 0.926 |
+| floor eff @1% FPR, <0.1 MeV | 0.22 | 0.18 | 0.26 | 0.24 | 0.10 | 0.05 |
+| floor eff @1% FPR, 0.1-0.2 MeV | 0.54 | 0.39 | 0.48 | 0.35 | 0.13 | 0.16 |
+| floor eff @1% FPR, 0.2-0.5 MeV | 0.97 | 0.93 | 0.94 | 0.89 | 0.58 | 0.81 |
+| floor AUC, 0.1-0.2 MeV | 0.93 | 0.92 | 0.92 | 0.92 | 0.89 | 0.84 |
+| localisation >1 MeV, wires / ticks | 0.35 / 2.5 | 0.54 / 3.1 | 0.58 / 2.8 | 0.73 / 3.2 | 0.83 / 4.6 | 0.60 / 3.0 |
 
-| metric | pw8 | pw16 s0 | pw16 s1 | pw32 |
-|---|---|---|---|---|
-| charge map r | 0.967 | 0.938 | 0.939 | 0.892 |
-| faint-cell AUC | 0.708 | 0.685 | 0.688 | 0.666 |
-| floor eff @1% FPR, <0.1 MeV | 0.21 | 0.25 | 0.27 | 0.16 |
-| floor eff @1% FPR, 0.1-0.2 MeV | 0.53 | 0.48 | 0.50 | 0.26 |
-| floor eff @1% FPR, 0.2-0.5 MeV | 0.97 | 0.95 | 0.95 | 0.83 |
-| localisation >1 MeV, wires / ticks | 0.34 / 2.4 | 0.56 / 2.7 | 0.54 / 2.7 | 0.73 / 3.2 |
-| close pairs <=8 wires, dip ratio (lower = resolved) | 0.16 | 0.35 | 0.40 | 0.34 |
-| close pairs 32-64 ticks, dip ratio | 0.04 | 0.14 | 0.18 | 0.19 |
-| reconstruction, same regions hidden (var_expl) | 0.300 | 0.324 | 0.305 | 0.318 |
+At equal cost (0.74-0.75x tokens) the three reductions are not equal. Coarser
+TIME (pt16) and dropping D2 both lose the floor (efficiency at 0.1-0.2 MeV 0.13
+and 0.16 against 0.39-0.48); D2 appears to help reject noise although it rarely
+carries a faint deposit alone (floor AUC 0.92 -> 0.84), and pt16 also loses time
+localisation (3.1 -> 4.6 ticks). Coarser WIRE (pw32) keeps most of the floor
+(0.35 at 0.1-0.2, AUC unchanged) and costs wire localisation (0.54 -> 0.73) and
+map fidelity. Finer wire (pw8, 1.29x tokens) localises ~35% better and is at
+least as sensitive.
 
-Doubling the wire extent (pw32) halves floor efficiency at 0.1-0.2 MeV and costs
-~30% in localisation; its raw-input control detects faint deposits BETTER than
-pw16's, so the loss is in the model. Halving it (pw8) sharpens localisation ~40%
-and separates close pairs better, in wire and in time, for 2x the tokens (+17%
-step at d768). The separation gain is not a token-edge artifact: it holds for
-pairs with and without a token boundary between them, and the raw input shows no
-boundary effect. Token reduction should not come from coarser wire patches.
-
-How big a difference is real: two training seeds of pw16 agree to 0.003 on the
-map/AUC metrics, 0.01 wire on energetic localisation and ~0.03 on the dip ratios.
-Floor efficiency is noisier than its event-bootstrap interval suggests: re-drawing
-the truth windows (same model) moved it by ~0.05, because the 1% threshold sits in
-the tail of the background distribution. So pw32's floor loss (~0.23) is real,
-while the pw8-vs-pw16 floor differences (<=0.05) are not resolved.
-Pending: pt4/pt16 (time axis), a second pw32 seed, pw32 at d1024 (capacity).
+How big a difference is real: the two pw16 seeds agree to 0.003 on map/AUC
+metrics and ~0.03 wire on localisation; floor efficiency spreads ~0.08 between
+them (and ~0.05 when the truth windows are re-drawn), so floor differences below
+~0.1 are not resolved. Close-pair separation spread up to 0.12 between seeds and
+is not used for decisions.
