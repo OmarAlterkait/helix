@@ -70,6 +70,7 @@ fit pt16, and they predict different things for band pooling:
 | res_bp0 | `band_pool=0, pool_skip=False`: locations from the embedding on, decoder keys are locations | H2: one token per location, no fine path (a band-merged tokenizer) |
 | res_bp2 | `band_pool=2`, skip on: 2 blocks over band tokens, 10 over locations, per-token features = stage 1 + up(trunk) | whether a fine path recovers what bp0 loses |
 | res_pw8bp2 | the same at pw8, `mask_cell=(8,128)` | the candidate: pw8 localisation at below-pw16 trunk cost |
+| res_pw8loc | pw8 band tokens, the same location masking, no pooling | pooling at pw8 against its own masking task |
 
 References: ab_varlen (pw16, varlen, seed 0), res_pw8. All arms are varlen +
 fused_qk, which the pooled encoder requires. Scored by `eval_resolution.py`:
