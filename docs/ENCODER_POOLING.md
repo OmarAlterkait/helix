@@ -231,3 +231,40 @@ localisation (time localisation better), 0.009-0.017 lower in floor AUC, at 27%
 less step time. The whole pw8 family is lower than pw16 in faintest-bin floor AUC
 and higher in low-FPR floor efficiency: finer patches do better where a detection
 threshold is set (low false-positive rate) and worse in the high-FPR part of the ROC.
+
+**The fine path is required** (res_pw8bp0r: one token per location from the
+embedding, no band blocks, no skip; random masks): floor AUC 0.856 / 0.725 (0.1-0.2
+/ 0-0.1 MeV), 5%-FPR efficiency 0.531, map_r 0.948, wire loc. 1.56 / 0.89 -- the
+floor collapses, as it did for pt16, although every coefficient is in the token.
+H2 (dilution) holds: a faint deposit does not survive being one part of a bigger
+token. Two blocks over band tokens and the skip path to the decoder and probe are
+what keep it (res_pw8bp2r).
+
+**Partial decoding is free on the pooled encoder** (res_pw8bp2r_dec3,
+`dec_frac=1/3`): map_r 0.963, floor AUC 0.915 / 0.812 (inside res_pw8bp2r's seed
+range), 5%-FPR efficiency 0.747, presence AUC 0.864, wire loc. 1.39 / 0.76 and time
+loc. 11.07 -- the best localisation of any run, plain pw8 included. With the
+encoder pooled, the decoder dominates the step, so the decoder cut now buys wall
+time: -16% on the same allocation.
+
+Same-node-type step time (1 node, B=4, s/step): pw16 0.149, pw8 0.170, pw8 pooled
++ random masks 0.152, **pw8 pooled + random masks + dec_frac 1/3: 0.121** -- 19%
+below today's pw16 and 29% below pw8.
+
+## 7. Conclusion
+
+Recommended encoder: **pw8 band tokens, `band_pool=2` (two blocks over band tokens,
+typed pool of every band of an 8-wire x 128-tick location, ten blocks over
+locations, skip path), random masks, `dec_frac=1/3`.** Against today's pw16 it
+localises ~30% better in wire and ~10% in time, raises map_r 0.938 -> 0.963 and
+presence AUC 0.837 -> 0.864, matches 5%-FPR floor efficiency (0.75 vs 0.70-0.75),
+and costs ~0.02 in faintest-bin floor AUC (a property of pw8 tokens, not of the
+pooling) -- at 19% less step time. A second seed of it is running.
+
+What decided it, in order of size: a fine per-band path is necessary (without it
+the floor collapses); the mask unit matters more than the pool (location masks cost
+map_r and wire localisation, because reconstructing a masked band from the co-located
+others teaches within-token detail); pooling itself is nearly free once the fine path
+and random masks are kept; and pooling is what lets the decoder budget turn into wall
+time. Not tested here: the same at d1024+, where the encoder's share of FLOPs and the
+savings grow.
