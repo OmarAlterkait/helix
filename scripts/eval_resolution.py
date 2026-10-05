@@ -138,7 +138,7 @@ def main():
     # ------------------------------------------------------------ extraction
     files = sorted(glob.glob(os.path.join(a.truth, "ev*.npz")))
     arms = ("trained", "random", "raw")
-    data = {x: {k: [] for k in ("Xtr", "Atr", "ytr", "etr", "Xte", "Ate", "yte", "ete", "pte", "Xw", "Aw")} for x in arms}
+    data = {x: {k: [] for k in ("Xtr", "Atr", "ytr", "etr", "Xte", "Ate", "yte", "ete", "pte", "Xw", "Aw", "Ow")} for x in arms}
     win_meta, win_q, win_id, rec_acc = [], [], [], np.zeros(5)
     qs = np.concatenate([np.load(f)["mq"] for f in files[:40]])
     Q0 = float(np.median(qs[qs > 0]))
@@ -159,8 +159,8 @@ def main():
             if test:
                 d["pte"].append((R.unkey(z["mrows"][ok])[0] % 3).astype(np.int8))
                 if len(z["wkey"]):
-                    Xw, Aw, _ = gather(z["wkey"], B, bl, feats[x])
-                    d["Xw"].append(Xw); d["Aw"].append(Aw)
+                    Xw, Aw, okw = gather(z["wkey"], B, bl, feats[x])
+                    d["Xw"].append(Xw); d["Aw"].append(Aw); d["Ow"].append(okw)
         if test:
             if len(z["wkey"]):
                 base = len(win_meta)
@@ -218,6 +218,11 @@ def main():
         p, y, e, pl = predict(net, cat("Xte"), cat("Ate")), cat("yte"), cat("ete"), cat("pte")
         q = np.expm1(y) * Q0; q30 = np.quantile(q[q > 0], 0.3)
         qh = np.expm1(np.maximum(predict(net, cat("Xw"), cat("Aw")), 0)) * Q0
+        # A cell no token covers carries no model information: predict nothing there.
+        # The probe is trained only on covered cells, so its output on an all-zero
+        # input is an extrapolated constant -- which used to set every window's max
+        # (noD2: the background 95th and 99th percentiles were the same number).
+        qh[~cat("Ow")] = 0.0
         W = R.window_stats(qh, win_q, win_meta, starts, ends, pw, pt, cfg.delta[0], toff)
         kz = {}
         for k in np.unique(e * 10 + pl):
@@ -229,6 +234,8 @@ def main():
         wins_of = {v: [w for w in W if w["ev"] == v] for v in evs}
         z_of = {v: [z_ for k, z_ in kz.items() if k // 10 == v] for v in evs}
         point = R.scalars(p, q, list(kz.values()), W, q30)
+        with open(a.out.replace(".jsonl", f"_{a.tag}_{x}_windows.json"), "w") as fh:     # per-window scores
+            json.dump([{k: w[k] for k in ("kind", "score", "eb", "dip", "edge", "sep") if k in w} for w in W], fh, default=float)
         rng = np.random.default_rng(0); boots = []
         for _ in range(a.boot):
             sm = rng.choice(evs, len(evs), replace=True)

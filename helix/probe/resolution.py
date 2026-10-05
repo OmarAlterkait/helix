@@ -27,7 +27,11 @@ Metrics (``scalars``) from a predicted fine-cell charge map:
   presence_auc     any truth charge vs none, cell level
   faint_auc        faint cells (0 < q < 30th pct of nonzero) vs empty
   floor_eff1pct_*  isolated-particle windows above the 99th percentile of
-                   background windows (1% false-positive rate), by energy
+                   background windows (1% false-positive rate), by energy;
+                   floor_eff5pct_* and floor_auc_* as diagnostics. A cell no
+                   token covers must be predicted 0 by the caller: the probe never
+                   saw an all-zero input, and its extrapolated constant otherwise
+                   sets every window's maximum (scripts/eval_resolution.py does).
   loc_w_* / loc_t_*  |centroid(prediction) - centroid(truth)|, wires / ticks
   sep_dip_*        close pairs: min along the segment / lower peak (0 = two
                    separate peaks, >=1 = one blob), median by separation, also
@@ -264,10 +268,13 @@ def scalars(p, q, keyz, W, q30):
          "faint_auc": auc(p[(q > 0) & (q < q30)], p[q == 0])}
     bg = np.array([w["score"] for w in W if w["kind"] == "bg"])
     thr = np.quantile(bg, 0.99) if len(bg) else np.inf
+    thr5 = np.quantile(bg, 0.95) if len(bg) else np.inf
     names = [f"{ENERGY_BINS[i]:g}-{ENERGY_BINS[i + 1]:g}" for i in range(len(ENERGY_BINS) - 1)]
     for i, nm in enumerate(names):
         s = np.array([w["score"] for w in W if w["kind"] == "iso" and w["eb"] == i])
         r[f"floor_eff1pct_{nm}"] = float((s > thr).mean()) if len(s) else float("nan")
+        r[f"floor_eff5pct_{nm}"] = float((s > thr5).mean()) if len(s) else float("nan")    # diagnostic
+        r[f"floor_auc_{nm}"] = auc(s, bg)                                                   # diagnostic
         lw = [w["loc"] for w in W if w["kind"] == "iso" and w["eb"] == i and "loc" in w]
         r[f"loc_w_{nm}"] = float(np.median([x[0] for x in lw])) if lw else float("nan")
         r[f"loc_t_{nm}"] = float(np.median([x[1] for x in lw])) if lw else float("nan")

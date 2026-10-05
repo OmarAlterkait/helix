@@ -451,6 +451,15 @@ map, faint-charge detection, floor efficiency at a 1% false-positive rate,
 localisation, close-pair separation, and reconstruction with the same physical
 regions hidden, each with an event-bootstrap interval.
 
+> **Window metrics below are being re-evaluated (2026-10-05).** The scoring
+> predicted cells that no token covers with the probe's extrapolated constant,
+> which could set a window's maximum; it now predicts 0 there. The map and AUC
+> rows are unaffected; floor, localisation and separation rows will be replaced.
+> Already re-run: noD2 (A4/D4/D3 only) and pt16 (16 band-ticks), at 0.75x and
+> 0.74x the tokens, both lose faint sensitivity against the baseline's 0.39
+> floor efficiency at 0.1-0.2 MeV (noD2 0.16, pt16 0.13; floor AUC 0.92 ->
+> 0.84 / 0.89), and pt16 loses time localisation (3.1 -> 4.6 ticks).
+
 Equal-step runs, d768 QK-norm recipe, 29.2k steps, only the wire patch differs
 (variants in `configs/pimm/variants/`):
 
