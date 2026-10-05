@@ -432,7 +432,15 @@ class SerialFMModel(FMModel):
         n_vis = int((~tok_mask).sum())
         order = torch.argsort(tok_mask.to(torch.uint8), stable=True)
         vis_idx, mask_idx = order[:n_vis], order[n_vis:]
-        if masked_only and self.training and self.dec_frac < 1.0:
+        if masked_only and self.training and isinstance(self.dec_frac, (tuple, list)):
+            # Per-band partial reconstruction: each masked row kept with its band's
+            # probability (FMModel.dec_weights supplies the 1/p loss weights). The
+            # count is random, so this costs one host sync; always at least one row.
+            p = torch.as_tensor(self.dec_frac, dtype=torch.float32, device=order.device)
+            keep = torch.rand(mask_idx.numel(), device=order.device) < p[B["band_id"][mask_idx]]
+            keep[0] |= ~keep.any()
+            mask_idx = mask_idx[keep]
+        elif masked_only and self.training and self.dec_frac < 1.0:
             # Partial reconstruction (CrossMAE): decode a random subset of the
             # masked tokens. The encoder still sees only the visible ones, so its
             # task is unchanged; the decoder -- a third of the step -- shrinks.
@@ -450,11 +458,13 @@ class SerialFMModel(FMModel):
                 g_, b_ = self.film(B["band_id"][mask_idx], B["plane_id"][mask_idx], B["wirefeat"][mask_idx]); qm = g_ * qm + b_
             qm = qm + self.band_emb(B["band_id"][mask_idx]) + self.plane_emb(B["plane_id"][mask_idx])
         qm = qm.to(xv.dtype)
+        if self.dec_embed is not None:          # a narrower decoder reads the encoder through one map
+            qm, xv = self.dec_embed(qm), self.dec_embed(xv)
         if self.varlen:
             qm = self._decode_varlen(qm, xv, at, aw, mask_idx, vis_idx, c, B)
             if masked_only:
                 return self.dec_norm(qm), mask_idx
-            x = torch.zeros(B["inp"].shape[0], self.d, dtype=xv.dtype, device=xv.device)
+            x = torch.zeros(B["inp"].shape[0], self.d_dec, dtype=xv.dtype, device=xv.device)
             return self.dec_norm(x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm))
         Tq, Tk = qm.shape[0], xv.shape[0]
         oq = torch.argsort(B["t_phys"][mask_idx].double()); okv = torch.argsort(B["t_phys"][vis_idx].double())
@@ -477,6 +487,6 @@ class SerialFMModel(FMModel):
 
         if masked_only:
             return self.dec_norm(qm), mask_idx
-        x = torch.zeros(B["inp"].shape[0], self.d, dtype=xv.dtype, device=xv.device)
+        x = torch.zeros(B["inp"].shape[0], self.d_dec, dtype=xv.dtype, device=xv.device)
         x = x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm)
         return self.dec_norm(x)
