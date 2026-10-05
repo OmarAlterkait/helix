@@ -216,6 +216,8 @@ class FMModel(nn.Module):
                 dec.add(f"dec.{i}.{nm}.weight")
         if self.dec_embed is not None:
             hidden_dec.add("dec_embed.weight")    # fan_in d, fan_out d_dec: both O(width)
+        names = dict(self.named_parameters())
+        hidden.update(n for n in ("pool_proj.weight", "pool_up.weight") if n in names)  # serial band_pool
         output.update({"occ_head.weight", "val_head.weight"})
         cats = {}
         for n, p in self.named_parameters():

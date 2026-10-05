@@ -8,13 +8,19 @@
 source "$(dirname "$0")/../common.sh"
 COMMON="model.d=768 model.heads=12 model.qk_norm=True scheduler.type=WSDCooldownLR scheduler.stable_frac=0.9 scheduler.floor=1e-3 hooks.CoeffFMEvaluator.mask_ratio=0.75"
 V="$HELIX_ROOT/configs/pimm/variants"
+VL="model.varlen=True model.fused_qk=True"
 #  tag | where | options | config
 RUNS=(
   "res_dec3|interactive|model.dec_frac=0.3333"                 # uniform partial decode
   "res_dech|interactive|model.d_dec=384"                       # half-width decoder
   "res_decb|preempt||$V/coeff_fm_8run_decb.py"                # all A4/D4, a third of D3/D2, 1/p weights
   "res_mm2|preempt|model.n_masks=2"                            # two complementary masks per event
-  "res_loc|interactive|model.mask_mode=location"               # every band of a location masked together
+  # Encoder pooling (docs/ENCODER_POOLING.md): varlen + fused_qk, which band_pool
+  # requires; the pw16 reference is kernel_ab.sh's ab_varlen.
+  "res_loc|interactive|$VL model.mask_mode=location"            # every band of a location masked together
+  "res_bp0|interactive|$VL model.mask_mode=location model.band_pool=0 model.pool_skip=False"
+  "res_bp2|interactive|$VL model.mask_mode=location model.band_pool=2"
+  "res_pw8bp2|interactive||$V/coeff_fm_8run_pw8bp2.py"
 )
 for r in "${RUNS[@]}"; do
   IFS='|' read -r tag where opt cfg <<< "$r"

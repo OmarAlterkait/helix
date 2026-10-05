@@ -221,6 +221,29 @@ def _cu_even(T, nb, device):
     return ((torch.arange(nb + 1, device=device) * T) // nb).to(torch.int32)
 
 
+def _locations(plane, t, wire, band, cell, sub):
+    """Group token rows into LOCATIONS: (plane, ``cell[0]``-wire block,
+    ``cell[1]``-tick drift window), every band together (helix.model.mask's
+    ``location`` unit). -> (row -> location index, row -> typed sub-slot,
+    location plane, centre time, wire-block start). The sub-slot is the band's
+    offset plus which of its ``sub[band]`` sub-windows the row's time falls in --
+    A4 | D4 | D3 x2 | D2 x4 for a 128-tick window -- so pooling keeps the scale
+    and the time order of what it merges. One host sync (the unique)."""
+    cw, ct = cell
+    wb = torch.div(wire, cw, rounding_mode="floor").long()
+    u = t / ct
+    tw = torch.floor(u).long()
+    t0 = tw.min()
+    key = (plane.long() << 40) | (wb << 20) | (tw - t0)
+    uk, loc = torch.unique(key, return_inverse=True)
+    lp, lwb, ltw = uk >> 40, (uk >> 20) & 0xFFFFF, (uk & 0xFFFFF) + t0
+    nsub = torch.as_tensor(sub, device=t.device)
+    off = torch.cumsum(nsub, 0) - nsub
+    ns = nsub[band]
+    slot = off[band] + torch.minimum(((u - tw) * ns).long(), ns - 1)
+    return loc, slot, lp, (ltw.float() + 0.5) * ct, (lwb * cw).float()
+
+
 _COMPILED = {}
 
 
@@ -294,12 +317,40 @@ def _blocks(model):
 
 
 class SerialFMModel(FMModel):
-    def __init__(self, *args, rope_split=True, gp=1024, gd=2048, varlen=False, **kw):
+    """``band_pool=k`` runs the first ``k`` encoder blocks over band tokens, then
+    POOLS every band of a location (``mask_cell``: plane x wire block x drift
+    window) into one token for the remaining blocks -- 0.37x the tokens at pw16,
+    0.46x of pw8's at pw8 -- with no spatial coarsening. The pool is typed: the
+    tokens of a location are laid into ``sum(pool_sub)`` sub-slots by band and
+    sub-window, concatenated, and projected (Swin's patch merging, over scale
+    instead of space). ``pool_skip=True`` returns per-band-token features
+    ``stage-1 + up(trunk[location])`` -- what the decoder attends and the probe
+    reads; False returns the trunk alone (keys are the locations; a band token's
+    feature is its location's). Pooling only shrinks the encoder if whole
+    locations are visible or masked: train it with ``mask_mode="location"``."""
+
+    def __init__(self, *args, rope_split=True, gp=1024, gd=2048, varlen=False,
+                 band_pool=None, pool_skip=True, pool_sub=(1, 1, 2, 4), **kw):
         super().__init__(*args, **kw)
         self.rope_split, self.gp, self.gd, self.varlen = rope_split, gp, gd, bool(varlen)
         if self.varlen and kw.get("n_sink", 0):
             raise ValueError("varlen=True does not support attention sinks (n_sink>0): "
                              "flash varlen has no per-group extra keys")
+        self.band_pool, self.pool_skip, self.pool_sub = band_pool, bool(pool_skip), tuple(pool_sub)
+        if band_pool is not None:
+            if not (self.varlen and self.cond != "adaln" and 0 <= band_pool < len(self.enc)):
+                raise ValueError(f"band_pool={band_pool} needs varlen=True, cond!='adaln' and "
+                                 f"0 <= band_pool < blocks={len(self.enc)}")
+            if len(self.pool_sub) != len(self.band_emb.weight):
+                raise ValueError(f"pool_sub {self.pool_sub} needs one entry per band ({len(self.band_emb.weight)})")
+            d, S = self.d, sum(self.pool_sub)
+            self.pool_norm = torch.nn.LayerNorm(d)
+            self.pool_proj = torch.nn.Linear(S * d, d)
+            self.pool_up = torch.nn.Linear(d, d)
+            torch.nn.init.zeros_(self.pool_up.weight); torch.nn.init.zeros_(self.pool_up.bias)
+            if self.mup:                                   # hidden: var / m, as _mup_init does
+                with torch.no_grad():
+                    self.pool_proj.weight.mul_(self.m ** -0.5)
 
     def _fused(self):
         """``fused_qk`` (a train option) after checking it can apply: the kernel
@@ -312,7 +363,7 @@ class SerialFMModel(FMModel):
                              f"(got varlen={self.varlen}, qk_norm={self.enc[0].qn is not None}, hd={hd})")
         return True
 
-    def _layouts(self, plane, t, wire):
+    def _layouts(self, plane, t, wire, depth=None):
         """The encoder's distinct (order, group size, wire RoPE on) layouts;
         block i uses ``layouts[i % 4]``."""
         bp = plane.double()
@@ -321,7 +372,7 @@ class SerialFMModel(FMModel):
         o_t = torch.argsort(t.double()); o_ts = torch.roll(o_t, self.gd // 2)
         dw = not self.rope_split                                   # drift-layer wire RoPE: off if split
         cell = [(o_pt, self.gp, True), (o_t, self.gd, dw), (o_pw, self.gp, True), (o_ts, self.gd, dw)]
-        return cell[:len(self.enc)]
+        return cell[:len(self.enc) if depth is None else depth]
 
     def _emb(self, B, idx=None):
         band, plane = B["band_id"], B["plane_id"]
@@ -374,35 +425,66 @@ class SerialFMModel(FMModel):
         with bf16 weights (``bf16_params``) the residual stream is bf16 too --
         unless ``fp32_stream``."""
         x = x.to(torch.float32 if self.fp32_stream else self.embed.weight.dtype)
+        if self.band_pool is not None:
+            return self._encode_pooled(B, sel, x, at, aw, layers)[:2]
+        return self._stack_varlen(self.enc, x, B["plane_id"][sel], B["t_phys"][sel],
+                                  B["wire_pos"][sel], at, aw, c, layers)
+
+    def _stack_varlen(self, blocks, x, plane, t, wire, at, aw, c=None, layers=(), base=0):
+        """``blocks`` over rows at (plane, t, wire) -> (x, {base + i: x}), both in
+        the rows' order."""
         T, dev = x.shape[0], x.device
         lay = []
-        for o, g, uw in self._layouts(B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel]):
+        for o, g, uw in self._layouts(plane, t, wire, len(blocks)):
             cos, sin = rope_tables(at[o], aw[o] if uw else None, x.dtype)
             lay.append((o, _inverse(o), _cu_chunks(T, g, dev), min(g, T), cos, sin,
                         None if c is None else c[o]))
+        if not lay:
+            return x, {}
         step = [lay[j - 1][1][lay[j][0]] for j in range(len(lay))]
         self_blk, fused = _ckpt(_blocks(self)[0], self), self._fused()
         xp, out = _permute(x, lay[0][0], T), {}
-        for i, blk in enumerate(self.enc):
+        for i, blk in enumerate(blocks):
             j = i % len(lay)
             if i:
                 xp = _permute(xp, step[j], T)
             _, inv, cu, mx, cos, sin, cp = lay[j]
             xp = self_blk(blk, xp, cos, sin, cu, mx, cp, fused)
-            if i + 1 in layers:
-                out[i + 1] = _permute(xp, inv, T)
+            if base + i + 1 in layers:
+                out[base + i + 1] = _permute(xp, inv, T)
         return _permute(xp, inv, T), out
 
-    def _decode_varlen(self, qm, xv, at, aw, mask_idx, vis_idx, c, B):
-        """The grouped-cross decoder with even, unpadded time groups."""
+    def _encode_pooled(self, B, sel, x, at, aw, layers):
+        """Stage 1 over band tokens, typed pool to locations, trunk over locations.
+        -> (per-token features, {layer: per-token}, trunk, location of each row,
+        (t, ang_t, ang_w) of each location)."""
+        k = self.band_pool
+        plane, t, wire, band = B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel], B["band_id"][sel]
+        x, out = self._stack_varlen(self.enc[:k], x, plane, t, wire, at, aw, layers=layers)
+        loc, slot, lp, lt, lw = _locations(plane, t, wire, band, tuple(self.mask_cell), self.pool_sub)
+        S, d, n = sum(self.pool_sub), self.d, lp.numel()
+        Z = x.new_zeros(n * S, d).index_add_(0, loc * S + slot, self.pool_norm(x).to(x.dtype))
+        xl = self.pool_proj(Z.view(n, S * d)).to(x.dtype)
+        hd = self.d // self.heads
+        lat, law = rope_angles(lt, hd, *self.lam_t), rope_angles(lw, hd, *self.lam_w)
+        xl, lo = self._stack_varlen(self.enc[k:], xl, lp, lt, lw, lat, law, layers=layers, base=k)
+        tok = (lambda z: x + self.pool_up(z)[loc].to(x.dtype)) if self.pool_skip else (lambda z: z[loc])
+        out.update({i: tok(z) for i, z in lo.items()})
+        return tok(xl), out, xl, loc, (lt, lat, law)
+
+    def _decode_varlen(self, qm, xv, qpos, kpos, cm):
+        """The grouped-cross decoder with even, unpadded time groups. ``qpos`` /
+        ``kpos`` are (t_phys, ang_t, ang_w) of the queries / keys; ``cm`` the
+        queries' AdaLN conditioning or None."""
+        (qt, qat, qaw), (kt, kat, kaw) = qpos, kpos
         Tq, Tk, dev = qm.shape[0], xv.shape[0], xv.device
-        oq = torch.argsort(B["t_phys"][mask_idx].double()); okv = torch.argsort(B["t_phys"][vis_idx].double())
+        oq = torch.argsort(qt.double()); okv = torch.argsort(kt.double())
         nb = max(1, min((max(Tq, Tk) + self.gd - 1) // self.gd, Tq, Tk))
         cuq, cuk = _cu_even(Tq, nb, dev), _cu_even(Tk, nb, dev)
         mq, mk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
-        qcos, qsin = rope_tables(at[mask_idx][oq], aw[mask_idx][oq], qm.dtype)
-        kcos, ksin = rope_tables(at[vis_idx][okv], aw[vis_idx][okv], xv.dtype)
-        cm = None if c is None else c[mask_idx][oq]
+        qcos, qsin = rope_tables(qat[oq], qaw[oq], qm.dtype)
+        kcos, ksin = rope_tables(kat[okv], kaw[okv], xv.dtype)
+        cm = None if cm is None else cm[oq]
         cross_blk, fused = _ckpt(_blocks(self)[1], self), self._fused()
         qp, kvp = _permute(qm, oq, Tq), _permute(xv, okv, Tk)
         for blk in self.dec:
@@ -449,7 +531,14 @@ class SerialFMModel(FMModel):
             mask_idx = mask_idx[keep.sort().values]
         c = self._cond(B) if self.cond == "adaln" else None
         atv, awv = at[vis_idx], aw[vis_idx]
-        xv, _ = self._encode(B, vis_idx, atv, awv, None if c is None else c[vis_idx])
+        kpos = (B["t_phys"][vis_idx], atv, awv)
+        if self.band_pool is not None:
+            x0 = self._emb(B, vis_idx).to(torch.float32 if self.fp32_stream else self.embed.weight.dtype)
+            xv, _, xl, _, lpos = self._encode_pooled(B, vis_idx, x0, atv, awv, ())
+            if not self.pool_skip:                       # keys: the locations themselves
+                xv, kpos = xl, lpos
+        else:
+            xv, _ = self._encode(B, vis_idx, atv, awv, None if c is None else c[vis_idx])
 
         # CrossMAE decoder (grouped, drift-time): masked queries x-attend visible
         qm = self.mask_tok.expand(mask_idx.numel(), self.d)
@@ -461,9 +550,12 @@ class SerialFMModel(FMModel):
         if self.dec_embed is not None:          # a narrower decoder reads the encoder through one map
             qm, xv = self.dec_embed(qm), self.dec_embed(xv)
         if self.varlen:
-            qm = self._decode_varlen(qm, xv, at, aw, mask_idx, vis_idx, c, B)
+            qm = self._decode_varlen(qm, xv, (B["t_phys"][mask_idx], at[mask_idx], aw[mask_idx]), kpos,
+                                     None if c is None else c[mask_idx])
             if masked_only:
                 return self.dec_norm(qm), mask_idx
+            if self.band_pool is not None and not self.pool_skip:
+                raise NotImplementedError("full-grid features with pool_skip=False: use masked_only")
             x = torch.zeros(B["inp"].shape[0], self.d_dec, dtype=xv.dtype, device=xv.device)
             return self.dec_norm(x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm))
         Tq, Tk = qm.shape[0], xv.shape[0]
