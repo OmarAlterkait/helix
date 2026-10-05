@@ -23,6 +23,8 @@ RUNS=(
   "res_pw8bp2|interactive||$V/coeff_fm_8run_pw8bp2.py"
   "res_pw8loc|interactive||$V/coeff_fm_8run_pw8loc.py"           # pw8bp2's masking, no pooling
   "res_pw8bp2r|interactive|model.mask_mode=random|$V/coeff_fm_8run_pw8bp2.py"   # pooled, random masks: keeps the cross-band task
+  "res_pw8bp0r|interactive|model.mask_mode=random model.band_pool=0 model.pool_skip=False|$V/coeff_fm_8run_pw8bp2.py"   # one token per location, no fine path
+  # Second seeds (SEED=1): res_pw8_s1 (pw8 config, no options), res_pw8bp2_s1, res_pw8bp2r_s1.
 )
 for r in "${RUNS[@]}"; do
   IFS='|' read -r tag where opt cfg <<< "$r"

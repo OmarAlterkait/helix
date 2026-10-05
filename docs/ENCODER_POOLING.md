@@ -192,3 +192,19 @@ Pooling with random masks recovers plain pw8's map_r and localisation at 27% les
 step time; its faintest-bin floor AUC is the lowest of the four -- the claim the
 seeds must test. Across all runs the pw8 family sits at 0.80-0.83 floor AUC in the
 faintest bin against 0.84-0.855 for pw16, while its 1%-FPR efficiency is higher.
+
+**Second seeds** (SEED=1, same recipe) agree to ~0.003 on these metrics:
+
+| | res_pw8 / _s1 | res_pw8bp2 / _s1 |
+|---|---|---|
+| map_r | 0.967 / 0.965 | 0.954 / 0.955 |
+| floor AUC 0.1-0.2 MeV | 0.925 / 0.928 | 0.918 / 0.919 |
+| floor AUC 0-0.1 MeV | 0.831 / 0.828 | 0.821 / 0.826 |
+| floor eff. 5% FPR 0.1-0.2 MeV | 0.772 / 0.771 | 0.727 / 0.739 |
+| wire loc. 0.2-0.5 MeV | 1.442 / 1.449 | 1.519 / 1.535 |
+| region-masked recon | 0.300 / 0.300 | 0.353 / 0.371 |
+
+So the location-masked pooled encoder's cost against plain pw8 is real and small
+-- map_r -0.012, floor AUC -0.004 to -0.008, wire localisation +5%, 5%-FPR floor
+efficiency -0.04 -- for 26% less step time and better leak-free reconstruction.
+ab_varlen's floor (0.790) is an outlier against this spread, not typical noise.
