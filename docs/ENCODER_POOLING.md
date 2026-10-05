@@ -146,3 +146,28 @@ model beats the random-trained one.
 this width. Step-time table for the designs (1 node, B=4, s/step): pw16 0.141,
 location mask 0.140, bp0 0.112, bp2 0.117, bp2 + d_dec 384 0.102, pw8 0.168,
 pw8bp2 0.145, pw8bp2 + d_dec 384 0.114.
+
+**pw16: what the mask unit costs, and what pooling adds on top.**
+
+| | pw16 random (4 runs) | res_loc | res_bp2 |
+|---|---|---|---|
+| map_r | 0.936-0.939 | 0.911 | 0.911 |
+| wire loc. 0.2-0.5 / 0.5-1 MeV | 1.95-2.11 / 1.29-1.47 | 2.24 / 1.67 | 2.26 / 1.74 |
+| time loc. 0.2-0.5 MeV | 12.0-12.6 | 11.2 | 11.5 |
+| floor AUC 0.1-0.2 / 0-0.1 MeV | 0.890-0.927 / 0.790-0.855 | 0.914 / 0.854 | 0.908 / 0.837 |
+| presence AUC | 0.835-0.839 | 0.829 | 0.830 |
+| region-masked recon var_expl | 0.31-0.32 | 0.388 | 0.359 |
+| masked recon, location masks (all / A4) | 0.39 / 0.54 (ab_ref) | 0.439 / 0.610 | 0.413 / 0.587 |
+
+The location mask is what costs: map_r -0.026 and wire localisation, against
+better time localisation and leak-free reconstruction; the faintest floor holds.
+Pooling adds little on top (floor AUC -0.006 / -0.017, within seed spread; map_r
+unchanged). So the cross-band "leak" is not only a shortcut: reconstructing a
+masked token from its co-located bands teaches the within-token detail that the
+frozen probe reads for map_r and wire position.
+
+Hence res_pw8bp2r: the pooled pw8 encoder trained with RANDOM masks. The trunk
+then runs over every location with any visible band (less saving than under
+location masks), and the cross-band task is kept -- the visible bands of a
+location are pooled into the token the masked ones attend. res_pw8loc separates
+pooling from masking at pw8.

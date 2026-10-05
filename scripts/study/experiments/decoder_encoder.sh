@@ -22,6 +22,7 @@ RUNS=(
   "res_bp2|interactive|$VL model.mask_mode=location model.band_pool=2"
   "res_pw8bp2|interactive||$V/coeff_fm_8run_pw8bp2.py"
   "res_pw8loc|interactive||$V/coeff_fm_8run_pw8loc.py"           # pw8bp2's masking, no pooling
+  "res_pw8bp2r|interactive|model.mask_mode=random|$V/coeff_fm_8run_pw8bp2.py"   # pooled, random masks: keeps the cross-band task
 )
 for r in "${RUNS[@]}"; do
   IFS='|' read -r tag where opt cfg <<< "$r"
