@@ -171,3 +171,24 @@ then runs over every location with any visible band (less saving than under
 location masks), and the cross-band task is kept -- the visible bands of a
 location are pooled into the token the masked ones attend. res_pw8loc separates
 pooling from masking at pw8.
+
+**pw8: masking x pooling** (one seed each; second seeds of pw8 and pw8bp2 running):
+
+| | res_pw8 | res_pw8loc | res_pw8bp2 | res_pw8bp2r |
+|---|---|---|---|---|
+| mask / pool | random / no | location / no | location / yes | random / yes |
+| map_r | 0.967 | 0.957 | 0.954 | 0.961 |
+| wire loc. 0.2-0.5 / 0.5-1 MeV | 1.44 / 0.81 | 1.58 / 1.02 | 1.52 / 0.85 | 1.49 / 0.81 |
+| time loc. 0.2-0.5 MeV | 11.5 | 11.6 | 12.2 | 11.3 |
+| floor AUC 0.1-0.2 / 0-0.1 MeV | 0.925 / 0.831 | 0.923 / 0.834 | 0.918 / 0.821 | 0.913 / 0.803 |
+| region-masked recon | 0.300 | 0.412 | 0.353 | 0.230 |
+| masked recon, location masks (all) | 0.378 | 0.482 | 0.423 | 0.296 |
+| step time, 4 nodes (s; mixed node types) | 0.217 | 0.197 | 0.161 | 0.158 |
+
+Location masking alone keeps the floor and costs map_r and wire localisation.
+Pooling at fixed masking (bp2 vs loc) is 18% faster and does not cost wire
+localisation; it costs reconstruction (-0.06) and floor AUC within seed spread.
+Pooling with random masks recovers plain pw8's map_r and localisation at 27% less
+step time; its faintest-bin floor AUC is the lowest of the four -- the claim the
+seeds must test. Across all runs the pw8 family sits at 0.80-0.83 floor AUC in the
+faintest bin against 0.84-0.855 for pw16, while its 1%-FPR efficiency is higher.
