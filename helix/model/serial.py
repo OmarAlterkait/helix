@@ -534,11 +534,12 @@ class SerialFMModel(FMModel):
         c = self._cond(B) if self.cond == "adaln" else None
         atv, awv = at[vis_idx], aw[vis_idx]
         kpos = (B["t_phys"][vis_idx], atv, awv)
+        vis_feat = None                                  # per visible token, when keys are not
         if self.band_pool is not None:
             x0 = self._emb(B, vis_idx).to(torch.float32 if self.fp32_stream else self.embed.weight.dtype)
-            xv, _, xl, _, lpos = self._encode_pooled(B, vis_idx, x0, atv, awv, ())
+            xv, _, xl, vloc, lpos = self._encode_pooled(B, vis_idx, x0, atv, awv, ())
             if not self.pool_skip:                       # keys: the locations themselves
-                xv, kpos = xl, lpos
+                xv, kpos, vis_feat = xl, lpos, vloc
         else:
             xv, _ = self._encode(B, vis_idx, atv, awv, None if c is None else c[vis_idx])
 
@@ -551,15 +552,16 @@ class SerialFMModel(FMModel):
         qm = qm.to(xv.dtype)
         if self.dec_embed is not None:          # a narrower decoder reads the encoder through one map
             qm, xv = self.dec_embed(qm), self.dec_embed(xv)
+        if vis_feat is not None:                # pool_skip=False: a visible token's feature is its location's
+            vis_feat = xv[vis_feat]
         if self.varlen:
             qm = self._decode_varlen(qm, xv, (B["t_phys"][mask_idx], at[mask_idx], aw[mask_idx]), kpos,
                                      None if c is None else c[mask_idx])
             if masked_only:
                 return self.dec_norm(qm), mask_idx
-            if self.band_pool is not None and not self.pool_skip:
-                raise NotImplementedError("full-grid features with pool_skip=False: use masked_only")
             x = torch.zeros(B["inp"].shape[0], self.d_dec, dtype=xv.dtype, device=xv.device)
-            return self.dec_norm(x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm))
+            xv_rows = xv if vis_feat is None else vis_feat
+            return self.dec_norm(x.index_copy(0, vis_idx, xv_rows).index_copy(0, mask_idx, qm))
         Tq, Tk = qm.shape[0], xv.shape[0]
         oq = torch.argsort(B["t_phys"][mask_idx].double()); okv = torch.argsort(B["t_phys"][vis_idx].double())
         nb = (max(Tq, Tk) + self.gd - 1) // self.gd

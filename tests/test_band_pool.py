@@ -140,3 +140,23 @@ def test_tokenizer_grid_fills_each_typed_slot_once(pw):
     loc, slot, *_ = _locations(r[:, 0].long(), r[:, 3].float(), r[:, 2].float(), r[:, 1].long(), (pw, 128), (1, 1, 2, 4))
     pairs = loc * 8 + slot
     assert pairs.unique().numel() == pairs.numel()
+
+
+@pytest.mark.parametrize("skip", [True, False])
+def test_full_grid_features_and_heads_work_for_both_skip_modes(skip):
+    """The validation hook reads raw_heads (every row), not only the masked rows;
+    without this path a pool_skip=False run dies at its first evaluation."""
+    m = _pooled(pool_skip=skip).eval()
+    B = _batch()
+    mask = torch.rand(N, generator=torch.Generator().manual_seed(2)) < 0.3   # most locations keep >1 visible
+    with torch.no_grad():
+        x = m.forward_feat(B, mask)
+        occ, val, _ = m.raw_heads(B, mask)
+    assert x.shape == (N, SMALL["d"]) and torch.isfinite(x).all()
+    assert occ.shape[0] == N and torch.isfinite(val).all()
+    if not skip:                                   # visible rows carry their location's feature
+        loc = _locations(B["plane_id"], B["t_phys"], B["wire_pos"], B["band_id"], (16, 128), (1, 1, 2, 4))[0]
+        vis = (~mask).nonzero().squeeze(1)
+        l = next(l for l in loc[vis].unique() if (loc[vis] == l).sum() > 1)
+        rows = vis[loc[vis] == l]
+        torch.testing.assert_close(x[rows], x[rows[:1]].expand(len(rows), -1))
