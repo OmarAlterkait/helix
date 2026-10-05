@@ -101,3 +101,48 @@ per-token features `x_k + pool_up(trunk)[location]` (`pool_up` zero-initialised,
 training starts from the stage-1 features). `pool_skip=False` returns the trunk
 alone and gives the decoder the locations as keys. The decoder's queries are always
 band tokens, so the objective is unchanged. Tests: `tests/test_band_pool.py`.
+
+## 6. Results so far (2026-10-05; d768, 29,200 steps, `eval_resolution.py` v6)
+
+**Variance first.** The same weights scored through the padded and the varlen
+code paths agree (floor AUC 0.924 / 0.929 for ab_ref, 0.890 / 0.890 for
+ab_varlen), so inference is not a source. Training is: across six pw16-like runs
+floor AUC at 0-0.1 MeV is 0.840-0.855 with one draw at 0.790 (ab_varlen; its
+sibling ab_pkg on the same code path scores 0.855). Floor efficiency at 1% FPR
+moves by up to 0.09 on FIXED weights through probe numerics alone. Floor AUC is
+the stable floor metric, and a single run can still be off by ~0.03 in it: floor
+claims need two seeds.
+
+**The cross-band leak, measured** (`eval_mask_modes.py`, 40 events, explained
+variance of masked reconstruction):
+
+| model | random masks | location masks | A4: random / location |
+|---|---|---|---|
+| ab_ref (pw16, trained random) | 0.739 | 0.393 | 0.844 / 0.544 |
+| res_pw8 (trained random) | 0.799 | 0.378 | 0.883 / 0.512 |
+| res_pw8bp2 (trained location, pooled) | 0.418 | **0.423** | 0.549 / **0.591** |
+
+About half of what a random-mask model reconstructs comes from the co-located
+tokens of the other bands. On the leak-free task the pooled, location-trained pw8
+model beats the random-trained one.
+
+**First pooled arm** (one seed; res_pw8loc and a second seed pending):
+
+| | pw16 (4 runs) | res_pw8 | res_pw8bp2 |
+|---|---|---|---|
+| wire loc. 0.2-0.5 MeV | 1.95-2.11 | 1.44 | 1.52 |
+| wire loc. 0.5-1 MeV | 1.29-1.47 | 0.81 | 0.85 |
+| map_r | 0.936-0.939 | 0.967 | 0.954 |
+| floor AUC 0.1-0.2 MeV | 0.890-0.927 | 0.925 | 0.918 |
+| floor AUC 0-0.1 MeV | 0.790-0.855 | 0.831 | 0.821 |
+| region-masked recon var_expl | 0.31-0.32 | 0.300 | 0.353 |
+| step time, 1 node B=4 (s) | 0.141 | 0.168 | 0.145 |
+
+~90% of pw8's localisation gain at pw16's step time; floor within the spread.
+
+**Decoder arms** (same recipe, pw16): uniform `dec_frac=1/3` holds the floor
+(AUC 0.927) at map_r 0.933 and recon 0.288; `d_dec=384` costs map_r 0.938 ->
+0.922, floor AUC -0.01, recon 0.277, for ~3% step time at d768 -- not worth it at
+this width. Step-time table for the designs (1 node, B=4, s/step): pw16 0.141,
+location mask 0.140, bp0 0.112, bp2 0.117, bp2 + d_dec 384 0.102, pw8 0.168,
+pw8bp2 0.145, pw8bp2 + d_dec 384 0.114.
