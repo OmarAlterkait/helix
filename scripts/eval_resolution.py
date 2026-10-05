@@ -46,6 +46,9 @@ def main():
     ap.add_argument("--out", required=True, help="results JSONL, appended")
     ap.add_argument("--train-events", type=int, default=260)
     ap.add_argument("--boot", type=int, default=200)
+    ap.add_argument("--override", nargs="*", default=[], metavar="KEY=VALUE",
+                    help="model-config entries replaced before building (e.g. varlen=False), "
+                         "to score the same weights through another code path")
     a = ap.parse_args()
 
     import h5py
@@ -61,6 +64,17 @@ def main():
 
     dev = torch.device("cuda")
     art = load(a.checkpoint)
+    if a.override:
+        import ast
+        arch = dict(art.arch)
+        for kv in a.override:
+            k, v = kv.split("=", 1)
+            try:
+                arch[k] = ast.literal_eval(v)
+            except (ValueError, SyntaxError):
+                arch[k] = v
+        art = replace(art, arch=arch)
+        print(f"[{a.tag}] overrides: {a.override}", flush=True)
     pw, pt = art.op.pw or 16, art.op.pt or 8
     cfg = PatchConfig(cell_t="grid_center", pw=pw, pt=pt, n_bands=art.op.n_bands or 4)
     nb = cfg.n_bands
