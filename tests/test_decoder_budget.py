@@ -125,3 +125,19 @@ def test_n_masks_averages_losses_in_training_only():
     m.eval()
     with torch.no_grad():
         assert torch.isfinite(m(B)["loss"])                # eval: one mask, unchanged path
+
+
+def test_location_mask_hides_every_band_of_a_location_together():
+    from helix.model.mask import location_index
+    B = make_batch(n_cells=6000)
+    B["wire_pos"] = (B["wire_pos"] // 16) * 16              # block starts, as the tokenizer emits
+    B["n_cells"] = 6000
+    loc = location_index(B)
+    m = _model().train()
+    m.mask_mode = "location"
+    mask = m.make_mask(B)
+    for l in torch.unique(loc)[:200]:
+        v = mask[loc == l]
+        assert bool(v.all()) or not bool(v.any())
+    per_loc = torch.zeros(int(loc.max()) + 1).index_reduce_(0, loc, mask.float(), "amax", include_self=False)
+    assert 0.7 < per_loc.mean().item() < 0.8

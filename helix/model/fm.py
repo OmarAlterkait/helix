@@ -83,13 +83,15 @@ from helix.model.mask import make_mask
 # -- more work per step where a step is fixed-cost bound. Random-mode masks are
 # COMPLEMENTARY (disjoint visible sets, as data2vec 2.0's multi-mask); a
 # plane-mode step draws its masks independently.
+#
+# mask_cell is the (wires, ticks) extent of a location for mask_mode="location".
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None, compile_blocks=False,
                    pad_mask=False, act_ckpt=False, fused_qk=False,
                    bf16_params=False, fp32_stream=False, dec_frac=1.0,
-                   n_masks=1)
+                   n_masks=1, mask_cell=(16, 128))
 
 
 class FMModel(nn.Module):
@@ -474,7 +476,8 @@ class FMModel(nn.Module):
                 m = self.plane_mode
         return make_mask(B, m,
                          self.mask_ratio if ratio is None else ratio,
-                         self.n_planes if n_planes is None else n_planes, gen=gen)
+                         self.n_planes if n_planes is None else n_planes, gen=gen,
+                         cell=tuple(self.mask_cell))
 
     def require_batch_keys(self, B):
         """Raise a named KeyError for anything the objective needs and lacks.
