@@ -454,29 +454,44 @@ input, and its extrapolated constant used to set window maxima -- the first
 version of this table carried that bug, and it reversed the pw32 conclusion.
 
 Equal-step runs, d768 QK-norm recipe, 29.2k steps, one token change each
-(variants in `configs/pimm/variants/`; tokens per event vs today's 32,480):
+(variants in `configs/pimm/variants/`; tokens per event vs today's 32,480). Scored
+with the v7 probe, which STANDARDISES each feature channel (training-split
+statistics) before the MLP: on raw features one massive-activation channel set
+the probe's input scale, and the floor numbers tracked that, not the
+representation (two seeds with equal validation loss scored faintest-bin floor
+AUC 0.68 and 0.81 raw, 0.80 and 0.82 standardised). The v6 table that stood here
+used raw features; its pt16 and noD2 conclusions are superseded below.
 
-| metric | pw8 | pw16 s0 | pw16 s1 | pw32 | pt16 | noD2 |
+| metric | pw8 (2 seeds) | pw16 (2) | pw32 (2) | pt4 | pt16 | noD2 |
 |---|---|---|---|---|---|---|
-| tokens vs today | 1.29 | 1.00 | 1.00 | 0.74 | 0.74 | 0.75 |
-| charge map r | 0.967 | 0.938 | 0.939 | 0.891 | 0.888 | 0.926 |
-| floor eff @1% FPR, <0.1 MeV | 0.22 | 0.18 | 0.26 | 0.24 | 0.10 | 0.05 |
-| floor eff @1% FPR, 0.1-0.2 MeV | 0.54 | 0.39 | 0.48 | 0.35 | 0.13 | 0.16 |
-| floor eff @1% FPR, 0.2-0.5 MeV | 0.97 | 0.93 | 0.94 | 0.89 | 0.58 | 0.81 |
-| floor AUC, 0.1-0.2 MeV | 0.93 | 0.92 | 0.92 | 0.92 | 0.89 | 0.84 |
-| localisation >1 MeV, wires / ticks | 0.35 / 2.5 | 0.54 / 3.1 | 0.58 / 2.8 | 0.73 / 3.2 | 0.83 / 4.6 | 0.60 / 3.0 |
+| tokens vs today | 1.29 | 1.00 | 0.74 | >1 (not measured) | 0.74 | 0.75 |
+| charge map r | 0.966-0.968 | 0.943-0.944 | 0.898-0.903 | 0.964 | 0.907 | 0.936 |
+| floor eff @1% FPR, <0.1 MeV | 0.26-0.27 | 0.40-0.44 | 0.44-0.45 | 0.30 | 0.48 | 0.13 |
+| floor eff @1% FPR, 0.1-0.2 MeV | 0.58-0.59 | 0.64-0.65 | 0.61 | 0.62 | 0.60 | 0.36 |
+| floor eff @1% FPR, 0.2-0.5 MeV | 0.97-0.98 | 0.97-0.98 | 0.96-0.97 | 0.97 | 0.94 | 0.92 |
+| floor AUC, <0.1 MeV | 0.841-0.846 | 0.878-0.879 | 0.902-0.905 | 0.830 | 0.902 | 0.801 |
+| floor AUC, 0.1-0.2 MeV | 0.933-0.934 | 0.944-0.945 | 0.946 | 0.934 | 0.940 | 0.895 |
+| localisation >1 MeV, wires / ticks | 0.30-0.32 / 2.0-2.1 | 0.46-0.48 / 2.4 | 0.61-0.63 / 2.6 | 0.38 / 1.50 | 0.58 / 3.04 | 0.43 / 2.13 |
 
-At equal cost (0.74-0.75x tokens) the three reductions are not equal. Coarser
-TIME (pt16) and dropping D2 both lose the floor (efficiency at 0.1-0.2 MeV 0.13
-and 0.16 against 0.39-0.48); D2 appears to help reject noise although it rarely
-carries a faint deposit alone (floor AUC 0.92 -> 0.84), and pt16 also loses time
-localisation (3.1 -> 4.6 ticks). Coarser WIRE (pw32) keeps most of the floor
-(0.35 at 0.1-0.2, AUC unchanged) and costs wire localisation (0.54 -> 0.73) and
-map fidelity. Finer wire (pw8, 1.29x tokens) localises ~35% better and is at
-least as sensitive.
+Token size trades the faintest floor against localisation, along either axis:
+bigger tokens (pw32, pt16) score best below 0.1 MeV (floor AUC 0.90, efficiency
+0.44-0.48) and worst in map fidelity and localisation along their coarse axis;
+smaller tokens (pw8, pt4) localise best (pt4: 1.5 ticks against 2.4; pw8: 0.31
+wires against 0.47) and score worst below 0.1 MeV. At 0.1-0.2 MeV pw16 is the best
+of all (0.64-0.65). Dropping D2 is the one change that loses the floor outright
+(0.36 at 0.1-0.2 MeV, AUC 0.80 below 0.1). Coarser time does NOT lose it -- the v6
+table said 0.13; standardised, pt16 scores 0.60 -- so time is not a floor-critical
+axis; it costs time localisation (3.0 ticks) and map fidelity (0.907).
 
-How big a difference is real: the two pw16 seeds agree to 0.003 on map/AUC
-metrics and ~0.03 wire on localisation; floor efficiency spreads ~0.08 between
-them (and ~0.05 when the truth windows are re-drawn), so floor differences below
-~0.1 are not resolved. Close-pair separation spread up to 0.12 between seeds and
-is not used for decisions.
+Seed spread now: the pw8, pw16 and pw32 pairs agree to ~0.005 on map r and floor
+AUC and to ~0.04 on floor efficiency at 1% FPR. Floor efficiency at 1% FPR on
+FIXED weights moved by up to 0.09 through probe numerics under raw features;
+standardised, seed pairs agree to 0.005-0.04. Close-pair separation is not used
+for decisions.
+
+**Width.** The tier-1 runs (equal compute per width, B=64; a different recipe
+from the table above) scored the same way: floor efficiency at 0.1-0.2 MeV 0.541
+(d768), 0.610 (d1024), 0.669 (d1536), 0.671 (d2048); floor AUC below 0.1 MeV 0.851,
+0.864, 0.876, 0.874. The floor improves with width at equal compute and saturates
+by d1536 at this budget. The long runs (older recipe, no QK-norm, 2 seeds) show no
+clear gain from training longer (0.58-0.62).

@@ -102,7 +102,43 @@ training starts from the stage-1 features). `pool_skip=False` returns the trunk
 alone and gives the decoder the locations as keys. The decoder's queries are always
 band tokens, so the objective is unchanged. Tests: `tests/test_band_pool.py`.
 
-## 6. Results so far (2026-10-05; d768, 29,200 steps, `eval_resolution.py` v6)
+## 6. Results -- READ THIS FIRST: superseded numbers
+
+Everything in sections 6 and 7 below was scored with the v6 probe, which fed RAW
+encoder features to the MLP. One massive-activation channel then set the probe's
+input scale (one checkpoint: 4,836 against a next-largest 462), and the floor
+numbers tracked it. The v7 probe standardises each channel; the corrected numbers
+(results_v7) change the conclusions:
+
+| (v7) | map_r | floor AUC <0.1 / 0.1-0.2 MeV | floor eff 5% / 1% FPR, 0.1-0.2 | wire loc. 0.2-0.5 / 0.5-1 |
+|---|---|---|---|---|
+| pw16 random masks (3 runs) | 0.943-0.944 | 0.875-0.879 / 0.943-0.945 | 0.815-0.825 / 0.620-0.652 | 1.92-2.04 / 1.28-1.43 |
+| pw16 location masks | 0.924 | 0.883 / 0.940 | 0.808 / 0.569 | 2.22 / 1.44 |
+| pw16 pooled, location masks | 0.924 | 0.877 / 0.943 | 0.810 / 0.540 | 2.24 / 1.45 |
+| pw8 (2 seeds) | 0.966-0.968 | 0.841-0.846 / 0.933-0.934 | 0.803-0.809 / 0.583-0.587 | 1.30-1.34 / 0.73-0.74 |
+| pw8 location masks | 0.961 | 0.857 / 0.940 | 0.811 / 0.578 | 1.51 / 0.81 |
+| pw8 pooled, location masks (2) | 0.956-0.957 | 0.823-0.835 / 0.922-0.930 | 0.752-0.767 / 0.459-0.492 | 1.46-1.47 / 0.73-0.84 |
+| pw8 pooled, random masks (2) | 0.963 | 0.828-0.835 / 0.930-0.932 | 0.780-0.802 / 0.480-0.500 | 1.38-1.44 / 0.76-0.80 |
+| pw8 pooled, random + dec_frac 1/3 (2) | 0.955-0.963 | 0.797-0.820 / 0.904-0.918 | 0.719-0.758 / 0.327-0.474 | 1.38-1.41 / 0.77-0.81 |
+| pw8 pooled, no fine path | 0.954 | 0.765 / 0.884 | 0.625 / 0.294 | 1.39 / 0.80 |
+
+Corrected conclusions (they replace section 7):
+
+* Pooling costs the floor. Against plain pw8, the pooled encoder loses ~0.09-0.13
+  in 1%-FPR efficiency and 0.01-0.02 in floor AUC, consistently over two seeds;
+  plain pw8 is itself below pw16. Pooled pw8 is a localisation-and-speed trade,
+  not a floor improvement. Partial decoding on top makes the floor worse and
+  seed-unstable (0.474 / 0.327). Without the fine path the floor collapses.
+* The floor is lost to false positives: faint-deposit scores are about equal
+  across models; the 99th percentile of noise-window scores moves (656 pw16, 715
+  pw8, 842 pooled, 1,244 no fine path).
+* At pw16 the location mask unit, not the pool, is what costs 1%-FPR efficiency
+  (0.569 location, 0.540 pooled, against 0.62-0.65 random).
+* Recommendation: keep pw16 with random masks for the floor; park in-encoder
+  pooling. If speed is needed later, test a U-Net-style design (fine blocks after
+  unpooling, A4 kept out of the pool) first.
+
+## 6b. Results as first scored (v6 probe, superseded) (2026-10-05; d768, 29,200 steps, `eval_resolution.py` v6)
 
 **Variance first.** The same weights scored through the padded and the varlen
 code paths agree (floor AUC 0.924 / 0.929 for ab_ref, 0.890 / 0.890 for
@@ -251,7 +287,7 @@ Same-node-type step time (1 node, B=4, s/step): pw16 0.149, pw8 0.170, pw8 poole
 + random masks 0.152, **pw8 pooled + random masks + dec_frac 1/3: 0.121** -- 19%
 below today's pw16 and 29% below pw8.
 
-## 7. Conclusion
+## 7. Conclusion as first written (v6 probe, superseded by section 6)
 
 Recommended encoder: **pw8 band tokens, `band_pool=2` (two blocks over band tokens,
 typed pool of every band of an 8-wire x 128-tick location, ten blocks over
