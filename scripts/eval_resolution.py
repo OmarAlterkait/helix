@@ -196,7 +196,19 @@ def main():
 
     # ------------------------------------------------------------ probes
     def fit(Xtr, Atr, ytr, etr):
+        """MLP probe on per-channel STANDARDISED features (mean/std from the
+        training rows only). Raw features let one massive-activation channel
+        (measured: 4836 against a next-largest 462 in one checkpoint) set the
+        input scale, and the probe's score then tracks that, not the
+        representation: two seeds with the same validation loss scored floor AUC
+        0.82 and 0.68 on raw inputs."""
         torch.manual_seed(0)                                   # the probe's init and batches, reproducible
+        s1 = torch.zeros(Xtr.shape[1], dtype=torch.float64, device=dev); s2 = torch.zeros_like(s1)
+        for c in Xtr.split(65536):                             # chunked: no float copy of the matrix
+            c = c.to(dev).double(); s1 += c.sum(0); s2 += (c * c).sum(0)
+        mu = (s1 / len(Xtr)).float()
+        sd = (s2 / len(Xtr) - (s1 / len(Xtr)) ** 2).clamp(min=0).sqrt().float().clamp(min=1e-3)
+        z = lambda X_: (X_.float() - mu) / sd
         net = nn.Sequential(nn.Linear(Xtr.shape[1] + Atr.shape[1], 1024), nn.GELU(),
                             nn.Linear(1024, 512), nn.GELU(), nn.Linear(512, 1)).to(dev)
         va = etr >= np.quantile(etr, 0.9)                      # last ~10% of train events: early stop
@@ -208,20 +220,22 @@ def main():
         best, best_sd = 1e9, None
         for s in range(steps):
             b = tri[torch.randint(len(tri), (4096,), device=dev)]
-            loss = F.mse_loss(net(torch.cat([Xg[b].float(), Ag[b]], 1)).squeeze(-1), yg[b])
+            loss = F.mse_loss(net(torch.cat([z(Xg[b]), Ag[b]], 1)).squeeze(-1), yg[b])
             opt.zero_grad(); loss.backward(); opt.step(); sched.step()
             if (s + 1) % (steps // 6) == 0:
                 with torch.no_grad():
-                    v = sum(float(F.mse_loss(net(torch.cat([Xg[c].float(), Ag[c]], 1)).squeeze(-1), yg[c], reduction="sum"))
+                    v = sum(float(F.mse_loss(net(torch.cat([z(Xg[c]), Ag[c]], 1)).squeeze(-1), yg[c], reduction="sum"))
                             for c in vai.split(16384)) / len(vai)
                 if v < best:
                     best, best_sd = v, {k: t_.clone() for k, t_ in net.state_dict().items()}
         net.load_state_dict(best_sd)
+        net.mu, net.sd = mu, sd
         return net, best
 
     @torch.no_grad()
     def predict(net, X, A):
-        return torch.cat([net(torch.cat([X[s:s + 16384].to(dev).float(), torch.from_numpy(A[s:s + 16384]).to(dev)], 1))
+        return torch.cat([net(torch.cat([(X[s:s + 16384].to(dev).float() - net.mu) / net.sd,
+                                         torch.from_numpy(A[s:s + 16384]).to(dev)], 1))
                           .squeeze(-1).cpu() for s in range(0, X.shape[0], 16384)]).numpy()
 
     toff = {i: cfg.toff[i] for i in range(3)}
