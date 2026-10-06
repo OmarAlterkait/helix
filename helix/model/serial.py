@@ -531,6 +531,12 @@ class SerialFMModel(FMModel):
             n_m = order.numel() - n_vis                          # host ints: no sync
             keep = torch.randperm(n_m, device=order.device)[:max(1, round(n_m * self.dec_frac))]
             mask_idx = mask_idx[keep.sort().values]
+        if masked_only and self.training and self.vis_frac > 0:
+            # Visible tokens also decoded (FMModel vis_frac): a random subset joins
+            # the queries after the masked rows. n_vis is a host int: no sync.
+            k = max(1, round(n_vis * self.vis_frac))
+            sel = vis_idx[torch.randperm(n_vis, device=order.device)[:k].sort().values]
+            mask_idx = torch.cat([mask_idx, sel])
         c = self._cond(B) if self.cond == "adaln" else None
         atv, awv = at[vis_idx], aw[vis_idx]
         kpos = (B["t_phys"][vis_idx], atv, awv)

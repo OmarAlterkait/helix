@@ -25,6 +25,9 @@ RUNS=(
   "res_pw8bp2r|interactive|model.mask_mode=random|$V/coeff_fm_8run_pw8bp2.py"   # pooled, random masks: keeps the cross-band task
   "res_pw8bp0r|interactive|model.mask_mode=random model.band_pool=0 model.pool_skip=False|$V/coeff_fm_8run_pw8bp2.py"   # one token per location, no fine path
   # Second seeds (SEED=1): res_pw8_s1 (pw8 config, no options), res_pw8bp2_s1, res_pw8bp2r_s1.
+  # Objective (2026-10-06), pw16 reference recipe, seeds 0 and 1 (refs: ab_ref, res_pw16_s1):
+  "obj_vis|interactive|model.vis_frac=0.3333"                    # visible tokens decoded, value loss
+  "obj_noisy|interactive||$V/coeff_fm_8run_noisytgt.py"          # noisy targets: the real-data control
 )
 for r in "${RUNS[@]}"; do
   IFS='|' read -r tag where opt cfg <<< "$r"

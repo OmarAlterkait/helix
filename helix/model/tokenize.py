@@ -289,7 +289,7 @@ def pixel_cells(plane_gid, wire, tick, band_lengths, cfg=None):
 
 def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
              norm_sigma, cfg=None, value_clean=None, dead_frac=0.0,
-             rng=None):
+             rng=None, noisy_target=False):
     """Coefficient rows -> per-band 2-D patch tokens (stateless, pure numpy).
 
     Faithful port of ``vit_tpc.assemble_tpc_band``. The one substantive change is
@@ -322,8 +322,14 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     sig_row = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), 1e-6)
     ratio = (np.asarray(value, np.float32) / sig_row).astype(np.float32)
     val = np.arcsinh(ratio).astype(np.float32)          # == normalize_values(...)
-    target = (np.arcsinh(np.asarray(clean, np.float32) / sig_row).astype(np.float32)
-              if clean is not None else np.zeros_like(val))
+    # noisy_target: the target IS the (normalised) input -- what a real-data
+    # recipe has, with no simulated clean waveform. Masked prediction then has to
+    # infer it from context, which is where denoising comes from (Noise2Self).
+    if noisy_target:
+        target = val.copy()
+    else:
+        target = (np.arcsinh(np.asarray(clean, np.float32) / sig_row).astype(np.float32)
+                  if clean is not None else np.zeros_like(val))
 
     wb, tb = wire // pw, tau // pt
     key = cell_key(plane_gid, band, wire, tau, cfg)
@@ -684,10 +690,11 @@ class CoeffTokenize:
 
     def __init__(self, part="coeff", clean_part="coeff_clean",
                  cfg=None, dead_frac=0.0, seed=None, gids=None, n_wires=None,
-                 band_lengths=None, norm_sigma=None, fm_names=True):
+                 band_lengths=None, norm_sigma=None, fm_names=True, noisy_target=False):
         cfg = _require_cfg(cfg)
         self.part = part
         self.clean_part = clean_part
+        self.noisy_target = bool(noisy_target)   # tgt = the noisy input, clean ignored
         self.cfg = cfg if isinstance(cfg, PatchConfig) else PatchConfig(**(cfg or {}))
         self.dead_frac = float(dead_frac)
         self.seed = seed
@@ -721,9 +728,9 @@ class CoeffTokenize:
             np.asarray(sub["value"]).reshape(-1),
             gids=m["gids"], n_wires=m["n_wires"], band_lengths=m["band_lengths"],
             norm_sigma=m["norm_sigma"], cfg=self.cfg,
-            value_clean=(None if clean is None
+            value_clean=(None if clean is None or self.noisy_target
                          else np.asarray(clean["value"]).reshape(-1)),
-            dead_frac=self.dead_frac, rng=rng)
+            dead_frac=self.dead_frac, rng=rng, noisy_target=self.noisy_target)
         n_cells = tok.pop("n_cells")
         # Emit the names fm/model.py gathers, not assemble()'s cell_* vocabulary.
         # Without this the first batch dies on B["band_id"] (model.py:266), and

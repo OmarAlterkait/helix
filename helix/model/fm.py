@@ -85,13 +85,20 @@ from helix.model.mask import make_mask
 # plane-mode step draws its masks independently.
 #
 # mask_cell is the (wires, ticks) extent of a location for mask_mode="location".
+#
+# vis_frac > 0 also decodes that fraction of the VISIBLE tokens in training: they
+# join the decoder's queries (their own encoder output is among the keys) and get
+# the value loss against the target -- clean in simulation, so a noise-only slot
+# is taught "nothing here". No occupancy loss for them: it is observed. Without
+# it no token is ever trained to judge its own coefficients, which is what the
+# frozen probe asks of every token.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None, compile_blocks=False,
                    pad_mask=False, act_ckpt=False, fused_qk=False,
                    bf16_params=False, fp32_stream=False, dec_frac=1.0,
-                   n_masks=1, mask_cell=(16, 128))
+                   n_masks=1, mask_cell=(16, 128), vis_frac=0.0)
 
 
 class FMModel(nn.Module):
@@ -558,7 +565,8 @@ class FMModel(nn.Module):
             # Only masked rows enter this objective, so only they are decoded,
             # and the value head is evaluated only on the slots it weights.
             feat, rows = self.forward_feat(B, m, masked_only=True)
-            bce, vloss = cat_head_sparse(self, feat, B, rows, w=self.dec_weights(B, rows))
+            obs = ~m[rows] if (self.training and self.vis_frac > 0) else None   # decoded visible rows
+            bce, vloss = cat_head_sparse(self, feat, B, rows, w=self.dec_weights(B, rows), no_bce=obs)
             return {"loss": bce + vloss, "bce": bce.detach(), "val": vloss.detach(),
                     "masked_frac": m.float().mean().detach()}
         occ, val, logvar = self.raw_heads(B, m)

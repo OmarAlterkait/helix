@@ -18,17 +18,23 @@ import torch.nn.functional as F
 from helix.model.loss import bucketize_bins
 
 
-def cat_head_sparse(model, feat, B, rows, w=None):
+def cat_head_sparse(model, feat, B, rows, w=None, no_bce=None):
     """-> (occupancy BCE, value CE) over the masked rows ``rows`` of the batch,
     whose decoded features are ``feat``; the sums ``losses_cat`` forms at
     vis_w == 0.
 
     ``w`` (per row) weights each row's terms in numerator and denominator alike
     -- a self-normalised estimate of the full-decode mean when rows were sampled
-    with probability 1/w. None is uniform and the original arithmetic."""
+    with probability 1/w. None is uniform and the original arithmetic.
+
+    ``no_bce`` (per row, bool) drops those rows from the occupancy term --
+    decoded visible rows, whose occupancy is observed -- and keeps them in the
+    value term."""
     NS, K = model.n_slot, model.n_bins
     valid, occ_t, tgt = B["valid"][rows], B["occ"][rows], B["tgt"][rows]
     vw = valid if w is None else valid * w[:, None]          # valid may be bool
+    if no_bce is not None:
+        vw = vw * (~no_bce)[:, None]
 
     occ = model.occ_head(feat) * model.readout_mult
     bce_e = F.binary_cross_entropy_with_logits(occ, occ_t, reduction="none")
