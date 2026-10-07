@@ -74,3 +74,34 @@ def test_auc_and_floor_efficiency():
     s = R.scalars(np.array([1.0, 0.0]), np.array([1.0, 0.0]), [0.5], W, 0.5)
     effs = [v for k, v in s.items() if k.startswith("floor_eff1pct_") and not np.isnan(v)]
     assert effs and all(v == 1.0 for v in effs)        # every isolated particle beats empty windows
+
+
+def test_cell_inputs_matches_the_probe_gather_arithmetic():
+    """cell_inputs is the probe's gather, moved: the same covering tokens and the
+    same offset features as the inline version eval_resolution used to carry."""
+    from helix.model.tokenize import PatchConfig, pixel_cells
+    cfg = PatchConfig(cell_t="grid_center")
+    rng = np.random.default_rng(0)
+    bl = np.array([280, 280, 560, 1120])
+    keys = R.fkey(rng.integers(0, 6, 400), rng.integers(0, 900, 400), rng.integers(0, 260, 400))
+    g, fw, ft = R.unkey(keys)
+    w, t = fw * R.FW, ft * R.FT + R.FT // 2
+    pc = pixel_cells(g, w, t, bl, cfg)
+    tok_keys = np.unique(pc[rng.random(pc.shape) < 0.5])        # a token set covering about half
+    idx, aux = R.cell_inputs(keys, tok_keys, bl, cfg)
+    # reference: the inline gather as it stood in scripts/eval_resolution.py
+    order = np.argsort(tok_keys); cks = tok_keys[order]
+    pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
+    ref_idx = np.where(cks[pos] == pc, order[pos], -1)
+    dec = (1 << np.asarray(cfg.lev)).astype(np.float64); toff = np.asarray(cfg.toff)[g % 3]
+    offs = []
+    for b in range(cfg.n_bands):
+        tau = (t + toff) / dec[b] - cfg.delta[b]
+        offs += [(w % cfg.pw + 0.5) / cfg.pw, (tau / cfg.pt) % 1.0]
+    x = np.stack(offs, 1).astype(np.float32)
+    ang = 2 * np.pi * x[..., None] * np.array([1, 2, 3], np.float32)
+    ref_aux = np.concatenate([(ref_idx >= 0).astype(np.float32),
+                              np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(len(keys), -1)], 1)
+    np.testing.assert_array_equal(idx, ref_idx)
+    np.testing.assert_allclose(aux, ref_aux)
+    assert aux.shape == (len(keys), 13 * cfg.n_bands)

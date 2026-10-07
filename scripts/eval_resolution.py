@@ -59,7 +59,7 @@ def main():
     from helix.core.coeff_io import read_coeff_event
     from helix.model.artifact import build, load
     from helix.model.loss import bucketize_bins
-    from helix.model.tokenize import PatchConfig, assemble, pixel_cells, to_fm
+    from helix.model.tokenize import PatchConfig, assemble, to_fm
     from helix.probe import resolution as R
 
     dev = torch.device("cuda")
@@ -84,10 +84,6 @@ def main():
     models["random"] = build(replace(art, state_dict=None), device=dev, eval_mode=True)
     print(f"[{a.tag}] pw={pw} pt={pt} bands={nb} d={models['trained'].d}", flush=True)
 
-    def fourier(x):
-        ang = 2 * np.pi * x[..., None] * np.array([1, 2, 3], np.float32)
-        return np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(x.shape[0], -1)
-
     def tokens(shard, event):
         with h5py.File(shard, "r") as f:
             ids = f["ident"]["event"][:]
@@ -102,12 +98,7 @@ def main():
         return B, bl
 
     def gather(keys, B, bl, feats):
-        g, fw, ft = R.unkey(keys)
-        w, t = fw * R.FW, ft * R.FT + R.FT // 2
-        pc = pixel_cells(g, w, t, bl, cfg)
-        ck = B["cell_key"].cpu().numpy(); order = np.argsort(ck); cks = ck[order]
-        pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
-        idx = np.where(cks[pos] == pc, order[pos], -1)
+        idx, aux = R.cell_inputs(keys, B["cell_key"].cpu().numpy(), bl, cfg)
         D = feats.shape[1]
         X = torch.zeros((len(keys), nb * D), dtype=torch.float16, device=dev)
         for b in range(nb):
@@ -115,14 +106,7 @@ def main():
             if m.any():
                 X[torch.from_numpy(np.nonzero(m)[0]).to(dev), b * D:(b + 1) * D] = \
                     feats[torch.from_numpy(idx[m, b]).to(dev)].half()
-        dec = (1 << np.asarray(cfg.lev)).astype(np.float64)
-        toff = np.asarray(cfg.toff)[g % 3]
-        offs = []
-        for b in range(nb):
-            tau = (t + toff) / dec[b] - cfg.delta[b]
-            offs += [(w % pw + 0.5) / pw, (tau / pt) % 1.0]
-        aux = np.concatenate([(idx >= 0).astype(np.float32), fourier(np.stack(offs, 1).astype(np.float32))], 1)
-        return X.cpu(), aux.astype(np.float32), (idx >= 0).any(1)
+        return X.cpu(), aux, (idx >= 0).any(1)
 
     def region_mask(B):
         wc = (B["cell_wb"].float() * pw + pw / 2).cpu().numpy()

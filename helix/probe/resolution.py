@@ -80,6 +80,45 @@ def window_cells(g, w0, t0):
     return fkey(np.full(W.size, g), W.ravel(), T.ravel())
 
 
+def _fourier(x):
+    ang = 2 * np.pi * x[..., None] * np.array([1, 2, 3], np.float32)
+    return np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(x.shape[0], -1)
+
+
+def cell_inputs(keys, cell_key, band_lengths, cfg):
+    """Per fine cell: which token covers it in each band, and where inside it.
+
+    ``keys``: fine-cell keys (:func:`fkey`). ``cell_key``: the tokenized event's
+    per-token cell keys (``B["cell_key"]``). Returns ``idx`` (n, n_bands) int64 --
+    the covering token's row, -1 if none -- and ``aux`` (n, 13 * n_bands) float32:
+    a presence bit per band, then the cell's continuous offset inside each band's
+    token (wire, tau), Fourier-encoded. The frozen probe (scripts/eval_resolution.py)
+    and the trainable denoising head (helix.model.denoise) both read exactly this,
+    so a frozen and a fine-tuned number differ only in what was trained.
+    """
+    from helix.model.tokenize import pixel_cells
+
+    nb, pw, pt = cfg.n_bands, cfg.pw, cfg.pt
+    g, fw, ft = unkey(np.asarray(keys, np.int64))
+    w, t = fw * FW, ft * FT + FT // 2
+    pc = pixel_cells(g, w, t, band_lengths, cfg)
+    ck = np.asarray(cell_key, np.int64)
+    order = np.argsort(ck); cks = ck[order]
+    if len(cks):
+        pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
+        idx = np.where(cks[pos] == pc, order[pos], -1)
+    else:
+        idx = np.full(pc.shape, -1, np.int64)
+    dec = (1 << np.asarray(cfg.lev)).astype(np.float64)
+    toff = np.asarray(cfg.toff)[g % 3]
+    offs = []
+    for b in range(nb):
+        tau = (t + toff) / dec[b] - cfg.delta[b]
+        offs += [(w % pw + 0.5) / pw, (tau / pt) % 1.0]
+    aux = np.concatenate([(idx >= 0).astype(np.float32), _fourier(np.stack(offs, 1).astype(np.float32))], 1)
+    return idx.astype(np.int64), aux.astype(np.float32)
+
+
 def event_truth(pix, coeff_cells, rng, cap_signal=3000, n_iso=60, n_pair=40, n_bg=60):
     """Truth for one event.
 
