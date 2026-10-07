@@ -28,6 +28,8 @@ RUNS=(
   # Objective (2026-10-06), pw16 reference recipe, seeds 0 and 1 (refs: ab_ref, res_pw16_s1):
   "obj_vis|interactive|model.vis_frac=0.3333"                    # visible tokens decoded, value loss
   "obj_noisy|interactive||$V/coeff_fm_8run_noisytgt.py"          # noisy targets: the real-data control
+  # From cfc5345 every config trains on NOISY targets with the v4 (noisy) bin grid.
+  "nz_pw16|interactive|"                                         # the noisy reference, seeds 0 and 1 (nz_pw16_s1)
 )
 for r in "${RUNS[@]}"; do
   IFS='|' read -r tag where opt cfg <<< "$r"
