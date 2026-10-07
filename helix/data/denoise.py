@@ -48,13 +48,13 @@ def split_events(corpus_root, runs, split):
 
 class DenoiseEvents:
     def __init__(self, corpus_root, runs, truth_root, split="train", *, n_events=None, subset_seed=0,
-                 cfg=None, q0=Q0_DEFAULT, sig_cap=20000, neg_per_sig=1.0, near_per_sig=1.0, cov_per_sig=1.0,
+                 cfg=None, q0=Q0_DEFAULT, sig_cap=20000, neg_per_sig=1.0, near_per_sig=1.0, cov_per_sig=1.0, win_per_event=0,
                  sample_seed=None, items=None):
         from helix.model.tokenize import PatchConfig
         self.cfg = cfg or PatchConfig(cell_t="grid_center")
         self.truth_root, self.q0 = truth_root, float(q0)
         self.sig_cap, self.neg_per_sig, self.near_per_sig = sig_cap, neg_per_sig, near_per_sig
-        self.cov_per_sig = cov_per_sig
+        self.cov_per_sig, self.win_per_event = cov_per_sig, win_per_event
         self.sample_seed = sample_seed                     # None: a fresh draw per access (training)
         self.items = items if items is not None else split_events(corpus_root, runs, split)
         if n_events is not None and n_events < len(self.items):
@@ -126,6 +126,8 @@ class DenoiseEvents:
             dec = (1 << np.asarray(self.cfg.lev))[b]
             tick = tick_of_tau(tau, g, b, self.cfg) + rng.random(n) * dec
             parts.append(fkey(g, np.maximum(wire, 0) // FW, np.floor(np.maximum(tick, 0) / FT).astype(np.int64)))
+        if self.win_per_event > 0 and len(ck):
+            parts.append(self._noise_windows(ck, tkeys, rng))
         rows = np.unique(np.concatenate(parts))
         q = np.zeros(len(rows))
         if len(tkeys):
@@ -133,6 +135,29 @@ class DenoiseEvents:
             hit = tkeys[pos] == rows
             q[hit] = tq[pos[hit]]
         return rows, np.log1p(q / self.q0).astype(np.float32)
+
+    def _noise_windows(self, ck, tkeys, rng):
+        """Every cell of up to ``win_per_event`` charge-free windows (WW x WT),
+        each centred on a kept coefficient with no truth charge within the same
+        padding the evaluation's noise windows use (16 wires, 128 ticks). The
+        floor scores the MAX over such a window, so training sees all of it."""
+        from helix.probe.resolution import FT, FW, WT, WW, fkey, unkey
+        tg, tw, tt = unkey(tkeys)
+        by_plane = {int(g): (tw[tg == g], tt[tg == g]) for g in np.unique(tg)}
+        out, n = [], 0
+        for x in rng.permutation(ck)[:20 * self.win_per_event]:
+            g, fw, ft = (int(v) for v in unkey(np.array([x])))
+            w0, t0 = max(0, fw - WW // FW // 2), max(0, ft - WT // FT // 2)        # in fine-cell units
+            pw_, pt_ = 16 // FW, 128 // FT
+            cw, ct = by_plane.get(g, (np.zeros(0, int), np.zeros(0, int)))
+            if ((cw >= w0 - pw_) & (cw < w0 + WW // FW + pw_) & (ct >= t0 - pt_) & (ct < t0 + WT // FT + pt_)).any():
+                continue
+            ww, tt_ = np.meshgrid(np.arange(w0, w0 + WW // FW), np.arange(t0, t0 + WT // FT), indexing="ij")
+            out.append(fkey(np.full(ww.size, g), ww.ravel(), tt_.ravel()))
+            n += 1
+            if n >= self.win_per_event:
+                break
+        return np.concatenate(out) if out else np.zeros(0, np.int64)
 
     def __getitem__(self, i):
         from helix.probe.resolution import cell_inputs

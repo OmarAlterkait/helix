@@ -118,7 +118,9 @@ def main():
     res = dict(tag=a.tag, checkpoint=a.checkpoint, step=ck.get("step"), Q0=Q0, n_windows=len(META),
                train_events=meta["args"].get("n_events"), init=meta["args"].get("init"), trained=r)
     with open(a.out.replace(".jsonl", f"_{a.tag}_trained_windows.json"), "w") as fh:
-        json.dump([{k: w[k] for k in ("kind", "score", "eb", "dip", "edge", "sep") if k in w} for w in W], fh, default=float)
+        json.dump([dict({k: w[k] for k in ("kind", "score", "eb", "dip", "edge", "sep") if k in w},
+                        ev=m_.get("ev"), g=m_.get("g"), w0=m_.get("w0"), t0=m_.get("t0"))
+                   for w, m_ in zip(W, META)], fh, default=float)       # where each window is, for diagnosis
     with open(a.out, "a") as fh:
         fh.write(json.dumps(res) + "\n")
     print(json.dumps({k: r[k] for k in ("map_r", "faint_auc", "floor_eff1pct_0.1-0.2", "floor_auc_0-0.1")}), flush=True)
