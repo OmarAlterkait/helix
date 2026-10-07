@@ -39,12 +39,24 @@ def test_no_training_module_names_the_clean_modality():
     assert not hits, f"training modules that reference coeff_clean: {hits}"
 
 
+def _default_of(path, cls, arg):
+    """A constructor default read from source -- the pimm adapter imports pimm,
+    which the CI image does not carry, so it is parsed, not imported."""
+    import ast
+    tree = ast.parse(path.read_text())
+    fn = next(n for c in ast.walk(tree) if isinstance(c, ast.ClassDef) and c.name == cls
+              for n in c.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    names = [a.arg for a in fn.args.args]
+    defaults = dict(zip(names[len(names) - len(fn.args.defaults):], fn.args.defaults))
+    return ast.literal_eval(defaults[arg])
+
+
 def test_defaults_load_no_clean_data():
     import inspect
-    from helix.integrations.pimm.data import CoeffTPCDataset as Wrapper
     from helix.model.tokenize import CoeffTokenize
     assert inspect.signature(CoeffTokenize.__init__).parameters["clean_part"].default is None
-    assert inspect.signature(Wrapper.__init__).parameters["modalities"].default == ("coeff",)
+    wrapper = ROOT / "helix" / "integrations" / "pimm" / "data.py"
+    assert _default_of(wrapper, "CoeffTPCDataset", "modalities") == ("coeff",)
 
 
 def test_target_without_clean_values_is_the_noisy_input():
