@@ -83,10 +83,16 @@ the model never saw. Adding empty cells drawn uniformly inside token footprints
 16 events, lr 1e-2 cosine): map r 0.995, presence AUC 0.948, floor AUC 0.886 /
 0.963 (<0.1 / 0.1-0.2 MeV), 5%-FPR efficiency 0.893, 1%-FPR efficiency 0.224 / 0.689
 / 0.984 (<0.1 / 0.1-0.2 / 0.2-0.5 MeV), localisation 1.60 wires / 6.6 ticks. The
-frozen probe on the same FM (nz_pw16_s1, 260 events) gives map r 0.946, 0.835 /
-0.932, 0.780, 0.48 at 0.1-0.2, 1.44 / 11.1 ticks. Supervision wins everywhere but the
-faintest bin's 1%-FPR efficiency, where regression to log1p(q/Q0) puts faint
-deposits near noise in charge units (window score medians 360 vs the probe's 586).
+frozen probe on the same noisy-recipe FM (260 events) gives, for its two seeds
+nz_pw16 / nz_pw16_s1: map r 0.944 / 0.946, floor AUC 0.829-0.875 / 0.912-0.940, 5%-FPR
+efficiency 0.712 / 0.799, 1%-FPR efficiency at 0.1-0.2 MeV 0.447 / 0.577, localisation
+~2.0 wires / 11.5 ticks, and 1%-FPR efficiency below 0.1 MeV 0.219 / 0.347.
+Supervision wins on every metric except that faintest bin, where it is within the
+probe's seed range (0.224). (Against the clean-target probes of s10 -- 0.40-0.44 there
+-- it would look like a deficit; that is the wrong baseline for a noisy-input model.)
+In charge units, regression to log1p(q/Q0) does put faint deposits close to noise
+(window-score medians 360 vs the clean probe's 586), which is what the presence-head
+ablation tests.
 
 **Label efficiency** (4k steps x 4 events for every arm, best val checkpoint; the
 ceiling saw 640k events, so from-scratch arms are compute- as well as label-limited):
