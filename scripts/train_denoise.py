@@ -45,6 +45,9 @@ def parse():
     ap.add_argument("--ckpt-every", type=int, default=1000)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--presence", action="store_true",
+                    help="hurdle head: also a BCE logit for q > 0 (window scores by presence)")
+    ap.add_argument("--presence-w", type=float, default=1.0, help="weight of the presence BCE")
     ap.add_argument("--win-per-event", type=int, default=0,
                     help="charge-free noise windows per event, every cell of each (the floor's bg windows)")
     ap.add_argument("--cov-per-sig", type=float, default=2.0,
@@ -91,7 +94,7 @@ def main():
     arch = load(a.arch_from).arch
     sd = load(a.init).state_dict if a.init else None
     torch.manual_seed(a.seed)
-    model = build_denoise(arch, sd, overrides=overrides).to(dev)
+    model = build_denoise(arch, sd, overrides=overrides, head_kw=dict(presence=a.presence)).to(dev)
     n_train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
     say(f"[denoise] arch {a.arch_from} init {a.init or 'scratch'} trainable {n_train_p/1e6:.1f}M world {world}")
 
@@ -120,7 +123,8 @@ def main():
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
         step, best = ck["step"], ck.get("best", best)
         say(f"[denoise] resumed at step {step}")
-    meta = dict(arch=arch, overrides=overrides, args=vars(a), q0=train.q0, runs=runs)
+    meta = dict(arch=arch, overrides=overrides, args=vars(a), q0=train.q0, runs=runs,
+                head_kw=dict(presence=a.presence))
 
     def save(path, extra=None):
         if rank:
@@ -137,7 +141,8 @@ def main():
         for i in range(rank, len(val), world):
             B, idx, aux, y = to_device(val[i], dev)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                p = model(B, idx, aux).float()
+                p = model(B, idx, aux)
+            p = (p[0] if a.presence else p).float()
             e = (p - y) ** 2; pos = y > 0
             tot += torch.stack([e.sum(), torch.tensor(float(len(y)), device=dev),
                                 e[pos].sum(), pos.sum().double()]).double()
@@ -172,8 +177,13 @@ def main():
             g["lr"] = b0 * lr_at(step)
         B, idx, aux, y = to_device(next(it), dev)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            p = ddp(B, idx, aux).float()
-        loss = torch.nn.functional.mse_loss(p, y)
+            p = ddp(B, idx, aux)
+        if a.presence:
+            p, logit = p[0].float(), p[1].float()
+            loss = torch.nn.functional.mse_loss(p, y) + a.presence_w * \
+                torch.nn.functional.binary_cross_entropy_with_logits(logit, (y > 0).float())
+        else:
+            loss = torch.nn.functional.mse_loss(p.float(), y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), a.clip)

@@ -6,7 +6,11 @@ field response) summed onto the fine grid of :mod:`helix.probe.resolution`
 the floor evaluation scores. The input is exactly what the foundation model
 sees -- every noisy token of an event, none masked.
 
-``DenoiseModel`` = the FM encoder (``SerialFMModel.encode``) + ``CellHead``. The
+``DenoiseModel`` = the FM encoder (``SerialFMModel.encode``) + ``CellHead``.
+With ``presence`` the head also returns a logit for "this cell carries charge"
+(a hurdle model): the floor is a detection question, and a regression to
+``log1p(q/Q0)`` pulls an ambiguous blip to an intermediate value either way,
+which puts faint deposits beside noise in charge units. The
 head reads, for each queried cell, the encoder features of the token covering it
 in each band plus the cell's offset inside those tokens
 (:func:`helix.probe.resolution.cell_inputs`) -- the frozen probe's input, made
@@ -29,21 +33,23 @@ ENCODER_PREFIXES = ("embed.", "film.", "band_emb.", "plane_emb.", "cond_wire.", 
 class CellHead(nn.Module):
     """Per-cell readout over the covering tokens of every band."""
 
-    def __init__(self, d, n_bands=4, proj=256, hidden=1024, n_aux=None):
+    def __init__(self, d, n_bands=4, proj=256, hidden=1024, n_aux=None, presence=False):
         super().__init__()
-        self.n_bands, self.proj_dim = n_bands, proj
+        self.n_bands, self.proj_dim, self.presence = n_bands, proj, bool(presence)
         self.norm = nn.LayerNorm(d)
         self.proj = nn.Linear(d, proj)
         n_aux = 13 * n_bands if n_aux is None else n_aux
         self.mlp = nn.Sequential(nn.Linear(n_bands * proj + n_aux, hidden), nn.GELU(),
                                  nn.Linear(hidden, hidden // 2), nn.GELU(),
-                                 nn.Linear(hidden // 2, 1))
+                                 nn.Linear(hidden // 2, 2 if presence else 1))
 
     def forward(self, feats, idx, aux):
-        """feats (N_tok, d); idx (n, n_bands) covering token or -1; aux (n, n_aux)."""
+        """feats (N_tok, d); idx (n, n_bands) covering token or -1; aux (n, n_aux).
+        -> charge ``y`` (n,), or ``(y, presence_logit)`` with ``presence``."""
         z = self.proj(self.norm(feats))
         g = z[idx.clamp(min=0)] * (idx >= 0).unsqueeze(-1).to(z.dtype)      # absent band -> zeros
-        return self.mlp(torch.cat([g.flatten(1), aux.to(g.dtype)], 1)).squeeze(-1)
+        out = self.mlp(torch.cat([g.flatten(1), aux.to(g.dtype)], 1))
+        return (out[:, 0], out[:, 1]) if self.presence else out.squeeze(-1)
 
 
 class DenoiseModel(nn.Module):

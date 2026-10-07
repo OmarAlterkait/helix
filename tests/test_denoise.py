@@ -69,3 +69,15 @@ def test_pretrained_weights_load_into_the_encoder():
     partial = {k: v for k, v in fm.state_dict().items() if not k.startswith("enc.0.")}
     with pytest.raises(ValueError):                                   # encoder weights missing: refuse
         build_denoise(dict(SMALL), partial)
+
+
+def test_presence_head_returns_charge_and_logit_and_trains():
+    m = _model(head_kw=dict(presence=True)).train()
+    B = make_batch(n_cells=N_CELLS)
+    idx, aux = _inputs(B)
+    y, logit = m(B, idx, aux)
+    assert y.shape == logit.shape == (50,)
+    loss = y.square().mean() + torch.nn.functional.binary_cross_entropy_with_logits(logit, torch.ones(50))
+    loss.backward()
+    assert m.head.mlp[-1].weight.grad.shape == (2, m.head.mlp[-1].in_features)
+    assert set(_model().state_dict()) == set(m.state_dict())             # same tree, wider last layer
