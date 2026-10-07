@@ -1,5 +1,12 @@
 # Science record
 
+> **Every training result in sections 1-10 used CLEAN targets.** Until cfc5345
+> (2026-10-06) the value target and the bin grid came from the simulated
+> noise-free `coeff_clean` modality, which real detector data does not have.
+> Training is now noisy-only (section 11); read the numbers below as properties
+> of the clean recipe, and the "Bayes limit" claim just below as a clean-target
+> statement.
+
 > **The posterior-width diagnosis is now measured.** Over 5.4M held-out slots
 > the categorical head's PIT has mean 0.512 and std 0.289, against the
 > 0.5 / 0.2887 of a uniform PIT — the forecast is calibrated. The read-back is a
@@ -495,3 +502,35 @@ from the table above) scored the same way: floor efficiency at 0.1-0.2 MeV 0.541
 0.864, 0.876, 0.874. The floor improves with width at equal compute and saturates
 by d1536 at this budget. The long runs (older recipe, no QK-norm, 2 seeds) show no
 clear gain from training longer (0.58-0.62).
+
+## 11. Training without clean data (from 2026-10-06)
+
+Real detector data has no noise-free counterpart, so the training target is now
+the noisy input itself and nothing in training reads `coeff_clean` (cfc5345;
+`tests/test_noisy_training.py`). The value head's grid is v4, derived from noisy
+values: uniform in asinh on each side of zero with one bin spanning the
+sub-threshold gap (|asinh| < ~1.9-2.0), since noisy coefficients exist only above
+the ~3.35-3.74 sigma threshold. Same recipe as section 10 (d768 unless stated,
+B=16, 29.2k steps, WSD cooldown); v7 probe; floor efficiency at 1% FPR and the
+99th percentile of noise-only-window scores at 0.1-0.2 MeV:
+
+| run | target / grid | map r | floor AUC <0.1 / 0.1-0.2 | eff 5% / 1% FPR | bg p99 |
+|---|---|---|---|---|---|
+| ab_ref, res_pw16_s1 | clean / v3 | 0.943-0.944 | 0.878-0.879 / 0.944-0.945 | 0.821-0.825 / 0.635-0.652 | 636-656 |
+| obj_noisy, _s1 | noisy / v3 (clean grid) | 0.944 | 0.869-0.871 / 0.933-0.942 | 0.782-0.821 / 0.577-0.610 | 677-713 |
+| nz_pw16, _s1 | noisy / v4 | 0.944-0.946 | 0.829-0.875 / 0.912-0.940 | 0.712-0.799 / 0.447-0.577 | 716-874 |
+| nz_d1536, _s1 | noisy / v4, d1536 | 0.947-0.948 | 0.856-0.859 / 0.929-0.932 | 0.783-0.790 / 0.593-0.612 | 659-726 |
+
+* Training without clean data costs floor: 0.45-0.61 at 1% FPR against 0.64-0.65,
+  with map r, localisation and reconstruction scored against clean truth
+  unchanged (0.314-0.344). The v4 grid did not recover it.
+* The noisy recipe is less seed-stable at d768 (0.447 / 0.577; the low seed has the
+  heavy noise tail, 874).
+* Width helps on the noisy recipe: d1536 (equal steps, ~2.5x compute) scores
+  0.612 / 0.593 with tails 659 / 726 -- mean +0.09 over d768 and seed-stable. Most
+  of the mean gain comes from the low d768 seed; against the other it is +0.02 to
+  +0.035, within seed spread. d1536 is still below the clean-target d768.
+* Visible-token decoding (`vis_frac`, obj_vis / _s1) needs clean targets and is not
+  usable under this constraint; for the record it gave no floor change (0.644 /
+  0.609) and small gains in 5%-FPR efficiency (+0.02) and localisation.
+
