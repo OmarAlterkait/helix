@@ -114,8 +114,28 @@ ceiling's 0.224): more labels pull them toward plain charge regression.
 
 **M3** (whole noise windows + presence head, lr 1e-2) produced a non-finite gradient
 at step 1,150 and trained on NaN weights; the training script now skips such steps
-and stops after 20 in a row. Its two changes are being ablated in the fine-tuned
-N=1,024 setting.
+and stops after 20 in a row (isolated non-finite gradients recur occasionally --
+about one per 600 steps in one ablation, and once at step 10 of a run without
+windows -- and are absorbed).
+
+**Floor-objective ablation** (fine-tuned, N=1,024, 4k steps; two baseline seeds):
+
+| variant | windows scored by | eff 1% FPR 0.1-0.2 / <0.1 MeV | eff 5% | floor AUC <0.1 / 0.1-0.2 | loc wires / ticks |
+|---|---|---|---|---|---|
+| baseline, seeds 0 / 1 | charge | 0.710 / 0.307, 0.641 / 0.219 | 0.899 / 0.897 | 0.891 / 0.962 | 1.56-1.59 / 6.4 |
+| + whole noise windows (48/event) | charge | **0.784 / 0.413** | **0.917** | **0.903 / 0.966** | **1.50 / 6.1** |
+| + presence head | charge | 0.675 / 0.266 | 0.868 | 0.880 / 0.953 | 1.75 / 6.6 |
+| + presence head | presence | 0.729 / 0.373 | 0.874 | 0.889 / 0.954 | -- |
+| + both | charge | 0.763 / 0.425 | 0.898 | 0.887 / 0.960 | 1.67 / 6.9 |
+| + both | presence | 0.768 / 0.499 | 0.890 | 0.899 / 0.958 | -- |
+
+Training on every cell of charge-free windows -- the unit the floor scores -- is the
+largest improvement found: +0.11 (0.1-0.2 MeV) and +0.15 (<0.1 MeV) in 1%-FPR
+efficiency over the baseline mean, beyond the seed spread (0.07, 0.09), with every
+other metric better too. The presence head helps only the faintest bin, only when
+windows are scored by presence. With windows, 1,024 labelled events on the
+pretrained encoder (0.784) beat the windowless full-label ceiling (0.689); the
+ceiling is being re-run with windows from scratch (M2w) and fine-tuned (M4w).
 
 **Other diagnostics.** Top-scoring noise windows concentrate on U planes (22 of 25 at
 M1b 12k steps). The hits-to-coefficient time offset is small on every plane (A4, in
