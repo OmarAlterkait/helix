@@ -5,10 +5,10 @@ input, no clean modality) plus a set of query cells with their truth
 ``y = log1p(q / Q0)`` (scripts/build_denoise_truth.py) and their per-band
 covering tokens (:func:`helix.probe.resolution.cell_inputs`).
 
-Query cells follow the floor evaluation's row recipe (helix.probe.resolution
-``event_truth``): every charge-carrying cell (capped), cells near them, and random
-cells under kept coefficients -- the last are noise-only cells, which are what a
-model must learn to keep at zero. Cells no token covers are not queried: the
+Query cells: every charge-carrying cell (capped), cells near them, random cells
+under kept coefficients (the evaluation's row recipe), and random cells anywhere
+inside a token's footprint -- the noise-only cells a model must keep at zero,
+including the coefficient-free ones the floor's noise windows are mostly made of. Cells no token covers are not queried: the
 model predicts zero there by construction, as the evaluation does.
 
 Splits come from each run's ``holdout.json``: ``probe`` and ``val`` are listed,
@@ -48,12 +48,13 @@ def split_events(corpus_root, runs, split):
 
 class DenoiseEvents:
     def __init__(self, corpus_root, runs, truth_root, split="train", *, n_events=None, subset_seed=0,
-                 cfg=None, q0=Q0_DEFAULT, sig_cap=20000, neg_per_sig=1.0, near_per_sig=1.0,
+                 cfg=None, q0=Q0_DEFAULT, sig_cap=20000, neg_per_sig=1.0, near_per_sig=1.0, cov_per_sig=1.0,
                  sample_seed=None, items=None):
         from helix.model.tokenize import PatchConfig
         self.cfg = cfg or PatchConfig(cell_t="grid_center")
         self.truth_root, self.q0 = truth_root, float(q0)
         self.sig_cap, self.neg_per_sig, self.near_per_sig = sig_cap, neg_per_sig, near_per_sig
+        self.cov_per_sig = cov_per_sig
         self.sample_seed = sample_seed                     # None: a fresh draw per access (training)
         self.items = items if items is not None else split_events(corpus_root, runs, split)
         if n_events is not None and n_events < len(self.items):
@@ -111,6 +112,20 @@ class DenoiseEvents:
             parts.append(near[np.isin(near, ck)])
         if len(ck):
             parts.append(rng.choice(ck, min(int(len(sig) * self.neg_per_sig) + 1, len(ck)), replace=False))
+        if self.cov_per_sig > 0 and k.any():
+            # Cells anywhere inside a token's footprint, not only under a kept
+            # coefficient: a noise token covers up to 16 wires x 128 ticks, most of
+            # it coefficient-free, and the floor's noise windows score the MAX over
+            # such cells -- a cell type the model must be shown, not left to
+            # extrapolate. Pick kept coefficients, then a uniform point in their token.
+            n = int(len(sig) * self.cov_per_sig) + 1
+            j = rng.integers(0, int(k.sum()), n)
+            b, g = ce.band[k][j], ce.plane_gid[k][j]
+            wire = (ce.wire[k][j] // self.cfg.pw) * self.cfg.pw + rng.integers(0, self.cfg.pw, n)
+            tau = (ce.tau[k][j] // self.cfg.pt) * self.cfg.pt + rng.integers(0, self.cfg.pt, n)
+            dec = (1 << np.asarray(self.cfg.lev))[b]
+            tick = tick_of_tau(tau, g, b, self.cfg) + rng.random(n) * dec
+            parts.append(fkey(g, np.maximum(wire, 0) // FW, np.floor(np.maximum(tick, 0) / FT).astype(np.int64)))
         rows = np.unique(np.concatenate(parts))
         q = np.zeros(len(rows))
         if len(tkeys):

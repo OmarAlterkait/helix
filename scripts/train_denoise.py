@@ -45,6 +45,8 @@ def parse():
     ap.add_argument("--ckpt-every", type=int, default=1000)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--cov-per-sig", type=float, default=2.0,
+                    help="empty cells drawn uniformly inside token footprints, per charge cell")
     ap.add_argument("--override", nargs="*", default=[], metavar="KEY=VALUE", help="FM arch overrides")
     return ap.parse_args()
 
@@ -91,9 +93,11 @@ def main():
     n_train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
     say(f"[denoise] arch {a.arch_from} init {a.init or 'scratch'} trainable {n_train_p/1e6:.1f}M world {world}")
 
-    train = DenoiseEvents(corpus_root, runs, a.truth_root, "train", n_events=a.n_events, subset_seed=a.subset_seed)
+    train = DenoiseEvents(corpus_root, runs, a.truth_root, "train", n_events=a.n_events, subset_seed=a.subset_seed,
+                          cov_per_sig=a.cov_per_sig)
     val_items = split_events(corpus_root, runs[:1], "val")[:a.val_events]
-    val = DenoiseEvents(corpus_root, runs, a.truth_root, "val", items=val_items, sample_seed=1234)
+    val = DenoiseEvents(corpus_root, runs, a.truth_root, "val", items=val_items, sample_seed=1234,
+                        cov_per_sig=a.cov_per_sig)
     say(f"[denoise] train events {len(train)}  val events {len(val)}  runs {len(runs)}")
 
     ddp = DDP(model, device_ids=[lrank], find_unused_parameters=False)

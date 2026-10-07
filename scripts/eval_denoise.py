@@ -92,7 +92,8 @@ def main():
     wq, wid, wp = map(np.concatenate, (WQ, WID, WP))
     starts = np.searchsorted(wid, np.arange(len(META))); ends = np.append(starts[1:], len(wid))
     toff = {i: cfg.toff[i] for i in range(3)}
-    W = R.window_stats(wp, wq, META, starts, ends, cfg.pw, cfg.pt, cfg.delta[0], toff)
+    qh = np.expm1(np.maximum(wp, 0)) * Q0          # charge units, clamped -- exactly eval_resolution's window input
+    W = R.window_stats(qh, wq, META, starts, ends, cfg.pw, cfg.pt, cfg.delta[0], toff)
     q = np.expm1(y) * Q0; q30 = np.quantile(q[q > 0], 0.3)        # as eval_resolution: truth in charge units
     kz = {}
     for k in np.unique(e * 10 + pl):
