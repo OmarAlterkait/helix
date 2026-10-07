@@ -171,7 +171,7 @@ def main():
                                          persistent_workers=True, prefetch_factor=4)
     it = iter(loader)
     model.train()
-    t0, acc, n_acc = time.time(), 0.0, 0
+    t0, acc, n_acc, bad_steps = time.time(), 0.0, 0, 0
     while step < a.steps:
         for g, b0 in zip(opt.param_groups, base):
             g["lr"] = b0 * lr_at(step)
@@ -186,13 +186,25 @@ def main():
             loss = torch.nn.functional.mse_loss(p.float(), y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), a.clip)
+        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), a.clip)
+        if not torch.isfinite(gnorm):
+            # A non-finite gradient would turn every weight NaN through the
+            # optimizer (M3 trained on NaN for 13k steps after one at 1.15k).
+            # Skip the step -- all ranks see the same reduced norm -- and stop
+            # outright if it keeps happening.
+            bad_steps += 1
+            say(f"[denoise] step {step}: non-finite gradient norm, step skipped ({bad_steps} in a row)")
+            if bad_steps >= 20:
+                raise SystemExit("[denoise] 20 consecutive non-finite gradients: diverged, stopping")
+            opt.zero_grad(set_to_none=True)
+            continue
+        bad_steps = 0
         opt.step()
         step += 1; acc += loss.item(); n_acc += 1
         if step % 50 == 0:
             say(f"step {step}/{a.steps} loss {acc / n_acc:.4f} lr {opt.param_groups[0]['lr']:.2e} "
                 f"{(time.time() - t0) / n_acc:.3f}s/step")
-            t0, acc, n_acc = time.time(), 0.0, 0
+            t0, acc, n_acc, bad_steps = time.time(), 0.0, 0, 0
         if step % a.val_every == 0 or step == a.steps:
             v, vp, vn = validate()
             say(f"[val] step {step} mse {v:.5f} (charge cells {vp:.5f}, empty cells {vn:.5f})")
