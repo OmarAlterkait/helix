@@ -205,7 +205,7 @@ transform = [
     # ~94% of cells and nothing downstream reports it. ('centroid' is the other
     # option; research's 3D probe 0.60 vs 0.42 for it is inflated by leakage, see
     # coeff_fm_train.py.)
-    dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
+    dict(type="CoeffTokenize", part="coeff",
          cfg=dict(cell_t="grid_center"),   # as the long run (m113) did
          fm_names=True),
     dict(type="CoeffCollect", part="coeff"),
@@ -215,7 +215,7 @@ _common = dict(
     type="CoeffTPCDataset",
     data_root=CORPUS,
     dataset_name="sim_wire",
-    modalities=("coeff", "coeff_clean"),
+    modalities=("coeff",),
     transform=transform,
     # 32 events, so a 2-rank run still has 16 steps/rank: OneCycleLR's first
     # phase is `pct_start * total_steps - 1`, which is DEGENERATE (zero length,

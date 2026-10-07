@@ -201,7 +201,7 @@ transform = [
     # 8-run and cooldown checkpoints are). It is CROSS-CHECKED, not preferred: a
     # checkpoint that does record one and disagrees raises rather than letting
     # either side win quietly.
-    dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
+    dict(type="CoeffTokenize", part="coeff",
          fm_names=True, cfg=patch_config_from_checkpoint(CKPT, cell_t=CELL_T)),
     # Terminal per-event step. Not optional and not cosmetic: it flattens the
     # part to the top level, and converts numpy -> torch so pimm's collate takes
@@ -218,7 +218,7 @@ _data_common = dict(
     type="CoeffTPCDataset",
     data_root=CORPUS,
     dataset_name="sim_wire",
-    modalities=("coeff", "coeff_clean"),
+    modalities=("coeff",),
     transform=transform,
 )
 

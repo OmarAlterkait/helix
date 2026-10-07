@@ -298,6 +298,11 @@ def test_transform_is_pimm_data_compatible_without_importing_it():
     cfg = PatchConfig(cell_t="grid_center")
     assert out["coeff"]["inp"].shape[1] == cfg.n_slot
     assert out["coeff"]["_meta"]["n_slot"] == cfg.n_slot
+    # Default (training): the clean modality is not read; the target is the noisy input.
+    occ = out["coeff"]["occ"].astype(bool)
+    np.testing.assert_array_equal(out["coeff"]["tgt"][occ], out["coeff"]["inp"][occ])
+    # Opt-in (evaluation only): clean values folded into tgt, the modality consumed.
+    out = CoeffTokenize(clean_part="coeff_clean", cfg=dict(cell_t="grid_center"))(dict(sample))
     assert "coeff_clean" not in out          # folded into tgt
     assert out["coeff"]["tgt"].any()
     # constructor overrides win over the sample's _meta

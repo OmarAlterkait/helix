@@ -114,7 +114,7 @@ class CoeffTPCDataset(Dataset):
     """
 
     def __init__(self, data_root, split="", dataset_name="coeff_tpc",
-                 modalities=("coeff", "coeff_clean"), transform=None, loop=1,
+                 modalities=("coeff",), transform=None, loop=1,
                  max_len=-1, strict_lengths=True, event_range=None,
                  exclude_range=None, holdout=None, split_role=None,
                  max_event_size=None):

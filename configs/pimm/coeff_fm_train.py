@@ -384,7 +384,13 @@ transform = [
     # MASKED tokens — so the number is inflated by leakage of the very thing the
     # probe reads. PatchConfig has no cell_t default at all now, precisely so this
     # choice cannot be made by omission.
-    dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
+    #
+    # NO clean modality: the value target is the noisy input itself. Real
+    # detector data has no noise-free counterpart, so nothing in training may
+    # read the simulated `coeff_clean` -- not the target, not the bin grid, not
+    # validation (tests/test_noisy_training.py enforces it). Simulation truth is
+    # for evaluation only (scripts/eval_resolution.py and friends).
+    dict(type="CoeffTokenize", part="coeff",
          cfg=dict(cell_t="grid_center"),
          fm_names=True),
     dict(type="CoeffCollect", part="coeff"),
@@ -394,7 +400,7 @@ _common = dict(
     type="CoeffTPCDataset",
     data_root=CORPUS,
     dataset_name="sim_wire",
-    modalities=("coeff", "coeff_clean"),
+    modalities=("coeff",),
     transform=transform,
     # 32 events, so a 2-rank run still has 16 steps/rank: OneCycleLR's first
     # phase is `pct_start * total_steps - 1`, which is DEGENERATE (zero length,

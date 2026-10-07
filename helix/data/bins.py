@@ -112,7 +112,7 @@ def reference_table(archive: Any = None) -> Path:
 #: below, which reads from it. These values exist so the module still imports
 #: with its package data stripped, not as a second place to edit them.
 _FALLBACK_DEFAULTS = dict(dataset_name="sim_wire", events=120, K=128, n_bands=4,
-                          lo_pct=0.05, hi_pct=99.95)
+                          lo_pct=0.05, hi_pct=99.95, target="noisy")
 
 
 def _defaults() -> dict[str, Any]:
@@ -137,15 +137,24 @@ DEFAULTS = _defaults()
 #: Keys a derived table always carries. ``compare`` checks the arrays; the
 #: scalars are provenance, and are what makes :func:`rederive` possible.
 ARRAY_KEYS = ("edges", "cent_asinh", "cent_ratio")
-PARAM_KEYS = ("K", "n_bands", "events", "corpus")
+PARAM_KEYS = ("K", "n_bands", "events", "corpus", "target")
 
 
 def derive(corpus, *, dataset_name=DEFAULTS["dataset_name"],
            events=DEFAULTS["events"], K=DEFAULTS["K"],
            n_bands=DEFAULTS["n_bands"], lo_pct=DEFAULTS["lo_pct"],
-           hi_pct=DEFAULTS["hi_pct"],
+           hi_pct=DEFAULTS["hi_pct"], target=DEFAULTS["target"],
            report: Callable[[str], None] | None = None) -> dict[str, Any]:
     """Pool ``events`` events from ``corpus`` and return the bin table.
+
+    ``target`` is the space the head is trained to predict. ``"noisy"`` (the
+    only training mode: real data has no clean counterpart) bins the NOISY
+    coefficients, which exist only beyond the significance threshold, so the
+    grid is uniform in asinh on each side of zero with ONE bin spanning the
+    sub-threshold gap -- a single uniform grid over [lo, hi] would put ~30-40%
+    of its bins where no noisy value can fall. ``"clean"`` is the legacy grid
+    (v1-v3), derived from the simulated clean coefficients; it reads the
+    ``coeff_clean`` modality and exists to rederive and verify old tables.
 
     ``corpus`` is a run directory (``<root>/<run>/``), not a corpus root — the
     grid is derived from one run's statistics and the run it came from is
@@ -160,19 +169,23 @@ def derive(corpus, *, dataset_name=DEFAULTS["dataset_name"],
 
     say = report or (lambda _msg: None)
 
+    if target not in ("noisy", "clean"):
+        raise ValueError(f"target={target!r}: 'noisy' or 'clean'")
+    mods = ("coeff",) if target == "noisy" else ("coeff", "coeff_clean")
     ds = CoeffTPCDataset(data_root=corpus, dataset_name=dataset_name,
-                         modalities=("coeff", "coeff_clean"), transform=None)
+                         modalities=mods, transform=None)
     n = min(events, len(ds))
     say(f"pooling {n} of {len(ds)} events from {corpus}")
 
     vals: dict[Any, list] = {b: [] for b in range(n_bands)}
     for i in range(n):
         s = ds.get_data(i)
-        c, cc = s["coeff"], s["coeff_clean"]
+        c = s["coeff"]
         meta = c["_meta"]
         band = np.asarray(c["band"], np.int64)
         gid = np.asarray(c["plane_gid"], np.int64)
-        clean = np.asarray(cc["value"], np.float32).reshape(-1)
+        src = c if target == "noisy" else s["coeff_clean"]
+        clean = np.asarray(src["value"], np.float32).reshape(-1)    # the target values
         keep = band < n_bands
         band, gid, clean = band[keep], gid[keep], clean[keep]
         sig = np.maximum(sigma_for_rows(gid, band, meta["gids"], meta["norm_sigma"]), 1e-6)
@@ -198,7 +211,14 @@ def derive(corpus, *, dataset_name=DEFAULTS["dataset_name"],
         v = np.concatenate(vals[("raw", b)])
         r = np.concatenate(vals[("ratio", b)])
         lo, hi = np.percentile(t, lo_pct), np.percentile(t, hi_pct)
-        e = np.linspace(lo, hi, K + 1)
+        if target == "clean":
+            e = np.linspace(lo, hi, K + 1)
+        else:
+            # Same bin width on both sides of the gap (-a, a); one bin spans it.
+            a = float(np.percentile(np.abs(t), lo_pct))
+            w = ((-a - lo) + (hi - a)) / (K - 1)
+            kn = int(round((-a - lo) / w))
+            e = np.concatenate([np.linspace(lo, -a, kn + 1), np.linspace(a, hi, K - kn)])
         idx = np.clip(np.digitize(t, e[1:-1]), 0, K - 1)
         for k in range(K):
             m = idx == k
@@ -220,7 +240,7 @@ def derive(corpus, *, dataset_name=DEFAULTS["dataset_name"],
             f"empty bins={empty}  |coeff|max={np.abs(v).max():.0f}")
 
     return dict(edges=edges, cent_asinh=cent_a, cent_ratio=cent_r,
-                K=K, n_bands=n_bands, corpus=str(corpus), events=n)
+                K=K, n_bands=n_bands, corpus=str(corpus), events=n, target=target)
 
 
 def save(table: Mapping[str, Any], path) -> None:
@@ -256,6 +276,8 @@ def params_of(table: Mapping[str, Any]) -> dict[str, Any]:
     for k in PARAM_KEYS:
         if k in table:
             p[k] = table[k]
+    if "target" not in table:
+        p["target"] = "clean"          # tables before v4 were all derived from clean values
     return p
 
 
@@ -275,7 +297,8 @@ def rederive(reference, *, corpus=None,
     return derive(corpus if corpus is not None else p["corpus"],
                   dataset_name=p["dataset_name"], events=p["events"],
                   K=p["K"], n_bands=p["n_bands"],
-                  lo_pct=p["lo_pct"], hi_pct=p["hi_pct"], report=report)
+                  lo_pct=p["lo_pct"], hi_pct=p["hi_pct"],
+                  target=p["target"], report=report)
 
 
 def fingerprint(table: Mapping[str, Any]) -> dict[str, str]:

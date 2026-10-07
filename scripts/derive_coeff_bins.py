@@ -44,6 +44,8 @@ def main(argv=None):
                     help="bands the tokenizer keeps (D1 and beyond are dropped)")
     ap.add_argument("--lo-pct", type=float, default=binlib.DEFAULTS["lo_pct"])
     ap.add_argument("--hi-pct", type=float, default=binlib.DEFAULTS["hi_pct"])
+    ap.add_argument("--target", choices=("noisy", "clean"), default=binlib.DEFAULTS["target"],
+                    help="value space the head predicts: noisy (training) or clean (legacy tables)")
     # The basis check below exists to catch the pre-tau/r1 confusion, which is a
     # real hazard: those generations differ in which coefficients survive the
     # gate, so a grid from one does not describe the other. But a SYNTHETIC
@@ -107,7 +109,7 @@ def main(argv=None):
     else:
         table = binlib.derive(a.corpus, dataset_name=a.dataset_name,
                               events=a.events, K=a.K, n_bands=a.n_bands,
-                              lo_pct=a.lo_pct, hi_pct=a.hi_pct, report=print)
+                              lo_pct=a.lo_pct, hi_pct=a.hi_pct, target=a.target, report=print)
 
     if a.verify:
         r = binlib.compare(ref, table)

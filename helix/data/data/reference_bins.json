@@ -1,13 +1,14 @@
 {
   "_comment": "The DEFINITION of the production bin grid: the parameters it is derived with, the corpus it is derived from, and a content digest of the result. This file is the single source of those parameters -- helix.data.bins reads its defaults here, and scripts/derive_coeff_bins.py takes its argparse defaults from those, so the numbers live in one place.",
-  "name": "coeff_bins_r1_tau05_run0027575715_v3",
+  "name": "coeff_bins_r1_tau05_run0027575715_v4",
   "params": {
     "K": 128,
     "n_bands": 4,
     "events": 120,
     "lo_pct": 0.05,
     "hi_pct": 99.95,
-    "dataset_name": "sim_wire"
+    "dataset_name": "sim_wire",
+    "target": "noisy"
   },
   "corpus": {
     "run": "run_0027575715",
@@ -18,9 +19,9 @@
     "_site_note": "v3 is recorded against the NERSC copy of the corpus at $CFS/m5238/users/oalter/coeff_tpc_r1/run_0027575715 (19,999 events, 100 coeff + 100 coeff_clean shards, every shard built on a 2080 Ti at helix c646886)."
   },
   "digests": {
-    "edges": "sha256:8faca247eef2991b42b8fb85c3de8ac6993f81c7e654d4b9a6549902c196880d",
-    "cent_asinh": "sha256:f0414ef0c1f3f708d2bc78a26aeedc8834d3f1a0856cb4c9596ff36345e43cc4",
-    "cent_ratio": "sha256:357916e7b6282435655886f4461d18d7d20543b25eaa0ef49c7eee34b4937239"
+    "edges": "sha256:85b9ee66065f122c8b97f56838bf4a9cb753ee07e32880358231982e44ff4c68",
+    "cent_asinh": "sha256:9e56fe32958937fff3e00d320e8cbf590e4bc24db857c7d0453825ed32500e3d",
+    "cent_ratio": "sha256:1d2406d99187df34d88f8ddf52431f399e2034ab892968ea5ed4dc27d964ddd0"
   },
   "_rerecord_note": "v2 named the S3DF corpus and its digests were edges 79485d19, cent_asinh cae984e7, cent_ratio cf3859b7. Deriving with IDENTICAL params from the NERSC corpus -- same run, same basis_digest 8c4542b6, check_corpus ok -- produced all three differently, so the two corpora are not the same bytes and the cause was not established. The grids that v2 fingerprints are the ones the S3DF-published checkpoints were trained against; no such checkpoint was transferred here, and the plan is to retrain, so v3 fingerprints the corpus that will actually be trained on. A number produced here is therefore NOT comparable with a number in docs/SCIENCE.md.",
   "shapes": {
@@ -36,5 +37,15 @@
       4,
       128
     ]
+  },
+  "_v4_note": "v4 bins the NOISY coefficients (target='noisy'): training never reads the simulated coeff_clean modality, so the value head predicts in noisy space. Noisy coefficients exist only beyond the ~3.35-3.74 sigma threshold, so the grid is uniform in asinh on each side of zero with one bin spanning the gap (|asinh| < ~1.9-2.0); a single uniform grid would leave ~30-40% of its bins unreachable. Same corpus, events and percentiles as v3.",
+  "_previous": {
+    "name": "coeff_bins_r1_tau05_run0027575715_v3",
+    "digests": {
+      "edges": "sha256:8faca247eef2991b42b8fb85c3de8ac6993f81c7e654d4b9a6549902c196880d",
+      "cent_asinh": "sha256:f0414ef0c1f3f708d2bc78a26aeedc8834d3f1a0856cb4c9596ff36345e43cc4",
+      "cent_ratio": "sha256:357916e7b6282435655886f4461d18d7d20543b25eaa0ef49c7eee34b4937239"
+    },
+    "note": "v3: derived from CLEAN values (legacy; every run before 2026-10-06 trained on it, with clean targets)"
   }
 }

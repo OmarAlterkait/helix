@@ -8,7 +8,7 @@ import os as _os
 
 _base_ = [_os.path.join(_os.environ["HELIX_ROOT"], "configs", "pimm", "coeff_fm_train_8run.py")]
 _tf = [
-    dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
+    dict(type="CoeffTokenize", part="coeff",
          cfg=dict(cell_t="grid_center"), fm_names=True, noisy_target=True),
     dict(type="CoeffCollect", part="coeff"),
 ]

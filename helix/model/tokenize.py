@@ -325,11 +325,14 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     # noisy_target: the target IS the (normalised) input -- what a real-data
     # recipe has, with no simulated clean waveform. Masked prediction then has to
     # infer it from context, which is where denoising comes from (Noise2Self).
-    if noisy_target:
+    # With no clean values the target IS the noisy input -- the training mode
+    # (real data has no clean counterpart). It used to be zeros, which trained a
+    # model to predict nothing without any error. Clean values are for
+    # evaluation only (scoring a reconstruction against simulation truth).
+    if noisy_target or clean is None:
         target = val.copy()
     else:
-        target = (np.arcsinh(np.asarray(clean, np.float32) / sig_row).astype(np.float32)
-                  if clean is not None else np.zeros_like(val))
+        target = np.arcsinh(np.asarray(clean, np.float32) / sig_row).astype(np.float32)
 
     wb, tb = wire // pw, tau // pt
     key = cell_key(plane_gid, band, wire, tau, cfg)
@@ -688,7 +691,7 @@ class CoeffTokenize:
 
     scope = "sample"
 
-    def __init__(self, part="coeff", clean_part="coeff_clean",
+    def __init__(self, part="coeff", clean_part=None,
                  cfg=None, dead_frac=0.0, seed=None, gids=None, n_wires=None,
                  band_lengths=None, norm_sigma=None, fm_names=True, noisy_target=False):
         cfg = _require_cfg(cfg)
