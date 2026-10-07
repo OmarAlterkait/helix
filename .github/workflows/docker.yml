@@ -32,19 +32,30 @@ on:
     # Adding them is cheap: when only helix/ or scripts/ change, the Dockerfile's
     # COPY layers (install.sh, pyproject.toml) are untouched, so `cache-from` is
     # a hit and the build is a pull rather than a 9 GB rebuild.
+    #
+    # tests/ and configs/ belong here for the same reason: the suite runs ONLY in
+    # this workflow (ci.yml runs the stdlib pin check alone), and it executes the
+    # training configs. Without them a test- or config-only change was checked
+    # nowhere -- which is how a test that imported pimm, absent from this image,
+    # reached main (fixed in 7c2446b). The pull_request list matches push.
     paths:
       - 'container/**'
       - 'pyproject.toml'
       - 'uv.lock'
       - 'helix/**'
       - 'scripts/**'
+      - 'tests/**'
+      - 'configs/**'
       - '.github/workflows/docker.yml'
   pull_request:
     paths:
       - 'container/**'
       - 'pyproject.toml'
+      - 'uv.lock'
       - 'helix/**'
       - 'scripts/**'
+      - 'tests/**'
+      - 'configs/**'
       - '.github/workflows/docker.yml'
   workflow_dispatch:
     inputs:
