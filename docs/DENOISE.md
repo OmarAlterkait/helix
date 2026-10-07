@@ -62,6 +62,55 @@ via `scripts/eval_denoise.py`, scored exactly as `scripts/eval_resolution.py`.
    fine-tuned from the FM, best checkpoint by val MSE. The frozen probe (260 events,
    nz_pw16/_s1) is one more point.
 
-## Results
+## Results (2026-10-07)
 
-(filled in as runs complete)
+All scored on the floor evaluation's 128 probe-split test events (truth_v2), the
+same cells, windows and Q0 as every probe number; interval widths and seed spread
+as in docs/SCIENCE.md s10-11 (1%-FPR efficiency ~ +-0.03-0.05).
+
+**LR.** From scratch (3k steps, B=4): 1e-2 best (val MSE 0.060), 3e-3 0.063, 1e-3
+0.083, 3e-4 0.143. Fine-tuned from nz_pw16_s1 (encoder LR; head 1e-2): 3e-3 best
+(0.024), 1e-3 0.026, 3e-4 0.030, 1e-4 0.033.
+
+**Sampling matters more than anything else found so far.** The first ceiling run
+(M1) sampled empty cells only under kept coefficients; at 6k steps it had per-cell
+presence AUC 0.93 but window floor AUC 0.675 (<0.1 MeV) -- the floor's noise windows
+score the MAX over cells of noise tokens, most of them coefficient-free, a cell type
+the model never saw. Adding empty cells drawn uniformly inside token footprints
+(`cov_per_sig=2`, M1b) gave floor AUC 0.862 at the same step.
+
+**Supervised ceiling** (M1b: d768 from scratch, all ~150k train events, 40k steps x
+16 events, lr 1e-2 cosine): map r 0.995, presence AUC 0.948, floor AUC 0.886 /
+0.963 (<0.1 / 0.1-0.2 MeV), 5%-FPR efficiency 0.893, 1%-FPR efficiency 0.224 / 0.689
+/ 0.984 (<0.1 / 0.1-0.2 / 0.2-0.5 MeV), localisation 1.60 wires / 6.6 ticks. The
+frozen probe on the same FM (nz_pw16_s1, 260 events) gives map r 0.946, 0.835 /
+0.932, 0.780, 0.48 at 0.1-0.2, 1.44 / 11.1 ticks. Supervision wins everywhere but the
+faintest bin's 1%-FPR efficiency, where regression to log1p(q/Q0) puts faint
+deposits near noise in charge units (window score medians 360 vs the probe's 586).
+
+**Label efficiency** (4k steps x 4 events for every arm, best val checkpoint; the
+ceiling saw 640k events, so from-scratch arms are compute- as well as label-limited):
+
+| labels | fine-tuned: eff 1% (0.1-0.2) / eff 5% / floor AUC <0.1 / map r | from scratch: same |
+|---|---|---|
+| 64 | 0.641 / 0.813 / 0.865 / 0.974 | 0.359 / 0.605 / 0.779 / 0.940 |
+| 256 | 0.678 / 0.875 / 0.885 / 0.982 | 0.445 / 0.727 / 0.844 / 0.961 |
+| 1,024 | 0.710 / 0.899 / 0.891 / 0.988 | 0.528 / 0.831 / 0.869 / 0.977 |
+| 4,096 | 0.643 / 0.903 / 0.890 / 0.991 | 0.547 / 0.811 / 0.867 / 0.983 |
+| 16,384 | 0.656 / 0.904 / 0.890 / 0.991 | 0.499 / 0.758 / 0.858 / 0.984 |
+| ceiling (150k, scratch) | 0.689 / 0.893 / 0.886 / 0.995 | |
+
+With the pretrained encoder, 64 labelled events reach 93% of the ceiling's 1%-FPR
+efficiency and 256-1,024 match it on every floor metric; from scratch, the same
+counts reach 52-77%. Fine-tuned runs with few labels also keep more of the faintest
+bin (1%-FPR <0.1 MeV 0.29-0.32 at N <= 1,024, against 0.20-0.22 at N >= 4,096 and the
+ceiling's 0.224): more labels pull them toward plain charge regression.
+
+**M3** (whole noise windows + presence head, lr 1e-2) produced a non-finite gradient
+at step 1,150 and trained on NaN weights; the training script now skips such steps
+and stops after 20 in a row. Its two changes are being ablated in the fine-tuned
+N=1,024 setting.
+
+**Other diagnostics.** Top-scoring noise windows concentrate on U planes (22 of 25 at
+M1b 12k steps). The hits-to-coefficient time offset is small on every plane (A4, in
+the coefficient frame: U -4, V -4, Y -9 ticks), so the cell mapping is not the cause.
