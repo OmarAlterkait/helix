@@ -140,3 +140,36 @@ ceiling is being re-run with windows from scratch (M2w) and fine-tuned (M4w).
 **Other diagnostics.** Top-scoring noise windows concentrate on U planes (22 of 25 at
 M1b 12k steps). The hits-to-coefficient time offset is small on every plane (A4, in
 the coefficient frame: U -4, V -4, Y -9 ticks), so the cell mapping is not the cause.
+
+## First principles: noise vs hits, and the bound (`scripts/noise_vs_hits.py`)
+
+128 test events, 6,265 isolated deposits; numbers on the 3,595 whose surroundings
+(+-8 wires, +-64 ticks) hold <= 25% foreign charge, measured on each deposit's own
+wires/ticks of the CLEAN sensor image.
+
+**Units.** `hits` is electrons: 20,400-20,600 e-/MeV deposited on every plane
+(42,400/MeV at W = 23.6 eV x recombination ~0.48). Q0 = 2,043 e- is ~0.1 MeV.
+
+**Gain and noise.** Peak clean signal per 1,000 e-: U 2.0, V 1.65, Y 4.5 ADC; the
+forward model's incoherent noise is 2.0 ADC/tick, so ENC ~ 1,000 (U), 1,230 (V),
+440 (Y) e- -- MicroBooNE-like. The optimal (whitened matched filter, exact noise
+spectrum, coherent noise perfectly removed, shape known) SNR is 1 at 460 / 540 /
+250 e- of deposit charge. An ideal detector searching a window needs 4.4-4.5 sigma
+for 1% FPR, so its 50% point is ~2,000-2,400 e- (~0.1-0.12 MeV) on U/V and
+~1,100 e- (~0.055 MeV) on Y.
+
+**The stored sensor is zero-suppressed.** It is integer ADC with every |v| < 2
+removed, before noise is added. 36% of the deposits below 0.1 MeV (42% U, 47% V,
+18% Y) have NO clean signal left: no detector can find them, yet they are in the
+floor's <0.1 MeV denominator. Ideal 1%-FPR efficiency there is 0.22 (U/V/Y 0.13 /
+0.09 / 0.45); at 0.1-0.2 MeV 0.85 (0.85 / 0.74 / 0.98).
+
+**The model against the bound** (ab_ft1024_win, 1%-FPR efficiency by the deposit's
+optimal SNR): no signal 0.30 (ideal 0), SNR < 3 0.29 (0.02), 3-5 0.37 (0.37), 5-7
+0.54 (0.90), 7-10 0.87 (1.00), >= 10 1.00 (1.00). It reaches the bound above SNR
+10 and is ~1.5 sigma short at threshold. The 0.29-0.30 it scores on deposits with no
+signal at all is not sensitivity: noise windows are drawn >= 16 wires / 128 ticks
+from any charge, isolated deposits sit near activity, and the model predicts a
+haze of 100-300 e- per cell around activity -- so the floor metric credits the haze
+as detections. Training rarely sees those cells: `near` cells are restricted to
+kept coefficients and noise windows to charge-free surroundings.
