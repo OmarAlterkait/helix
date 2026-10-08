@@ -225,3 +225,27 @@ Full labels do not fix it (M1b 0.14, M2w 0.13): the haze is a sampling/objective
 problem, not a data-quantity one. The old metric ranks the new arms LOWER -- it
 credited the haze. Near-activity eff of signal-free deposits is 0.002-0.006, as
 it must be at 1% FPR.
+
+### Label efficiency on the near-activity evaluation (le3: near sampling + presence head)
+
+Every arm 4k steps x 4 events, fine-tuned from nz_pw16_s1 (lr 3e-3) or from scratch
+(1e-2), whole noise windows + near-activity cells (1/sig) and windows (24/event),
+presence head; windows scored by presence. 1%-FPR efficiency, threshold set near
+activity (charge-score rows in brackets; le2 = the same grid without near sampling
+or presence, charge-scored):
+
+| labels | fine-tuned 0.1-0.2 MeV | scratch 0.1-0.2 | fine-tuned SNR 10-15 | scratch SNR 10-15 | le2 fine-tuned 0.1-0.2 |
+|---|---|---|---|---|---|
+| 64 | **0.428** [0.278] | 0.253 [0.118] | 0.954 | 0.647 | 0.172 |
+| 256 | 0.450 [0.337] | 0.309 [0.169] | 0.957 | 0.812 | 0.114 |
+| 1,024 | 0.465 [0.330] | 0.364 [0.273] | 0.977 | 0.934 | 0.177 |
+| 4,096 | 0.485 [0.426] | 0.407 [0.335] | 0.990 | 0.974 | 0.188 |
+| 16,384 | **0.498** [0.395] | 0.405 [0.348] | 0.993 | 0.974 | 0.175 |
+
+Fine-tuned with 64 labelled events beats from-scratch with 16,384 (0.428 vs 0.405):
+pretraining is worth more than 256x the labels on this task. Seeds reproduce
+(1,024 fine-tuned: 0.465 / 0.463; nr_ft1024_pres repeats le3_ft_N1024 exactly).
+Doubling near sampling (nr2: 2/sig, 48 windows) gives 0.482 at 1,024. The full-label
+windowed runs without near sampling stay at 0.13-0.25 (M2w 0.134, M4w 0.255). Map r
+of presence-scored rows (~0.65) is a probability against charge and not meaningful;
+the charge rows keep 0.97-0.99.
