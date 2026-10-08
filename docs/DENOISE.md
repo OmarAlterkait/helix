@@ -261,3 +261,30 @@ is the remaining comparison.
 M2n (the same recipe from scratch, all labels, 40k steps): 0.1-0.2 MeV 0.524
 [0.509-0.538], SNR 5-7 0.27, 7-10 0.79, 10-15 0.99 -- below M4n's 0.558
 [0.549-0.577]: pretraining still helps with every label, by ~0.03.
+
+### A real classical detector: whitened matched-filter bank with window search (`scripts/mf_detector.py`)
+
+The simulation's fitted 2D response (baselines/uboone_sp) convolved with 9 charge
+boxes (1-4 wires x 4-48 ticks), whitened by the exact noise spectrum; a window
+scores the max z over templates and positions. 48 test events, 2,384 deposits;
+1%-FPR efficiency, threshold from far | near-activity noise windows:
+
+| input | 0.1-0.2 MeV | SNR 5-7 | SNR 7-10 | threshold z far / near |
+|---|---|---|---|---|
+| no neighbours: deposits' own charge x response, float, + incoherent | 0.68 | 0.53 | 0.98 | 5.6 / 5.6 |
+| + stored like the sensor (zero-suppressed) | 0.55 | 0.37 | 0.89 | 5.6 |
+| + coherent noise + gate | 0.52 | 0.32 | 0.86 | 5.5 |
+| + corpus threshold, no D1 | 0.41 / 0.36 | 0.20 / 0.12 | 0.64 / 0.48 | 4.2 / 4.7 |
+| real planes (neighbours), raw + incoherent | 0.32 / 0.02 | 0.14 / 0.01 | 0.29 / 0.01 | 10.8 / 260 |
+| real planes, corpus input | 0.34 / 0.02 | 0.15 / 0.01 | 0.33 / 0.01 | 9.3 / 262 |
+| M4n (real corpus input) | 0.81 / **0.57** | 0.67 / 0.33 | 0.91 / **0.82** | -- |
+
+Without neighbours the classical loss is the sim's zero suppression (-0.13) and the
+corpus threshold (-0.11); the gate costs ~0. With real neighbours a matched filter
+collapses: other charge's response doubles the threshold even far from activity
+and raises it 50x near it -- the job MicroBooNE's ROI / 2D deconvolution machinery
+exists for. M4n, on real data near activity, beats the matched filter on a
+neighbour-FREE corpus-type input (0.57 vs 0.36-0.41) and matches it on the
+uncompressed gated input (0.52); it stays below the known-location bound (SNR 5-7
+0.48, 7-10 0.86 on corpus input). The synthetic deposits use the same fitted kernel
+as the templates, which favours the matched filter.
