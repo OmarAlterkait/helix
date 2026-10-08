@@ -258,3 +258,6 @@ near-activity threshold, presence-scored): 0.1-0.2 MeV **0.558** [0.549-0.577],
 (known location, no window search): 0.48 at SNR 5-7, 0.86 at 7-10 -- the ceiling is
 close to what the sparsified coefficients still hold. M2n (the same from scratch)
 is the remaining comparison.
+M2n (the same recipe from scratch, all labels, 40k steps): 0.1-0.2 MeV 0.524
+[0.509-0.538], SNR 5-7 0.27, 7-10 0.79, 10-15 0.99 -- below M4n's 0.558
+[0.549-0.577]: pretraining still helps with every label, by ~0.03.
