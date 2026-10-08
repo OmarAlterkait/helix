@@ -105,3 +105,37 @@ def test_cell_inputs_matches_the_probe_gather_arithmetic():
     np.testing.assert_array_equal(idx, ref_idx)
     np.testing.assert_allclose(aux, ref_aux)
     assert aux.shape == (len(keys), 13 * cfg.n_bands)
+
+
+def test_near_windows_are_empty_but_beside_charge():
+    rng = np.random.default_rng(3)
+    keys, q = [], []
+    for g in (0, 4):                                               # two planes, a few compact blobs each
+        for _ in range(6):
+            cw, ct = rng.integers(20, 400), rng.integers(20, 200)
+            ww, tt = np.meshgrid(np.arange(cw, cw + 3), np.arange(ct, ct + 2), indexing="ij")
+            keys.append(R.fkey(np.full(ww.size, g), ww.ravel(), tt.ravel())); q.append(np.full(ww.size, 500.0))
+    keys, q = np.concatenate(keys), np.concatenate(q)
+    order = np.argsort(keys); keys, q = keys[order], q[order]
+    wins = R.near_windows(keys, q, np.random.default_rng(0), n=20)
+    assert 0 < len(wins) <= 20 and {g for g, _, _ in wins} == {0, 4}       # shared over the charged planes
+    G, CW, CT = R.unkey(keys)
+    for g, w0, t0 in wins:
+        assert w0 % R.FW == 0 and t0 % R.FT == 0
+        fw, ft = w0 // R.FW, t0 // R.FT
+        on = G == g
+        inside = (CW >= fw - 1) & (CW < fw + R.WW // R.FW + 1) & (CT >= ft - 1) & (CT < ft + R.WT // R.FT + 1)
+        near = (CW >= fw - 8) & (CW < fw + R.WW // R.FW + 8) & (CT >= ft - 8) & (CT < ft + R.WT // R.FT + 8)
+        assert not (on & inside).any() and (on & near).any()       # empty with a margin, charge within the pad
+    assert wins == R.near_windows(keys, q, np.random.default_rng(0), n=20)  # reproducible
+
+
+def test_near_scalars_threshold_near_activity():
+    W = ([dict(kind="bg", score=s) for s in np.linspace(0, 1, 200)]
+         + [dict(kind="bgn", score=s) for s in np.linspace(0, 3, 200)]          # a haze: near windows score higher
+         + [dict(kind="iso", eb=1, score=2.0, snr=6.0, clean=True)] * 10)
+    s = R.near_scalars(W)
+    assert s["near_fpr_at_far1pct"] > 0.5                                       # the far threshold flags the haze
+    assert s["snr_eff1pct_far_5-7"] == 1.0 and s["snr_eff1pct_near_5-7"] == 0.0  # credited far, not near
+    assert s["near_eff1pct_0.1-0.2"] == 0.0
+    assert R.near_scalars([w for w in W if w["kind"] != "bgn"]) == {}

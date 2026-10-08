@@ -49,12 +49,14 @@ def split_events(corpus_root, runs, split):
 class DenoiseEvents:
     def __init__(self, corpus_root, runs, truth_root, split="train", *, n_events=None, subset_seed=0,
                  cfg=None, q0=Q0_DEFAULT, sig_cap=20000, neg_per_sig=1.0, near_per_sig=1.0, cov_per_sig=1.0, win_per_event=0,
+                 near_any_per_sig=0.0, win_near_per_event=0,
                  sample_seed=None, items=None):
         from helix.model.tokenize import PatchConfig
         self.cfg = cfg or PatchConfig(cell_t="grid_center")
         self.truth_root, self.q0 = truth_root, float(q0)
         self.sig_cap, self.neg_per_sig, self.near_per_sig = sig_cap, neg_per_sig, near_per_sig
         self.cov_per_sig, self.win_per_event = cov_per_sig, win_per_event
+        self.near_any_per_sig, self.win_near_per_event = near_any_per_sig, win_near_per_event
         self.sample_seed = sample_seed                     # None: a fresh draw per access (training)
         self.items = items if items is not None else split_events(corpus_root, runs, split)
         if n_events is not None and n_events < len(self.items):
@@ -128,6 +130,17 @@ class DenoiseEvents:
             parts.append(fkey(g, np.maximum(wire, 0) // FW, np.floor(np.maximum(tick, 0) / FT).astype(np.int64)))
         if self.win_per_event > 0 and len(ck):
             parts.append(self._noise_windows(ck, tkeys, rng))
+        if len(sig) and self.near_any_per_sig > 0:
+            # cells near charge whether or not a coefficient survived there: the
+            # empty, coefficient-free surroundings of activity, where a regression
+            # left to extrapolate predicts a haze (the floor's iso deposits sit there)
+            n = int(len(sig) * self.near_any_per_sig)
+            g, w, t = unkey(rng.choice(sig, n, replace=True))
+            parts.append(fkey(g, np.maximum(w + rng.integers(-8, 9, n), 0), np.maximum(t + rng.integers(-8, 9, n), 0)))
+        if self.win_near_per_event > 0:
+            from helix.probe.resolution import near_windows, window_cells
+            for g, w0, t0 in near_windows(tkeys, tq, rng, n=self.win_near_per_event):
+                parts.append(window_cells(g, w0, t0))
         rows = np.unique(np.concatenate(parts))
         q = np.zeros(len(rows))
         if len(tkeys):

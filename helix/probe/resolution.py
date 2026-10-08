@@ -239,6 +239,81 @@ def event_truth(pix, coeff_cells, rng, cap_signal=3000, n_iso=60, n_pair=40, n_b
                 meta=meta)
 
 
+def near_windows(keys, q, rng, n=60, margin=1, pad=(8, 8)):
+    """Charge-free windows NEAR activity, as pixel origins ``[(g, w0, t0)]``.
+
+    No charge cell within ``margin`` cells of the window, but at least one within
+    ``pad`` (wire, tick) cells -- 16 wires / 128 ticks at the default, exactly the
+    surroundings the floor's own noise windows must keep EMPTY. Those measure the
+    false-positive rate far from activity only, while isolated deposits sit near
+    it; a model that leaves a haze around activity is credited for it unless the
+    threshold is also set here. ``keys``/``q``: the event's fine cells and charge.
+    Up to ``n`` windows, shared equally over the planes that carry charge.
+    """
+    keys = np.asarray(keys, np.int64)[np.asarray(q) > 0]
+    if not len(keys):
+        return []
+    G, CW, CT = unkey(keys)
+    ww, wt = WW // FW, WT // FT
+    planes = np.unique(G)
+    per = -(-n // len(planes))
+    out = []
+    for g in planes.tolist():
+        m = G == g
+        o = max(pad) + margin + 1                                 # grid offset: origins may sit left of 0
+        occ = np.zeros((int(CW[m].max()) + ww + 2 * o + 1, int(CT[m].max()) + wt + 2 * o + 1), np.int32)
+        occ[CW[m] + o, CT[m] + o] = 1
+        S = np.pad(occ.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+
+        def box(i0, i1, j0, j1):                                  # charge cells in [i0,i1) x [j0,j1), grid coords
+            i0, i1 = np.clip(i0, 0, occ.shape[0]), np.clip(i1, 0, occ.shape[0])
+            j0, j1 = np.clip(j0, 0, occ.shape[1]), np.clip(j1, 0, occ.shape[1])
+            return S[i1, j1] - S[i0, j1] - S[i1, j0] + S[i0, j0]
+
+        I, J = np.meshgrid(np.arange(o, occ.shape[0] - ww), np.arange(o, occ.shape[1] - wt), indexing="ij")
+        I, J = I.ravel(), J.ravel()
+        empty = box(I - margin, I + ww + margin, J - margin, J + wt + margin) == 0
+        near = box(I - pad[0], I + ww + pad[0], J - pad[1], J + wt + pad[1]) > 0
+        cand = np.nonzero(empty & near)[0]
+        for c in rng.permutation(cand)[:per].tolist():
+            out.append((int(g), int(I[c] - o) * FW, int(J[c] - o) * FT))
+    return out[:n] if len(out) > n else out
+
+
+def near_scalars(W, snr_bins=((0, 1e-9), (1e-9, 3), (3, 5), (5, 7), (7, 10), (10, 15), (15, 1e9))):
+    """Floor quantities that need near-activity noise windows (kind ``bgn``) and,
+    when present, per-window annotations on the isolated deposits (``snr``: the
+    deposit's optimal matched-filter SNR, 0 if the clean sensor holds none of it;
+    ``clean``: foreign charge <= 25% of its own; scripts/noise_vs_hits.py).
+
+    ``near_fpr_at_far{1,5}pct``: the fraction of near-activity windows the
+    far-from-activity threshold flags -- the haze; ``near_eff{1,5}pct_<bin>``: the
+    efficiency per energy bin when the threshold is set near activity;
+    ``snr_eff1pct_{far,near}_<lo-hi>``: efficiency by deposit SNR at either threshold.
+    """
+    bg = np.array([w["score"] for w in W if w["kind"] == "bg"])
+    bn = np.array([w["score"] for w in W if w["kind"] == "bgn"])
+    out = {}
+    if not len(bg) or not len(bn):
+        return out
+    iso = [w for w in W if w["kind"] == "iso"]
+    for pct in (1, 5):
+        tf, tn = np.quantile(bg, 1 - pct / 100), np.quantile(bn, 1 - pct / 100)
+        out[f"near_fpr_at_far{pct}pct"] = float(np.mean(bn > tf))
+        for i in range(len(ENERGY_BINS) - 1):
+            s = np.array([w["score"] for w in iso if w["eb"] == i])
+            if len(s):
+                out[f"near_eff{pct}pct_{ENERGY_BINS[i]:g}-{ENERGY_BINS[i + 1]:g}"] = float(np.mean(s > tn))
+        if pct == 1 and any("snr" in w for w in iso):
+            for lo, hi in snr_bins:
+                s = np.array([w["score"] for w in iso if w.get("clean") and lo <= w.get("snr", -1) < hi])
+                lab = "nosignal" if hi <= 1e-9 else f"{lo:g}-{hi:g}" if hi < 1e9 else f"{lo:g}-inf"
+                if len(s):
+                    out[f"snr_eff1pct_far_{lab}"] = float(np.mean(s > tf))
+                    out[f"snr_eff1pct_near_{lab}"] = float(np.mean(s > tn))
+    return out
+
+
 def auc(pos, neg):
     """Mann-Whitney AUC, ties broken by order (fine at these sample sizes)."""
     pos, neg = np.asarray(pos, float), np.asarray(neg, float)

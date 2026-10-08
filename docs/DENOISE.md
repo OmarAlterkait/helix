@@ -173,3 +173,34 @@ from any charge, isolated deposits sit near activity, and the model predicts a
 haze of 100-300 e- per cell around activity -- so the floor metric credits the haze
 as detections. Training rarely sees those cells: `near` cells are restricted to
 kept coefficients and noise windows to charge-free surroundings.
+
+### Why 3-10 sigma is lost: stage by stage (`scripts/snr_stages.py`)
+
+The corpus chain replayed on the clean sensor of 48 test events with fresh noise
+(emulated kept coefficients / corpus = 1.000 median over 264 planes), 775 isolated
+deposits; known-location 1%-FPR efficiency of a matched filter on each stage (an
+upper bound for any detector reading it), against the model's window efficiency:
+
+| SNR | raw | gate | gate, no D1 | corpus (kappa 1, no D1) | flat 4 sigma | kappa 0.75 | kappa 0.5 | model |
+|---|---|---|---|---|---|---|---|---|
+| 3-5 | 0.92 | 0.91 | 0.74 | **0.19** | 0.10 | 0.34 | 0.53 | 0.34 |
+| 5-7 | 0.99 | 0.99 | 0.97 | **0.48** | 0.32 | 0.68 | 0.83 | 0.50 |
+| 7-10 | 1.00 | 1.00 | 1.00 | **0.86** | 0.70 | 0.95 | 1.00 | 0.87 |
+
+The coherent gate loses nothing; dropping D1 loses a little at threshold; the
+sparsification threshold (kappa x MAD sigma x sqrt(2 ln n_band) = 3.35-3.9 sigma per
+band) erases faint deposits whose energy is spread over coefficients each below it
+-- median signal response at SNR 3-5 goes 4.2 -> 0.0. The model is at the limit of
+its input (above it at 3-5: context/haze). Kept coefficients: kappa 0.75 2.1x, 0.5
+9.0x, flat 4 sigma 0.9x the corpus. The corpus is unchanged; this is measurement.
+
+### Evaluation and training near activity
+
+`scripts/dump_near_windows.py` writes, beside truth_v2, charge-free windows WITH
+charge within 16 wires / 128 ticks (`helix.probe.resolution.near_windows`, kind
+`bgn`): the surroundings the floor's own noise windows exclude. `eval_denoise.py
+--near <dir> --annot <noise_vs_hits.npz>` adds `near_fpr_at_far{1,5}pct`,
+`near_eff{1,5}pct_<bin>` (threshold set near activity) and
+`snr_eff1pct_{far,near}_<snr bin>` (incl. `nosignal`); every existing key is
+unchanged. Training: `--near-any-per-sig` (cells within +-8 of charge, coefficient
+or not) and `--win-near-per-event` (every cell of near-activity windows).

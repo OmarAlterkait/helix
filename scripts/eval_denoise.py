@@ -28,6 +28,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--train-events", type=int, default=260, help="probe-split events NOT scored (the probe's training set)")
     ap.add_argument("--boot", type=int, default=200)
+    ap.add_argument("--near", default=None, help="scripts/dump_near_windows.py sidecar dir: near-activity noise windows")
+    ap.add_argument("--annot", default=None, help="scripts/noise_vs_hits.py --out npz: per-deposit SNR / isolation")
     a = ap.parse_args()
 
     import torch
@@ -90,9 +92,27 @@ def main():
             for m_ in mm:
                 m_["ev"] = ei
             META += mm; WQ.append(z["wq"]); WID.append(z["wid"] + base); WP.append(pw_); WPR.append(pr_)
+        if a.near:
+            zn = np.load(os.path.join(a.near, os.path.basename(f)), allow_pickle=True)
+            if len(zn["wkey"]):
+                pw_, _, pr_ = predict(zn["wkey"])
+                base = len(META)
+                mm = json.loads(str(zn["meta"]))
+                for m_ in mm:
+                    m_["ev"] = ei
+                META += mm; WQ.append(zn["wq"]); WID.append(zn["wid"] + base); WP.append(pw_); WPR.append(pr_)
         if ei % 32 == 0:
             print(f"  event {ei}", flush=True)
 
+    if a.annot:                                               # deposit SNR (0: no clean signal) and isolation
+        A = np.load(a.annot)
+        ann = {k: (float(s) if pk > 0 else 0.0, bool(fo <= 0.25 * q_))
+               for k, s, pk, fo, q_ in zip(zip(A["ev"].tolist(), A["g"].tolist(), A["w0"].tolist(), A["t0"].tolist()),
+                                           A["snr"], A["peak"], A["foreign"], A["q"])}
+        for m_ in META:
+            k_ = (m_["ev"], m_["g"], m_["w0"], m_["t0"])
+            if m_["kind"] == "iso" and k_ in ann:
+                m_["snr"], m_["clean"] = ann[k_]
     y, e, pl = map(np.concatenate, (Y, E, PL))
     wq, wid = map(np.concatenate, (WQ, WID))
     starts = np.searchsorted(wid, np.arange(len(META))); ends = np.append(starts[1:], len(wid))
@@ -104,6 +124,8 @@ def main():
         score ``wscore``: charge (expm1(max(p,0))*Q0, exactly eval_resolution's
         window input) or presence probability."""
         W = R.window_stats(wscore, wq, META, starts, ends, cfg.pw, cfg.pt, cfg.delta[0], toff)
+        for w_, m_ in zip(W, META):
+            w_.update({k_: m_[k_] for k_ in ("snr", "clean") if k_ in m_})
         kz = {}
         for k in np.unique(e * 10 + pl):
             m = (e * 10 + pl) == k
@@ -114,20 +136,22 @@ def main():
         wins_of = {v: [w for w in W if w["ev"] == v] for v in evs}
         z_of = {v: [z_ for k, z_ in kz.items() if k // 10 == v] for v in evs}
         point = R.scalars(p, q, list(kz.values()), W, q30)
+        point.update(R.near_scalars(W))
         rng = np.random.default_rng(0); boots = []
         for _ in range(a.boot):
             sm = rng.choice(evs, len(evs), replace=True)
             idx = np.concatenate([rows_of[v] for v in sm])
-            boots.append(R.scalars(p[idx], q[idx], [z_ for v in sm for z_ in z_of[v]], [w for v in sm for w in wins_of[v]], q30))
+            wb_ = [w for v in sm for w in wins_of[v]]
+            boots.append(dict(R.scalars(p[idx], q[idx], [z_ for v in sm for z_ in z_of[v]], wb_, q30), **R.near_scalars(wb_)))
         r = {"val_mse": float(np.mean((np.concatenate(P) - y) ** 2))}
         for k, v in point.items():
-            bv = np.array([b_[k] for b_ in boots], float)
+            bv = np.array([b_.get(k, np.nan) for b_ in boots], float)
             lo, hi = np.nanpercentile(bv, [16, 84]) if np.isfinite(bv).any() else (np.nan, np.nan)
             r[k] = [round(v, 4), round(float(lo), 4), round(float(hi), 4)]
         res = dict(tag=tag, checkpoint=a.checkpoint, step=ck.get("step"), Q0=Q0, n_windows=len(META),
                    train_events=meta["args"].get("n_events"), init=meta["args"].get("init"), trained=r)
         with open(a.out.replace(".jsonl", f"_{tag}_trained_windows.json"), "w") as fh:
-            json.dump([dict({k: w[k] for k in ("kind", "score", "eb", "dip", "edge", "sep") if k in w},
+            json.dump([dict({k: w[k] for k in ("kind", "score", "eb", "dip", "edge", "sep", "snr", "clean") if k in w},
                             ev=m_.get("ev"), g=m_.get("g"), w0=m_.get("w0"), t0=m_.get("t0"))
                        for w, m_ in zip(W, META)], fh, default=float)       # where each window is, for diagnosis
         with open(a.out, "a") as fh:

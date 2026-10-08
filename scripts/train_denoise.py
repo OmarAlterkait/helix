@@ -52,6 +52,10 @@ def parse():
                     help="charge-free noise windows per event, every cell of each (the floor's bg windows)")
     ap.add_argument("--cov-per-sig", type=float, default=2.0,
                     help="empty cells drawn uniformly inside token footprints, per charge cell")
+    ap.add_argument("--near-any-per-sig", type=float, default=0.0,
+                    help="cells within +-8 of charge, coefficient or not, per charge cell (activity's surroundings)")
+    ap.add_argument("--win-near-per-event", type=int, default=0,
+                    help="charge-free windows NEAR activity per event, every cell (helix.probe.resolution.near_windows)")
     ap.add_argument("--override", nargs="*", default=[], metavar="KEY=VALUE", help="FM arch overrides")
     return ap.parse_args()
 
@@ -99,10 +103,12 @@ def main():
     say(f"[denoise] arch {a.arch_from} init {a.init or 'scratch'} trainable {n_train_p/1e6:.1f}M world {world}")
 
     train = DenoiseEvents(corpus_root, runs, a.truth_root, "train", n_events=a.n_events, subset_seed=a.subset_seed,
-                          cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event)
+                          cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
+                          near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event)
     val_items = split_events(corpus_root, runs[:1], "val")[:a.val_events]
     val = DenoiseEvents(corpus_root, runs, a.truth_root, "val", items=val_items, sample_seed=1234,
-                        cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event)
+                        cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
+                        near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event)
     say(f"[denoise] train events {len(train)}  val events {len(val)}  runs {len(runs)}")
 
     ddp = DDP(model, device_ids=[lrank], find_unused_parameters=False)
