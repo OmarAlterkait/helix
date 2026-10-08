@@ -249,3 +249,12 @@ Doubling near sampling (nr2: 2/sig, 48 windows) gives 0.482 at 1,024. The full-l
 windowed runs without near sampling stay at 0.13-0.25 (M2w 0.134, M4w 0.255). Map r
 of presence-scored rows (~0.65) is a probability against charge and not meaningful;
 the charge rows keep 0.97-0.99.
+
+**Supervised ceiling with the near-activity recipe** (M4n: fine-tuned from
+nz_pw16_s1, all ~150k train events, 40k steps x 16, near sampling + presence head;
+near-activity threshold, presence-scored): 0.1-0.2 MeV **0.558** [0.549-0.577],
+<0.1 MeV 0.065, 0.2-0.5 MeV 0.975; by deposit SNR 5-7 0.32, 7-10 **0.81**, 10-15
+0.98; charge-head map r 0.995. Against the matched-filter bound on the corpus input
+(known location, no window search): 0.48 at SNR 5-7, 0.86 at 7-10 -- the ceiling is
+close to what the sparsified coefficients still hold. M2n (the same from scratch)
+is the remaining comparison.
