@@ -204,3 +204,24 @@ charge within 16 wires / 128 ticks (`helix.probe.resolution.near_windows`, kind
 `snr_eff1pct_{far,near}_<snr bin>` (incl. `nosignal`); every existing key is
 unchanged. Training: `--near-any-per-sig` (cells within +-8 of charge, coefficient
 or not) and `--win-near-per-event` (every cell of near-activity windows).
+
+### Results on the near-activity evaluation (2026-10-07 evening)
+
+42% of the floor's isolated deposits have foreign charge in the very next cell and
+93% within 8 cells; only 7% sit where the floor's noise windows are drawn. Charge-free
+windows near activity hold no clean signal (94-100%), yet the models score them up
+to 2-3k e- (99th pct U/V/Y 1,948 / 2,361 / 2,881 vs 554 / 237 / 227 far away): a
+context prior, not a response to waveforms. With the 1%-FPR threshold set near
+activity (`near_eff1pct`; a distance-matched threshold gives the same: 0.21 vs
+0.15 for ab_ft1024_win at 0.1-0.2 MeV):
+
+| model | near eff 1% 0.1-0.2 [16-84%] | <0.1 | by SNR 7-10 / 10-15 | far eff 0.1-0.2 (old metric) |
+|---|---|---|---|---|
+| every earlier model (ab_*, le_ft_*, M1b, M2w) | 0.13-0.16 | <= 0.006 | 0.25-0.32 / 0.52-0.59 | 0.53-0.78 |
+| + near-activity sampling, seeds 0 / 1 | 0.298 / 0.299 [0.26-0.34] | 0.011 | 0.42 / 0.78 | 0.70 / 0.76 |
+| + near sampling + presence head, scored by presence | **0.465** [0.45-0.48] | 0.055 | 0.68 / **0.977** | 0.72 |
+
+Full labels do not fix it (M1b 0.14, M2w 0.13): the haze is a sampling/objective
+problem, not a data-quantity one. The old metric ranks the new arms LOWER -- it
+credited the haze. Near-activity eff of signal-free deposits is 0.002-0.006, as
+it must be at 1% FPR.
