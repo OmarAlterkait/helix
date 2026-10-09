@@ -43,6 +43,7 @@ def main():
     ov = dict(meta["overrides"]); ov["compile_blocks"] = False
     hk = meta.get("head_kw") or {}
     presence = bool(hk.get("presence"))
+    decoder = hk.get("kind") == "decoder"
     model = build_denoise(meta["arch"], None, overrides=ov, head_kw=hk)
     model.load_state_dict(ck["model"]); model.to(dev).eval()
     q0 = float(meta["q0"])
@@ -74,8 +75,9 @@ def main():
             out = np.zeros(len(keys), np.float32)
             pres = np.zeros(len(keys), np.float32)
             if ok.any():
+                nbr = torch.as_tensor(R.cell_neighbors(keys[ok], B["cell_key"], bl, cfg)).to(dev) if decoder else None
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-                    p = model(Bt, torch.as_tensor(idx[ok]).to(dev), torch.as_tensor(aux[ok]).to(dev))
+                    p = model(Bt, torch.as_tensor(idx[ok]).to(dev), torch.as_tensor(aux[ok]).to(dev), nbr)
                 if presence:
                     pres[ok] = torch.sigmoid(p[1].float()).cpu().numpy(); p = p[0]
                 out[ok] = p.float().cpu().numpy()
@@ -144,6 +146,15 @@ def main():
             wb_ = [w for v in sm for w in wins_of[v]]
             boots.append(dict(R.scalars(p[idx], q[idx], [z_ for v in sm for z_ in z_of[v]], wb_, q30), **R.near_scalars(wb_)))
         r = {"val_mse": float(np.mean((np.concatenate(P) - y) ** 2))}
+        if p.min() >= 0 and p.max() <= 1 and tag.endswith("_pres"):
+            pass                                                   # a probability: no charge scalars
+        else:                                                      # quick charge scalars on the map rows
+            qp = np.expm1(np.maximum(p, 0)) * Q0
+            r["haze_frac_0.05Q0"] = float(np.mean(qp[q == 0] > 0.05 * Q0))
+            sel = (q >= 2000) & (q < 16000)
+            rat = qp[sel] / q[sel]
+            r["res68_2k_16k"] = float((np.quantile(rat, 0.84) - np.quantile(rat, 0.16)) / 2)
+            r["med_2k_16k"] = float(np.median(rat))
         for k, v in point.items():
             bv = np.array([b_.get(k, np.nan) for b_ in boots], float)
             lo, hi = np.nanpercentile(bv, [16, 84]) if np.isfinite(bv).any() else (np.nan, np.nan)
@@ -162,6 +173,10 @@ def main():
     score(a.tag, np.concatenate(P), np.expm1(np.maximum(wp, 0)) * Q0)
     if presence:                      # the same cells scored by "is there charge here"
         score(a.tag + "_pres", np.concatenate(PR), np.concatenate(WPR))
+        # the hurdle's output map: charge only where presence > 0.5
+        gp = np.where(np.concatenate(PR) > 0.5, np.concatenate(P), 0.0)
+        gw = np.where(np.concatenate(WPR) > 0.5, wp, 0.0)
+        score(a.tag + "_gated", gp, np.expm1(np.maximum(gw, 0)) * Q0)
 
 
 if __name__ == "__main__":

@@ -139,3 +139,28 @@ def test_near_scalars_threshold_near_activity():
     assert s["snr_eff1pct_far_5-7"] == 1.0 and s["snr_eff1pct_near_5-7"] == 0.0  # credited far, not near
     assert s["near_eff1pct_0.1-0.2"] == 0.0
     assert R.near_scalars([w for w in W if w["kind"] != "bgn"]) == {}
+
+
+def test_cell_neighbors_centre_is_the_covering_token_and_shifts_by_one_patch():
+    from helix.model.tokenize import PatchConfig, cell_key, pixel_cells, unpack_cell_key
+    cfg = PatchConfig(cell_t="grid_center")
+    bl = np.array([271, 271, 542, 1084, 2168])
+    rng = np.random.default_rng(0)
+    # tokens: every patch of plane 1 in a block of patch space, all bands
+    toks = []
+    for b in range(cfg.n_bands):
+        for wb in range(2, 8):
+            for tb in range(2, 12):
+                toks.append(cell_key(1, b, wb * cfg.pw, tb * cfg.pt, cfg))
+    ck = np.array(rng.permutation(toks), np.int64)
+    keys = R.fkey(np.full(40, 1), rng.integers(40, 100, 40), rng.integers(20, 60, 40))
+    nbr = R.cell_neighbors(keys, ck, bl, cfg)
+    idx, _ = R.cell_inputs(keys, ck, bl, cfg)
+    assert nbr.shape == (40, cfg.n_bands, 9) and np.array_equal(nbr[:, :, 4], idx)
+    g, fw, ft = R.unkey(keys)
+    pc = pixel_cells(g, fw * R.FW, ft * R.FT + R.FT // 2, bl, cfg)
+    for j, (dw, dt) in enumerate([(a, c) for a in (-1, 0, 1) for c in (-1, 0, 1)]):
+        hit = nbr[:, :, j] >= 0
+        _, _, wb, tb = unpack_cell_key(ck[nbr[:, :, j][hit]])
+        _, _, wb0, tb0 = unpack_cell_key(pc[hit])
+        assert np.array_equal(wb, wb0 + dw) and np.array_equal(tb, tb0 + dt)

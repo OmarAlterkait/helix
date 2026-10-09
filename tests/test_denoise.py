@@ -81,3 +81,21 @@ def test_presence_head_returns_charge_and_logit_and_trains():
     loss.backward()
     assert m.head.mlp[-1].weight.grad.shape == (2, m.head.mlp[-1].in_features)
     assert set(_model().state_dict()) == set(m.state_dict())             # same tree, wider last layer
+
+
+def test_cell_decoder_trains_and_survives_cells_with_no_tokens():
+    from helix.model.denoise import CellDecoder
+    torch.manual_seed(0)
+    m = build_denoise(dict(SMALL), head_kw=dict(kind="decoder", presence=True, proj=32, layers=2, hidden=64)).train()
+    assert isinstance(m.head, CellDecoder)
+    B = make_batch(n_cells=N_CELLS)
+    idx, aux = _inputs(B)
+    g = torch.Generator().manual_seed(1)
+    nbr = torch.randint(-1, B["plane_id"].shape[0], (50, SMALL["n_band"], 9), generator=g)
+    nbr[:5] = -1; idx[:5] = -1                                     # cells with no token anywhere near
+    y, logit = m(B, idx, aux, nbr)
+    assert y.shape == logit.shape == (50,) and torch.isfinite(y).all() and torch.isfinite(logit).all()
+    (y.square().mean() + logit.square().mean()).backward()
+    assert m.head.kv.weight.grad.abs().sum() > 0 and m.fm.enc[0].qkv.weight.grad.abs().sum() > 0
+    groups = m.param_groups(1e-3, 2e-3, 0.05)                      # the head's params are in the optimizer
+    assert {id(p) for p in m.head.parameters()} <= {id(p) for g_ in groups for p in g_["params"]}

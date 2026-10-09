@@ -85,6 +85,36 @@ def _fourier(x):
     return np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(x.shape[0], -1)
 
 
+def cell_neighbors(keys, cell_key, band_lengths, cfg, radius=1):
+    """Per fine cell and band: the tokens of the (2r+1) x (2r+1) patches around
+    the one covering it, -> (n, n_bands, (2r+1)**2) int64, -1 where no token.
+
+    Found by shifting the covering PATCH's block coordinates, so a cell with no
+    token of its own in a band still sees the tokens beside it -- the empty cells
+    next to activity are exactly those. Slot ``(2r+1)**2 // 2`` is the covering
+    token, the same index :func:`cell_inputs` returns. Order: wire offset major,
+    tick offset minor, each from -r to r.
+    """
+    from helix.model.tokenize import cell_key as pack, pixel_cells, unpack_cell_key
+
+    g, fw, ft = unkey(np.asarray(keys, np.int64))
+    pc = pixel_cells(g, fw * FW, ft * FT + FT // 2, band_lengths, cfg)          # (n, nb)
+    pg, pb, wb, tb = unpack_cell_key(pc.ravel())
+    ck = np.asarray(cell_key, np.int64)
+    order = np.argsort(ck); cks = ck[order]
+    offs = [(dw, dt) for dw in range(-radius, radius + 1) for dt in range(-radius, radius + 1)]
+    out = np.full((pc.size, len(offs)), -1, np.int64)
+    for j, (dw, dt) in enumerate(offs):
+        w2, t2 = wb + dw, tb + dt
+        ok = (w2 >= 0) & (t2 >= 0)
+        if not ok.any() or not len(cks):
+            continue
+        k2 = pack(pg[ok], pb[ok], w2[ok] * cfg.pw, t2[ok] * cfg.pt, cfg)
+        pos = np.clip(np.searchsorted(cks, k2), 0, len(cks) - 1)
+        out[np.nonzero(ok)[0], j] = np.where(cks[pos] == k2, order[pos], -1)
+    return out.reshape(pc.shape[0], pc.shape[1], len(offs))
+
+
 def cell_inputs(keys, cell_key, band_lengths, cfg):
     """Per fine cell: which token covers it in each band, and where inside it.
 

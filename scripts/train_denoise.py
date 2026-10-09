@@ -48,6 +48,14 @@ def parse():
     ap.add_argument("--presence", action="store_true",
                     help="hurdle head: also a BCE logit for q > 0 (window scores by presence)")
     ap.add_argument("--presence-w", type=float, default=1.0, help="weight of the presence BCE")
+    ap.add_argument("--cond-charge", action="store_true",
+                    help="with --presence: regress charge on charged cells only (hurdle: presence x conditional "
+                         "charge); validation and evaluation gate charge by presence > 0.5")
+    ap.add_argument("--head", choices=("mlp", "decoder"), default="mlp",
+                    help="mlp: covering token per band (CellHead); decoder: cross-attention over the 3x3 token "
+                         "neighbourhood per band + the covering tokens' raw coefficients (CellDecoder)")
+    ap.add_argument("--dec-proj", type=int, default=128)
+    ap.add_argument("--dec-layers", type=int, default=2)
     ap.add_argument("--win-per-event", type=int, default=0,
                     help="charge-free noise windows per event, every cell of each (the floor's bg windows)")
     ap.add_argument("--cov-per-sig", type=float, default=2.0,
@@ -65,8 +73,9 @@ def to_device(item, dev):
     B = {k: torch.as_tensor(v).to(dev, non_blocking=True) if isinstance(v, np.ndarray) else v
          for k, v in item["B"].items()}
     B["n_cells"] = B["plane_id"].shape[0]
+    nbr = torch.as_tensor(item["nbr"]).to(dev) if "nbr" in item else None
     return (B, torch.as_tensor(item["idx"]).to(dev), torch.as_tensor(item["aux"]).to(dev),
-            torch.as_tensor(item["y"]).to(dev))
+            torch.as_tensor(item["y"]).to(dev), nbr)
 
 
 def main():
@@ -98,17 +107,24 @@ def main():
     arch = load(a.arch_from).arch
     sd = load(a.init).state_dict if a.init else None
     torch.manual_seed(a.seed)
-    model = build_denoise(arch, sd, overrides=overrides, head_kw=dict(presence=a.presence)).to(dev)
+    if a.cond_charge and not a.presence:
+        raise SystemExit("--cond-charge needs --presence: the charge head no longer sees empty cells")
+    head_kw = dict(presence=a.presence)
+    if a.head == "decoder":
+        head_kw.update(kind="decoder", proj=a.dec_proj, layers=a.dec_layers)
+    model = build_denoise(arch, sd, overrides=overrides, head_kw=head_kw).to(dev)
     n_train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
     say(f"[denoise] arch {a.arch_from} init {a.init or 'scratch'} trainable {n_train_p/1e6:.1f}M world {world}")
 
     train = DenoiseEvents(corpus_root, runs, a.truth_root, "train", n_events=a.n_events, subset_seed=a.subset_seed,
                           cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
-                          near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event)
+                          near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event,
+                          neighbors=a.head == "decoder")
     val_items = split_events(corpus_root, runs[:1], "val")[:a.val_events]
     val = DenoiseEvents(corpus_root, runs, a.truth_root, "val", items=val_items, sample_seed=1234,
                         cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
-                        near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event)
+                        near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event,
+                          neighbors=a.head == "decoder")
     say(f"[denoise] train events {len(train)}  val events {len(val)}  runs {len(runs)}")
 
     ddp = DDP(model, device_ids=[lrank], find_unused_parameters=False)
@@ -130,7 +146,7 @@ def main():
         step, best = ck["step"], ck.get("best", best)
         say(f"[denoise] resumed at step {step}")
     meta = dict(arch=arch, overrides=overrides, args=vars(a), q0=train.q0, runs=runs,
-                head_kw=dict(presence=a.presence))
+                head_kw=head_kw, cond_charge=a.cond_charge)
 
     def save(path, extra=None):
         if rank:
@@ -145,10 +161,13 @@ def main():
         model.eval()
         tot = torch.zeros(4, device=dev, dtype=torch.float64)      # sse, n, sse_pos, n_pos
         for i in range(rank, len(val), world):
-            B, idx, aux, y = to_device(val[i], dev)
+            B, idx, aux, y, nbr = to_device(val[i], dev)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                p = model(B, idx, aux)
-            p = (p[0] if a.presence else p).float()
+                p = model(B, idx, aux, nbr)
+            if a.cond_charge:                                      # the hurdle's map: charge where present
+                p = torch.where(p[1].float() > 0, p[0].float(), torch.zeros_like(y))
+            else:
+                p = (p[0] if a.presence else p).float()
             e = (p - y) ** 2; pos = y > 0
             tot += torch.stack([e.sum(), torch.tensor(float(len(y)), device=dev),
                                 e[pos].sum(), pos.sum().double()]).double()
@@ -181,13 +200,17 @@ def main():
     while step < a.steps:
         for g, b0 in zip(opt.param_groups, base):
             g["lr"] = b0 * lr_at(step)
-        B, idx, aux, y = to_device(next(it), dev)
+        B, idx, aux, y, nbr = to_device(next(it), dev)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            p = ddp(B, idx, aux)
+            p = ddp(B, idx, aux, nbr)
         if a.presence:
             p, logit = p[0].float(), p[1].float()
-            loss = torch.nn.functional.mse_loss(p, y) + a.presence_w * \
-                torch.nn.functional.binary_cross_entropy_with_logits(logit, (y > 0).float())
+            pos = y > 0
+            if a.cond_charge:                                      # charge only where there is charge
+                reg = ((p - y) ** 2 * pos).sum() / pos.sum().clamp(min=1)
+            else:
+                reg = torch.nn.functional.mse_loss(p, y)
+            loss = reg + a.presence_w * torch.nn.functional.binary_cross_entropy_with_logits(logit, pos.float())
         else:
             loss = torch.nn.functional.mse_loss(p.float(), y)
         opt.zero_grad(set_to_none=True)

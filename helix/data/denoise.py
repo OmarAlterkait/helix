@@ -49,7 +49,7 @@ def split_events(corpus_root, runs, split):
 class DenoiseEvents:
     def __init__(self, corpus_root, runs, truth_root, split="train", *, n_events=None, subset_seed=0,
                  cfg=None, q0=Q0_DEFAULT, sig_cap=20000, neg_per_sig=1.0, near_per_sig=1.0, cov_per_sig=1.0, win_per_event=0,
-                 near_any_per_sig=0.0, win_near_per_event=0,
+                 near_any_per_sig=0.0, win_near_per_event=0, neighbors=False,
                  sample_seed=None, items=None):
         from helix.model.tokenize import PatchConfig
         self.cfg = cfg or PatchConfig(cell_t="grid_center")
@@ -57,6 +57,7 @@ class DenoiseEvents:
         self.sig_cap, self.neg_per_sig, self.near_per_sig = sig_cap, neg_per_sig, near_per_sig
         self.cov_per_sig, self.win_per_event = cov_per_sig, win_per_event
         self.near_any_per_sig, self.win_near_per_event = near_any_per_sig, win_near_per_event
+        self.neighbors = neighbors                         # CellDecoder: token neighbourhood per cell
         self.sample_seed = sample_seed                     # None: a fresh draw per access (training)
         self.items = items if items is not None else split_events(corpus_root, runs, split)
         if n_events is not None and n_events < len(self.items):
@@ -183,4 +184,8 @@ class DenoiseEvents:
         rows, y = self.rows(ce, tkeys, tq, rng)
         idx, aux = cell_inputs(rows, B["cell_key"], bl, self.cfg)
         ok = (idx >= 0).any(1)                               # uncovered cells are not queried
-        return dict(B=B, idx=idx[ok], aux=aux[ok], y=y[ok], name=f"{run}/{os.path.basename(path)}#{pos}")
+        item = dict(B=B, idx=idx[ok], aux=aux[ok], y=y[ok], name=f"{run}/{os.path.basename(path)}#{pos}")
+        if self.neighbors:
+            from helix.probe.resolution import cell_neighbors
+            item["nbr"] = cell_neighbors(rows[ok], B["cell_key"], bl, self.cfg)
+        return item
