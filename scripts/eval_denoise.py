@@ -30,6 +30,9 @@ def main():
     ap.add_argument("--boot", type=int, default=200)
     ap.add_argument("--near", default=None, help="scripts/dump_near_windows.py sidecar dir: near-activity noise windows")
     ap.add_argument("--annot", default=None, help="scripts/noise_vs_hits.py --out npz: per-deposit SNR / isolation")
+    ap.add_argument("--q0", type=float, default=None,
+                    help="use this Q0 instead of recomputing it from the probe-train truth files (which then are "
+                         "not read); it must still equal the model's")
     a = ap.parse_args()
 
     import torch
@@ -51,8 +54,11 @@ def main():
     cfg = ds.cfg
 
     files = sorted(glob.glob(os.path.join(a.truth, "ev*.npz")))
-    qs = np.concatenate([np.load(f, allow_pickle=True)["mq"] for f in files if int(os.path.basename(f)[2:5]) < a.train_events])
-    Q0 = float(np.median(qs[qs > 0]))
+    if a.q0 is not None:              # given, not recomputed: still checked against the model's below
+        Q0 = float(a.q0)
+    else:
+        qs = np.concatenate([np.load(f, allow_pickle=True)["mq"] for f in files if int(os.path.basename(f)[2:5]) < a.train_events])
+        Q0 = float(np.median(qs[qs > 0]))
     if abs(Q0 - q0) > 1e-6 * Q0:
         raise SystemExit(f"model trained with Q0={q0}, this truth has Q0={Q0}: predictions are on another scale")
 
