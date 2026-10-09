@@ -99,3 +99,20 @@ def test_cell_decoder_trains_and_survives_cells_with_no_tokens():
     assert m.head.kv.weight.grad.abs().sum() > 0 and m.fm.enc[0].qkv.weight.grad.abs().sum() > 0
     groups = m.param_groups(1e-3, 2e-3, 0.05)                      # the head's params are in the optimizer
     assert {id(p) for p in m.head.parameters()} <= {id(p) for g_ in groups for p in g_["params"]}
+
+
+def test_cell_decoder_output_is_not_bounded():
+    """No normalisation between the residual stream and the readout: a LayerNorm there
+    capped the charge logit (M5d / M5dc saturated near 0.8M e- per cell)."""
+    from helix.model.denoise import CellDecoder
+    torch.manual_seed(0)
+    head = CellDecoder(SMALL["d"], n_bands=4, n_slot=SMALL["n_slot"], proj=16, heads=4, layers=1, hidden=32)
+    B = make_batch(n_cells=N_CELLS)
+    idx, aux = _inputs(B, n=20)
+    nbr = torch.randint(-1, N_CELLS, (20, 4, 9))
+    feats = torch.randn(N_CELLS, SMALL["d"])
+    with torch.no_grad():
+        y1 = head(feats, idx, aux, nbr=nbr, B=B)
+        head.q0[-1].bias += 1000.0                              # a large residual stream...
+        y2 = head(feats, idx, aux, nbr=nbr, B=B)
+    assert (y2 - y1).abs().max() > 10                           # ...must reach the output

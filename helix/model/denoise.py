@@ -83,7 +83,9 @@ class CellDecoder(nn.Module):
                 nq=nn.LayerNorm(proj), nk=nn.LayerNorm(proj), q=nn.Linear(proj, proj), k=nn.Linear(proj, proj),
                 v=nn.Linear(proj, proj), o=nn.Linear(proj, proj),
                 nm=nn.LayerNorm(proj), mlp=nn.Sequential(nn.Linear(proj, 4 * proj), nn.GELU(), nn.Linear(4 * proj, proj)))))
-        self.out = nn.Sequential(nn.LayerNorm(proj), nn.Linear(proj, 2 if presence else 1))
+        # a plain linear readout of the residual stream: a LayerNorm before it bounds the
+        # charge logit by the weights (M5d/M5dc capped near 0.8M e- per cell, M4n reaches 2.6M)
+        self.out = nn.Linear(proj, 2 if presence else 1)
         nn.init.normal_(self.pos, std=0.02); nn.init.normal_(self.null, std=0.02)
 
     def forward(self, feats, idx, aux, nbr=None, B=None):
