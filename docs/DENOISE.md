@@ -316,3 +316,23 @@ map rows; loc = eval localisation (wire / tick) for 0.2-0.5 MeV deposits.
   0.87-0.90) but its gated map drops faint detections.
 - No variant moves presence-scored detection (0.459-0.472, within the interval):
   the faint floor is set by the input, as the stage replay showed.
+
+### Full-label output models (M5d decoder, M5dc decoder + hurdle; 40k steps x 16, as M4n)
+
+Trained through the OST-61 overlay (identical data; scripts/study/denoise_full.sh),
+scored with --near/--annot/--q0. Detection near activity at 1% FPR, 0.1-0.2 MeV;
+haze / res68 / med / loc as in the ablation above.
+
+| model | presence-scored | charge map | gated map | SNR 7-10 (pres.) | haze (gated) | res68 | med | loc (gated) |
+|---|---|---|---|---|---|---|---|---|
+| M4n (MLP head) | 0.558 [0.549-0.577] | 0.420 | 0.420 | 0.812 | 0.162 -> 0.037 | 0.211 | 0.964 | 0.13 / 0.59 |
+| **M5d (decoder)** | **0.592 [0.579-0.607]** | **0.564** | **0.572** | **0.846** | 0.162 -> 0.037 | 0.198 | 0.956 | 0.15 / 0.63 |
+| M5dc (decoder + hurdle) | 0.582 [0.569-0.598] | -- | 0.429 | 0.828 | 0.038 | **0.180** | **0.970** | 0.20 / 0.80 |
+
+At full scale the decoder is the first change to move the faint floor (+0.034,
+intervals disjoint) and makes the charge map nearly as good a detector as the
+presence head (0.420 -> 0.564). Presence gating alone delivers the haze (0.16 ->
+0.04) and localisation (0.82 / 3.4 -> 0.13 / 0.6 wire / tick; tuned classical 0.17 /
+1.5) gains, for M4n as for M5d. The hurdle loss buys the best per-cell charge
+(res68 0.18, median 0.97) at the cost of faint detections in its gated map.
+Recommended product: M5d, detection by presence, charge map gated by presence.
