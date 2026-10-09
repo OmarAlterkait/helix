@@ -288,3 +288,31 @@ neighbour-FREE corpus-type input (0.57 vs 0.36-0.41) and matches it on the
 uncompressed gated input (0.52); it stays below the known-location bound (SNR 5-7
 0.48, 7-10 0.86 on corpus input). The synthetic deposits use the same fitted kernel
 as the templates, which favours the matched filter.
+
+### Output model: hurdle loss, cell-resolution decoder, presence gating (2026-10-09)
+
+Fast protocol (fine-tuned, 1,024 labels, 4k steps, near-activity recipe, presence
+head), scored with --near/--annot. `_pres` = windows scored by presence; `_gated` =
+the charge map kept only where presence > 0.5. haze = fraction of truth-empty map
+rows above 0.05 Q0; res68 / med = 68% half-width and median of pred/true on 2-16k e-
+map rows; loc = eval localisation (wire / tick) for 0.2-0.5 MeV deposits.
+
+| model | near eff 1% 0.1-0.2 (presence) | charge-scored 0.1-0.2 | SNR 7-10 (presence) | haze | res68 | med | loc |
+|---|---|---|---|---|---|---|---|
+| baseline: MLP head (le3_ft_N1024), charge map | 0.465 [0.454-0.486] | 0.330 | 0.686 | 0.204 | 0.482 | 0.862 | 0.96 / 4.19 |
+| baseline, gated | | 0.330 | | 0.084 | 0.483 | 0.862 | 0.25 / 1.32 |
+| hurdle loss (charge on charged cells), gated | 0.459 | 0.282 | 0.680 | 0.080 | 0.420 | 0.868 | 0.27 / 1.36 |
+| decoder | 0.472 [0.458-0.489] | **0.413** | **0.732** | 0.240 | 0.486 | 0.863 | 0.97 / 3.97 |
+| decoder, gated | | 0.419 | | 0.077 | 0.486 | 0.863 | **0.19 / 0.92** |
+| decoder + hurdle, gated (seeds 0 / 1) | 0.467 / 0.467 | 0.307 / 0.295 | 0.720 / 0.705 | 0.077 / 0.081 | **0.429 / 0.434** | 0.885 / 0.898 | 0.26 / 1.1 |
+
+- Gating the charge map by presence removes ~60% of the haze on empty map rows and
+  fixes localisation (0.96 / 4.2 -> 0.19-0.27 wire / 0.9-1.4 ticks; the tuned
+  classical chain: 0.17 / 1.5): the haze, not the representation, made the charge
+  head localise badly.
+- The decoder makes the charge map itself a far better detector (0.330 -> 0.413 at
+  0.1-0.2 MeV, SNR 10-15 0.82 -> 0.91) and gives the sharpest gated map.
+- The hurdle loss tightens per-cell charge (res68 0.48 -> 0.42-0.43, median 0.86 ->
+  0.87-0.90) but its gated map drops faint detections.
+- No variant moves presence-scored detection (0.459-0.472, within the interval):
+  the faint floor is set by the input, as the stage replay showed.
