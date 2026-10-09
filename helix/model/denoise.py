@@ -87,26 +87,39 @@ class CellDecoder(nn.Module):
         nn.init.normal_(self.pos, std=0.02); nn.init.normal_(self.null, std=0.02)
 
     def forward(self, feats, idx, aux, nbr=None, B=None):
-        import torch.nn.functional as F
         n = idx.shape[0]
+        # keys/values are projected once per TOKEN (~30k rows), then gathered for every
+        # (cell, neighbour slot) pair (~n x 37) -- projecting after the gather cost 90x the
+        # matmul rows and made a step 5x slower; the slot embedding is projected and added
+        # after the gather instead of before
+        # Gather indices must not repeat heavily: a gather's backward is an atomic
+        # scatter-add, and absent slots clamped to one row (or the null key gathered
+        # by every cell) serialise ~1M adds on that row -- a 6-9 s backward on real
+        # events against 0.3 s for CellHead. Absent slots get spread dummy rows (masked,
+        # so their gradients are zero); the null key is appended, not gathered.
         z = self.kv(self.norm(feats))                                           # (N_tok, P)
         flat = nbr.reshape(n, -1)                                               # (n, nb*K)
-        kv = z[flat.clamp(min=0)]                                               # (n, nb*K, P)
-        kv = torch.cat([kv, self.null.to(kv.dtype).expand(n, 1, -1)], 1) + self.pos.to(kv.dtype)
+        nt = z.shape[0]
+        spread = torch.arange(flat.numel(), device=flat.device).view_as(flat) % nt
+        gidx = torch.where(flat >= 0, flat, spread)
         keep = torch.cat([flat >= 0, torch.ones(n, 1, dtype=torch.bool, device=flat.device)], 1)
         raw = torch.cat([B["inp"], B["occ"].to(B["inp"].dtype)], -1)            # (N_tok, 2*n_slot)
         r = raw[idx.clamp(min=0)] * (idx >= 0).unsqueeze(-1).to(raw.dtype)      # (n, nb, 2*n_slot)
-        q = self.q0(torch.cat([aux.to(r.dtype), r.flatten(1)], 1).to(kv.dtype))
+        q = self.q0(torch.cat([aux.to(r.dtype), r.flatten(1)], 1)).float()
         h, P = self.heads, q.shape[-1]
-        mask = keep[:, None, None, :]                                           # (n, 1, 1, L)
+        L = flat.shape[1]
         for blk in self.blocks:
-            kn = blk["nk"](kv)
-            Q = blk["q"](blk["nq"](q)).view(n, 1, h, P // h).transpose(1, 2)
-            K = blk["k"](kn).view(n, -1, h, P // h).transpose(1, 2)
-            V = blk["v"](kn).view(n, -1, h, P // h).transpose(1, 2)
-            a = F.scaled_dot_product_attention(Q, K, V, attn_mask=mask)        # (n, h, 1, P/h)
-            q = q + blk["o"](a.transpose(1, 2).reshape(n, P))
-            q = q + blk["mlp"](blk["nm"](q))
+            zn, nn_ = blk["nk"](z), blk["nk"](self.null)
+            Kt, Vt = blk["k"](zn).float(), blk["v"](zn).float()                # (N_tok, P), gathered in fp32
+            kp, vp = blk["k"](self.pos).float(), blk["v"](self.pos).float()    # (L+1, P)
+            K = torch.cat([Kt[gidx] + kp[:L], (blk["k"](nn_).float() + kp[L]).expand(n, 1, P)], 1)
+            V = torch.cat([Vt[gidx] + vp[:L], (blk["v"](nn_).float() + vp[L]).expand(n, 1, P)], 1)
+            Qh = blk["q"](blk["nq"](q)).float().view(n, h, P // h)
+            s = torch.einsum("nhd,nlhd->nhl", Qh, K.view(n, L + 1, h, P // h)) * (P // h) ** -0.5
+            a = s.masked_fill(~keep[:, None, :], float("-inf")).softmax(-1)
+            att = torch.einsum("nhl,nlhd->nhd", a, V.view(n, L + 1, h, P // h)).reshape(n, P)
+            q = q + blk["o"](att).float()
+            q = q + blk["mlp"](blk["nm"](q)).float()
         out = self.out(q)
         return (out[:, 0], out[:, 1]) if self.presence else out.squeeze(-1)
 
