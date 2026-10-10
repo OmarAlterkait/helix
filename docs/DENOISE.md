@@ -336,3 +336,23 @@ presence head (0.420 -> 0.564). Presence gating alone delivers the haze (0.16 ->
 1.5) gains, for M4n as for M5d. The hurdle loss buys the best per-cell charge
 (res68 0.18, median 0.97) at the cost of faint detections in its gated map.
 Recommended product: M5d, detection by presence, charge map gated by presence.
+
+### Dense rerun with gated outputs, and the decoder's charge cap (fixed: M6d / M6dc)
+
+baselines/uboone_sp/dense/results/dense2.md (all 128 test events, every cell):
+presence gating fixes the faint-region over-estimate (16x8-cell regions with 1-4k /
+4-16k e-: raw 3.0x / 1.8x -> M5dc gated 0.94 / 1.00; classical 0.36 / 0.56) and cuts
+dense-region haze 8-10x (empty cells > 100 e-: 0.20-0.43 -> 0.03-0.11; classical
+0.07-0.12 above 1M e- of neighbourhood charge, cleaner only below 100k), at the cost
+of 0.75% of all true charge zeroed (classical tuned 1.47%), almost all in sparse
+cells < 2k e-. Every dense-activity win survives (moves <= 0.01). The decoder's
+window-level detection gain does not appear at the cell level (same-density 1%-FPR
+efficiency equal to M4n within 0.01).
+
+The run found that CellDecoder's output (LayerNorm -> Linear) capped the charge
+logit: M5d / M5dc saturated at 775k / 853k e- per cell. Fixed by a linear readout of
+the residual stream (87b4caa) and retrained (M6d, M6dc; same recipe). Eval metrics are
+unchanged within intervals (presence 0.1-0.2 MeV: M6d 0.591, M6dc 0.579; gated haze
+0.036-0.037; res68 0.206 / 0.183), and bright cells are now right: median pred/true
+1.00 / 1.00 at 0.2-1M e- and 0.97 / 0.98 above 1M (M4n 0.98 / 0.93), maximum
+prediction 2.2M e-. Recommended product: M6dc, detection by presence, charge gated.
