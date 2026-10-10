@@ -355,4 +355,7 @@ the residual stream (87b4caa) and retrained (M6d, M6dc; same recipe). Eval metri
 unchanged within intervals (presence 0.1-0.2 MeV: M6d 0.591, M6dc 0.579; gated haze
 0.036-0.037; res68 0.206 / 0.183), and bright cells are now right: median pred/true
 1.00 / 1.00 at 0.2-1M e- and 0.97 / 0.98 above 1M (M4n 0.98 / 0.93), maximum
-prediction 2.2M e-. Recommended product: M6dc, detection by presence, charge gated.
+prediction 2.2M e-. Recommended product: M6d (better or tied on detection, gated-map
+detection 0.566 vs 0.416 and localisation 0.16 / 0.60 vs 0.22 / 0.84; M6dc only on
+per-cell resolution 0.183 vs 0.206), detection by presence, charge gated. The
+calorimetry comparison (dense rerun) is pending for M6d vs M6dc.
