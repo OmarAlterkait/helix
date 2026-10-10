@@ -372,3 +372,20 @@ vs 0.67 / 0.87), per-cell charge in dense activity (10-15% tighter), per-particl
 kept, -0.74% gated, +0.3% haze). Both zero 0.74% of true charge (classical 1.47%).
 Verdict: M6d for a detection / reconstruction product, M6dc for energy measurement;
 ideally M6d presence for detection and M6dc gated for charge.
+
+### Causes of the remaining failings (2026-10-10; baselines/uboone_sp/causes/results/causes_FBC.md, dense/results/causes_ade.md)
+
+| failing | main cause (share) | other causes | evidence |
+|---|---|---|---|
+| faint isolated deposits: classical leads on Y (+0.030 at 0.1-0.2 MeV, +0.079 at SNR 3-10, same noise draw) | information erased by the corpus threshold / D1 drop: 100% of the lead sits in deposits with < 2 sigma of corpus-input evidence | a Y-specific modelling headroom of +0.12 (low-evidence Y deposits next to foreign charge fall under Y's haze-set near threshold of 0.95) that does not cause the lead | above 2 sigma of corpus evidence: classical 0.736 = M6d 0.736; known-location bound 0.95 (full waveform) -> 0.56 (corpus). On U/V the model leads at every SNR (-0.12/-0.13) and reaches 50% at 2.3 sigma corpus evidence vs 6.5 sigma full-waveform for classical |
+| induction weaker than collection (U 0.50, V 0.38, Y 0.90) | physics: deposit SNR per electron (median at 0.1-0.2 MeV U 6.5, V 5.4, Y 11.6): 96-100% for M6d | zero-suppression ~0 at 0.1-0.2 MeV; modelling <= 0.02 | Y re-weighted to each induction plane's SNR distribution leaves 0.014 / 0.007 |
+| decoder window gain absent at cell level | tail ranking at cell FPR ~1e-4 (U 67%, V 33%, Y 100% of the gain) | clustered false positives (U 39%, V 50%: fewer independent cells per noise window) | sums to the gain; the cell-level "classical leads in sparse surroundings" reverses at FPR 1e-4 |
+| haze in shower cores (10% of empty cells > 100 e-) | genuine over-prediction next to bright charge (~3/4 of false cells, ~95% of false charge) | truth artefact (sub-25 e- charge dropped from hits): ~1/4 of false cells, ~5% of false charge | complete truth rebuilt from step files (reproduces the eval truth to 0.4%): false fraction 0.102 -> 0.079 (classical 0.122 -> 0.105); faint linearity is also flattered for every method (M6dc 0.91 -> 0.83, classical 0.36 -> 0.33) |
+| sparse faint false charge (4-6x classical) | spill within 1-4 cells of real faint deposits (~60%) | lone noise coefficients (~34%; the model fires on only 0.5-2% of empty cells with a lone 3-6 sigma coefficient, conservative and discriminative); truth incompleteness ~4% | in isolated surroundings the model is 7x CLEANER than classical |
+| gating zeroes faint true charge (25-33% in sparse surroundings) | no surviving input: 67-70% in sparse regions (mostly 1-3.35 sigma signal erased by the corpus threshold) | threshold choice (0.3 recovers ~40% at 6x the false cells); presence is over-confident in sparse regions, not under | |
+
+Two provenance findings: the corpus's recorded noise_seed does not reproduce its noise on this
+torch/GPU (0.797 of coefficients re-found with the right seed, 0.793 with a wrong one), so the
+model's exact input exists only as the stored coefficients; and M6d scores +0.020 [0.007, 0.031]
+higher on the stored corpus than on fresh draws with matched noise statistics (Y +0.040), cause
+not isolated -- this hid two thirds of the Y gap in the published comparison.
