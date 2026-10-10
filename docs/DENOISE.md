@@ -359,3 +359,16 @@ prediction 2.2M e-. Recommended product: M6d (better or tied on detection, gated
 detection 0.566 vs 0.416 and localisation 0.16 / 0.60 vs 0.22 / 0.84; M6dc only on
 per-cell resolution 0.183 vs 0.206), detection by presence, charge gated. The
 calorimetry comparison (dense rerun) is pending for M6d vs M6dc.
+
+**M6d vs M6dc on the full spectrum** (baselines/uboone_sp/dense/results/dense3.md, all
+128 test events): the cap fix makes bright cells unbiased for both (> 1M e-: 0.96 /
+0.98; bright 8x64 regions U/V 1.00 / 0.99). The presence heads are interchangeable
+(AUC within 0.001). M6d's gated map is the better single map: better detection from
+the map in every density bin (+0.02-0.05), half the confident false hits (empty cells
+> 1 Q0 in shower cores 0.00037 vs 0.00077). M6dc's gated map is the better charge
+measurement: faint-region linearity (32x128 regions with 1-4k / 4-16k e-: 0.91 / 0.98
+vs 0.67 / 0.87), per-cell charge in dense activity (10-15% tighter), per-particle
+(median 1.000 vs 1.006). Plane totals tie (~1.00 both; M6d by cancellation of +0.4%
+kept, -0.74% gated, +0.3% haze). Both zero 0.74% of true charge (classical 1.47%).
+Verdict: M6d for a detection / reconstruction product, M6dc for energy measurement;
+ideally M6d presence for detection and M6dc gated for charge.
