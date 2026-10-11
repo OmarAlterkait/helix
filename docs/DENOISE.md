@@ -439,3 +439,40 @@ charged (70k vs 40k), 29% of all its charged cells hold <= 5 e- and 37% <= 25 e-
 tails, far below the 400-1,200 e- noise); presence is trained on q > 0, so it learns
 "near activity = charged" and the gate opens. The charge target and the definition of
 "present" are separate choices; the hits truth implicitly defined presence at ~25 e-.
+
+### First-principles diagnostics: the outputs are posteriors under the training prior (2026-10-11; post hoc)
+
+dense/results/firstp.md, causes/results/firstp_{sampling,detection}.md. Training cells are chosen
+using the truth (all charged cells up to sig_cap, empty cells by label-dependent rules): case-control
+sampling. Odds of 'charged' in training rows vs all covered cells: 9.5 overall (hits label), ~16 in
+sparse regions, 1.5 in shower cores (complete label 8.3 / 9.5 / 1.6).
+
+- H1 (posteriors under the training prior): CONFIRMED. A deployable prior correction (odds ratio per
+  stratum of the model's own predicted density, fitted on calibration events) calibrates presence on
+  all covered cells: ECE 0.06 -> <= 0.003 (M4n/M6d/M6dc, every plane, <= 0.010 in every density
+  stratum), log-loss 0.12 -> 0.07. It explains the sign and nearly all of the 2-5x faint
+  over-prediction of the raw charge map ("haze"), which is posterior mass under an inflated prior,
+  not an error of the posterior.
+- H2 (exp of a log-space mean underestimates E[q]): confirmed at 1-8k e- (Jensen removes 60-90% of a
+  4-19% under-prediction); ~0 above 16k e- (log sigma 0.05-0.08). Raw plane totals (0.985-1.010) were
+  unbiased only by cancellation of the faint excess against this deficit.
+- H3 (gating is a decision rule): confirmed; raw p > 0.5 means corrected p > ~0.1 in sparse regions,
+  ~0.4 in cores; all of the zeroed charge (0.8-1.1%) and the faint-region under-estimate follow.
+- H4 (irreducible spread): not separable; the fast arms' log sigma is 0.34-0.37 vs 0.21-0.24 for the
+  full-scale models at equal predicted charge, so much of it is training.
+- Best linear-space estimator above ~1k e-: prior-corrected presence x charge with Jensen, within 1-6%
+  on every plane; none is unbiased below ~500 e- predicted. Proper scores: presence log-loss ties for
+  M4n/M6d/M6dc (0.069-0.070); charge CRPS favours the hurdle model ~2x (M6dc 0.0059 vs M6d 0.0114).
+- Complete label: fine for charge -- after prior correction its extra haze vanishes (0.005 vs 0.005)
+  and the ct arms are the most linear (1.00-1.04 from 2k e-, plane total 1.003). What went wrong:
+  presence target q > 0 (23.5% of complete-truth cells < 1 e-, down to 1e-37), and sig_cap now binds
+  in 195/200 events, cutting bright training cells by 42%.
+- The hits label's 25 e- cut is per (group, wire, tick) sample: among cells with 102-250 e- of complete
+  charge, 6.7% are labelled 0 and 25% keep < 50%; grouping-dependent, noisy for faint charge.
+- Detection: the floor's noise windows are empty under the complete truth too (near: 0.03% hold
+  > 102 e-), so redefining them changes nothing. But 93% of 'isolated' positives have charge above
+  25 e- within the padding a noise window must keep empty: far-threshold efficiency is inflated by
+  nearby activity (0.01-0.02 MeV deposits 'detected' 20-37% near activity, 0/5 isolated). On truly
+  isolated positives every model drops 0.10-0.19 (M6d 0.842 -> 0.692), ranking unchanged. The complete
+  label's +0.04 far-threshold gain does not survive (-0.009 [-0.042, +0.018]; 5-draw mean +0.009);
+  at the near threshold its charge / gated outputs gain +0.09 / +0.075 on isolated positives.
