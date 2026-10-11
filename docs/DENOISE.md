@@ -418,3 +418,24 @@ M4n +0.026 +- 0.0095 (all 10 draws positive), M6d - M6dc presence +0.011 +- 0.00
 input from the same digitised waveforms the classical chain reads, average >= 5 fresh
 draws, and quote draw sd with the event bootstrap (a single draw underestimates method
 differences by ~1.7x). The corpus build commit c646886 is in no reachable clone or remote.
+
+### Complete-truth label: first result (fast protocol, 5 draws, complete-truth keys)
+
+scripts/build_complete_corpus_truth.py over all 790 shards (157,991 events; verified: every
+file's events match its corpus shard, complete/hits charge 1.0155-1.0161). Decoder arms,
+1,024 labels, 4k steps, same seed; scored with eval_denoise --draws 5 --complete-truth:
+
+| arm | presence 0.1-0.2 MeV near pp | SNR 7-10 | bright med vs complete (gated) | res68 16k | haze vs complete (gated) |
+|---|---|---|---|---|---|
+| decoder, hits labels | 0.457 [0.443-0.472] | 0.62 | 0.984 | 0.174 | 0.042 |
+| decoder, complete labels | **0.509** [0.497-0.522] | **0.69** | 0.984 | 0.178 | 0.128 |
+| decoder + hurdle, hits labels | 0.467 | 0.64 | 0.972 | 0.135 | 0.036 |
+| decoder + hurdle, complete labels | **0.501** | **0.69** | **0.995** | 0.152 | 0.143 |
+
+Complete labels raise detection (+0.035-0.05) and remove the hurdle model's bright bias
+(0.972 -> 0.995; the plain decoder's is unchanged at 4k steps), but triple the haze and
+widen per-cell resolution. Cause: the complete truth marks ~30k more cells per event as
+charged (70k vs 40k), 29% of all its charged cells hold <= 5 e- and 37% <= 25 e- (diffusion
+tails, far below the 400-1,200 e- noise); presence is trained on q > 0, so it learns
+"near activity = charged" and the gate opens. The charge target and the definition of
+"present" are separate choices; the hits truth implicitly defined presence at ~25 e-.
