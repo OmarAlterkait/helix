@@ -6,7 +6,7 @@ set -uo pipefail
 T=$1; PORT=$2; JN=$3; shift 3
 H=$(cd "$(dirname "$0")/../.." && pwd); W=/pscratch/sd/o/oalter/helix_work; A=$W/probe/artifact_nz_pw16_s1
 O=/global/cfs/cdirs/m5238/users/oalter/ost61; R=/global/cfs/cdirs/m5238/users/oalter/helix_runs
-mkdir -p $R/denoise/results; export DENOISE_TRUTH=$O/denoise_truth HELIX_STUDY_DIR=$R
+mkdir -p $R/denoise/results; export DENOISE_TRUTH=${TRUTH_ROOT:-$O/denoise_truth} HELIX_STUDY_DIR=$R
 cd $H
 while [ ! -f $R/denoise/$T/final.pt ]; do
   until timeout 60 salloc --no-shell --qos=interactive --account=m5238_g --constraint=gpu --nodes=4 --gpus-per-node=4 --time=04:00:00 --job-name=$JN > /dev/null 2>&1; do sleep 30; done

@@ -476,3 +476,22 @@ sparse regions, 1.5 in shower cores (complete label 8.3 / 9.5 / 1.6).
   isolated positives every model drops 0.10-0.19 (M6d 0.842 -> 0.692), ranking unchanged. The complete
   label's +0.04 far-threshold gain does not survive (-0.009 [-0.042, +0.018]; 5-draw mean +0.009);
   at the near threshold its charge / gated outputs gain +0.09 / +0.075 on isolated positives.
+
+### Posterior products and support-threshold arms (2026-10-11)
+
+scripts/denoise_products.py (c5d6f59) reads each model's posterior through a prior correction and
+Jensen table fitted on calibration events: p_cal (calibrated presence), calo (E[q|data]) and clean
+(calo where p_cal > tau). On 128 test events x 5 draws vs complete truth (dense/results/products_draws.md):
+p_cal is calibrated against the label each model was trained for (ECE 0.05-0.06 -> 0.001-0.008); calo
+is linear in prediction bins (low-prediction regions 0.01-0.6 -> 1.01-1.11; hurdle plane totals 1.15-1.6
+-> 0.98-0.99; hits-trained models stay ~1-2% low = the charge the hits truth drops); clean has the
+lowest L1 of every map for every model (haze 0.09-0.13 -> 0.0013-0.0065, false charge 2.6% -> < 0.25%,
+1.0-1.5% zeroed). Isolated-deposit near-threshold detection 0.1-0.2 MeV: M6d raw 0.572 / p_cal 0.576.
+
+Support-threshold arms (complete-truth charge, presence and sampling support c; fast protocol, 5 draws):
+c = 25 e- restores the hits-label haze (gated 0.046 vs 0.128 at c = 0) and removes the bright bias
+(gated median vs complete 1.002 vs 0.984 for hits labels), presence detection 0.491 vs 0.457 (hits)
+vs 0.509 (c = 0); c = 102 is cleaner and unbiased but loses the detection gain. Under the products,
+c = 25 and 102 differ little; the fast arms are much weaker than M6d (bright res68 0.14-0.18 vs 0.05),
+and Jensen-only calo leaves +2-3% at bright charge for the weak non-hurdle arms (a mean log residual of
+-0.02 to -0.03, -0.008 for M6d; recorded as fit.mu_log, not applied). The label question needs full scale.
