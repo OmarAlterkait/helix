@@ -49,7 +49,7 @@ def split_events(corpus_root, runs, split):
 class DenoiseEvents:
     def __init__(self, corpus_root, runs, truth_root, split="train", *, n_events=None, subset_seed=0,
                  cfg=None, q0=Q0_DEFAULT, sig_cap=20000, neg_per_sig=1.0, near_per_sig=1.0, cov_per_sig=1.0, win_per_event=0,
-                 near_any_per_sig=0.0, win_near_per_event=0, neighbors=False,
+                 near_any_per_sig=0.0, win_near_per_event=0, neighbors=False, support_min_q=0.0,
                  sample_seed=None, items=None):
         from helix.model.tokenize import PatchConfig
         self.cfg = cfg or PatchConfig(cell_t="grid_center")
@@ -58,6 +58,13 @@ class DenoiseEvents:
         self.cov_per_sig, self.win_per_event = cov_per_sig, win_per_event
         self.near_any_per_sig, self.win_near_per_event = near_any_per_sig, win_near_per_event
         self.neighbors = neighbors                         # CellDecoder: token neighbourhood per cell
+        # A cell counts as 'charged' -- for sampling (charged cells, cells near them, the
+        # charge-free windows) and for the presence label -- only above this charge (e-).
+        # The complete truth gives sub-electron diffusion tails to most cells near activity
+        # (23.5% of its cells hold < 1 e-); with 0 they all became 'charged', crowding bright
+        # cells out of sig_cap and turning presence into "any tail". The regression target is
+        # unchanged: the cell's full charge, whatever c is.
+        self.support_min_q = float(support_min_q)
         self.sample_seed = sample_seed                     # None: a fresh draw per access (training)
         self.items = items if items is not None else split_events(corpus_root, runs, split)
         if n_events is not None and n_events < len(self.items):
@@ -103,7 +110,8 @@ class DenoiseEvents:
         k = ce.band < self.cfg.n_bands
         ct = tick_of_tau(ce.tau[k], ce.plane_gid[k], ce.band[k], self.cfg)
         ck = np.unique(fkey(ce.plane_gid[k], ce.wire[k] // FW, np.floor(ct / FT).astype(np.int64)))
-        sig = tkeys[tq > 0]
+        sup = tq > self.support_min_q                         # 'charged' cells (see __init__)
+        sig = tkeys[sup]
         if len(sig) > self.sig_cap:
             sig = rng.choice(sig, self.sig_cap, replace=False)
         parts = [sig]
@@ -130,7 +138,7 @@ class DenoiseEvents:
             tick = tick_of_tau(tau, g, b, self.cfg) + rng.random(n) * dec
             parts.append(fkey(g, np.maximum(wire, 0) // FW, np.floor(np.maximum(tick, 0) / FT).astype(np.int64)))
         if self.win_per_event > 0 and len(ck):
-            parts.append(self._noise_windows(ck, tkeys, rng))
+            parts.append(self._noise_windows(ck, tkeys[sup], rng))
         if len(sig) and self.near_any_per_sig > 0:
             # cells near charge whether or not a coefficient survived there: the
             # empty, coefficient-free surroundings of activity, where a regression
@@ -140,7 +148,7 @@ class DenoiseEvents:
             parts.append(fkey(g, np.maximum(w + rng.integers(-8, 9, n), 0), np.maximum(t + rng.integers(-8, 9, n), 0)))
         if self.win_near_per_event > 0:
             from helix.probe.resolution import near_windows, window_cells
-            for g, w0, t0 in near_windows(tkeys, tq, rng, n=self.win_near_per_event):
+            for g, w0, t0 in near_windows(tkeys, np.where(sup, tq, 0.0), rng, n=self.win_near_per_event):
                 parts.append(window_cells(g, w0, t0))
         rows = np.unique(np.concatenate(parts))
         q = np.zeros(len(rows))

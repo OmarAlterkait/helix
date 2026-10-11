@@ -54,6 +54,10 @@ def parse():
     ap.add_argument("--head", choices=("mlp", "decoder"), default="mlp",
                     help="mlp: covering token per band (CellHead); decoder: cross-attention over the 3x3 token "
                          "neighbourhood per band + the covering tokens' raw coefficients (CellDecoder)")
+    ap.add_argument("--support-min-q", type=float, default=0.0,
+                    help="a cell is 'charged' (presence label; sampling of charged cells, cells near them and the "
+                         "charge-free windows) only above this charge in e-; the regression target stays the full "
+                         "charge. 0 reproduces the old behaviour; with the complete truth use ~25")
     ap.add_argument("--dec-proj", type=int, default=128)
     ap.add_argument("--dec-layers", type=int, default=2)
     ap.add_argument("--win-per-event", type=int, default=0,
@@ -119,12 +123,12 @@ def main():
     train = DenoiseEvents(corpus_root, runs, a.truth_root, "train", n_events=a.n_events, subset_seed=a.subset_seed,
                           cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
                           near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event,
-                          neighbors=a.head == "decoder")
+                          neighbors=a.head == "decoder", support_min_q=a.support_min_q)
     val_items = split_events(corpus_root, runs[:1], "val")[:a.val_events]
     val = DenoiseEvents(corpus_root, runs, a.truth_root, "val", items=val_items, sample_seed=1234,
                         cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
                         near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event,
-                          neighbors=a.head == "decoder")
+                          neighbors=a.head == "decoder", support_min_q=a.support_min_q)
     say(f"[denoise] train events {len(train)}  val events {len(val)}  runs {len(runs)}")
 
     ddp = DDP(model, device_ids=[lrank], find_unused_parameters=False)
@@ -145,6 +149,7 @@ def main():
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
         step, best = ck["step"], ck.get("best", best)
         say(f"[denoise] resumed at step {step}")
+    y_sup = float(np.log1p(a.support_min_q / train.q0))      # presence threshold in target units
     meta = dict(arch=arch, overrides=overrides, args=vars(a), q0=train.q0, runs=runs,
                 head_kw=head_kw, cond_charge=a.cond_charge)
 
@@ -205,7 +210,7 @@ def main():
             p = ddp(B, idx, aux, nbr)
         if a.presence:
             p, logit = p[0].float(), p[1].float()
-            pos = y > 0
+            pos = y > y_sup                                        # present: charge above the support threshold
             if a.cond_charge:                                      # charge only where there is charge
                 reg = ((p - y) ** 2 * pos).sum() / pos.sum().clamp(min=1)
             else:
