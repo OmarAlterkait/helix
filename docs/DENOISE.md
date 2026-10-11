@@ -389,3 +389,32 @@ torch/GPU (0.797 of coefficients re-found with the right seed, 0.793 with a wron
 model's exact input exists only as the stored coefficients; and M6d scores +0.020 [0.007, 0.031]
 higher on the stored corpus than on fresh draws with matched noise statistics (Y +0.040), cause
 not isolated -- this hid two thirds of the Y gap in the published comparison.
+
+### Bright-charge error budget and noise-draw robustness (2026-10-10; diagnostics only)
+
+causes/results/bright_budget.md (complete truth rebuilt from step files; bright = cells
+>= 16k e-, regions >= 64k, particles >= 1 MeV): per-cell median / 68% half-width U/V/Y --
+M6d gated -0.7/-0.9/-0.4% (0.052/0.054/0.044), M6dc gated -1.4/-1.6/-1.4% (0.043/0.045/
+0.035), classical tuned -11.6/-11.9/-5.7%. The hits truth itself is -1.27% vs complete
+truth (sub-25 e- diffusion tails, growing with drift: -0.3% near the anode to -2.1% far);
+M6dc reproduces the hits label to within 0.3%, flat in drift -> its bias IS the label
+definition (exact physical charge needs a complete-truth target). Spread: 63-90% noise +
+corpus input (the threshold itself costs little at high charge: 0.068 vs 0.074 U), 9-37%
+per-wire information limit (clean-sensor exact-kernel inversion floor 0.019/0.028/0.013).
+Small: bf16 -> fp32 1-4% of variance; calibration removes the offset only; edges, wire
+position < 0.3%; angle (incl. along-drift), dE/dx, overlap <= 0.5% (classical: angle -10
+to -14%, overlap 5-6%); ADC saturation real (775/122/167 clipped clean samples in 128
+events) but <= 0.6% of MSE; cell boundaries not a cause. The one shortfall: Y bright cells,
+where a Tikhonov inversion of the corpus input (0.032, strength tuned on the same events)
+beats M6dc 0.035 / M6d 0.044. On U/V the model beats every exact-kernel linear inversion.
+
+dense/results/draws.md: the stored corpus's +0.020 over a fresh draw was a noise-draw
+fluctuation (one low fresh draw). Over ten fresh draws the stored corpus sits within the
+spread; on 258 more held-out events it scores slightly lower; combined over 386 events
+stored - fresh = 0.000 +- 0.008. Coefficient statistics, DSP backend and wavelet phase are
+indistinguishable; bright-charge accuracy moves by <= 1e-4. Margins on fresh draws: M6d -
+M4n +0.026 +- 0.0095 (all 10 draws positive), M6d - M6dc presence +0.011 +- 0.006 (9 of
+10), M6d - classical on identical waveforms +0.065 to +0.076. From now on: build the model
+input from the same digitised waveforms the classical chain reads, average >= 5 fresh
+draws, and quote draw sd with the event bootstrap (a single draw underestimates method
+differences by ~1.7x). The corpus build commit c646886 is in no reachable clone or remote.
