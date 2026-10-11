@@ -38,6 +38,26 @@ Keys added next to the existing ones (old keys keep their meaning):
     diffusion tails next to bright charge). DIR holds either per-event ``evNNN.npz``
     (scripts/build_eval_complete_truth.py) or the corpus layout
     ``<run>/truth_<shard>.npz`` (build_denoise_truth.py format).
+With ``--products PARAMS.json`` (scripts/denoise_products.py fit; needs --complete-truth and a
+presence head) the model is also run on EVERY token-covered readout cell of each event, the
+products are formed (prior-corrected presence p_cal, calorimetry map E[q|data], clean map =
+calo where p_cal > tau) and three more rows are written per source: ``<tag>_cal`` (p_cal as the
+cell / window score), ``<tag>_calo`` and ``<tag>_clean`` (charge maps, every charge key). Every
+row of the run (old ones included) also gains, bootstrapped over the same event resamples:
+  * ``floor_iso_pp_eff1pct_<E>[_<P>]`` / ``near_iso_pp_eff1pct_<E>[_<P>]``: the per-plane 1%-FPR
+    efficiencies (far / near thresholds) on ISOLATED positives only -- iso windows whose bg padding
+    (16 wires / 128 ticks each side, window excluded) holds no complete-truth cell > 25 e-;
+  * charge maps (<tag>, _gated, _calo, _clean), over the full readout vs the complete truth:
+    ``lin_cell_<bin>`` / ``lin_region_<bin>`` = sum truth / sum prediction per bin of the
+    PREDICTION (cells; 16 x 8-cell regions), ``tot_ratio[_<P>]`` = sum pred / sum truth,
+    ``fm_false_frac`` (predicted charge on cells with truth <= 25 e-, / total truth),
+    ``fm_zeroed_frac`` (truth on cells predicted 0, / total), ``fm_l1_frac`` (sum |pred - truth|
+    / total), ``fm_haze_frac_0.05Q0`` (covered cells with truth <= 25 e- predicted > 0.05 Q0);
+  * presence maps (_pres raw, _cal calibrated), all covered cells: ``cal_ece``, ``cal_brier``,
+    ``cal_logloss`` [``_<P>``] against complete q > c, c = the checkpoint's support_min_q
+    (default 0), and ``cal_own_*`` against the model's training truth when that is not the
+    complete truth (the label the prior correction was fitted for).
+Without --products every row and key is unchanged.
 """
 import argparse
 import glob
@@ -69,6 +89,10 @@ def parse_args(argv=None):
     ap.add_argument("--draw-cache", default=DRAW_CACHE)
     ap.add_argument("--no-stored", action="store_true", help="skip the stored-corpus rows (draws only)")
     ap.add_argument("--complete-truth", default=None, help="complete-truth dir: adds ct_* charge keys")
+    ap.add_argument("--products", default=None,
+                    help="scripts/denoise_products.py fit json: adds the _cal/_calo/_clean rows and the full-map keys "
+                         "(needs --complete-truth and a presence head)")
+    ap.add_argument("--products-key", default=None, help="entry of --products to use (default: --tag)")
     return ap.parse_args(argv)
 
 
@@ -111,16 +135,23 @@ class CompleteTruth:
 
 
 # ----------------------------------------------------------------------------------------- prediction
-def collect(a, ev_list, Q0, tokens_of, predict_fn, ct=None):
+def collect(a, ev_list, Q0, tokens_of, predict_fn, ct=None, prod=None):
     """Run ``predict_fn(B, bl, keys) -> (out, ok, pres)`` over the scored events, exactly as
-    the original loop did; ``tokens_of(z, f) -> (B, bl)``. Returns the arrays ``score`` needs."""
+    the original loop did; ``tokens_of(z, f) -> (B, bl)``. Returns the arrays ``score`` needs.
+    With ``prod`` (--products) also the full-map products per event (``tokens_of.ce``: the
+    event's coefficients, for the token footprints)."""
     from helix.probe import resolution as R
     P, PR, Y, E, PL, WQ, WID, WP, WPR, META, QC, WQC = [], [], [], [], [], [], [], [], [], [], [], []
+    FM, RP, WRP = {}, [], []
     for ei, f in ev_list:
         z = np.load(f, allow_pickle=True)
         B, bl = tokens_of(z, f)
         if ct is not None:
             CK, CQ = ct.event(f, str(z["shard"]), int(z["event"]))
+        if prod is not None:
+            zn_ = np.load(os.path.join(a.near, os.path.basename(f)), allow_pickle=True) if a.near else None
+            F = prod["event"](tokens_of.ce, B, bl, z, zn_, CK, CQ, f)
+            FM[ei] = F["stats"]
 
         def predict(keys):
             return predict_fn(B, bl, keys)
@@ -131,15 +162,21 @@ def collect(a, ev_list, Q0, tokens_of, predict_fn, ct=None):
         PL.append((R.unkey(z["mrows"][okm])[0] % 3).astype(np.int8))
         if ct is not None:
             QC.append(CompleteTruth.lookup(CK, CQ, z["mrows"][okm]))
+        if prod is not None:
+            RP.append(F["at"](z["mrows"][okm]))
         if len(z["wkey"]):
             pw_, _, pr_ = predict(z["wkey"])                  # uncovered cells stay 0
             base = len(META)
             mm = json.loads(str(z["meta"]))
             for m_ in mm:
                 m_["ev"] = ei
+                if prod is not None and m_["kind"] == "iso":
+                    m_["isolated"] = F["ring_max"](m_) <= ISO_RING_MAX
             META += mm; WQ.append(z["wq"]); WID.append(z["wid"] + base); WP.append(pw_); WPR.append(pr_)
             if ct is not None:
                 WQC.append(CompleteTruth.lookup(CK, CQ, z["wkey"]))
+            if prod is not None:
+                WRP.append(F["at"](z["wkey"]))
         if a.near:
             zn = np.load(os.path.join(a.near, os.path.basename(f)), allow_pickle=True)
             if len(zn["wkey"]):
@@ -151,9 +188,15 @@ def collect(a, ev_list, Q0, tokens_of, predict_fn, ct=None):
                 META += mm; WQ.append(zn["wq"]); WID.append(zn["wid"] + base); WP.append(pw_); WPR.append(pr_)
                 if ct is not None:
                     WQC.append(CompleteTruth.lookup(CK, CQ, zn["wkey"]))
+                if prod is not None:
+                    WRP.append(F["at"](zn["wkey"]))
         if ei % 32 == 0:
             print(f"  event {ei}", flush=True)
-    return dict(P=P, PR=PR, Y=Y, E=E, PL=PL, WQ=WQ, WID=WID, WP=WP, WPR=WPR, META=META, QC=QC, WQC=WQC)
+    out = dict(P=P, PR=PR, Y=Y, E=E, PL=PL, WQ=WQ, WID=WID, WP=WP, WPR=WPR, META=META, QC=QC, WQC=WQC)
+    if prod is not None:
+        out.update(FM=FM, RP={k: np.concatenate([d[k] for d in RP]) for k in RP[0]},
+                   WRP={k: np.concatenate([d[k] for d in WRP]) for k in WRP[0]})
+    return out
 
 
 def context(a, C, Q0, cfg):
@@ -177,6 +220,8 @@ def context(a, C, Q0, cfg):
                Q0=Q0, cfg=cfg, qc=None, wqc=None)
     if C["QC"]:
         ctx["qc"] = np.concatenate(C["QC"]); ctx["wqc"] = np.concatenate(C["WQC"])
+    if "FM" in C:
+        ctx["products"] = True
     return ctx
 
 
@@ -244,16 +289,18 @@ def charge_scalars(qp, q, kz, wsum_p, wsum_t, Q0, prefix=""):
 
 
 # ----------------------------------------------------------------------------------------- scoring
-def score(a, ctx, tag, p, wscore, header, charge=True, write=True):
+def score(a, ctx, tag, p, wscore, header, charge=True, write=True, fm=None):
     """Every metric for one per-cell score ``p`` (map rows) and window cell score
     ``wscore``: charge (expm1(max(p,0))*Q0, exactly eval_resolution's window input) or
-    presence probability. Returns (row, point values, bootstrap dicts)."""
+    presence probability. ``fm(events) -> keys``: full-map keys from per-event sums (with
+    --products), bootstrapped with the same event resamples. Returns (row, point values,
+    bootstrap dicts)."""
     from helix.probe import resolution as R
     META, y, e, pl, wq, starts, ends, toff, q, q30, Q0, cfg = (ctx[k] for k in (
         "META", "y", "e", "pl", "wq", "starts", "ends", "toff", "q", "q30", "Q0", "cfg"))
     W = R.window_stats(wscore, wq, META, starts, ends, cfg.pw, cfg.pt, cfg.delta[0], toff)
     for w_, m_ in zip(W, META):
-        w_.update({k_: m_[k_] for k_ in ("snr", "clean") if k_ in m_})
+        w_.update({k_: m_[k_] for k_ in ("snr", "clean", "isolated") if k_ in m_})
         w_["p"] = m_["g"] % 3                                   # plane, for the per-plane thresholds
     kz = {}
     for k in np.unique(e * 10 + pl):
@@ -267,6 +314,11 @@ def score(a, ctx, tag, p, wscore, header, charge=True, write=True):
     point = R.scalars(p, q, list(kz.values()), W, q30)
     point.update(R.near_scalars(W))
     point.update(pp_scalars(W))
+    prod = ctx.get("products", False)
+    if prod:
+        point.update(iso_pp_scalars(W))
+    if fm is not None:
+        point.update(fm(evs))
     # charge keys on the predicted charge (charge-type scores only)
     is_charge = charge and not (p.min() >= 0 and p.max() <= 1 and tag.endswith("_pres"))
     if is_charge:
@@ -300,6 +352,10 @@ def score(a, ctx, tag, p, wscore, header, charge=True, write=True):
         wb_ = [w for v in sm for w in wins_of[v]]
         b = dict(R.scalars(p[idx], q[idx], [z_ for v in sm for z_ in z_of[v]], wb_, q30), **R.near_scalars(wb_))
         b.update(pp_scalars(wb_))
+        if prod:
+            b.update(iso_pp_scalars(wb_))
+        if fm is not None:
+            b.update(fm(sm))
         if is_charge:
             widx = np.concatenate([win_of[v] for v in sm])
             b.update(cscal(idx, widx, None, [z_ for v in sm for z_ in zc_of[v]] if qc is not None else None))
@@ -365,18 +421,233 @@ def aggregate(a, tag, per_draw, header):
     return res
 
 
+# ----------------------------------------------------------------------------------------- products (--products)
+ISO_RING_MAX = 25.0          # isolated positive: no complete-truth cell > 25 e- in the bg padding ring
+QB = np.array([-1, 0, 25, 102, 500, 1e3, 2e3, 4e3, 8e3, 16e3, 64e3, np.inf])
+QBL = ["0", "0-25", "25-102", "102-500", "500-1k", "1k-2k", "2k-4k", "4k-8k", "8k-16k", "16k-64k", "64k"]
+RB = np.array([-1, 0, 1e3, 4e3, 16e3, 64e3, 256e3, 1e6, np.inf])
+RBL = ["0", "0-1k", "1k-4k", "4k-16k", "16k-64k", "64k-256k", "256k-1M", "1M"]
+PB = np.array([0, 1e-4, 1e-3, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98, 0.99, 0.999, 1 + 1e-9])
+REG = (16, 8)                # region = one window footprint, 16 x 8 fine cells
+EMPTY_Q = 25.0               # 'empty' for haze / false charge: complete truth <= 25 e-
+CHARGE_MAPS = ("", "_gated", "_calo", "_clean")
+PROB_MAPS = ("_pres", "_cal")
+
+
+def iso_pp_scalars(W):
+    """pp_scalars with the iso positives restricted to ISOLATED ones (padding ring free of
+    complete-truth charge > 25 e-); thresholds from the same bg / bgn windows."""
+    Wf = [w for w in W if w["kind"] != "iso" or w.get("isolated")]
+    return {k.replace("floor_pp_", "floor_iso_pp_").replace("near_pp_", "near_iso_pp_"): v
+            for k, v in pp_scalars(Wf, snr_bins=()).items() if not k.startswith("snr")}
+
+
+def covered_cells_fn(cfg):
+    """covered_cells(ce): every fine cell inside a token's footprint (scripts/plot_denoise.covered_cells)."""
+    from helix.model.tokenize import tick_of_tau
+    from helix.probe import resolution as R
+
+    def covered_cells(ce):
+        k = ce.band < cfg.n_bands
+        out = []
+        for b in range(cfg.n_bands):
+            m = k & (ce.band == b)
+            if not m.any():
+                continue
+            gb, wb, tb = np.unique(np.stack([ce.plane_gid[m], ce.wire[m] // cfg.pw, ce.tau[m] // cfg.pt], 1), axis=0).T
+            t_raw = tick_of_tau(tb * cfg.pt, gb, np.full(len(gb), b), cfg)
+            f_lo = np.floor(np.maximum(t_raw, 0) / R.FT).astype(np.int64)
+            f_hi = np.floor(np.maximum(t_raw + cfg.pt * (1 << cfg.lev[b]), 0) / R.FT).astype(np.int64)
+            fw = (wb * cfg.pw // R.FW)[:, None] + np.arange(cfg.pw // R.FW)
+            ft = f_lo[:, None] + np.arange(int((f_hi - f_lo).max()) + 1)
+            shape = (len(gb), fw.shape[1], ft.shape[1])
+            sel = np.broadcast_to((ft <= f_hi[:, None])[:, None, :], shape)
+            out.append(R.fkey(np.broadcast_to(gb[:, None, None], shape)[sel],
+                              np.broadcast_to(fw[:, :, None], shape)[sel],
+                              np.broadcast_to(ft[:, None, :], shape)[sel]))
+        return np.unique(np.concatenate(out)) if out else np.zeros(0, np.int64)
+    return covered_cells
+
+
+def _plane_maps(keys, vals, shapes):
+    from helix.probe.resolution import unkey
+    g, w, t = unkey(np.asarray(keys, np.int64))
+    out = {}
+    for gg, sh in shapes.items():
+        M = np.zeros(sh)
+        m = (g == gg) & (w >= 0) & (w < sh[0]) & (t >= 0) & (t < sh[1])
+        np.add.at(M, (w[m], t[m]), vals[m])
+        out[gg] = M
+    return out
+
+
+def _charge_stats(M, T, cov, Q0):
+    """Per-event sums for one charge map over the readout: cells binned by PREDICTION
+    (n, sum pred, sum truth), 16x8 regions binned by predicted sum, and plane totals."""
+    LC = np.zeros((3, len(QB) - 1, 3)); LR = np.zeros((3, len(RB) - 1, 3)); TOT = np.zeros((3, 8))
+    for g in M:
+        p_, X, Tg, cv = g % 3, M[g], T[g], cov[g]
+        b = np.clip(np.searchsorted(QB, X[cv], side="left") - 1, 0, len(QB) - 2)
+        for j, w in enumerate((None, X[cv], Tg[cv])):
+            LC[p_, :, j] += np.bincount(b, weights=w, minlength=len(QB) - 1)
+        sh = X.shape
+        H, Wd = -(-sh[0] // REG[0]) * REG[0], -(-sh[1] // REG[1]) * REG[1]
+        rs = lambda A: np.pad(A, ((0, H - sh[0]), (0, Wd - sh[1]))).reshape(H // REG[0], REG[0], Wd // REG[1], REG[1]).sum((1, 3))
+        Xr, Tr, Cr = rs(X), rs(Tg), rs(cv.astype(float)) > 0
+        b = np.clip(np.searchsorted(RB, Xr[Cr], side="left") - 1, 0, len(RB) - 2)
+        for j, w in enumerate((None, Xr[Cr], Tr[Cr])):
+            LR[p_, :, j] += np.bincount(b, weights=w, minlength=len(RB) - 1)
+        emp = Tg <= EMPTY_Q
+        TOT[p_] += [X.sum(), Tg.sum(), X[emp].sum(), Tg[X <= 0].sum(), np.abs(X - Tg).sum(),
+                    (emp & cv).sum(), (emp & cv & (X > 0.05 * Q0)).sum(), Tg[cv].sum()]
+    return dict(LC=LC, LR=LR, TOT=TOT)
+
+
+def _prob_stats(Pm, lab, cov):
+    """Per-event sums for a presence map on covered cells vs a label map: reliability bins
+    (n, sum p, sum y) and (n, Brier, log-loss) per plane."""
+    REL = np.zeros((3, len(PB) - 1, 3)); BR = np.zeros((3, 3))
+    for g in Pm:
+        p_, cv = g % 3, cov[g]
+        pc, y = Pm[g][cv], lab[g][cv].astype(float)
+        b = np.clip(np.searchsorted(PB, pc, side="right") - 1, 0, len(PB) - 2)
+        for j, w in enumerate((None, pc, y)):
+            REL[p_, :, j] += np.bincount(b, weights=w, minlength=len(PB) - 1)
+        pcc = np.clip(pc, 1e-7, 1 - 1e-7)
+        BR[p_] += [len(pc), ((pc - y) ** 2).sum(), -(y * np.log(pcc) + (1 - y) * np.log1p(-pcc)).sum()]
+    return dict(REL=REL, BR=BR)
+
+
+def fm_keys(S, kind):
+    """Full-map keys from per-event sums ``S`` (summed over the chosen events)."""
+    r = {}
+    div = lambda x, y: float(x / y) if y > 0 else float("nan")       # noqa: E731
+    if kind == "charge":
+        LC, LR, TOT = S["LC"].sum(0), S["LR"].sum(0), S["TOT"]
+        for i in range(1, len(QBL)):                                 # truth / pred per predicted-charge bin
+            r[f"lin_cell_{QBL[i]}"] = div(LC[i, 2], LC[i, 1])
+        for i in range(1, len(RBL)):
+            r[f"lin_region_{RBL[i]}"] = div(LR[i, 2], LR[i, 1])
+        T = TOT.sum(0)
+        r["tot_ratio"] = div(T[0], T[1])
+        for p in range(3):
+            r[f"tot_ratio_{PLANES[p]}"] = div(TOT[p, 0], TOT[p, 1])
+        r["fm_false_frac"] = div(T[2], T[1]); r["fm_zeroed_frac"] = div(T[3], T[1])
+        r["fm_l1_frac"] = div(T[4], T[1]); r["fm_haze_frac_0.05Q0"] = div(T[6], T[5])
+        return r
+    for pre, rk, bk in (("cal_", "REL", "BR"), ("cal_own_", "RELo", "BRo")):
+        if rk not in S:
+            continue
+        REL, BR = S[rk], S[bk]
+        for p, nm in [(slice(None), "")] + [(p, f"_{PLANES[p]}") for p in range(3)]:
+            R_ = REL[p].reshape(-1, len(PB) - 1, 3).sum(0); B_ = BR[p].reshape(-1, 3).sum(0)
+            r[f"{pre}ece{nm}"] = div(np.abs(R_[:, 1] - R_[:, 2]).sum(), R_[:, 0].sum())
+            r[f"{pre}brier{nm}"] = div(B_[1], B_[0]); r[f"{pre}logloss{nm}"] = div(B_[2], B_[0])
+    return r
+
+
+def fm_fn(C, name):
+    """fm(events) for the score of map ``name`` (row suffix), or None without --products."""
+    if "FM" not in C:
+        return None
+    kind = "charge" if name in CHARGE_MAPS else "prob"
+    FM = C["FM"]
+
+    def fm(evs):
+        S = {}
+        for v in evs:
+            for k, x in FM[v][name].items():
+                S[k] = S[k] + x if k in S else x.copy()
+        return fm_keys(S, kind)
+    return fm
+
+
+class Products:
+    """Full-map prediction of one event and its products (scripts/denoise_products.py)."""
+
+    def __init__(self, prm, cfg, Q0, predict_full, support_min_q, own=None):
+        import denoise_products as DP
+        from helix.tpc.geometry import load_plane_registry
+        self.DP, self.prm, self.Q0, self.predict_full, self.c, self.own = DP, prm, Q0, predict_full, support_min_q, own
+        reg = load_plane_registry("cubic_wireplane_geometry.json")
+        self.shapes = {g: (-(-reg[g]["n_wires"] // 2), -(-reg[g]["n_ticks"] // 16)) for g in range(6)}
+        self.covered = covered_cells_fn(cfg)
+
+    def event(self, ce, B, bl, z, zn, CK, CQ, f):
+        from helix.probe import resolution as R
+        Q0, sh = self.Q0, self.shapes
+        o = np.argsort(CK); CK, CQ = CK[o], CQ[o]
+        parts = [self.covered(ce), z["mrows"], z["wkey"]] + ([zn["wkey"]] if zn is not None else [])
+        keys = np.unique(np.concatenate(parts).astype(np.int64))
+        g, fw, ft = R.unkey(keys)
+        inside = np.zeros(len(keys), bool)
+        for gg, s_ in sh.items():
+            inside |= (g == gg) & (fw >= 0) & (fw < s_[0]) & (ft >= 0) & (ft < s_[1])
+        keys = keys[inside]
+        y, ok, pr = self.predict_full(B, bl, keys)
+        q = np.where(ok, np.expm1(np.maximum(y, 0)) * Q0, 0.0)
+        Qm, Pm = _plane_maps(keys, q, sh), _plane_maps(keys, np.where(ok, pr, 0.0), sh)
+        Cm = {k: v > 0 for k, v in _plane_maps(keys, ok.astype(float), sh).items()}
+        Tc = _plane_maps(CK, CQ, sh)
+        prods = {gg: self.DP.products_maps(Qm[gg], Pm[gg], Cm[gg], gg % 3, self.prm) for gg in sh}
+        maps = {"": Qm, "_gated": {gg: Qm[gg] * (Pm[gg] > 0.5) for gg in sh},
+                "_calo": {gg: prods[gg]["calo"] for gg in sh}, "_clean": {gg: prods[gg]["clean"] for gg in sh}}
+        stats = {k: _charge_stats(v, Tc, Cm, Q0) for k, v in maps.items()}
+        lab = {gg: Tc[gg] > self.c for gg in sh}
+        if self.own is not None:
+            OK, OQ = self.own.event(f, str(z["shard"]), int(z["event"]))
+            To = _plane_maps(OK, OQ, sh)
+            labo = {gg: To[gg] > self.c for gg in sh}
+        for k, Pmap in (("_pres", Pm), ("_cal", {gg: prods[gg]["p_cal"] for gg in sh})):
+            stats[k] = _prob_stats(Pmap, lab, Cm)
+            if self.own is not None:
+                so = _prob_stats(Pmap, labo, Cm)
+                stats[k].update(RELo=so["REL"], BRo=so["BR"])
+
+        def at(qk):
+            gq, wq, tq = R.unkey(np.asarray(qk, np.int64))
+            out = {k: np.zeros(len(gq), np.float32) for k in ("p_cal", "calo", "clean")}
+            for gg, s_ in sh.items():
+                m = (gq == gg) & (wq >= 0) & (wq < s_[0]) & (tq >= 0) & (tq < s_[1])
+                for k in out:
+                    out[k][m] = prods[gg][k][wq[m], tq[m]]
+            return out
+
+        def ring_max(m_):
+            """Max complete-truth cell in the bg padding box (16 wires / 128 ticks each side), window excluded."""
+            gg, w0, t0 = int(m_["g"]), int(m_["w0"]), int(m_["t0"])
+            fw_ = np.arange((w0 - 16) // 2, (w0 + 48) // 2); ft_ = np.arange((t0 - 128) // 16, (t0 + 256) // 16)
+            FWm, FTm = np.meshgrid(fw_, ft_, indexing="ij")
+            insd = (FWm >= w0 // 2) & (FWm < w0 // 2 + 16) & (FTm >= t0 // 16) & (FTm < t0 // 16 + 8)
+            okk = (FWm >= 0) & ~insd
+            qv = CompleteTruth.lookup(CK, CQ, R.fkey(np.full(int(okk.sum()), gg), FWm[okk], FTm[okk]))
+            return float(qv.max()) if len(qv) else 0.0
+
+        return dict(stats=stats, at=at, ring_max=ring_max)
+
+
 def score_all(a, ctx, C, header, tag, presence):
     """The three score types of one source (charge, presence, gated), as the original main."""
     Q0 = ctx["Q0"]
     out = []
     wp = np.concatenate(C["WP"])
-    out.append((tag, *score(a, ctx, tag, np.concatenate(C["P"]), np.expm1(np.maximum(wp, 0)) * Q0, header)[1:]))
+    out.append((tag, *score(a, ctx, tag, np.concatenate(C["P"]), np.expm1(np.maximum(wp, 0)) * Q0, header,
+                            fm=fm_fn(C, ""))[1:]))
     if presence:                      # the same cells scored by "is there charge here"
-        out.append((tag + "_pres", *score(a, ctx, tag + "_pres", np.concatenate(C["PR"]), np.concatenate(C["WPR"]), header)[1:]))
+        out.append((tag + "_pres", *score(a, ctx, tag + "_pres", np.concatenate(C["PR"]), np.concatenate(C["WPR"]), header,
+                                          fm=fm_fn(C, "_pres"))[1:]))
         # the hurdle's output map: charge only where presence > 0.5
         gp = np.where(np.concatenate(C["PR"]) > 0.5, np.concatenate(C["P"]), 0.0)
         gw = np.where(np.concatenate(C["WPR"]) > 0.5, wp, 0.0)
-        out.append((tag + "_gated", *score(a, ctx, tag + "_gated", gp, np.expm1(np.maximum(gw, 0)) * Q0, header)[1:]))
+        out.append((tag + "_gated", *score(a, ctx, tag + "_gated", gp, np.expm1(np.maximum(gw, 0)) * Q0, header,
+                                           fm=fm_fn(C, "_gated"))[1:]))
+    if "RP" in C:                     # --products: calibrated presence, calorimetry map, clean map
+        RP, WRP = C["RP"], C["WRP"]
+        out.append((tag + "_cal", *score(a, ctx, tag + "_cal", RP["p_cal"], WRP["p_cal"], header, charge=False,
+                                         fm=fm_fn(C, "_cal"))[1:]))
+        for nm in ("calo", "clean"):
+            out.append((tag + f"_{nm}", *score(a, ctx, tag + f"_{nm}", np.log1p(RP[nm] / Q0), WRP[nm], header,
+                                               fm=fm_fn(C, f"_{nm}"))[1:]))
     return out
 
 
@@ -405,6 +676,8 @@ def main():
     if abs(Q0 - q0) > 1e-6 * Q0:
         raise SystemExit(f"model trained with Q0={q0}, this truth has Q0={Q0}: predictions are on another scale")
     ct = CompleteTruth(a.complete_truth) if a.complete_truth else None
+    if a.products and (ct is None or not presence):
+        raise SystemExit("--products needs --complete-truth and a presence head")
 
     def predict_fn(B, bl, keys):
         if predict_fn.cache[0] is not B:                     # tokens moved to the GPU once per event
@@ -426,18 +699,58 @@ def main():
         return out, ok, pres
     predict_fn.cache = (None, None)
 
+    def predict_full(B, bl, keys, chunk=65536):
+        """Every given cell, encoder run once and the head in chunks (dense/model_dump2.py)."""
+        if predict_fn.cache[0] is not B:                     # tokens to the GPU, shared with predict_fn
+            Bt = {k: torch.as_tensor(v).to(dev) if isinstance(v, np.ndarray) else v for k, v in B.items()}
+            Bt["n_cells"] = Bt["plane_id"].shape[0]
+            predict_fn.cache = (B, Bt)
+        Bt = predict_fn.cache[1]
+        idx, aux = R.cell_inputs(keys, B["cell_key"], bl, cfg)
+        ok = (idx >= 0).any(1)
+        out = np.zeros(len(keys), np.float32); pres = np.zeros(len(keys), np.float32)
+        sel_all = np.nonzero(ok)[0]
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            feats = model.fm.encode(Bt)
+            for s0 in range(0, len(sel_all), chunk):
+                sel = sel_all[s0:s0 + chunk]
+                ti, ta = torch.as_tensor(idx[sel]).to(dev), torch.as_tensor(aux[sel]).to(dev)
+                if decoder:
+                    nbr = torch.as_tensor(R.cell_neighbors(keys[sel], B["cell_key"], bl, cfg)).to(dev)
+                    o = model.head(feats, ti, ta, nbr=nbr, B=Bt)
+                else:
+                    o = model.head(feats, ti, ta)
+                if presence:
+                    pres[sel] = torch.sigmoid(o[1].float()).cpu().numpy(); o = o[0]
+                out[sel] = o.float().cpu().numpy()
+        return out, ok, pres
+
+    prod = None
+    if a.products:
+        prm = json.load(open(a.products))[a.products_key or a.tag]
+        c = float(meta["args"].get("support_min_q") or 0.0)
+        hurdle = bool(meta.get("cond_charge") or meta["args"].get("cond_charge"))
+        if abs(prm["support_min_q"] - c) > 1e-9 or prm["hurdle"] != hurdle or abs(prm["q0"] - Q0) > 1e-6 * Q0:
+            raise SystemExit(f"--products entry does not match this checkpoint (support {prm['support_min_q']} vs {c}, "
+                             f"hurdle {prm['hurdle']} vs {hurdle})")
+        troot = prm["fit"]["truth_root"]
+        own = None if os.path.realpath(troot) == os.path.realpath(a.complete_truth) else CompleteTruth(troot)
+        P_ = Products(prm, cfg, Q0, predict_full, c, own)
+        prod = dict(event=P_.event)
+
     def stored_tokens(z, f):
         import h5py
         shard, event = str(z["shard"]), int(z["event"])
         with h5py.File(shard, "r") as fh:
             pos = int(np.searchsorted(fh["ident"]["event"][:], event))
-        _, B, bl = ds.tokens(shard, pos)
+        ce, B, bl = ds.tokens(shard, pos)
+        stored_tokens.ce = ce
         return B, bl
 
     header = dict(checkpoint=a.checkpoint, step=ck.get("step"), train_events=meta["args"].get("n_events"),
                   init=meta["args"].get("init"))
     if not a.no_stored:
-        C = collect(a, ev_list, Q0, stored_tokens, predict_fn, ct)
+        C = collect(a, ev_list, Q0, stored_tokens, predict_fn, ct, prod)
         ctx = context(a, C, Q0, cfg)
         score_all(a, ctx, C, dict(header, P=C["P"]), a.tag, presence)
     if a.draws > 0:
@@ -448,8 +761,12 @@ def main():
                 shard = str(z["shard"])
                 path = ED.build(shard, int(z["event"]), k, a.draw_cache, ev_tag=int(os.path.basename(f)[2:5]))
                 _, B, bl = ED.tokens(path, shard, ds)
+                if prod is not None:                         # token footprints of the draw
+                    from types import SimpleNamespace
+                    zc = np.load(path)
+                    draw_tokens.ce = SimpleNamespace(**{k: zc[k] for k in ("band", "plane_gid", "wire", "tau")})
                 return B, bl
-            C = collect(a, ev_list, Q0, draw_tokens, predict_fn, ct)
+            C = collect(a, ev_list, Q0, draw_tokens, predict_fn, ct, prod)
             ctx = context(a, C, Q0, cfg)
             hdr = dict(header, P=C["P"], extra=dict(source=f"d{k}", draw=k))
             for t, point, boots in score_all(a, ctx, C, hdr, f"{a.tag}@d{k}", presence):
