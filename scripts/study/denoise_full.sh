@@ -9,8 +9,15 @@ O=/global/cfs/cdirs/m5238/users/oalter/ost61; R=/global/cfs/cdirs/m5238/users/oa
 mkdir -p $R/denoise/results; export DENOISE_TRUTH=${TRUTH_ROOT:-$O/denoise_truth} HELIX_STUDY_DIR=$R
 cd $H
 while [ ! -f $R/denoise/$T/final.pt ]; do
-  until timeout 60 salloc --no-shell --qos=interactive --account=m5238_g --constraint=gpu --nodes=4 --gpus-per-node=4 --time=04:00:00 --job-name=$JN > /dev/null 2>&1; do sleep 30; done
-  J=$(squeue -u $USER -n $JN -h -o %i | head -1); echo "[full] $T: got $JN = $J at $(date)"
+  # 80 GB A100s: the decoder needs ~46 GB per GPU at full scale; on 40 GB cards it runs at the
+  # limit and the allocator thrashes (2-3x slower steps, no OOM). The job id comes from salloc
+  # itself -- looking it up by name can catch a previous job of the same name still completing.
+  J=""; until [ -n "$J" ]; do
+    J=$(timeout 90 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
+        --time=04:00:00 --job-name=$JN 2>&1 | grep -o "Granted job allocation [0-9]*" | grep -o "[0-9]*$")
+    [ -z "$J" ] && sleep 30
+  done
+  echo "[full] $T: got $JN = $J at $(date)"
   scripts/study/denoise_multi.sh $J $T $PORT --corpus-root $O/corpus --arch-from $A --init $A --steps 40000 --warmup 1000 \
     --lr 3e-3 --lr-head 1e-2 --val-every 2000 --ckpt-every 2000 --val-events 64 --cov-per-sig 2 --win-per-event 48 \
     --near-any-per-sig 1 --win-near-per-event 24 --presence --workers 8 "$@"
