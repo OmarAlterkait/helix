@@ -62,3 +62,17 @@ def test_complete_truth_lookup_absent_is_zero():
     got = EV.CompleteTruth.lookup(K, Q, np.array([7, 8, 11, 0, 99]))
     assert np.array_equal(got, [2.0, 0.0, 3.0, 0.0, 0.0])
     assert np.array_equal(EV.CompleteTruth.lookup(np.zeros(0, np.int64), np.zeros(0), np.array([1, 2])), [0.0, 0.0])
+
+
+def test_presence_keys_at_a_shared_target():
+    """cal_c25_* is scored against complete q > 25 e- for every model, beside cal_* at the model's own c."""
+    rng = np.random.default_rng(0)
+    cov = {g: np.ones((4, 5), bool) for g in range(6)}
+    T = {g: rng.exponential(30.0, (4, 5)) * (rng.random((4, 5)) < 0.5) for g in range(6)}
+    P = {g: rng.random((4, 5)) for g in range(6)}
+    s0, s25 = EV._prob_stats(P, {g: T[g] > 0 for g in T}, cov), EV._prob_stats(P, {g: T[g] > 25 for g in T}, cov)
+    r = EV.fm_keys(dict(REL=s0["REL"], BR=s0["BR"], REL25=s25["REL"], BR25=s25["BR"]), "prob")
+    assert {"cal_logloss", "cal_c25_logloss", "cal_c25_ece_Y"} <= set(r)
+    assert r["cal_c25_logloss"] != r["cal_logloss"]
+    same = EV.fm_keys(dict(REL=s25["REL"], BR=s25["BR"]), "prob")
+    assert np.isclose(same["cal_logloss"], r["cal_c25_logloss"]) and "cal_c25_logloss" not in same

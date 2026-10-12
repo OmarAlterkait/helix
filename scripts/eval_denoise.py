@@ -56,7 +56,8 @@ row of the run (old ones included) also gains, bootstrapped over the same event 
   * presence maps (_pres raw, _cal calibrated), all covered cells: ``cal_ece``, ``cal_brier``,
     ``cal_logloss`` [``_<P>``] against complete q > c, c = the checkpoint's support_min_q
     (default 0), and ``cal_own_*`` against the model's training truth when that is not the
-    complete truth (the label the prior correction was fitted for).
+    complete truth (the label the prior correction was fitted for), and ``cal_c25_*`` against
+    complete q > 25 e- whatever c is: the one presence target shared by every model.
 Without --products every row and key is unchanged.
 """
 import argparse
@@ -535,7 +536,7 @@ def fm_keys(S, kind):
         r["fm_false_frac"] = div(T[2], T[1]); r["fm_zeroed_frac"] = div(T[3], T[1])
         r["fm_l1_frac"] = div(T[4], T[1]); r["fm_haze_frac_0.05Q0"] = div(T[6], T[5])
         return r
-    for pre, rk, bk in (("cal_", "REL", "BR"), ("cal_own_", "RELo", "BRo")):
+    for pre, rk, bk in (("cal_", "REL", "BR"), ("cal_own_", "RELo", "BRo"), ("cal_c25_", "REL25", "BR25")):
         if rk not in S:
             continue
         REL, BR = S[rk], S[bk]
@@ -594,12 +595,15 @@ class Products:
                 "_calo": {gg: prods[gg]["calo"] for gg in sh}, "_clean": {gg: prods[gg]["clean"] for gg in sh}}
         stats = {k: _charge_stats(v, Tc, Cm, Q0) for k, v in maps.items()}
         lab = {gg: Tc[gg] > self.c for gg in sh}
+        lab25 = {gg: Tc[gg] > 25.0 for gg in sh}
         if self.own is not None:
             OK, OQ = self.own.event(f, str(z["shard"]), int(z["event"]))
             To = _plane_maps(OK, OQ, sh)
             labo = {gg: To[gg] > self.c for gg in sh}
         for k, Pmap in (("_pres", Pm), ("_cal", {gg: prods[gg]["p_cal"] for gg in sh})):
             stats[k] = _prob_stats(Pmap, lab, Cm)
+            s25 = _prob_stats(Pmap, lab25, Cm)
+            stats[k].update(REL25=s25["REL"], BR25=s25["BR"])
             if self.own is not None:
                 so = _prob_stats(Pmap, labo, Cm)
                 stats[k].update(RELo=so["REL"], BRo=so["BR"])
