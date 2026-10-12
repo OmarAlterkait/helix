@@ -495,3 +495,38 @@ vs 0.509 (c = 0); c = 102 is cleaner and unbiased but loses the detection gain. 
 c = 25 and 102 differ little; the fast arms are much weaker than M6d (bright res68 0.14-0.18 vs 0.05),
 and Jensen-only calo leaves +2-3% at bright charge for the weak non-hurdle arms (a mean log residual of
 -0.02 to -0.03, -0.008 for M6d; recorded as fit.mu_log, not applied). The label question needs full scale.
+
+### The label at full scale: M7d / M7dc (complete truth, support c = 25 e-) vs M6d / M6dc (hits truth) (2026-10-12)
+
+Same recipe as M6d / M6dc (40k steps x 16 ranks, near-activity sampling, presence, decoder; M7dc adds the
+hurdle) with complete-truth charge targets and `--support-min-q 25`. All four scored on the products
+standard: calibration-event fit (denoise_products.py), 128 test events x 5 noise draws, complete truth,
+isolated positives (dense/results/products_draws.md). Presence is now also scored on ONE target for every
+model, complete q > 25 e- (`cal_c25_*`, 494a8f6): `cal_*` uses each model's own c, which is 0 for the hits
+models and made their presence numbers incomparable. The M6 rescore reproduces every other key exactly.
+
+| (complete truth) | M6d | M7d | M6dc | M7dc |
+|---|---|---|---|---|
+| p_cal log-loss, q > 25 | 0.0808 | **0.0761** | 0.0832 | 0.0774 |
+| p_cal ECE / Brier, q > 25 | 0.0060 / 0.0214 | **0.0012 / 0.0199** | 0.0084 / 0.0217 | 0.0031 / 0.0201 |
+| calo truth/pred, pred 102-500 e- | 1.309 | 1.149 | 1.329 | **1.129** |
+| calo truth/pred, 1k-2k / 4k-8k | 1.081 / 1.028 | 1.015 / 1.006 | 1.094 / 1.036 | **1.007 / 1.002** |
+| calo plane totals U / V / Y | 0.991 / 0.987 / 0.994 | 0.992 / 0.992 / 0.995 | 0.985 / 0.980 / 0.985 | **0.994 / 0.992 / 0.998** |
+| bright (>= 16k) median / res68 | 0.995 / 0.050 | 0.995 / 0.050 | 0.987 / **0.041** | **0.997** / **0.041** |
+| clean L1 / haze | 0.061 / 0.0013 | 0.061 / 0.0012 | 0.054 / 0.0013 | **0.053 / 0.0012** |
+| isolated near 0.1-0.2 MeV, p_cal | 0.576 [0.53, 0.62] | 0.579 [0.53, 0.63] | 0.563 [0.52, 0.61] | 0.555 [0.51, 0.60] |
+
+Late-training seed noise, from two M7dc runs that share steps 0-26k (a stray duplicate loop): +-0.01 on
+detection efficiencies, +-0.0002 on the bright median.
+
+- **Verdict: complete truth with c = 25 is the label.** It is better or equal on every key, at no deployment
+  cost. Calibrated presence improves on the shared target (log-loss -6 to -7%; ECE 5x / 2.7x lower). The
+  calorimetry map becomes linear above 1 k e- to <= 1.5% (hits labels: 3-9% low between 1 k and 8 k e-).
+- **Bright charge: the label matters only for the hurdle.** M6dc -> M7dc removes the bright bias (0.987 ->
+  0.997, res68 0.041 unchanged); M6d and M7d are identical at 0.995 / 0.050. The best bright charge comes from
+  the hurdle (res68 0.041 vs 0.050 for the decoder alone). M7dc has the best bright median, resolution, plane
+  totals and clean L1 of the four: it is the reference model now.
+- **Detection does not move** (all four within each other's intervals), as the causes analysis predicted: the
+  faint floor is set by the corpus threshold and the physics, not by the label.
+- **Still open:** the faintest predicted bin (102-500 e-) remains 13-15% low after calo. The decoder's bright
+  median sits 0.5% low, a log-space residual the Jensen table does not remove (`fit.mu_log`, not applied).
