@@ -69,6 +69,14 @@ def parse():
     ap.add_argument("--win-near-per-event", type=int, default=0,
                     help="charge-free windows NEAR activity per event, every cell (helix.probe.resolution.near_windows)")
     ap.add_argument("--override", nargs="*", default=[], metavar="KEY=VALUE", help="FM arch overrides")
+    ap.add_argument("--init-denoiser", default=None,
+                    help="a denoiser checkpoint (encoder + head) to start from; its head must match --head/--presence")
+    ap.add_argument("--gain-sigma-plane", type=float, default=0.0,
+                    help="charge-scaling augmentation: log-normal sigma of a per-plane-gid signal gain (truth scaled alike)")
+    ap.add_argument("--gain-sigma-block", type=float, default=0.0,
+                    help="... and of a per-(gid, --gain-block-wires wires) gain on top")
+    ap.add_argument("--gain-block-wires", type=int, default=64)
+    ap.add_argument("--clean-root", default=None, help="corpus root of the co-supported clean shards (needed by the gains)")
     return ap.parse_args()
 
 
@@ -117,13 +125,17 @@ def main():
     if a.head == "decoder":
         head_kw.update(kind="decoder", proj=a.dec_proj, layers=a.dec_layers)
     model = build_denoise(arch, sd, overrides=overrides, head_kw=head_kw).to(dev)
+    if a.init_denoiser:
+        model.load_state_dict(torch.load(a.init_denoiser, map_location="cpu", weights_only=False)["model"])
     n_train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
     say(f"[denoise] arch {a.arch_from} init {a.init or 'scratch'} trainable {n_train_p/1e6:.1f}M world {world}")
 
     train = DenoiseEvents(corpus_root, runs, a.truth_root, "train", n_events=a.n_events, subset_seed=a.subset_seed,
                           cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
                           near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event,
-                          neighbors=a.head == "decoder", support_min_q=a.support_min_q)
+                          neighbors=a.head == "decoder", support_min_q=a.support_min_q,
+                          gain_sigma_plane=a.gain_sigma_plane, gain_sigma_block=a.gain_sigma_block,
+                          gain_block_wires=a.gain_block_wires, clean_root=a.clean_root)
     val_items = split_events(corpus_root, runs[:1], "val")[:a.val_events]
     val = DenoiseEvents(corpus_root, runs, a.truth_root, "val", items=val_items, sample_seed=1234,
                         cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,

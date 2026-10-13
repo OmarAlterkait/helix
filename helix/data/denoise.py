@@ -50,6 +50,7 @@ class DenoiseEvents:
     def __init__(self, corpus_root, runs, truth_root, split="train", *, n_events=None, subset_seed=0,
                  cfg=None, q0=Q0_DEFAULT, sig_cap=20000, neg_per_sig=1.0, near_per_sig=1.0, cov_per_sig=1.0, win_per_event=0,
                  near_any_per_sig=0.0, win_near_per_event=0, neighbors=False, support_min_q=0.0,
+                 gain_sigma_plane=0.0, gain_sigma_block=0.0, gain_block_wires=64, clean_root=None,
                  sample_seed=None, items=None):
         from helix.model.tokenize import PatchConfig
         self.cfg = cfg or PatchConfig(cell_t="grid_center")
@@ -65,6 +66,18 @@ class DenoiseEvents:
         # cells out of sig_cap and turning presence into "any tail". The regression target is
         # unchanged: the cell's full charge, whatever c is.
         self.support_min_q = float(support_min_q)
+        # Charge-scaling augmentation. The simulation's amplitude-to-charge scale never
+        # varies, so nothing in training constrains how the output responds to an
+        # overall scale: the trained model reads charge relative to the event's visible
+        # amplitude (gain response ~0.7, m7_tests_results.md T2a/T2d). Per item, region
+        # r = (plane gid, wire // gain_block_wires) gets g_r = exp(N(0, s_plane) per gid +
+        # N(0, s_block) per block); its SIGNAL is scaled -- value + (g_r - 1) * clean
+        # value, from the co-supported clean shard under clean_root, noise untouched --
+        # and its cells' truth by g_r: exactly "this region held g_r x the charge".
+        self.gain_sigma_plane, self.gain_sigma_block = float(gain_sigma_plane), float(gain_sigma_block)
+        self.gain_block_wires, self.clean_root = int(gain_block_wires), clean_root
+        if (self.gain_sigma_plane > 0 or self.gain_sigma_block > 0) and not clean_root:
+            raise ValueError("gain augmentation needs clean_root (the co-supported clean shards)")
         self.sample_seed = sample_seed                     # None: a fresh draw per access (training)
         self.items = items if items is not None else split_events(corpus_root, runs, split)
         if n_events is not None and n_events < len(self.items):
@@ -93,15 +106,34 @@ class DenoiseEvents:
         a, b = t["offsets"][pos], t["offsets"][pos + 1]
         return t["keys"][a:b], t["q"][a:b], int(t["event"][pos])
 
-    def tokens(self, shard_path, pos):
-        """The event's tokens as the FM sees them (numpy dict, FM names)."""
+    def tokens(self, shard_path, pos, gain=None):
+        """The event's tokens as the FM sees them (numpy dict, FM names). ``gain``
+        (see :meth:`draw_gain`) scales each region's signal via the clean shard."""
         from helix.core.coeff_io import read_coeff_event
         from helix.model.tokenize import assemble, to_fm
         c = self._shard_cfg(shard_path)
         ce = read_coeff_event(shard_path, pos)
-        tok = assemble(ce.band, ce.plane_gid, ce.wire, ce.tau, ce.value, gids=c["gids"], n_wires=c["n_wires"],
+        value = ce.value
+        if gain is not None:
+            run = os.path.basename(os.path.dirname(shard_path))
+            clean = os.path.join(self.clean_root, run, os.path.basename(shard_path).replace("sim_wire_coeff_", "sim_wire_coeff_clean_"))
+            cc = read_coeff_event(clean, pos, coords_from=ce)
+            g = self.region_gain(gain, ce.plane_gid, ce.wire)
+            value = (ce.value.astype(np.float64) + (g - 1.0) * cc.value.astype(np.float64)).astype(np.float32)
+        tok = assemble(ce.band, ce.plane_gid, ce.wire, ce.tau, value, gids=c["gids"], n_wires=c["n_wires"],
                        band_lengths=c["band_lengths"], norm_sigma=c["norm_sigma"], cfg=self.cfg)
         return ce, to_fm(tok), c["band_lengths"]
+
+    def draw_gain(self, rng, n_gid=64, n_block=256):
+        """(n_gid, n_block) region gains, or None without augmentation."""
+        if self.gain_sigma_plane <= 0 and self.gain_sigma_block <= 0:
+            return None
+        lg = rng.normal(0.0, self.gain_sigma_plane, (n_gid, 1)) + rng.normal(0.0, self.gain_sigma_block, (n_gid, n_block))
+        return np.exp(lg)
+
+    def region_gain(self, gain, gid, wire):
+        """gain of each (gid, raw wire) -- coefficient rows or, with wire = 2 * fine wire, truth cells."""
+        return gain[np.asarray(gid, np.int64), np.asarray(wire, np.int64) // self.gain_block_wires]
 
     def rows(self, ce, tkeys, tq, rng):
         """Query cells and their truth, after the evaluation's recipe."""
@@ -183,12 +215,17 @@ class DenoiseEvents:
 
     def __getitem__(self, i):
         from helix.probe.resolution import cell_inputs
+        from helix.probe.resolution import FW, unkey
         run, path, pos, event = self.items[i]
-        ce, B, bl = self.tokens(path, pos)
+        rng = np.random.default_rng(None if self.sample_seed is None else (self.sample_seed, i))
+        gain = self.draw_gain(rng)
+        ce, B, bl = self.tokens(path, pos, gain)
         tkeys, tq, tev = self._truth(run, path, pos)
         if tev != event:
             raise ValueError(f"{path}#{pos}: truth is for event {tev}, corpus has {event}")
-        rng = np.random.default_rng(None if self.sample_seed is None else (self.sample_seed, i))
+        if gain is not None:
+            tg, tfw, _ = unkey(tkeys)
+            tq = tq * self.region_gain(gain, tg, tfw * FW)
         rows, y = self.rows(ce, tkeys, tq, rng)
         idx, aux = cell_inputs(rows, B["cell_key"], bl, self.cfg)
         ok = (idx >= 0).any(1)                               # uncovered cells are not queried

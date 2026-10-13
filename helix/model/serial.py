@@ -332,9 +332,17 @@ class SerialFMModel(FMModel):
     locations are visible or masked: train it with ``mask_mode="location"``."""
 
     def __init__(self, *args, rope_split=True, gp=1024, gd=2048, varlen=False,
-                 band_pool=None, pool_skip=True, pool_sub=(1, 1, 2, 4), **kw):
+                 band_pool=None, pool_skip=True, pool_sub=(1, 1, 2, 4), drift_planes_per_volume=0, **kw):
         super().__init__(*args, **kw)
         self.rope_split, self.gp, self.gd, self.varlen = rope_split, gp, gd, bool(varlen)
+        # The drift layouts sort by time alone, so a group mixes every plane of EVERY
+        # drift volume: tokens of one volume attend ~30% to the other volume's tokens
+        # at the same time, a place unrelated to theirs, and the denoiser's charge then
+        # depends on the other volume's amplitude (baselines/uboone_sp/causes/results/
+        # m7_tests_results.md, C2-C6). k > 0 sorts the drift layouts by
+        # (plane_id // k, time): planes of one volume still meet at equal drift time
+        # (triangulation), volumes never do. Adds no parameters; 0 = the original.
+        self.drift_planes_per_volume = int(drift_planes_per_volume)
         if self.varlen and kw.get("n_sink", 0):
             raise ValueError("varlen=True does not support attention sinks (n_sink>0): "
                              "flash varlen has no per-group extra keys")
@@ -371,7 +379,9 @@ class SerialFMModel(FMModel):
         bp = plane.double()
         o_pt = torch.argsort(bp * 1e9 + t.double())
         o_pw = torch.argsort(bp * 1e13 + wire.double() * 1e6 + t.double())
-        o_t = torch.argsort(t.double()); o_ts = torch.roll(o_t, self.gd // 2)
+        k = self.drift_planes_per_volume
+        o_t = torch.argsort(t.double() if k <= 0 else torch.div(plane, k, rounding_mode="floor").double() * 1e9 + t.double())
+        o_ts = torch.roll(o_t, self.gd // 2)
         dw = not self.rope_split                                   # drift-layer wire RoPE: off if split
         cell = [(o_pt, self.gp, True), (o_t, self.gd, dw), (o_pw, self.gp, True), (o_ts, self.gd, dw)]
         return cell[:len(self.enc) if depth is None else depth]
