@@ -332,7 +332,8 @@ class SerialFMModel(FMModel):
     locations are visible or masked: train it with ``mask_mode="location"``."""
 
     def __init__(self, *args, rope_split=True, gp=1024, gd=2048, varlen=False,
-                 band_pool=None, pool_skip=True, pool_sub=(1, 1, 2, 4), drift_planes_per_volume=0, **kw):
+                 band_pool=None, pool_skip=True, pool_sub=(1, 1, 2, 4), drift_planes_per_volume=0,
+                 drift_cathode_tick=0.0, lin_amp_scale=0.0, **kw):
         super().__init__(*args, **kw)
         self.rope_split, self.gp, self.gd, self.varlen = rope_split, gp, gd, bool(varlen)
         # The drift layouts sort by time alone, so a group mixes every plane of EVERY
@@ -343,6 +344,24 @@ class SerialFMModel(FMModel):
         # (plane_id // k, time): planes of one volume still meet at equal drift time
         # (triangulation), volumes never do. Adds no parameters; 0 = the original.
         self.drift_planes_per_volume = int(drift_planes_per_volume)
+        # drift_cathode_tick T > 0 (needs drift_planes_per_volume): the drift coordinate is the signed distance from a
+        # shared cathode, x = -(T - t) in even volumes, +(T - t) in odd ones (JAXTPC cubic: volume 0 at x < 0), in
+        # place of t for RoPE and every layout. Within a volume only the sign of relative positions can change; across
+        # volumes, tokens are near only where they are near the cathode -- the one place the two volumes' charge
+        # actually meets -- and the drift layouts, sorted by x, mix volumes there and nowhere else.
+        self.drift_cathode_tick = float(drift_cathode_tick)
+        if self.drift_cathode_tick > 0 and self.drift_planes_per_volume <= 0:
+            raise ValueError("drift_cathode_tick needs drift_planes_per_volume (which planes form a volume)")
+        # lin_amp_scale S > 0: the embedding also reads each slot's AMPLITUDE sinh(value) / S beside arcsinh(value)
+        # (linear in the measured charge). The new input columns start at zero, so a converted checkpoint is
+        # unchanged at step 0 (see scripts/train_denoise.py --init-denoiser).
+        self.lin_amp_scale = float(lin_amp_scale)
+        if self.lin_amp_scale > 0:
+            old = self.embed
+            self.embed = torch.nn.Linear(old.in_features + self.n_slot, old.out_features)
+            with torch.no_grad():
+                self.embed.weight.zero_(); self.embed.weight[:, :old.in_features].copy_(old.weight)
+                self.embed.bias.copy_(old.bias)
         if self.varlen and kw.get("n_sink", 0):
             raise ValueError("varlen=True does not support attention sinks (n_sink>0): "
                              "flash varlen has no per-group extra keys")
@@ -380,16 +399,31 @@ class SerialFMModel(FMModel):
         o_pt = torch.argsort(bp * 1e9 + t.double())
         o_pw = torch.argsort(bp * 1e13 + wire.double() * 1e6 + t.double())
         k = self.drift_planes_per_volume
-        o_t = torch.argsort(t.double() if k <= 0 else torch.div(plane, k, rounding_mode="floor").double() * 1e9 + t.double())
+        if k <= 0 or self.drift_cathode_tick > 0:                   # t is already the physical x when T > 0
+            o_t = torch.argsort(t.double())
+        else:
+            o_t = torch.argsort(torch.div(plane, k, rounding_mode="floor").double() * 1e9 + t.double())
         o_ts = torch.roll(o_t, self.gd // 2)
         dw = not self.rope_split                                   # drift-layer wire RoPE: off if split
         cell = [(o_pt, self.gp, True), (o_t, self.gd, dw), (o_pw, self.gp, True), (o_ts, self.gd, dw)]
         return cell[:len(self.enc) if depth is None else depth]
 
+    def _tcoord(self, B):
+        """The drift coordinate RoPE and the layouts use: t_phys, or the signed distance from the cathode."""
+        t = B["t_phys"]
+        if self.drift_cathode_tick <= 0:
+            return t
+        vol = torch.div(B["plane_id"], self.drift_planes_per_volume, rounding_mode="floor")
+        sign = torch.where(vol % 2 == 0, -1.0, 1.0).to(t.dtype)
+        return sign * (self.drift_cathode_tick - t)
+
     def _emb(self, B, idx=None):
         band, plane = B["band_id"], B["plane_id"]
         sel = slice(None) if idx is None else idx
-        x = self.embed(torch.cat([B["inp"][sel], B["occ"][sel]], -1))
+        parts = [B["inp"][sel], B["occ"][sel]]
+        if self.lin_amp_scale > 0:
+            parts.append(torch.sinh(B["inp"][sel].float()).to(B["inp"].dtype) / self.lin_amp_scale)
+        x = self.embed(torch.cat(parts, -1))
         if self.cond == "adaln":
             return x                       # identity enters through AdaLN, not additively
         if self.film is not None:
@@ -398,7 +432,7 @@ class SerialFMModel(FMModel):
 
     def _angles(self, B):
         hd = self.d // self.heads
-        return (rope_angles(B["t_phys"], hd, *self.lam_t),
+        return (rope_angles(self._tcoord(B), hd, *self.lam_t),
                 rope_angles(B["wire_pos"], hd, *self.lam_w))
 
     def _encode(self, B, idx, at, aw, c, layers=()):
@@ -410,7 +444,7 @@ class SerialFMModel(FMModel):
             return self._encode_varlen(B, sel, x, at, aw, c, layers)
         T = x.shape[0]
         lay = []
-        for o, g, uw in self._layouts(B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel]):
+        for o, g, uw in self._layouts(B["plane_id"][sel], self._tcoord(B)[sel], B["wire_pos"][sel]):
             npad = ((T + g - 1) // g) * g
             pi = _pad_idx(o, T, npad)
             cos, sin = rope_tables(at[pi], aw[pi] if uw else None, x.dtype)
@@ -439,7 +473,7 @@ class SerialFMModel(FMModel):
         x = x.to(torch.float32 if self.fp32_stream else self.embed.weight.dtype)
         if self.band_pool is not None:
             return self._encode_pooled(B, sel, x, at, aw, layers)[:2]
-        return self._stack_varlen(self.enc, x, B["plane_id"][sel], B["t_phys"][sel],
+        return self._stack_varlen(self.enc, x, B["plane_id"][sel], self._tcoord(B)[sel],
                                   B["wire_pos"][sel], at, aw, c, layers)
 
     def _stack_varlen(self, blocks, x, plane, t, wire, at, aw, c=None, layers=(), base=0):
@@ -471,7 +505,7 @@ class SerialFMModel(FMModel):
         -> (per-token features, {layer: per-token}, trunk, location of each row,
         (t, ang_t, ang_w) of each location)."""
         k = self.band_pool
-        plane, t, wire, band = B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel], B["band_id"][sel]
+        plane, t, wire, band = B["plane_id"][sel], self._tcoord(B)[sel], B["wire_pos"][sel], B["band_id"][sel]
         x, out = self._stack_varlen(self.enc[:k], x, plane, t, wire, at, aw, layers=layers)
         loc, slot, lp, lt, lw = _locations(plane, t, wire, band, tuple(self.mask_cell), self.pool_sub)
         S, d, n = sum(self.pool_sub), self.d, lp.numel()
@@ -549,7 +583,7 @@ class SerialFMModel(FMModel):
             mask_idx = torch.cat([mask_idx, sel])
         c = self._cond(B) if self.cond == "adaln" else None
         atv, awv = at[vis_idx], aw[vis_idx]
-        kpos = (B["t_phys"][vis_idx], atv, awv)
+        kpos = (self._tcoord(B)[vis_idx], atv, awv)
         vis_feat = None                                  # per visible token, when keys are not
         if self.band_pool is not None:
             x0 = self._emb(B, vis_idx).to(torch.float32 if self.fp32_stream else self.embed.weight.dtype)
@@ -571,7 +605,7 @@ class SerialFMModel(FMModel):
         if vis_feat is not None:                # pool_skip=False: a visible token's feature is its location's
             vis_feat = xv[vis_feat]
         if self.varlen:
-            qm = self._decode_varlen(qm, xv, (B["t_phys"][mask_idx], at[mask_idx], aw[mask_idx]), kpos,
+            qm = self._decode_varlen(qm, xv, (self._tcoord(B)[mask_idx], at[mask_idx], aw[mask_idx]), kpos,
                                      None if c is None else c[mask_idx])
             if masked_only:
                 return self.dec_norm(qm), mask_idx
@@ -579,7 +613,8 @@ class SerialFMModel(FMModel):
             xv_rows = xv if vis_feat is None else vis_feat
             return self.dec_norm(x.index_copy(0, vis_idx, xv_rows).index_copy(0, mask_idx, qm))
         Tq, Tk = qm.shape[0], xv.shape[0]
-        oq = torch.argsort(B["t_phys"][mask_idx].double()); okv = torch.argsort(B["t_phys"][vis_idx].double())
+        tc = self._tcoord(B)
+        oq = torch.argsort(tc[mask_idx].double()); okv = torch.argsort(tc[vis_idx].double())
         nb = (max(Tq, Tk) + self.gd - 1) // self.gd
         gq, gk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
         iq, ik = _pad_idx(oq, Tq, nb * gq), _pad_idx(okv, Tk, nb * gk)

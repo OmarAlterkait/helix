@@ -126,7 +126,14 @@ def main():
         head_kw.update(kind="decoder", proj=a.dec_proj, layers=a.dec_layers)
     model = build_denoise(arch, sd, overrides=overrides, head_kw=head_kw).to(dev)
     if a.init_denoiser:
-        model.load_state_dict(torch.load(a.init_denoiser, map_location="cpu", weights_only=False)["model"])
+        sd0 = torch.load(a.init_denoiser, map_location="cpu", weights_only=False)["model"]
+        own = model.state_dict()
+        for k, v in list(sd0.items()):
+            o = own.get(k)
+            # a matrix that gained INPUT columns (e.g. lin_amp_scale's amplitude channel): copy, new columns zero
+            if o is not None and o.shape != v.shape and o.dim() == 2 and o.shape[0] == v.shape[0] and o.shape[1] > v.shape[1]:
+                w = torch.zeros_like(o); w[:, :v.shape[1]] = v; sd0[k] = w
+        model.load_state_dict(sd0)
     n_train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
     say(f"[denoise] arch {a.arch_from} init {a.init or 'scratch'} trainable {n_train_p/1e6:.1f}M world {world}")
 
