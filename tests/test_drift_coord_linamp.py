@@ -40,3 +40,14 @@ def test_amplitude_channel_starts_as_a_no_op():
     with torch.no_grad():
         assert torch.allclose(base.encode(B), lin.encode(B), atol=1e-5)
     assert lin.embed.in_features == base.embed.in_features + SMALL["n_slot"]
+
+
+def test_build_denoise_loads_a_pretrained_fm_into_an_encoder_with_the_amplitude_channel():
+    from helix.model.denoise import build_denoise
+    B = make_batch(n_cells=120)
+    base = build_fm(dict(SMALL)).eval()
+    sd = base.state_dict()
+    m = build_denoise(dict(SMALL), sd, overrides={"lin_amp_scale": 30.0}).eval()
+    with torch.no_grad():
+        assert torch.allclose(base.encode(B), m.fm.encode(B), atol=1e-5)    # starts exactly as the pretrained FM
+    assert m.fm.embed.weight.shape[1] == sd["embed.weight"].shape[1] + SMALL["n_slot"]

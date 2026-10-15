@@ -148,6 +148,20 @@ class DenoiseModel(nn.Module):
         return groups
 
 
+def pad_input_columns(module, state_dict):
+    """``state_dict`` with every matrix that has FEWER input columns than ``module``'s own (an encoder option such
+    as ``lin_amp_scale`` added input features) zero-padded to fit: the old columns copied, the new ones zero, so the
+    loaded model computes exactly what the checkpoint did until training moves the new weights."""
+    own = module.state_dict()
+    out = dict(state_dict)
+    for k, v in state_dict.items():
+        o = own.get(k)
+        if o is not None and o.shape != v.shape and o.dim() == 2 and v.dim() == 2 \
+                and o.shape[0] == v.shape[0] and o.shape[1] > v.shape[1]:
+            w = o.new_zeros(o.shape); w[:, :v.shape[1]] = v; out[k] = w
+    return out
+
+
 def build_denoise(arch, state_dict=None, *, head_kw=None, overrides=None):
     """A DenoiseModel from an FM architecture dict (e.g. an eval artifact's
     ``arch``), optionally with the FM's pretrained weights."""
@@ -157,7 +171,7 @@ def build_denoise(arch, state_dict=None, *, head_kw=None, overrides=None):
     a.update(overrides or {})
     fm = build_fm(a)
     if state_dict is not None:
-        missing, unexpected = fm.load_state_dict(state_dict, strict=False)
+        missing, unexpected = fm.load_state_dict(pad_input_columns(fm, state_dict), strict=False)
         enc_missing = [k for k in missing if k.startswith(ENCODER_PREFIXES)]
         if enc_missing or unexpected:
             raise ValueError(f"pretrained weights do not fit the encoder: missing {enc_missing[:5]}, "
