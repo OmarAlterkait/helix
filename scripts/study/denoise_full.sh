@@ -13,7 +13,7 @@ while [ ! -f $R/denoise/$T/final.pt ]; do
   # limit and the allocator thrashes (2-3x slower steps, no OOM). The job id comes from salloc
   # itself -- looking it up by name can catch a previous job of the same name still completing.
   J=""; until [ -n "$J" ]; do
-    J=$(timeout 90 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
+    J=$(timeout 21600 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
         --time=04:00:00 --job-name=$JN 2>&1 | grep -o "Granted job allocation [0-9]*" | grep -o "[0-9]*$")
     [ -z "$J" ] && sleep 30
   done

@@ -10,7 +10,7 @@ H=$(cd "$(dirname "$0")/../.." && pwd); R=/global/cfs/cdirs/m5238/users/oalter/h
 D=$P/model_cal_$(echo $N | tr A-Z a-z)
 mkdir -p $P/logs $P/results
 J=""; until [ -n "$J" ]; do
-  J=$(timeout 90 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=1 --gpus-per-node=4 \
+  J=$(timeout 21600 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=1 --gpus-per-node=4 \
       --time=03:00:00 --job-name=hx-prod-$N 2>&1 | grep -o "Granted job allocation [0-9]*" | grep -o "[0-9]*$")
   [ -z "$J" ] && sleep 30
 done

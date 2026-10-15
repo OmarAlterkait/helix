@@ -25,7 +25,7 @@ while :; do
   todo=(); for t in "${TAGS[@]}"; do [ -f $R/denoise/$t/final.pt ] || todo+=($t); done
   [ ${#todo[@]} -eq 0 ] && break
   J=""; until [ -n "$J" ]; do
-    J=$(timeout 90 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
+    J=$(timeout 21600 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
         --time=04:00:00 --job-name=hx-m9 2>&1 | grep -o "Granted job allocation [0-9]*" | grep -o "[0-9]*$")
     [ -z "$J" ] && sleep 30
   done
