@@ -55,10 +55,7 @@ goop_shard.h5 [--device cuda]`): deconvolution with the system's measured
 single-photon response, integer-Haar differences kept where the light (or the
 departure from it) reaches threshold, coarse sums always; written as optical shards
 (`helix.optical.shard`, one modality per file next to the TPC coefficient shards) with 128-slot tokens (`helix.optical.tokens`),
-so simulation and data share one representation. The earlier goop pipeline
-(`helix.optical.process_event`: coif3 + VisuShrink, and the `scripts/optical`
-sweeps) is kept as a reference; it loses most isolated photons and part of the slow
-light. The optical tokens are not yet fed to the model.
+so simulation and data share one representation. The optical tokens are not yet fed to the model.
 
 The intent is for optical to grow the same way the wire path did — its own
 wavelet compression, its own corpus, feeding the same model. See

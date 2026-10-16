@@ -38,10 +38,8 @@ probe = ["hdf5plugin>=4.0", "torch>=2.0"]
 # Lazy imports that raise a clear error when absent, so they are opt-in rather
 # than base dependencies — but they were declared NOWHERE, which made them
 # undiscoverable. helix/model/checkpoint.py needs safetensors to read a
-# .safetensors export (it SystemExits telling you to install it);
-# helix/optical/viz.py needs matplotlib for plot_decomposition.
+# .safetensors export (it SystemExits telling you to install it).
 export = ["safetensors>=0.4"]
-viz = ["matplotlib>=3.6"]
 
 # helix.data and helix.integrations are the ONLY subpackages that may import
 # pimm_data (7 modules do). helix.core and helix.tpc must never touch it, and
@@ -102,7 +100,7 @@ include = ["helix*"]
 # FileNotFoundError, which an editable install hides completely.
 [tool.setuptools.package-data]
 "helix.tpc" = ["data/*.json", "data/*.npz"]
-# SBND optical matched-filter templates (helix.optical.sbnd_chain.load_templates).
+# optical single-photon responses (helix.optical.codec.load_templates).
 "helix.optical" = ["data/*.npz"]
 # The bin-grid fingerprint. helix.data.bins.check_reference reads it to tell a
 # freshly derived grid from the one the released models were trained against —

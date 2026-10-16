@@ -11,9 +11,6 @@ sides are one batch; channel = pmt_id (+1000 on the west side). Extra in the fil
 ``truth/pe_counts`` (n_events, 2, 81: goop's photon count per PMT, east / west) and attrs
 ``goop_events`` (the light file's event keys) and ``summary_json``.
 
-The coif3 pipeline (:func:`helix.optical.pipeline.process_event`) stays as the reference: it
-loses most isolated photons and part of the slow light (SBND-data-helix scripts/goop_compare.py).
-
   python -m helix.optical.goop_run --input light_output.h5 --output goop_shard.h5 [--device cuda]
       [--first 0] [--count N]
 """

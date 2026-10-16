@@ -11,7 +11,7 @@ periodization filter bank is matched to pywt's exact convention:
              roll by +dec_len//2, sum lowpass+highpass.
 Verified against ``pywt.wavedec``/``pywt.waverec`` to ~1e-14 (float64) across
 coif/sym/db/haar and lengths up to 36864. Requires the signal length to be a
-multiple of 2^level (even at every level — the optical pipeline pads to this);
+multiple of 2^level (even at every level);
 that guarantee, plus pywt's ``dwt_max_level`` cap, keeps every sub-band even and
 >= filter length so the FFT conv reproduces pywt exactly.
 

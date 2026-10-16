@@ -1,21 +1,13 @@
 """helix.optical — optical (PMT / X-ARAPUCA) waveforms, data and simulation alike.
 
-  * codec (helix.optical.codec): one method for every light system - SBND PMT and X-ARAPUCA
-    (helix.tpc.sbnd_run) and goop's simulated PMTs (helix.optical.goop_run, codec.GOOP):
-    deconvolve with the system's measured response, keep the integer-Haar differences where the
-    light (or the departure from it) reaches threshold, coarse sums always; optical shards
-    (helix.optical.shard, one modality per file next to the TPC shards) and 128-slot tokens (helix.optical.tokens);
-  * the earlier goop pipeline (process_event: coif3 + VisuShrink + quantization) is kept as the
-    reference - it loses most isolated photons and part of the slow light.
+One codec for every light system (helix.optical.codec): SBND PMT and X-ARAPUCA
+(helix.tpc.sbnd_run) and goop's simulated PMTs (helix.optical.goop_run, codec.GOOP). A system is
+its measured single-photon response (helix.optical.calibrate); the codec deconvolves the window
+with it and keeps the integer-Haar differences where the light, or the departure from it, reaches
+threshold, coarse sums always. Optical shards (helix.optical.shard: one modality per file next to
+the TPC coefficient shards), 128-slot tokens (helix.optical.tokens), validation against injected
+truth (helix.optical.validate).
 """
-from helix.optical.config import OpticalConfig
-from helix.optical.io import (config_from_file, list_events, read_event_chunks,
-                              chunk_noise_sigma)
-from helix.optical.pipeline import process_event, OpticalResult
-from helix.optical.viz import decompose, plot_decomposition
+from helix.optical.codec import GOOP, SBND, OpticalChain, OpticalSpec
 
-__all__ = [
-    "OpticalConfig", "config_from_file", "list_events", "read_event_chunks",
-    "chunk_noise_sigma", "process_event", "OpticalResult",
-    "decompose", "plot_decomposition",
-]
+__all__ = ["OpticalChain", "OpticalSpec", "SBND", "GOOP"]
