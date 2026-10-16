@@ -8,7 +8,7 @@ from helix.optical.codec import OpticalChain
 
 
 def _template(system="pmt"):
-    t = codec.load_templates()[0][system]
+    t = codec.load_templates()[0][f"{system}_response"]
     return t / np.abs(t).max(), int(np.argmax(np.abs(t)))
 
 
@@ -21,14 +21,12 @@ def _wf(n_wf=24, seed=0, lengths=(5000, 1500, 700), amp=40.0, sigma=3.0, system=
         n = lengths[k % len(lengths)]
         x = base + rng.normal(0, sigma, n)
         p = int(rng.integers(150, n - 150))
-        x[p - tp:p - tp + len(t)] += pol * amp * t
+        seg = t[:n - (p - tp)]                              # the response, cut at the window end
+        x[p - tp:p - tp + len(seg)] += pol * amp * seg
         bufs.append(np.round(x).astype(np.uint16)); offs.append(off); lens.append(n); pulses.append(p)
         off += n
     return dict(channel=np.arange(n_wf, dtype=np.int32) // 3, t_us=np.arange(n_wf, dtype=np.float64),
                 length=np.array(lens), offset=np.array(offs), buf=np.concatenate(bufs)), pulses
-
-
-SUPPORT = {"rule": "support"}                     # the support rule (X-ARAPUCA's; PMT's before "deconv")
 
 
 def _raw(wf, k):
@@ -41,20 +39,6 @@ def test_integer_haar_is_exact():
     s, d = codec.haar(x, 6)
     assert s.shape == (5, 4) and [a.shape[1] for a in d] == [4, 8, 16, 32, 64, 128]
     np.testing.assert_array_equal(codec.unhaar(s, d), x)
-
-
-def test_pulses_are_in_the_support_and_lossless_there():
-    wf, pulses = _wf()
-    ch = OpticalChain(codec.make_specs({"pmt": {"q": 0, **SUPPORT}}))
-    res = ch.process("pmt", wf)
-    rec = ch.reconstruct(res)
-    for g in res["groups"]:
-        roi = np.asarray(g["roi"])
-        for r, k in enumerate(g["index"]):
-            n = wf["length"][k]
-            assert roi[r, pulses[k] - 4:pulses[k] + 12].all()
-            np.testing.assert_array_equal(rec[k][roi[r, :n]], _raw(wf, k)[roi[r, :n]])
-    assert res["n_samples"] / res["n_kept"] > 5
 
 
 def test_default_keeps_the_charge():
@@ -87,65 +71,43 @@ def test_deconv_keeps_slow_dense_light():
     raw = np.round(8000 - truth + rng.normal(0, 3.0, (m, n)))
     wf = dict(channel=np.arange(m, dtype=np.int32), t_us=np.zeros(m), length=np.full(m, n), offset=np.arange(m) * n,
               buf=raw.astype(np.uint16).ravel())
-    err = {}
-    for name, spec in (("deconv", None), ("support", codec.make_specs({"pmt": SUPPORT}))):
-        ch = OpticalChain(spec)
-        res = ch.process("pmt", wf)
-        rec = np.stack(ch.reconstruct(res))
-        err[name] = np.mean((rec - (8000 - truth)) ** 2)
-        if name == "deconv":
-            assert res["n_kept"] < 0.25 * m * n
-    err["raw"] = np.mean((raw - (8000 - truth)) ** 2)
-    assert err["deconv"] < err["support"] and err["deconv"] < 0.5 * err["raw"]
+    ch = OpticalChain()
+    res = ch.process("pmt", wf)
+    rec = np.stack(ch.reconstruct(res))
+    assert res["n_kept"] < 0.25 * m * n
+    assert np.mean((rec - (8000 - truth)) ** 2) < 0.5 * np.mean((raw - (8000 - truth)) ** 2)
 
 
-def test_q_only_on_the_fine_levels_and_coarse_sums_exact():
+@pytest.mark.parametrize("system", ["pmt", "xarapuca"])
+def test_matched_filter_lines_up_with_the_pulse_peak(system):
+    h = codec.load_templates()[0][f"{system}_response"]; hp = int(np.argmax(h))
+    u, lag, pre, post = codec.matched_filter(h)
+    z = np.zeros((1, 2048), np.float32); z[0, 300 - hp:300 - hp + len(h)] = h
+    assert abs(int(np.argmax(codec._correlate(z, u, lag))) - 300) <= 1
+    assert abs(u.sum()) < 1e-9 and abs((u ** 2).sum() - 1) < 1e-9 and pre >= 0 and post > 0
+
+
+def test_batches_bound_the_padding():
+    rng = np.random.default_rng(3)
+    L = np.r_[rng.integers(10000, 48000, 169), [700, 5000, 5000]]
+    for torch_ in (False, True):
+        b = codec.batches(L, 7, torch_)
+        seen = np.concatenate([i[i >= 0] for _, i in b])
+        assert sorted(seen.tolist()) == list(range(len(L)))
+        for Lp, idx in b:
+            real = idx[idx >= 0]
+            assert Lp % 128 == 0 and (L[real] <= Lp).all() and (Lp <= 1.25 * (L[real].min() + 128)).all()
+            if torch_:
+                r = len(idx); assert r & (r - 1) == 0 or r % 256 == 0
+        assert len(b) <= 12
+
+
+def test_coarse_sums_are_block_sums():
     wf, _ = _wf(seed=3)
-    res = OpticalChain(codec.make_specs({"pmt": SUPPORT})).process("pmt", wf)
-    spec = res["spec"]
+    res = OpticalChain().process("pmt", wf)
     for g in res["groups"]:
-        roi = np.asarray(g["roi"]); m = roi.shape[0]
-        for li, (d, s) in enumerate(zip(g["details"], g["stored"])):
-            j = spec["level"] - li
-            cand = roi.reshape(m, d.shape[1], -1).any(-1)
-            assert not np.any(s & ~cand)
-            if j > spec["q_levels"]:
-                np.testing.assert_array_equal(s, cand)
-        # every window's coarse sums are its block sums
-        k = g["index"][0]; n = wf["length"][k]; raw = _raw(wf, k)
-        nb = n // 64
+        k = g["index"][0]; n = wf["length"][k]; raw = _raw(wf, k); nb = n // 64
         np.testing.assert_array_equal(np.asarray(g["coarse"])[0, :nb], raw[:nb * 64].reshape(nb, 64).sum(1))
-
-
-def test_gap_closing():
-    t, tp = _template()
-    x = np.full((2, 1024), 2000.0)
-    for p in (300, 300 + 12 + 30):                     # trigger regions 30 samples apart: closed
-        x[0, p - tp:p - tp + len(t)] -= 60 * t
-    for p in (300, 300 + 12 + 80):                     # 80 apart: not
-        x[1, p - tp:p - tp + len(t)] -= 60 * t
-    x += np.random.default_rng(4).normal(0, 3, x.shape)
-    wf = dict(channel=np.zeros(2, np.int32), t_us=np.zeros(2), length=np.full(2, 1024), offset=np.array([0, 1024]),
-              buf=np.round(x).astype(np.uint16).ravel())
-    roi = np.asarray(OpticalChain(codec.make_specs({"pmt": SUPPORT})).process("pmt", wf)["groups"][0]["roi"])
-    runs = [int((np.diff(np.r_[0, r[200:600].astype(int)]) == 1).sum()) for r in roi]   # noise triggers elsewhere
-    assert runs[0] == 1 and runs[1] == 2
-
-
-def test_xarapuca_delta_template_finds_small_pulses():
-    wf, pulses = _wf(seed=5, lengths=(768,), amp=4.0, sigma=0.46, system="xarapuca", pol=1, base=2000)
-    res = OpticalChain(codec.make_specs({"xarapuca": SUPPORT})).process("xarapuca", wf)
-    g = res["groups"][0]
-    found = np.mean([np.asarray(g["roi"])[r, pulses[k]] for r, k in enumerate(g["index"])])
-    assert found > 0.9
-    assert np.all(np.isfinite(res["noise"]["level"])) and np.all(res["noise"]["level"] > 0)
-
-
-def test_matched_filter_lines_up_with_the_pulse_peak():
-    t, tp = _template()
-    u, lag = codec._filter(codec.load_templates()[0]["pmt"])
-    z = np.zeros((1, 512), np.float32); z[0, 200 - tp:200 - tp + len(t)] = t
-    assert abs(int(np.argmax(codec._correlate(z, u, lag))) - 200) <= 1
 
 
 def test_torch_matches_numpy():
@@ -164,11 +126,10 @@ def test_torch_matches_numpy():
 
 
 def _shard(tmp_path, res):
-    from helix.tpc import sparse_io
-    from helix.tpc.chain import TPCChain
+    from helix.optical.shard import OpticalWriter
     p = tmp_path / "o.h5"
-    w = sparse_io.Writer(p, TPCChain())
-    w.add_optical(res); w.add_optical(res)              # two events
+    w = OpticalWriter(p)
+    w.add([res], event=0); w.add([res], event=1)        # two events
     w.close()
     return p
 
@@ -177,7 +138,7 @@ def _shard(tmp_path, res):
 def test_shard_roundtrip(tmp_path, dev):
     if dev is not None:
         pytest.importorskip("torch")
-    from helix.tpc.sparse_io import read_optical
+    from helix.optical.shard import read_optical
     wf, _ = _wf(seed=7)
     ch = OpticalChain(device=dev)
     res = ch.process("pmt", wf)
@@ -197,9 +158,7 @@ def test_stored_blocks_are_shard_candidates(tmp_path):
     """Every stored difference is a candidate of the support the shard encodes (blocks touching
     it) - also a coarse block at a window's end whose light runs into the end (the block's
     middle lies past the window) - and the shard decodes to the same waveforms."""
-    from helix.tpc import sparse_io
-    from helix.tpc.chain import TPCChain
-    from helix.tpc.sparse_io import read_optical
+    from helix.optical.shard import OpticalWriter, read_optical
     h = codec.load_templates()[0]["pmt_response"]; hp = int(np.argmax(h))
     rng = np.random.default_rng(0); m = 64
     lens = rng.integers(700, 5200, m); bufs = []
@@ -220,14 +179,14 @@ def test_stored_blocks_are_shard_candidates(tmp_path):
             assert not np.any(np.asarray(st) & ~roi.reshape(mm, d.shape[1], -1).any(-1))
     rec = ch.reconstruct(res)
     p = tmp_path / "c.h5"
-    w = sparse_io.Writer(p, TPCChain()); w.add_optical(res); w.close()
+    w = OpticalWriter(p); w.add([res]); w.close()
     for k, g in enumerate(read_optical(p, "pmt", 0)):
         x = codec.unhaar(g["coarse"][None], [d[None] for d in g["details"]], [s_[None] for s_ in g["stored"]])[0]
         np.testing.assert_array_equal(x[:g["length"]], rec[k])
 
 
 def test_tokens_roundtrip(tmp_path):
-    from helix.tpc.sparse_io import read_optical
+    from helix.optical.shard import read_optical
     wf, _ = _wf(seed=8, lengths=(9496, 5000, 700))
     p = _shard(tmp_path, OpticalChain().process("pmt", wf))
     tk = tokens.shard_tokens(p, "pmt", 0)
@@ -246,43 +205,17 @@ def test_tokens_roundtrip(tmp_path):
 
 
 def test_event_without_windows(tmp_path):
-    from helix.tpc.sparse_io import read_optical
+    from helix.optical.shard import read_optical
     wf, _ = _wf(seed=9)
     empty = dict(channel=np.zeros(0, np.int32), t_us=np.zeros(0), length=np.zeros(0, np.int64),
                  offset=np.zeros(0, np.int64), buf=np.zeros(0, np.uint16))
     ch = OpticalChain()
     r0, r1 = ch.process("pmt", empty), ch.process("pmt", wf)
     assert r0["n_kept"] == 0 and ch.reconstruct(r0) == []
-    from helix.tpc import sparse_io
-    from helix.tpc.chain import TPCChain
+    from helix.optical.shard import OpticalWriter
     p = tmp_path / "e.h5"
-    w = sparse_io.Writer(p, TPCChain()); w.add_optical(r0); w.add_optical(r1); w.close()
+    w = OpticalWriter(p); w.add([r0]); w.add([r1]); w.close()
     assert read_optical(p, "pmt", 0) == [] and len(read_optical(p, "pmt", 1)) == len(wf["length"])
-
-
-def test_calibrate_recovers_a_known_source():
-    """Synthetic source: white noise 3 ADC, negative pulses of a known shape, single photons 15 ADC
-    (5 sigma, 10% spread), 30% of pulses 2-4 photons, ~1 per 2 us: polarity, noise, photon
-    amplitude and template come back; the chosen k reaches the target efficiency."""
-    from helix.optical.calibrate import calibrate
-    rng = np.random.default_rng(12)
-    t = np.arange(40.0)
-    shape = np.where(t < 6, np.exp(-(6 - t) / 1.0), np.exp(-(t - 6) / 4.0))
-    n, m = 5000, 400
-    x = 8000 + rng.normal(0, 3.0, (m, n))
-    for i in range(m):
-        for p in rng.choice(np.arange(100, n - 100), 2, replace=False):
-            npe = 1 if rng.uniform() < 0.7 else int(rng.integers(2, 5))      # 30% multi-photon pulses
-            x[i, p - 6:p + 34] -= sum(rng.normal(15, 1.5) for _ in range(npe)) * shape
-    wf = dict(channel=np.arange(m, dtype=np.int32) % 20, length=np.full(m, n), offset=np.arange(m) * n,
-              buf=np.round(x).astype(np.uint16).ravel())
-    spec, tmpl, rep = calibrate([wf], 2.0, ks=(3.0, 3.5, 4.0, 4.5), n_inject=1000)
-    assert spec.polarity == -1 and abs(rep["sigma_adc"] - 3.0) < 0.15
-    assert abs(rep["photon_amplitude_adc"] / 15 - 1) < 0.25
-    r_ = tmpl["response"]; p0 = tmpl["pre"]
-    np.testing.assert_allclose(r_[p0 - 2:p0 + 12], np.r_[shape[4:6] / shape[6], shape[6:18] / shape[6]], atol=0.04)
-    c = {r["k"]: r["efficiency"] for r in rep["k_curve"]}
-    assert c[spec.k] >= 0.9 and all(c[a] >= c[b] for a, b in zip(sorted(c), sorted(c)[1:]))
 
 
 def test_xarapuca_deconv_closer_to_truth_than_raw():
@@ -371,7 +304,7 @@ def test_goop_run_writes_readable_optical_shards(tmp_path):
     import h5py
     import json
     from helix.optical import goop_run
-    from helix.tpc.sparse_io import read_optical
+    from helix.optical.shard import read_optical
     src = _goop_file(tmp_path / "light.h5"); out = tmp_path / "goop_shard.h5"
     goop_run.main(["--input", str(src), "--output", str(out)])
     ch = OpticalChain(codec.GOOP, templates="goop")
@@ -388,3 +321,26 @@ def test_goop_run_writes_readable_optical_shards(tmp_path):
     with h5py.File(out, "r") as o:
         assert o["truth/pe_counts"].shape == (2, 2, 3)
         assert json.loads(o.attrs["summary_json"])["events"] == 2
+
+
+def test_calibrate_recovers_a_known_response():
+    """fit_response on white noise with photons of a known response injected, starting from a
+    wrong (30% wider) response: one pass brings the core within 0.1 of the peak, three passes closer."""
+    from helix.optical import calibrate
+    rng = np.random.default_rng(17)
+    T, _ = codec.load_templates("goop"); h = T["goop_response"][:600]; hp = int(np.argmax(h))
+    o = np.arange(len(h)) - hp; wide = np.interp(o / 1.3, o, h, left=0, right=0); wide /= wide.max()
+    m, n = 60, 6000
+    noise = np.round(29490 + rng.normal(0, 2.6, (m, n))).astype(np.int64)
+    ev = dict(channel=np.arange(m, dtype=np.int32) % 6, t_us=np.zeros(m), length=np.full(m, n), offset=np.arange(m) * n,
+              buf=noise.ravel())
+    chain = OpticalChain({"goop": codec.OpticalSpec("goop_response", -1, level=7)}, templates={"goop_response": wide})
+    err = {}
+    for passes in (1, 3):
+        r = calibrate.fit_response([ev], chain, "goop", pre=20, core=40, length=400, inject=h,
+                                   amplitude=lambda g: g.normal(13, 1.3), passes=passes)
+        lo = r["ls_offsets"]; truth = np.interp(lo, o, h, left=0, right=0)
+        core = (lo >= -20) & (lo <= 40)
+        assert r["n_isolated"] > 300
+        err[passes] = np.abs(r["h_ls"][core] - truth[core]).max()
+    assert err[1] < 0.1 and err[3] < min(err[1], 0.08)

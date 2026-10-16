@@ -5,7 +5,7 @@ goop (HELIX's simulated PMT light: two sides of 81 PMTs, 1 ns ticks, white noise
 (:mod:`helix.optical.codec`, :data:`helix.optical.codec.GOOP`: deconvolution with goop's own
 measured response, a Haar difference kept where the light or the departure from it reaches its
 threshold, coarse sums always) and is written in the same shard format
-(:func:`helix.tpc.sparse_io.read_optical`, :func:`helix.optical.tokens.shard_tokens`), so
+(:mod:`helix.optical.shard`, :func:`helix.optical.tokens.shard_tokens`), so
 simulation and data reach the model in one representation. Per event the stored chunks of both
 sides are one batch; channel = pmt_id (+1000 on the west side). Extra in the file:
 ``truth/pe_counts`` (n_events, 2, 81: goop's photon count per PMT, east / west) and attrs
@@ -56,14 +56,14 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     from helix.optical.codec import GOOP, OpticalChain
-    from helix.tpc.chain import TPCChain
-    from helix.tpc.sparse_io import Writer
+    from pathlib import Path
+    from helix.optical.shard import OpticalWriter
     chain = OpticalChain(GOOP, device=a.device, templates="goop")
     sync = (lambda: __import__("torch").cuda.synchronize()) if a.device and a.device.startswith("cuda") else (lambda: None)
     f = h5py.File(a.input, "r")
     keys = sorted(k for k in f.keys() if k.startswith("event_"))
     keys = keys[a.first:a.first + a.count if a.count is not None else None]
-    w = Writer(a.output, TPCChain(), level=a.deflate)                    # optical-only shard (TPC config attrs unused)
+    w = OpticalWriter(a.output, level=a.deflate)
     pes, kept, samples, t_codec = [], 0, 0, 0.0
     t_start = time.perf_counter()
     for i, key in enumerate(keys):
@@ -71,7 +71,7 @@ def main(argv=None):
         t0 = time.perf_counter()
         res = chain.process("goop", wf)
         sync(); t_codec += time.perf_counter() - t0
-        w.add_optical(res); w.flush()
+        w.add([res], run=Path(a.input).stem, source_file=Path(a.input).name, event=int(key.split("_")[1]))
         kept += res["n_kept"]; samples += res["n_samples"]; pes.append(pe)
         if i < 3 or (i + 1) % 20 == 0:
             print(f"{key}: {res['n_kept']} values / {res['n_samples']} samples", flush=True)

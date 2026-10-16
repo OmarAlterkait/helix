@@ -32,10 +32,8 @@ channel, t_us, length, n_region, n_cand, n_value. Streams, in waveform order:
 
   * ``region_gap`` / ``region_len`` (uint16): the support runs (gap from the previous run's end);
   * ``coarse`` (int32): the window's ceil(length / 2^level) coarse sums, delta-coded within it;
-  * ``keep_bits``: one bit per candidate difference (blocks touching the support) of the fine
-    levels :func:`helix.optical.codec.bit_levels` (rule "support": 1..q_levels; rule "deconv":
-    every level, the support then only marks the stored blocks), packed per waveform - coarser
-    candidates are always stored;
+  * ``keep_bits``: one bit per candidate difference (blocks touching the marks of the stored
+    blocks) on every level, packed per waveform;
   * ``value`` (int32): the stored differences, levels coarse to fine, ascending within a level.
 Noise per event and channel (``noise_offsets`` (n_events + 1)): noise_channel, noise_stat,
 noise_level (n, level). :func:`read_optical` returns per-waveform coarse sums, differences,
@@ -136,7 +134,7 @@ def optical_streams(res):
     """One system's :meth:`helix.optical.codec.OpticalChain.process` result -> (per-waveform
     table, {stream: array}, per-channel noise), in waveform order."""
     spec = res["spec"]
-    lev, ql = spec["level"], codec.bit_levels(spec)
+    lev = ql = spec["level"]
     if not res["groups"]:
         z = lambda dt: np.zeros(0, dt)  # noqa: E731
         table = dict(channel=z(np.int32), t_us=z(np.float64), length=z(np.int32), n_region=z(np.int32),
@@ -406,7 +404,7 @@ def read_optical(path, system, i):
     with h5py.File(path, "r") as f:
         g = f["optical"][system]
         spec = json.loads(g.attrs["spec_json"])
-        lev, ql = spec["level"], codec.bit_levels(spec)
+        lev = ql = spec["level"]
         a, b = int(g["wf_offsets"][i]), int(g["wf_offsets"][i + 1])
         cnt = {k: g[k][:b].astype(np.int64) for k in ("n_region", "n_cand", "n_value", "length")}
         nco = (cnt["length"] + (1 << lev) - 1) >> lev

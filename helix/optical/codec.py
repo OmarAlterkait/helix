@@ -1,66 +1,32 @@
-"""Optical codec: one method for every light system (SBND PMT, SBND X-ARAPUCA, ...).
+"""Optical codec: one method for every light system (SBND PMT and X-ARAPUCA, goop, ...).
 
-Part 1 - where the light is (detection), per event and system:
-  * noise per CHANNEL, measured where there is no light: a first support from the statistic's
-    rms over each window's median 256-sample stretch, then the clipped rms of the statistic and
-    of every Haar level outside that support; median over the channel's windows in the event.
-    Light inflates any whole-window estimate (SBND flashes, self-triggered X-ARAPUCA pulses,
-    goop's ~1000-sigma flash in every window: q then drops real photon detail);
-  * local baseline: means of 64-sample blocks of the window, linearly interpolated;
-  * statistic: the baseline-subtracted window correlated with the system's pulse template
-    (zero mean, unit norm; ``"delta"`` = the samples themselves, an amplitude trigger), moved
-    back by the template's lag so it lines up with the pulse peak, in units of the channel noise;
-  * support: every sample from ``pre`` before to ``post`` after a statistic above ``k``; gaps of
-    up to ``gap`` samples between support runs are closed.
-Part 2 - what is stored (representation): the integer Haar transform (sum / difference) of the
-RAW ADC samples to ``level`` (edge-padded to the batch length):
-  * the coarse sums of every block of 2^level samples, always (light, baseline and the PMT
-    undershoot stay exact over any span of blocks);
-  * rule ``"deconv"`` (SBND PMT and X-ARAPUCA): the differences where the LIGHT is expected
-    to put at least q sigma_j. The light is estimated by deconvolving the window with the
-    system's full single-photon response h (pulse, undershoot and recovery): photon amplitudes
-    a >= 0 minimising |y - h*a|^2 / 2 + lambda sum(a), refitted without the penalty on that
-    support, then light = h*a. y: the window minus its channel's pedestal (the median over the
-    channel's windows of the clipped mean where there is no light: a median of integer codes
-    is off by up to half a count, and light below the trigger lifts a lit window's own
-    estimate; h integrates either into fake or lost light). lambda = k x the channel's
-    statistic noise x |h| (a photon enters where its matched-filter significance exceeds k;
-    the noise of y correlated with h, measured directly, takes in light below the trigger:
-    X-ARAPUCA flash light lost x2). A difference is kept where the same difference of h*a reaches
-    q sigma_j. Isolated photons, pile-up and slow dense light alike; nothing is chosen by its
-    own (noisy) value, so noise is not selected; no footprint (pre/post/gap) or level split.
-    Plus where the data depart from the light model: |d - light's d| >= 5 sigma_j (a noise
-    coefficient: ~6e-7, a few per event) - a wrong response on big pulses, artefacts that are not
-    light (negative spikes, saturation). Truth (rule_truth2.py, goop_compare.py): X-ARAPUCA flash
-    error with a 30% wrong core 235 -> 147 sigma^2, goop with a wrong response 6492 -> 5234 per
-    chunk; real cost +0.4% (PMT) / +0.7% (X-ARAPUCA) / +3.5% (goop) values; the universal
-    threshold sqrt(2 ln n) is too low on short windows (X-ARAPUCA +14.5% values, noise).
-    Against injected truth (SBND-data-helix scripts/rule_truth2.py: photons and 100-500 photon
-    flashes on real noise, error = signal dropped + noise kept): PMT per photon 6.4 values at
-    11.5 sigma^2 (support rule 13.0 at 25.5, oracle 6.2 at 9.1), per flash 484 at 827 (support +
-    far 700 at 1255, oracle 495 at 645); robust to a 30% wrong tail or core width. X-ARAPUCA
-    (measured response; core 30% wider): per photon 10.7 values at 23 sigma^2 (support rule 29
-    at 67), quiet window 64 values at 140 (174 at 397); its 40-sample trigger template is too
-    crude for this (flash light lost) - the response must be the measured mean pulse;
-  * rule ``"support"``: the differences of the blocks touching the support; on the fine levels
-    1..q_levels only those with |d| >= q sigma_j (sigma_j: the channel's clipped rms of that
-    level's differences).
-Nothing else. Decoding is the exact inverse: a stored difference is exact, a missing one splits
-its block's sum evenly.
+A system is described by its measured single-photon response h (unit peak, pulse, undershoot and
+recovery; helix.optical.calibrate) and the photon significance k; everything else follows from h.
 
-Settings (SBND-data-helix optical studies, run 18256, injected single photons of the measured
-shape and DB gains into real windows; values / event over all windows):
-  * PMT: matched filter k 3, -4/+12, gaps <= 32 closed, level 6, q 1 on D1-D3: 87% of single
-    photons get a support run (k 3.5: 82%, 4: 75%), ~545k values and 0.79 MB per event, charge of
-    small pulses 4.8% rms, time 0.14 ns rms, light after flashes exact; per-coefficient
-    hysteresis (the TPC rule) finds 55-70% with 34-41% charge errors; hysteresis on the
-    statistic adds nothing over one threshold; gap closing +5 points of photons in flash tails.
-  * X-ARAPUCA: amplitude (delta template) k 4, -8/+40, no gap closing (no gain, +11% values):
-    98% of 3-5 ADC photons, 0.02 noise regions per window. With the noise of the samples
-    themselves (inflated by the pulses) k 3.5 finds 93% at 0.04 noise regions per window. Noise
-    ~0.46 ADC, below one code: every sigma here is a clipped rms (the MAD of integer codes is 0).
-  * q on all levels (instead of the levels finer than the pulse) costs charge: the coarse
-    differences carry the pulse shape.
+Per event and system:
+  1. noise per CHANNEL from where there is no light: the matched-filter statistic (the window,
+     minus a local baseline, correlated with the zero-mean unit-norm core of h - its shortest
+     span around the peak holding 98% of h's energy), a first light mask from its rms over each
+     window's median 256-sample stretch, then the clipped rms of the statistic and of every Haar
+     level, and the window's clipped mean, outside the light (triggers at k, widened by the
+     core span); medians over the channel's windows (the pedestal too: a median of integer codes
+     is off by up to half a count, and light below the trigger lifts a lit window's own value);
+  2. the light: photon amplitudes a >= 0 minimising |y - h*a|^2 / 2 + lambda sum(a), y the window
+     minus its channel's pedestal, lambda = k x the statistic's noise x |h| (a photon enters where
+     its matched-filter significance exceeds k), refitted without the penalty on its support
+     (FISTA); light = h*a - isolated photons, pile-up and slow dense light alike;
+  3. stored: the integer Haar transform (sum / difference) of the RAW ADC samples to ``level``:
+     the coarse sums of every 2^level block always, and a difference where the light's difference
+     reaches q sigma_j (q 1: keep exactly where the signal is worth a noise sigma - nothing is
+     chosen by its own noisy value) or where the data depart from the light model by
+     |d - light's d| >= residual sigma_j (5: a noise coefficient ~6e-7; a wrong response on big
+     pulses, artefacts that are not light).
+Decoding is the exact inverse: a stored difference is exact, a missing one splits its block's sum
+evenly. Validation against injected truth: helix.optical.validate; numbers: docs/OPTICAL.md.
+
+Batching: windows of one length class are one batch - lengths within 25% padding of the
+batch's longest (Haar and baseline blocks round them up); on the GPU rows are padded to a power
+of two (multiples of 256 above), so shapes repeat without padding short batches to 256 rows.
 """
 from __future__ import annotations
 
@@ -75,50 +41,28 @@ from helix.core import backend
 from helix.tpc import robust
 
 _DATA = Path(__file__).resolve().parent / "data"
-_ROWS = 256                     # torch: batches padded to a multiple of this many rows (repeating shapes)
 BLOCK = 64                      # local-baseline block (samples)
+PAD_FRACTION = 0.25             # batch windows whose length is within this padding of the batch's longest
+ENERGY = 0.98                   # the response's core: the shortest span around the peak with this energy fraction
 
 
 @dataclass(frozen=True)
 class OpticalSpec:
-    template: str               # key of the template file, or "delta" (amplitude trigger)
+    response: str               # template key of the measured single-photon response (unit peak)
     polarity: int               # sign of a pulse: -1 negative-going (PMT), +1 positive (X-ARAPUCA)
-    k: float                    # detection threshold, in channel-noise units of the statistic
-    pre: int                    # support before a detection (samples)
-    post: int                   # support after a detection (samples)
-    gap: int = 0                # close gaps of up to this many samples between support runs
+    k: float = 3.0              # photon significance (matched-filter noise units)
     level: int = 6              # integer Haar levels: coarse block 2^level samples
-    q: float = 1.0              # fine-level threshold (channel sigma of the level)
-    q_levels: int = 3           # rule "support": levels 1..q_levels are thresholded at q; coarser ones are exact
-    rule: str = "support"       # what is stored: "support" (near detections) or "deconv" (where the light is)
-    response: str = ""          # rule "deconv": template key of the full response (unit peak, tail included)
-    residual: float = 0.0       # rule "deconv": also keep differences where the data depart from the light model,
-                                # |d - light's d| >= residual x sigma_j (wrong response, artefacts); 0 off,
-                                # < 0: the universal threshold sqrt(2 ln n_j) (n_j: the window's level-j count)
+    q: float = 1.0              # keep a difference where the light's difference reaches q sigma_j
+    residual: float = 5.0       # ... or where the data depart from the light by residual sigma_j (0: off)
 
 
 SBND = {
-    "pmt": OpticalSpec("pmt", -1, k=3.0, pre=4, post=12, gap=32, rule="deconv", response="pmt_response", residual=5.0),
-    "xarapuca": OpticalSpec("delta", 1, k=4.0, pre=8, post=40, rule="deconv", response="xarapuca_response", residual=5.0),
+    "pmt": OpticalSpec("pmt_response", -1),
+    "xarapuca": OpticalSpec("xarapuca_response", 1),
 }
-
-
-# goop (HELIX's simulated light: 1 ns ticks, white noise 2.6 ADC, ~8000 PE per PMT per event): its
-# own templates (data/goop_optical.npz: "goop" the matched-filter core, "goop_response" the full
-# response measured from goop by least squares, SBND-data-helix scripts/fit_response.py);
-# level 7 (128 ns coarse blocks at 1 ns). OpticalChain(GOOP, templates="goop").
-GOOP = {
-    "goop": OpticalSpec("goop", -1, k=3.0, pre=8, post=24, gap=64, level=7, rule="deconv", response="goop_response",
-                        residual=5.0),
-}
-
-
-def bit_levels(spec):
-    """Fine levels whose candidate differences carry one keep bit each in the shard."""
-    s = spec if isinstance(spec, dict) else dataclasses.asdict(spec)
-    if s.get("rule", "support") == "deconv":
-        return s["level"]
-    return s["q_levels"] if s["q"] > 0 else 0
+# goop (HELIX's simulated light, 1 ns ticks): its own response (data/goop_optical.npz), 128 ns
+# coarse blocks. OpticalChain(GOOP, templates="goop").
+GOOP = {"goop": OpticalSpec("goop_response", -1, level=7)}
 
 
 def make_specs(overrides=None, base=None):
@@ -136,26 +80,48 @@ def load_templates(name="sbnd"):
     return {k: d[k].astype(np.float64) for k in d.files if k != "meta"}, json.loads(str(d["meta"]))
 
 
-def template_lag(template) -> int:
-    """Samples by which the matched-filter output peaks after the peak of a clean pulse."""
+def core_span(h, energy=ENERGY):
+    """(first, last) index of the shortest span of ``h`` around its peak holding ``energy`` of its
+    energy (sum of squares)."""
+    h = np.asarray(h, np.float64); p = int(np.argmax(h)); e = h ** 2; tot = e.sum(); best = (0, len(h) - 1)
+    for a in range(p + 1):
+        c = np.cumsum(e[a:])
+        if c[-1] < energy * tot:
+            break
+        b = a + int(np.searchsorted(c, energy * tot))
+        if b >= p and b - a < best[1] - best[0]:
+            best = (a, b)
+    return best
+
+
+def matched_filter(h):
+    """(zero-mean unit-norm kernel of the response's core, lag of its output after the pulse
+    peak, core samples before / after the peak)."""
     from scipy.signal import convolve
-    t = np.asarray(template, np.float64)
-    if len(t) == 1:
-        return 0
+    h = np.asarray(h, np.float64); p = int(np.argmax(h)); a, b = core_span(h)
+    t = h[a:b + 1]
     u = t - t.mean(); u = u / np.sqrt(np.sum(u ** 2))
-    z = np.zeros(4 * len(t)); s = len(t)
-    z[s:s + len(t)] = t
-    y = convolve(z, u[::-1], mode="same")
-    return int(np.argmax(y)) - (s + int(np.argmax(t)))
+    z = np.zeros(4 * len(t)); s = len(t); z[s:s + len(t)] = t
+    lag = int(np.argmax(convolve(z, u[::-1], mode="same"))) - (s + p - a)
+    return u, lag, p - a, b - p
 
 
-def _filter(template):
-    """(normalised correlation kernel, lag)."""
-    t = np.asarray(template, np.float64)
-    if len(t) == 1:
-        return np.ones(1), 0
-    u = t - t.mean()
-    return u / np.sqrt(np.sum(u ** 2)), template_lag(t)
+def batches(lengths, level, torch_=False):
+    """Windows grouped for batching: [(padded length, row indices (-1: padding row))]. Sorted by
+    length; a batch takes windows whose padded length is within PAD_FRACTION of its longest's."""
+    unit = max(1 << level, BLOCK)
+    Lp = (np.maximum(np.asarray(lengths, np.int64), 1) + unit - 1) // unit * unit
+    order = np.argsort(-Lp, kind="stable"); out = []; i = 0
+    while i < len(order):
+        L = int(Lp[order[i]]); j = i
+        while j < len(order) and Lp[order[j]] * (1 + PAD_FRACTION) >= L:
+            j += 1
+        idx = np.sort(order[i:j])
+        if torch_:
+            nb = len(idx); r = 1 << int(np.ceil(np.log2(nb))) if nb < 256 else -(-nb // 256) * 256
+            idx = np.concatenate([idx, np.full(r - nb, -1, np.int64)])
+        out.append((L, idx)); i = j
+    return out
 
 
 # ---------------------------------------------------------------- array helpers (numpy / torch)
@@ -192,6 +158,7 @@ def unhaar(coarse, details, stored=None):
         x[..., 0::2] = (s + d) / 2; x[..., 1::2] = (s - d) / 2
         s = x
     return s
+
 
 
 def _baseline(y):
@@ -367,7 +334,7 @@ def _channel_median(v, ch):
 class OpticalChain:
     """Encode one event's waveforms of a system (:meth:`process`) and decode them
     (:meth:`reconstruct`). ``specs``: {system: :class:`OpticalSpec`} or overrides of :data:`SBND`;
-    ``templates``: a template file name (``data/<name>_optical.npz``) or {template name: array}."""
+    ``templates``: a template file name (``data/<name>_optical.npz``) or {key: response}."""
 
     def __init__(self, specs=None, device=None, templates="sbnd"):
         self.specs = specs if specs is not None and all(isinstance(v, OpticalSpec) for v in specs.values()) \
@@ -379,48 +346,42 @@ class OpticalChain:
         self.device = device
         self.kind = "torch" if device is not None else "numpy"
         self.wa = backend.import_backend_module("helix.core.hysteresis_ops", self.kind).window_any
+        self._mf = {}
+        self.capture = None                     # a list: (window indices, y, valid, photon train a) per batch
+                                                # are appended to it (helix.optical.calibrate)
 
-    def _kernel(self, spec):
-        return _filter(np.ones(1) if spec.template == "delta" else self.templates[spec.template])
+    def _filter(self, spec):
+        if spec.response not in self._mf:
+            self._mf[spec.response] = matched_filter(self.templates[spec.response])
+        return self._mf[spec.response]
 
-    def _support(self, trig, valid, spec):
-        """Samples from ``pre`` before to ``post`` after a trigger, gaps up to ``gap`` closed."""
-        roi = self.wa(trig & valid, spec.post, spec.pre)
-        if spec.gap > 1:
-            h = spec.gap // 2
-            roi = ~self.wa(~self.wa(roi, h, h), h, h)
-        return roi & valid
-
-    def _deconv_store(self, g, cg, spec):
-        """Rule "deconv": stored masks where the deconvolved light's differences reach q sigma_j,
-        and the samples that mark them for the shard (a stored D1 block, the first sample - valid
-        whenever the block is - of a coarser stored block no finer mark touches)."""
+    def _store(self, g, cg, spec):
+        """Stored masks (where the light's, or the departure from it, difference reaches its
+        threshold) and the samples that mark them for the shard (a stored D1 block, the first
+        sample - valid whenever the block is - of a coarser stored block no finer mark touches)."""
         h = self.templates[spec.response]
         valid = g["valid"]; m = valid.shape[0]; lev = spec.level
-        if self.kind == "torch":
-            import torch
         w = valid.to(g["y"].dtype) if self.kind == "torch" else valid.astype(np.float64)
         y = g["y"] if self.kind == "torch" else g["y"].astype(np.float64)
         lam = spec.k * cg[:, :1] * float(np.sqrt(np.sum(h ** 2)))     # (rows, 1)
-        light = _deconvolve(y, w, lam, h, int(np.argmax(h)))
+        if self.capture is not None:
+            light, a = _deconvolve(y, w, lam, h, int(np.argmax(h)), return_a=True)
+            self.capture.append((g["index"], _host(y * w), _host(valid), _host(a)))
+        else:
+            light = _deconvolve(y, w, lam, h, int(np.argmax(h)))
         _, dl = haar(spec.polarity * light, lev)
         roi = valid & False
         stored = [None] * lev
         for li in range(lev - 1, -1, -1):                            # D1 first
             B = 1 << (lev - li); nbk = dl[li].shape[1]
+            sj = cg[:, 1 + li:2 + li]; ok = valid.reshape(m, nbk, B).any(-1)
             a = dl[li].abs() if self.kind == "torch" else np.abs(dl[li])
-            s_ = (a >= spec.q * cg[:, 1 + li:2 + li]) & valid.reshape(m, nbk, B).any(-1)
+            s_ = (a >= spec.q * sj) & ok
             if spec.residual:                                        # what the light model does not explain
                 d = g["details"][li]
                 r_ = (d.to(dl[li].dtype) if self.kind == "torch" else d.astype(np.float64)) - dl[li]
                 r_ = r_.abs() if self.kind == "torch" else np.abs(r_)
-                if spec.residual > 0:
-                    tau = spec.residual
-                else:
-                    nj = np.maximum(_host(g["n"]) >> (lev - li), 2).astype(np.float64)
-                    tau = np.sqrt(2 * np.log(nj))[:, None]
-                    tau = torch.as_tensor(tau, dtype=r_.dtype, device=r_.device) if self.kind == "torch" else tau
-                s_ = s_ | ((r_ >= tau * cg[:, 1 + li:2 + li]) & valid.reshape(m, nbk, B).any(-1))
+                s_ = s_ | ((r_ >= spec.residual * sj) & ok)
             stored[li] = s_
             r3 = roi.reshape(m, nbk, B)
             if B == 2:
@@ -457,44 +418,37 @@ class OpticalChain:
         return X, valid, nt, med
 
     def process(self, system, wf):
-        """One system's waveforms of one event (``io_sbnd.SBNDEvents.optical``: channel, t_us,
-        length, offset, buf) -> dict(system, spec, channel, t_us, length, groups, noise, n_kept,
-        n_samples). Each group (waveforms of one padded length L): index, L, roi (support),
-        coarse, details [d_level..d_1], stored masks; ``noise``: per channel, the statistic's
-        noise and each level's sigma."""
+        """One system's waveforms of one event (channel, t_us, length, offset, buf) -> dict(system,
+        spec, channel, t_us, length, groups, noise, n_kept, n_samples). Each group (a batch of
+        windows): index, L, roi (marks of the stored blocks), coarse, details [d_level..d_1],
+        stored masks; ``noise``: per channel, the statistic's noise and each level's sigma."""
         spec = self.specs[system]
-        u, lag = self._kernel(spec)
+        u, lag, pre, post = self._filter(spec)
         n_all = np.asarray(wf["length"], np.int64)
         chans = np.asarray(wf["channel"])
+        lev = spec.level
         if len(n_all) == 0:                                      # no window of this system in the event
             return dict(system=system, spec=dataclasses.asdict(spec), channel=chans, t_us=np.asarray(wf["t_us"]),
                         length=n_all, groups=[], n_kept=0, n_samples=0,
                         noise=dict(channel=np.zeros(0, np.int32), stat=np.zeros(0, np.float32),
-                                   level=np.zeros((0, spec.level), np.float32)))
-        mult = np.where(n_all > 2048, 1024, 256)
-        Lpad = (np.ceil(np.maximum(n_all, 1) / mult) * mult).astype(np.int64)
+                                   level=np.zeros((0, lev), np.float32)))
         buf = np.asarray(wf["buf"])
         if self.kind == "torch":
             import torch
             buf = torch.as_tensor(buf.view(np.int16) if buf.dtype == np.uint16 else buf.astype(np.int32)).to(self.device)
-            if buf.dtype == torch.int16:                         # 14-bit codes: int16 on the way, int32 here
+            if buf.dtype == torch.int16:                         # 14/15-bit codes: int16 on the way, int32 here
                 buf = buf.to(torch.int32)
-        lev = spec.level
-        # pass 1: statistic and transform per group; noise per window
+        # pass 1: statistic and transform per batch; noise per window
         groups, wnoise, rows = [], [], []
-        for L in np.unique(Lpad):
-            idx = np.where(Lpad == L)[0]
-            nb = len(idx)
-            if self.kind == "torch":
-                idx = np.concatenate([idx, np.full((-nb) % _ROWS, -1, np.int64)])
-            X, valid, n, med = self._batch(wf, idx, int(L), buf)
+        for L, idx in batches(n_all, lev, self.kind == "torch"):
+            nb = int((idx >= 0).sum())
+            X, valid, n, med = self._batch(wf, idx, L, buf)
             y = X.to(torch.float32) - med[:, None] if self.kind == "torch" else X.astype(np.float32) - med[:, None]
-            z = spec.polarity * (y - _baseline(y))
-            z = z * valid
+            z = spec.polarity * (y - _baseline(y)) * valid
             stat = _correlate(z, u, lag) * valid
             coarse, details = haar(X, lev)
-            groups.append(dict(index=idx, L=int(L), nb=nb, X=X, n=n, valid=valid, stat=stat, coarse=coarse, details=details,
-                               y=spec.polarity * y if spec.rule == "deconv" else None))
+            groups.append(dict(index=idx, L=L, nb=nb, X=X, n=n, valid=valid, stat=stat, coarse=coarse, details=details,
+                               y=spec.polarity * y))
             wnoise.append(_quiet_rms(stat, n)); rows.append(idx)
         idx_all = np.concatenate(rows)
         ch_rows = np.where(idx_all >= 0, chans[np.maximum(idx_all, 0)], -1)
@@ -505,63 +459,51 @@ class OpticalChain:
             v = v.reshape(len(v), -1)
             v[dead] = np.nan
             return _channel_median(v, ch_rows)
-        # noise from where there is no light: a first support from the median-stretch noise,
-        # then the statistic's and every level's clipped rms outside it
+        # noise and pedestal from where there is no light: triggers at k (first from the
+        # median-stretch noise) widened by the response's core span
         cn0, wnoise, wbase, off = channel(wnoise), [], [], 0
         for g in groups:
             m = len(g["index"]); c0 = cn0[off:off + m, :1]; off += m
             if self.kind == "torch":
                 c0 = torch.as_tensor(c0, dtype=torch.float32, device=self.device)
-            sup = self._support(g["stat"] > spec.k * c0, g["valid"], spec)
+            lit = self.wa((g["stat"] > spec.k * c0) & g["valid"], post, pre) | ~g["valid"]
             zero = torch.zeros(m, device=self.device) if self.kind == "torch" else np.zeros(m)
-            est = [robust.clipped_stats(g["stat"], mask=sup | ~g["valid"], center=zero)[1]]
+            est = [robust.clipped_stats(g["stat"], mask=lit, center=zero)[1]]
             for li, d in enumerate(g["details"]):
                 j = lev - li
-                cm = sup.reshape(m, d.shape[1], 1 << j).any(-1)
+                cm = lit.reshape(m, d.shape[1], 1 << j).any(-1)
                 pad = np.arange(d.shape[1])[None, :] >= (_host(g["n"]) >> j)[:, None]
                 cm = cm | (torch.as_tensor(pad, device=self.device) if self.kind == "torch" else pad)
                 est.append(robust.clipped_stats(d.to(torch.float32) if self.kind == "torch" else d.astype(np.float32),
                                                 mask=cm, center=zero)[1])
             wnoise.append(torch.stack(est, 1) if self.kind == "torch" else np.stack(est, 1))
-            if spec.rule == "deconv":                             # the window's clipped mean where there is no light
-                wbase.append(robust.clipped_stats(g["y"], mask=sup | ~g["valid"])[0][:, None])
+            wbase.append(robust.clipped_stats(g["y"], mask=lit)[0][:, None])
         cn = channel(wnoise)
-        cbase = channel(wbase) if wbase else None                 # the channel's pedestal: light below the trigger
-                                                                  # lifts a lit window's own estimate, not the median
+        cbase = channel(wbase)
         uch = np.unique(chans)
         first = {c: i for i, c in reversed(list(enumerate(ch_rows)))}
         noise = dict(channel=uch.astype(np.int32), stat=np.array([cn[first[c], 0] for c in uch], np.float32),
                      level=np.array([cn[first[c], 1:] for c in uch], np.float32).reshape(len(uch), lev))
-        # pass 2: support and stored masks
+        # pass 2: the light and the stored masks
         kept, off = [], 0
         out = []
         for g in groups:
             m = len(g["index"])
-            cg = cn[off:off + m]; cb = cbase[off:off + m] if cbase is not None else None; off += m
+            cg = cn[off:off + m]; cb = cbase[off:off + m]; off += m
             if self.kind == "torch":
                 cg = torch.as_tensor(cg, dtype=torch.float32, device=self.device)
-                cb = torch.as_tensor(cb, dtype=torch.float32, device=self.device) if cb is not None else None
-            if cb is not None:
-                g["y"] = (g["y"] - cb) * g["valid"]
-            if spec.rule == "deconv":
-                roi, stored = self._deconv_store(g, cg, spec)
-            else:
-                roi = self._support(g["stat"] > spec.k * cg[:, :1], g["valid"], spec)
-                stored = []
-                for li, d in enumerate(g["details"]):
-                    j = lev - li
-                    s_ = roi.reshape(m, d.shape[1], 1 << j).any(-1)
-                    if j <= spec.q_levels and spec.q > 0:
-                        a = d.abs() if self.kind == "torch" else np.abs(d)
-                        s_ = s_ & (a >= spec.q * cg[:, 1 + li:2 + li])
-                    stored.append(s_)
-            nb = g["nb"]
-            sl = slice(0, nb)
+                cb = torch.as_tensor(cb, dtype=torch.float32, device=self.device)
+            g["y"] = (g["y"] - cb) * g["valid"]
+            roi, stored = self._store(g, cg, spec)
+            sl = np.nonzero(g["index"] >= 0)[0]
+            if self.kind == "torch":
+                sl = torch.as_tensor(sl, device=self.device)
+            idx = g["index"][g["index"] >= 0]
             roi, coarse = roi[sl], g["coarse"][sl]
             details, stored = [d[sl] for d in g["details"]], [s_[sl] for s_ in stored]
             kept.append(sum(s_.sum() for s_ in stored))
-            out.append(dict(index=g["index"][:nb], L=g["L"], level=lev, roi=roi, coarse=coarse, details=details,
-                            stored=stored, lengths=n_all[g["index"][:nb]]))
+            out.append(dict(index=idx, L=g["L"], level=lev, roi=roi, coarse=coarse, details=details,
+                            stored=stored, lengths=n_all[idx]))
         n_kept = int(sum(int(k) for k in kept)) if self.kind == "numpy" else int(torch.stack(kept).sum())
         n_kept += int(sum(-(-n_all // (1 << lev))))               # coarse sums within each window
         return dict(system=system, spec=dataclasses.asdict(spec), channel=chans, t_us=np.asarray(wf["t_us"]),

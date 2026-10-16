@@ -4,7 +4,7 @@
     (helix.tpc.sbnd_run) and goop's simulated PMTs (helix.optical.goop_run, codec.GOOP):
     deconvolve with the system's measured response, keep the integer-Haar differences where the
     light (or the departure from it) reaches threshold, coarse sums always; optical shards
-    (helix.tpc.sparse_io) and 128-slot tokens (helix.optical.tokens);
+    (helix.optical.shard, one modality per file next to the TPC shards) and 128-slot tokens (helix.optical.tokens);
   * the earlier goop pipeline (process_event: coif3 + VisuShrink + quantization) is kept as the
     reference - it loses most isolated photons and part of the slow light.
 """

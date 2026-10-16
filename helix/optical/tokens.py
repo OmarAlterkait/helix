@@ -31,7 +31,7 @@ def layout(level):
 
 
 def waveform_tokens(wf):
-    """One waveform of :func:`helix.tpc.sparse_io.read_optical` -> dict(kind, first_sample,
+    """One waveform of :func:`helix.optical.shard.read_optical` -> dict(kind, first_sample,
     values (T, 128) float32, mask (T, 128) bool, sigma (T, 128) float32, base)."""
     lev = wf["level"]
     per = layout(lev)
@@ -62,7 +62,7 @@ def waveform_tokens(wf):
 
 def from_tokens(tok, length, level):
     """Inverse of :func:`waveform_tokens` for one waveform -> (coarse, details, stored) as
-    :func:`helix.tpc.sparse_io.read_optical` gives them (coarse sums over the stored windows)."""
+    :func:`helix.optical.shard.read_optical` gives them (coarse sums over the stored windows)."""
     per = layout(level)
     n_co = -(-length // (1 << level))
     Lw = n_co << level
@@ -85,7 +85,7 @@ def from_tokens(tok, length, level):
 def shard_tokens(path, system, event):
     """Tokens of one event's waveforms of ``system`` -> dict(waveform, channel, t_us, kind,
     first_sample, values, mask, sigma) per token."""
-    from helix.tpc.sparse_io import read_optical
+    from helix.optical.shard import read_optical
     out = {k: [] for k in ("waveform", "channel", "t_us", "kind", "first_sample", "values", "mask", "sigma")}
     for w, wf in enumerate(read_optical(path, system, event)):
         tk = waveform_tokens(wf)
