@@ -58,8 +58,9 @@ class AddNoise:
     # This signature imported all five of these constants and then re-typed their
     # values inline (group_size=64, coh_rms=2.5, 20000.0, 1.5, beta=0.15). They
     # agreed, so nothing failed -- but retuning the forward model in noise.py
-    # would have left the registered transform silently on the old values. Same
-    # drift that DetectorConfig's third copy of the ENC triple allowed.
+    # would have left the registered transform silently on the old values. (The
+    # retired detector-config class carried a third copy of the ENC triple and
+    # allowed the same drift.)
     def __init__(self, incoherent=False, coherent=True,
                  group_size=DEFAULT_GROUP_SIZE,
                  wire_lengths_m=None, enc=DEFAULT_ENC,

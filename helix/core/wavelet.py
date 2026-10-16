@@ -2,7 +2,7 @@
 
 This is the piece shared by the TPC (wire) and optical (PMT) pipelines: a
 per-signal 1-D DWT, coefficient thresholding, and inverse DWT. The actual
-array math lives in ``wavelet_ops_{numpy,jax,torch}.py``; this module only
+array math lives in ``wavelet_ops_{numpy,torch}.py``; this module only
 holds the backend-independent data structures and the dispatch entry points.
 
 Threshold strategies (validated by the optical sweep + the prior handoff):
@@ -38,53 +38,12 @@ class ThresholdSpec:
     threshold_approx: bool = False  # universal: also threshold the approx band (else keep it)
 
 
-class FlatBands:
-    """A band list backed by ONE flat ``(..., sum(lens))`` array.
-
-    The jax path keeps coefficients flat end to end: ``wavedec`` produces one
-    array, the gate and threshold consume and return it untouched, and only the
-    final sparse extraction leaves the device. Indexing yields cheap slice views,
-    so len(), integer indexing and iteration still work — but the jax ops detect
-    this type and operate on ``.flat`` directly, avoiding the
-    concatenate/split round trip that a real list forces (four full-array copies
-    per plane, which cost more than the dispatches it saved).
-    """
-    __slots__ = ("flat", "lens", "offs")
-
-    def __init__(self, flat, lens):
-        self.flat = flat
-        self.lens = tuple(int(x) for x in lens)
-        o, acc = [0], 0
-        for L in self.lens:
-            acc += L; o.append(acc)
-        self.offs = tuple(o)
-
-    def __len__(self):
-        return len(self.lens)
-
-    def __getitem__(self, i):
-        # int only -- but iteration still works, and is still used. `__iter__` and
-        # like() and the slice branch were removed as uncalled; that was right for
-        # like() and the slice branch and WRONG for `__iter__`, which has live
-        # callers (tpc/pipeline.py's band_lengths, tests/test_gate_backends.py).
-        # They keep working because Python falls back to the legacy sequence
-        # protocol -- __getitem__(0), (1), ... until IndexError -- and `offs` has
-        # len(lens)+1 entries, so `offs[i + 1]` raises that IndexError at exactly
-        # the right index. Same bands, same terminator, measurably faster. Do not
-        # "fix" the missing __iter__ back in without re-checking that; and do not
-        # let `offs` lose its trailing entry, which is what makes iteration
-        # terminate.
-        if i < 0:
-            i += len(self)
-        return self.flat[..., self.offs[i]:self.offs[i + 1]]
-
-
 @dataclass
 class SparseResult:
     """Thresholded DWT coefficients + bookkeeping.
 
-    ``coeffs`` is backend-native: a list ``[cA, cD_L, …, cD_1]`` on the numpy
-    backend, a flat ``(n_signals, n_coeffs)`` array on jax/torch (matmul DWT).
+    ``coeffs`` is backend-native: a list ``[cA, cD_L, …, cD_1]`` of numpy arrays
+    or torch tensors.
     """
     coeffs: Any
     n_kept: int

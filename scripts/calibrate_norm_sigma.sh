@@ -7,8 +7,8 @@
 # corpus, not run 0's first shard. Each run contributes an equal sample; the
 # grand mean is their average.
 #
-# torch backend: no JIT warmup, so a short 100-event calibration pass does not
-# pay jax's ~35 s compile eight times over.
+# torch backend: no JIT warmup, so a short 100-event calibration pass pays
+# almost nothing to start, eight times over.
 #
 # SERIAL mode, not loader: loader globs the whole run and indexes all 100 shard
 # files before the first event. On a COLD run that measured 6433 ms/file -> ~11
@@ -49,7 +49,6 @@ N=${1:-100}
 # coherent that setting leaves behind, and must not be reused at another.
 KGATE=${KGATE:-}
 KG_ARG=""; [ -n "$KGATE" ] && KG_ARG="--kgate $KGATE"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 [ -s "$CALIB/RUNS.txt" ] || { echo "FATAL: $CALIB/RUNS.txt missing (one run name per line or space-separated)"; exit 1; }
 RUNS=$(tr '\n' ' ' < "$CALIB/RUNS.txt")

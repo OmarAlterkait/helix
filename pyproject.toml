@@ -63,21 +63,15 @@ export = ["safetensors>=0.4"]
 # training integration; use the container (docs/ARCHITECTURE.md section 4).
 pimm = ["pimm-data>=0.4.0"]
 
-# Backend frameworks are optional: helix.core imports only the selected one
-# lazily. NumPy (base dep) is always available; add jax and/or torch as needed.
-jax-cpu = ["jax[cpu]>=0.4.20"]
-jax-gpu = ["jax[cuda12]>=0.4.20"]
+# The backend framework is optional: helix.core imports torch lazily, only when
+# the torch backend is selected. NumPy (base dep) is always available.
 torch-cpu = ["torch>=2.0"]          # CPU wheels: pip install --index-url https://download.pytorch.org/whl/cpu
-cpu = ["jax[cpu]>=0.4.20", "torch>=2.0"]
-gpu = ["jax[cuda12]>=0.4.20", "torch>=2.0"]
+cpu = ["torch>=2.0"]
+gpu = ["torch>=2.0"]
 dev = [
     "pytest>=7.0",
     "pytest-benchmark",
 ]
-
-[project.scripts]
-helix = "helix.tpc.run:main"
-helix-tpc = "helix.tpc.run:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

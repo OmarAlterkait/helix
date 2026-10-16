@@ -1,5 +1,5 @@
 """The simulation through the TPC chain (helix.tpc.chain SIM_BASE / sim_config): the layout
-readout, parity with the earlier simulation path, and the CoeffEvent / clean target."""
+readout, the chain output pinned on synthetic planes, and the CoeffEvent / clean target."""
 import numpy as np
 import pytest
 
@@ -34,19 +34,35 @@ def test_layout_readout():
     lab = ro.labels("block", rows[0]); assert (np.diff(lab) >= 0).all() and len(np.unique(lab)) == 3
 
 
-def test_chain_matches_the_earlier_simulation_path():
-    """Same gate, threshold and basis: the chain with D1 kept equals process_plane(gate) (numpy)."""
-    from helix.tpc.config import DetectorConfig
-    from helix.tpc.pipeline import process_plane
+#: The chain's output on ``_planes()`` with D1 kept (numpy), pinned when the chain was
+#: validated against the earlier simulation path (the retired per-plane pipeline with
+#: the gate: equal to rtol 1e-5 / atol 1e-4 on every band). That path is gone;
+#: these numbers keep the parity it established.
+_PINNED_KEPT = [[389, 394, 397, 420, 316], [407, 416, 420, 403, 315], [408, 390, 381, 442, 332]]
+_PINNED_ABS_SUM = [30274.419497966766, 30496.596704006195, 30297.72803211212]
+_PINNED_POSITIONS = "1fd2b2f6f05f3f2eb512a353311c86311c0801a56046c167eb3e511a17b0eed6"
+
+
+def test_chain_output_is_pinned_on_the_synthetic_planes():
+    """Same gate, threshold and basis as the earlier simulation path: kept count per
+    band, a hash of the kept positions, and the kept magnitude are unchanged (numpy)."""
+    import hashlib
     clean, noisy = _planes()
     ch = TPCChain(sim_config([[len(x) for x in noisy]], {"threshold": {"drop_finest": 0}}))
     res = ch.process_images(noisy, tpc=0)
-    cfg = DetectorConfig(num_time_steps=noisy[0].shape[1])
-    for x, r in zip(noisy, res):
-        ref = process_plane(x, cfg, removal="gate", with_images=False).sparse.coeffs
-        assert len(ref) == len(r["bands"])
-        for a, b in zip(ref, r["bands"]):
-            np.testing.assert_allclose(np.asarray(b), np.asarray(a), rtol=1e-5, atol=1e-4)
+    h = hashlib.sha256()
+    kept, abs_sum = [], []
+    for r in res:
+        bands = [np.asarray(b) for b in r["bands"]]
+        kept.append([int(np.count_nonzero(b)) for b in bands])
+        abs_sum.append(float(sum(np.abs(b.astype(np.float64)).sum() for b in bands)))
+        for b in bands:
+            idx = np.flatnonzero(b).astype(np.int64)
+            h.update(np.int64(idx.size).tobytes()); h.update(idx.tobytes())
+    assert kept == _PINNED_KEPT
+    assert [r["n_kept"] for r in res] == [sum(k) for k in _PINNED_KEPT]
+    assert h.hexdigest() == _PINNED_POSITIONS
+    np.testing.assert_allclose(abs_sum, _PINNED_ABS_SUM, rtol=1e-5)
 
 
 def test_sim_coeff_event_and_clean_target():

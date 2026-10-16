@@ -149,9 +149,8 @@ def regenerate_planes(shard_path, run, ev, geom_path, npz):
     from helix.core import backend as _backend
     _backend.set_backend("torch")
     from helix.tpc import dense_ops as _dops
-    from helix.tpc.config import DetectorConfig
-    from helix.tpc.io import config_from_file, read_sensor_event_coo
-    from helix.tpc.pipeline import canonical_plane_gid
+    from helix.tpc.chain import SIM_BASE
+    from helix.tpc.io import read_sensor_event_coo, sensor_layout
     from pimm_data.geometry import load_plane_registry
 
     spec = None
@@ -162,18 +161,18 @@ def regenerate_planes(shard_path, run, ev, geom_path, npz):
         spec = (z["spectrum_freqs_hz"], z["spectrum_shape"])
 
     reg = load_plane_registry(geom_path)
-    base = config_from_file(shard_path)
-    cfg = DetectorConfig(num_time_steps=base.num_time_steps,
-                         plane_labels=base.plane_labels, pedestals=base.pedestals)
+    layout = sensor_layout(shard_path)
+    # The coherent noise model's group width, the one the builder reads off the chain.
+    group_size = int(SIM_BASE["readout"]["group_size"])
     seed = int.from_bytes(
         hashlib.blake2b(f"{run}/{osp.basename(shard_path)}/ev{ev}".encode(),
                         digest_size=8).digest(), "little") & 0xFFFFFFFF
 
-    coo = read_sensor_event_coo(shard_path, ev, cfg)
+    coo = read_sensor_event_coo(shard_path, ev, layout)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     w_l, t_l, v_l, p_l, gmap = [], [], [], [], {}
     for label, (w, t, v, nw, nt) in coo.items():
-        gid = canonical_plane_gid(label)
+        gid = layout.plane_gid(label)
         gmap[gid] = label
         w_l.append(torch.as_tensor(np.asarray(w), dtype=torch.long, device=dev))
         t_l.append(torch.as_tensor(np.asarray(t), dtype=torch.long, device=dev))
@@ -187,8 +186,8 @@ def regenerate_planes(shard_path, run, ev, geom_path, npz):
     clean = {int(g): x[0].detach().cpu().numpy().copy() for g, x in grids.items()}
     grids = _dops.add_intrinsic_noise(grids, reg, seeds=[seed], incoherent=True,
                                       coherent=True, series_spectrum=spec,
-                                      group_size=cfg.group_size)
-    peds = {int(g): cfg.pedestals.get(gmap[int(g)].split("_")[-1], 0) for g in grids}
+                                      group_size=group_size)
+    peds = {int(g): layout.pedestal(gmap[int(g)]) for g in grids}
     grids = _dops.digitize(grids, peds, n_bits=12)
     noisy = {int(g): x[0].detach().cpu().numpy() for g, x in grids.items()}
     return noisy, clean, seed
@@ -307,40 +306,23 @@ def main():
         print(f"noise seed {seed} matches the corpus")
 
     if a.removal == "r1":
-        # helix's OWN gate, not a scratch prototype. This used to
-        # sys.path.insert an experiment directory and import `r1_gate`, so the
-        # `--removal r1` branch could not run from a clone at all. That module
-        # was the prototype of what shipped as
-        # helix.tpc.coherent_gate.gate_band(..., tau=...) -- it even imported
-        # helix's own _detect_signal/_sigc -- so the productionised version is
-        # the same computation, and using it also means this figure exercises
-        # the code the corpus was actually built with.
-        from helix.tpc.coherent_gate_ops_torch import gate_band as _gate_r1
+        # helix's OWN gate: the corpus chain (helix.tpc.chain.sim_config, the
+        # contiguous-block gate) with its occupancy tolerance set to --r1-tau,
+        # run on the regenerated noisy planes exactly as the builder feeds them.
+        # The figure shows the thresholded coefficients reconstructed.
         from helix.core import backend as _bk
-        from helix.core.wavelet import (SparseResult, reconstruct as _rec,
-                                        threshold_bands as _thr, wavedec as _wd)
-        from helix.tpc.config import DetectorConfig
-        from helix.tpc.io import config_from_file
-        from helix.tpc.pipeline import _pad_time
-        from r1_gate import gate_band_r1
-        import torch as _t
+        from helix.tpc import chain_coeff as _cc
+        from helix.tpc.chain import TPCChain, sim_config
+        from helix.tpc.corpus import process_planes
+        from helix.tpc.io import sensor_layout
         _bk.set_backend("numpy")
-        _base = config_from_file(sensor_shard)
-        _cfg = DetectorConfig(num_time_steps=_base.num_time_steps,
-                              plane_labels=_base.plane_labels, pedestals=_base.pedestals)
+        _layout = sensor_layout(sensor_shard)
+        _chain = TPCChain(sim_config(_layout.num_wires, {"coherent": {"tau": a.r1_tau}}))
+        _lev, _wav = _chain.cfg["dwt"]["level"], _chain.cfg["dwt"]["wavelet"]
         removed_all = {}
-        for _g, _img in noisy_all.items():
-            _co, _lev = _wd(_pad_time(_img.astype(np.float32), _cfg.dwt_level),
-                            wavelet=_cfg.wavelet, level=_cfg.dwt_level, mode=_cfg.dwt_mode)
-            _gt = [np.asarray(_gate_r1(
-                _t.as_tensor(np.asarray(_b2, np.float32)), group_size=_cfg.group_size,
-                kgate=[_cfg.gate_kgate] * _cfg.gate_npass, ksig=_cfg.gate_ksig,
-                npass=_cfg.gate_npass, tau=a.r1_tau).numpy(), np.float32) for _b2 in _co]
-            _o, _nk, _nt2, _bs = _thr(_gt, _cfg.threshold_spec())
-            removed_all[_g] = _rec(SparseResult(coeffs=_o, n_kept=_nk, n_total=_nt2,
-                                                sigma_per_band=_bs, wavelet=_cfg.wavelet,
-                                                level=_lev, mode=_cfg.dwt_mode),
-                                   _cfg.num_time_steps)
+        for _r in process_planes(_chain, {g: np.asarray(x, np.float32) for g, x in noisy_all.items()}):
+            removed_all[_cc.plane_gid(_chain, _r)] = np.asarray(
+                _chain._rec(_r["bands"], _wav, _lev, _r["n_ticks"]))[:, :_layout.num_time_steps]
         kg_lbl = f"R1(tau={a.r1_tau:g})"
 
     REMOVED_TITLE = {

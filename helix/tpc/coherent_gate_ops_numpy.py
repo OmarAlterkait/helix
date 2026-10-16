@@ -1,7 +1,8 @@
 """NumPy backend for coefficient-space smart gating (the qualified R2).
 
-Backend module of the ``helix.tpc.coherent_gate_ops`` family — dispatched via
-``backend.ops()``; call it through :func:`helix.tpc.coherent_gate.coherent_gate`.
+Backend module of the ``helix.tpc.coherent_gate_ops`` family — the TPC chain's
+``block_gate`` (:class:`helix.tpc.chain.TPCChain`) picks it, or its torch twin, with
+``backend.import_backend_module``.
 
 One self-contained, parameterized function: `coherent_gate(bands, …)`. Given the
 per-band DWT coefficients of a plane, it removes the common-mode coherent noise
@@ -23,6 +24,16 @@ cost (the qualified 2-pass result).
 Qualified default: kgate=3.0, ksig=3.0, npass=2, group_size=64, A-parity `sigc`
 (`quantile(0.5)`). See research/r2_qualification/REPORT.md. Ported from
 `measure_coeffs.smart_gate_bands` (1-pass) + `r2_qualification/grid.py` (2-pass).
+
+BACKENDS AGREE TO ~1e-4 ADC, NOT EXACTLY, and that is inherent rather than a
+defect to chase. Measured on a real event (6 planes x 5 bands, 46.5M
+coefficients): max |numpy - torch| = 1.2e-4 ADC, unchanged by ``npass`` or
+``tau``. Three things compose to produce it — float32 reductions whose result
+depends on summation order (the masked mean, the MAD), discrete threshold
+comparisons taken on those floats, and a broadcast that applies one block
+decision to all 64 wires. A corpus is therefore BACKEND-specific as well as
+architecture-specific, which is why ``scripts/submit_coeff_corpus.sh`` pins the
+GPU generation and every build passes ``--backend torch``.
 """
 from __future__ import annotations
 

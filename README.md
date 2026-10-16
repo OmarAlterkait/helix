@@ -31,14 +31,14 @@ helix was developed on — they are defaults, not truths.
 
     pip install -e .                 # DSP only: numpy, h5py, PyWavelets, scipy
     pip install -e ".[pimm]"         # + the data layer, for the corpus and training
-    pip install -e ".[gpu]"          # + jax and torch
+    pip install -e ".[gpu]"          # + torch
     pip install -e ".[probe]"        # + hdf5plugin and torch, to read shards and fit
 
 Or skip all of it and use the image, which has everything:
 
     /sdf/data/neutrino/omara/images/helix-train.sif
 
-torch and jax are **optional**. `helix.core` and `helix.tpc` import with neither,
+torch is **optional**. `helix.core` and `helix.tpc` import without it,
 and a test enforces it — that is what lets the DSP half run where the training
 stack does not exist.
 
@@ -75,18 +75,18 @@ must be rebuilt when pimm-data changes. `docs/ARCHITECTURE.md` §3 has the detai
 
 ## Pipeline
 
+Both the simulation corpus and SBND data run through one chain,
+`helix.tpc.chain.TPCChain` (simulation: `sim_config(layout.num_wires)`; SBND:
+`SBND_DEFAULT`): pedestal and channel status, DWT, coherent removal, threshold.
+
 ### 1. Coherent noise removal
 
-Multi-pass mask accumulation. Each pass detects additional sub-threshold signal
-on the cleaned output, augments the mask, then re-estimates coherent noise from
-the **original** image:
-
-| Pass | Operation |
-|------|-----------|
-| 1 | group_median -> residual -> mask(3 sigma) -> dilate(11) -> masked_mean -> alpha x subtract |
-| 2-3 | detect on cleaned -> augment mask -> re-estimate from original -> alpha x subtract |
-
-`alpha = n_unflagged / group_size` scales subtraction by estimation confidence.
+A coefficient-space gate (no image round trip: the DWT is linear). Per band and
+per pass, a robust common mode is estimated per block of wires (64-wire blocks
+in simulation, `helix.tpc.coherent_gate_ops_numpy`; front-end-board groups across
+planes on SBND, `helix.tpc.coherent_gate_labels`), subtracted where it looks like
+coherent noise and refused where it looks like signal. Two passes: the second
+excludes signal detected on the first pass's output.
 
 The production gate also applies an occupancy tolerance, `tau = 0.05` — 3 wires
 of 64. Measured over 1,200 (event, plane) pairs it gives **5.32x lower stripe
@@ -96,8 +96,10 @@ difference between the two corpus generations, and mixing them is the failure
 
 ### 2. Wavelet sparsification
 
-Per-wire coif3 DWT (level 4) with Donoho-Johnstone universal hard threshold
-(kappa = 1.0). GPU paths use matmul-based DWT/IDWT.
+Per-wire coif3 DWT (level 4, periodization) with a hysteresis hard threshold
+(`helix.tpc.threshold_rows`): seeds at the universal threshold (kappa = 1.0),
+grown through 2 sigma; the finest detail band D1 is dropped. The torch backend
+uses an FFT DWT that is coefficient-identical to pywt.
 
 ### 3. The model
 
@@ -109,24 +111,22 @@ from **0.53 to 0.85**, at a cost on random masking within noise of zero. See
 ## Python API
 
 ```python
-from helix import DetectorConfig, process_plane, process_event
+from helix.tpc.chain import TPCChain, sim_config
+from helix.tpc.corpus import process_planes
+from helix.tpc.io import sensor_layout
+from helix.tpc import chain_coeff
 
-config = DetectorConfig()
-result = process_plane(image, config)
-
-result.cleaned          # coherent noise removed
-result.reconstructed    # wavelet-denoised reconstruction
-result.sparse.sparsity  # fraction of zero coefficients
+layout = sensor_layout("sensor.h5")
+chain = TPCChain(sim_config(layout.num_wires))      # device="cuda" for torch
+results = process_planes(chain, noisy_planes)       # {gid: (wires, ticks) image}
+ce = chain_coeff.coeff_event(chain, results)        # -> CoeffEvent
 ```
 
-## CLI
+## Command line
 
 ```bash
-helix --input sensor.h5 --output processed.h5
-helix --input sensor.h5 --output processed.h5 --events 0-19
-helix --input sensor.h5 --output processed.h5 --removal gate   # gate|multipass|none
-helix --input sensor.h5 --output processed.h5 --to-coeffs      # write a coefficient shard
-helix --input sensor.h5 --output processed.h5 --backend jax
+python scripts/build_coeff_corpus.py --out <corpus dir> ...        # simulation corpus
+python -m helix.tpc.sbnd_run --input RUN_DIR/*.h5 --output OUT/PREFIX --device cuda   # SBND
 ```
 
 ## DSP performance
@@ -150,7 +150,6 @@ spectrum) + flat white noise + coherent group noise.
 | Backend | Per plane | Per event (6 planes) |
 |---------|-----------|---------------------|
 | NumPy (CPU) | 176 ms | 1.1 s |
-| JAX (GPU) | 1.5 ms | 9 ms |
 
 The corpus builder defaults to `--backend torch` (10.6 ms/plane), which is what
 built the current corpus.

@@ -29,9 +29,11 @@ not. There is one copy of each, and the mirror test retired with the mirror.
 ``docs/ARCHITECTURE.md`` section 8.)
 
 Note this is the FORWARD model — noise injection and digitisation, what the
-detector does to a signal. ``helix.tpc.coherent`` is the INVERSE (coherent-noise
-removal); the two must agree on the grouping convention, which is the whole
-"don't drift" contract.
+detector does to a signal. The TPC chain's block gate
+(:mod:`helix.tpc.coherent_gate_ops_numpy`, ``group_size`` from
+:data:`helix.tpc.chain.SIM_BASE`) is the INVERSE (coherent-noise removal); the
+two must agree on the grouping convention, which is the whole "don't drift"
+contract.
 """
 
 from __future__ import annotations

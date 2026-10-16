@@ -108,8 +108,7 @@ def test_addnoise_defaults_come_from_the_noise_module():
     The signature imported five constants from helix.tpc.noise and then re-typed
     their values inline. They agreed, so nothing failed -- but retuning the
     forward model would have left the registered transform on the old values,
-    with the corpus builder and the trainer disagreeing silently. Same drift as
-    DetectorConfig's third copy of the ENC triple (test_forward_noise.py).
+    with the corpus builder and the trainer disagreeing silently.
     """
     import inspect
     from helix.tpc import noise as N

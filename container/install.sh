@@ -9,7 +9,6 @@
 #
 # Inputs, all optional:
 #
-#   JAX_EXTRA       cuda12 (default) or cpu. See the hazard note below.
 #   PIMM_DATA_REV   override the revision. Defaults to the one pyproject.toml
 #                   pins, which is the point: the image and a dev install cannot
 #                   name different revisions, because they read the same line.
@@ -22,7 +21,6 @@ set -e
 
 VENV=${VENV:-/opt/pimm/.venv}
 UV=${UV:-/usr/local/uv/bin/uv}
-JAX_EXTRA=${JAX_EXTRA:-cuda12}
 HELIX_PYPROJECT=${HELIX_PYPROJECT:-/opt/helix-build/pyproject.toml}
 
 # uv installs by hardlinking out of its cache, and in a build sandbox those links
@@ -90,16 +88,11 @@ echo "pimm-data revision: $PIMM_DATA_REV (from ${PIMM_DATA_REV_SOURCE:-$HELIX_PY
 #   PyWavelets  helix's DSP half -- its only dep not already here.
 #   pytest      because the first thing anyone does with a new environment is ask
 #               whether it works, and the base image has no runner.
-#   jax         $JAX_EXTRA. The hazard is NOT the GPU: torch 2.10+cu126 brings 16
-#               nvidia-*-cu12 wheels (cudnn 9.10.2.21, cublas 12.6.4.1, ...) and a
-#               CUDA jax depends on the same wheel family. If the resolver moves
-#               any of them to satisfy jax, torch is what breaks, six hours into a
-#               training run. So the versions are captured before and compared
-#               after, and a MOVE fails the build.
 #
-#               cuda12_local is not an option: it wants a system cuDNN and this
-#               image has none -- /usr/local/cuda has the runtime and nvcc, but
-#               libcudnn arrives only as torch's pip wheel.
+# torch 2.10+cu126 brings 16 nvidia-*-cu12 wheels (cudnn 9.10.2.21, cublas
+# 12.6.4.1, ...). If the resolver moves any of them to satisfy this install,
+# torch is what breaks, six hours into a training run. So the versions are
+# captured before and compared after, and a MOVE fails the build.
 # Does the base ship an MPI-enabled h5py? The NERSC base (pimm-nersc) rebuilds
 # h5py from source against a parallel HDF5, and a binary wheel pulled in later
 # would silently replace it with a serial one -- the image would still import,
@@ -118,7 +111,7 @@ PYSNAP
 cat /tmp/nvidia_before.txt
 
 "$UV" pip install --python "$VENV/bin/python" \
-    PyWavelets pytest pytest-benchmark "jax[${JAX_EXTRA}]"
+    PyWavelets pytest pytest-benchmark
 
 "$VENV/bin/python" - <<'PYSNAP' > /tmp/nvidia_after.txt
 import importlib.metadata as m
@@ -128,16 +121,9 @@ for d in sorted(m.distributions(), key=lambda d: d.metadata["Name"] or ""):
         print(n, d.version)
 PYSNAP
 
-# Compare only what existed BEFORE. An ADDITION is fine and expected:
-# jax[cuda12] brings its own nvidia-cuda-nvcc-cu12 (12.9) for ptxas, beside
-# torch's 12.6 runtime, and touches nothing torch resolved. What must never happen
-# is a package torch already had being MOVED or REMOVED to satisfy jax. The first
-# version of this guard failed on the addition and would have forced jax[cpu] for
-# no reason.
-JAX_EXTRA="$JAX_EXTRA" "$VENV/bin/python" - <<'PYGUARD'
-import os
-
-
+# Compare only what existed BEFORE. An ADDITION is fine; what must never happen
+# is a package torch already had being MOVED or REMOVED by this install.
+"$VENV/bin/python" - <<'PYGUARD'
 def read(p):
     return dict(l.split() for l in open(p) if l.strip())
 
@@ -146,20 +132,19 @@ before, after = read("/tmp/nvidia_before.txt"), read("/tmp/nvidia_after.txt")
 moved = {k: (v, after.get(k)) for k, v in before.items() if after.get(k) != v}
 added = sorted(set(after) - set(before))
 if added:
-    print("  jax added (fine):", ", ".join(f"{k} {after[k]}" for k in added))
+    print("  added (fine):", ", ".join(f"{k} {after[k]}" for k in added))
 if moved:
     for k, (was, now) in sorted(moved.items()):
         print(f"  MOVED {k}: {was} -> {now}")
     raise SystemExit(
-        f"FATAL: installing jax[{os.environ['JAX_EXTRA']}] moved a package torch "
-        "had pinned.\n"
-        "       Rebuild with JAX_EXTRA=cpu, or pin jax to a release whose "
-        "nvidia-* requirements match torch 2.10+cu126.")
+        "FATAL: this install moved a package torch had pinned.\n"
+        "       Pin the offending package to a release whose requirements "
+        "match torch 2.10+cu126.")
 print("  torch's own CUDA wheels: unchanged")
 PYGUARD
 
 # h5py must still be the one the base built. Nothing helix installs depends on
-# h5py -- pimm-data goes in with --no-deps, and PyWavelets/pytest/jax do not want
+# h5py -- pimm-data goes in with --no-deps, and PyWavelets/pytest do not want
 # it -- so this should never fire. It is here because if it ever does, the symptom
 # at NERSC is not an error: it is collective I/O quietly being unavailable.
 if [ "$H5PY_MPI_BEFORE" = "1" ]; then
@@ -192,9 +177,8 @@ if [ -d "$UV_CACHE_DIR" ] && [ -n "$(ls -A "$UV_CACHE_DIR" 2>/dev/null)" ]; then
 fi
 
 # Fail the BUILD, not a training run six hours in.
-JAX_EXTRA="$JAX_EXTRA" "$VENV/bin/python" - <<'PYCHECK'
+"$VENV/bin/python" - <<'PYCHECK'
 import importlib.util as _iu
-import os
 
 import pywt
 import pimm_data
@@ -209,12 +193,11 @@ for gone in ("AddNoise", "Digitize"):
     assert gone not in names, f"pimm_data still registers {gone}: lockstep violated"
 
 import pytest as _pt
-import jax as _jx
 import torch as _t
 
 # NOT asserting a GPU is visible: this image is built on whatever node or runner
-# is free, usually one with no GPU at all, and the jax wheels are arch-generic so
-# the build host's hardware says nothing about where the image will run.
+# is free, usually one with no GPU at all, so the build host's hardware says
+# nothing about where the image will run.
 
 # Modules the boundary move DELETED. The registry check above cannot see these:
 # they register nothing, so it passed while an image shipped all five.
@@ -225,7 +208,6 @@ for _gone in ("pimm_data.noise", "pimm_data.noise_jax", "pimm_data.coeff",
         f"build/lib leaked into the wheel")
 
 print(f"OK: pywt {pywt.__version__}, pimm_data {pimm_data.__version__}, "
-      f"pytest {_pt.__version__}, jax {_jx.__version__} "
-      f"({os.environ['JAX_EXTRA']}), torch {_t.__version__}, "
+      f"pytest {_pt.__version__}, torch {_t.__version__}, "
       f"{len(names)} transforms, forward model absent as expected")
 PYCHECK

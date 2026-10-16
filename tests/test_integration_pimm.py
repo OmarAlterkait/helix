@@ -67,7 +67,7 @@ def test_umbrella_exposes_the_codec_and_the_model():
     import helix
     for name in ("CoeffEvent", "write_coeff_shard", "read_coeff_event",
                  "audit_shard", "coord_digest", "build_corpus_stream",
-                 "DetectorConfig", "process_event", "get_backend"):
+                 "TPCChain", "sim_config", "get_backend"):
         assert hasattr(helix, name), name
         assert name in dir(helix)
     with pytest.raises(AttributeError, match="no attribute"):

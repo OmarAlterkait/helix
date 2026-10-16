@@ -25,8 +25,9 @@ import os
 
 import numpy as np
 
-from helix.tpc.pipeline import canonical_plane_gid
+from helix.tpc.readout import canonical_plane_gid
 
+_PLANE_INDEX = {'U': 0, 'V': 1, 'Y': 2}
 _DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 
 
@@ -49,15 +50,21 @@ def _wire_lengths(spec, n_wires):
     return arr
 
 
+def _label_gid(label):
+    """``'volume_{v}_{U|V|Y}'`` -> ``v*3 + {U:0,V:1,Y:2}`` (matches pimm-data)."""
+    vol, plane = label.rsplit('_', 1)
+    return canonical_plane_gid(int(vol.split('_')[1]), _PLANE_INDEX[plane])
+
+
 def load_plane_registry(path):
-    """JSON -> ``{canonical_plane_gid(label): {label, n_wires, n_ticks, pedestal, wire_lengths}}``."""
+    """JSON -> ``{plane gid: {label, n_wires, n_ticks, pedestal, wire_lengths}}``."""
     with open(_resolve(path)) as f:
         d = json.load(f)
     nts = int(d['num_time_steps'])
     reg = {}
     for label, e in d['planes'].items():
         nw = int(e['n_wires'])
-        reg[canonical_plane_gid(label)] = {
+        reg[_label_gid(label)] = {
             'label': label, 'n_wires': nw, 'n_ticks': nts,
             'pedestal': int(e['pedestal']),
             'wire_lengths': _wire_lengths(e['wire_lengths_m'], nw),

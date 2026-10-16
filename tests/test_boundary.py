@@ -31,7 +31,7 @@ import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-#: Subpackages that must import with pimm_data, torch and jax all absent.
+#: Subpackages that must import with pimm_data and torch both absent.
 #:
 #: ``helix.integrations`` is in this list on purpose. Its ``__init__`` is a
 #: deliberately empty namespace -- "nothing here is imported by helix itself,
@@ -96,7 +96,7 @@ LIGHT_INSIDE_HEAVY = ["helix.data", "helix.data.bins", "helix.data.identity"]
 _PROBE = (
     "import sys, importlib; importlib.import_module({mod!r}); "
     "print(','.join(sorted({{k.split('.')[0] for k in sys.modules}} "
-    "& {{'pimm_data', 'torch', 'jax'}})))"
+    "& {{'pimm_data', 'torch'}})))"
 )
 
 
@@ -110,12 +110,12 @@ def _heavy_imports(mod):
 
 @pytest.mark.parametrize("mod", CLEAN)
 def test_stays_clean_of_pimm_data_and_frameworks(mod):
-    """The DSP side imports with none of pimm_data, torch or jax present."""
+    """The DSP side imports with neither pimm_data nor torch present."""
     pulled = _heavy_imports(mod)
     assert not pulled, (
         f"{mod} pulled in {sorted(pulled)}. helix.core and helix.tpc must import "
         f"with numpy/h5py/PyWavelets/scipy alone -- the corpus-builder container "
-        f"has no pimm-data, and torch/jax are optional extras. If the import is "
+        f"has no pimm-data, and torch is an optional extra. If the import is "
         f"genuinely needed, the code belongs in helix.data, not here."
     )
 
@@ -200,14 +200,14 @@ def _submodules(*subpkgs):
     return out
 
 
-#: Importing the PACKAGE helix.tpc only executes its __init__, which pulls 5 of
-#: its submodules. noise, dense_ops, geometry and noise_jax are NOT among them,
+#: Importing the PACKAGE helix.tpc only executes its __init__, which pulls only
+#: its io module. noise, dense_ops, geometry and the chain are NOT among them,
 #: so the CLEAN check above cannot see a violation in any of those files. This
 #: sweep imports each submodule on its own.
 #:
-#: Only pimm_data is forbidden here. torch and jax are NOT: the backend modules
-#: (wavelet_ops_torch, coherent_ops_jax, dense_ops, ...) import them at module
-#: scope by design, and they are declared optional extras. The invariant this
+#: Only pimm_data is forbidden here. torch is NOT: the backend modules
+#: (wavelet_ops_torch, coherent_gate_ops_torch, dense_ops, ...) import it at
+#: module scope by design, and it is a declared optional extra. The invariant this
 #: file defends is about pimm-data, not about weight of imports.
 @pytest.mark.parametrize("mod", _submodules("helix.core", "helix.tpc"))
 def test_no_submodule_of_core_or_tpc_imports_pimm_data(mod):
@@ -215,7 +215,7 @@ def test_no_submodule_of_core_or_tpc_imports_pimm_data(mod):
                        capture_output=True, text=True, cwd=REPO)
     if r.returncode != 0:
         missing = re.search(r"No module named '([^']+)'", r.stderr)
-        if missing and missing.group(1).split(".")[0] in ("torch", "jax", "jaxlib"):
+        if missing and missing.group(1).split(".")[0] in ("torch",):
             pytest.skip(f"{mod} needs {missing.group(1)}, not installed here")
         pytest.fail(f"importing {mod} failed:\n{r.stderr}")
     pulled = set(filter(None, r.stdout.strip().split(",")))

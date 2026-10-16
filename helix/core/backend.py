@@ -1,14 +1,14 @@
 """Backend selection + lazy, per-backend op dispatch.
 
-Design goal (the whole point of this module): heavy frameworks — ``jax`` and
-``torch`` — must be imported ONLY when a backend that needs them is actually
-selected and used, never at ``import helix`` time. NumPy is the always-available
+Design goal (the whole point of this module): the heavy framework — ``torch`` —
+must be imported ONLY when a backend that needs it is actually selected and
+used, never at ``import helix`` time. NumPy is the always-available
 default.
 
-Each op *family* (e.g. wavelet, coherent) ships one module per backend, named
-``<family>_<backend>.py`` (e.g. ``wavelet_ops_numpy.py``, ``wavelet_ops_jax.py``,
-``wavelet_ops_torch.py``). ``ops("helix.core.wavelet_ops")`` imports and returns
-only the active backend's module — so the framework import happens inside that
+Each op *family* (e.g. wavelet, coherent gate) ships one module per backend, named
+``<family>_<backend>.py`` (e.g. ``wavelet_ops_numpy.py``, ``wavelet_ops_torch.py``).
+``ops("helix.core.wavelet_ops")`` imports and returns only the active backend's
+module — so the framework import happens inside that
 file, lazily, the first time the op is called.
 
 Selection precedence:  set_backend()  >  $HELIX_BACKEND  >  "numpy".
@@ -19,7 +19,7 @@ import os
 import importlib
 from functools import lru_cache
 
-VALID_BACKENDS = ("numpy", "jax", "torch")
+VALID_BACKENDS = ("numpy", "torch")
 _DEFAULT = "numpy"
 _override: str | None = None
 
@@ -65,14 +65,12 @@ def ops(base: str):
 # before it produced, and must neither drag a device array to the host nor
 # assume it is already there. Keeping this in one place is deliberate — the same
 # question ("is this on an accelerator, and how do I touch it?") was previously
-# answered separately, and jax-only, at four different sites, which is exactly
-# why the torch path did not work end to end.
+# answered separately, for one framework only, at four different sites, which is
+# exactly why the torch path did not work end to end.
 
 def kind_of(a) -> str:
-    """``'jax'`` | ``'torch'`` | ``'numpy'`` — which framework owns ``a``."""
+    """``'torch'`` | ``'numpy'`` — which framework owns ``a``."""
     mod = type(a).__module__
-    if mod.startswith("jax"):
-        return "jax"
     if mod.startswith("torch"):
         return "torch"
     return "numpy"
@@ -81,14 +79,11 @@ def kind_of(a) -> str:
 def is_device(a) -> bool:
     """True when ``a`` lives on an accelerator.
 
-    A jax array is treated as on-device unconditionally (that is the jax model);
-    a torch tensor only when its device is not CPU — a CPU tensor should take the
-    host path, since moving it to a device to extract sparse rows would be pure
-    overhead.
+    A torch tensor is on-device only when its device is not CPU — a CPU tensor
+    should take the host path, since moving it to a device to extract sparse rows
+    would be pure overhead.
     """
     k = kind_of(a)
-    if k == "jax":
-        return True
     if k == "torch":
         return a.device.type != "cpu"
     return False

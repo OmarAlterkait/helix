@@ -213,21 +213,10 @@ def test_basis_digest_mismatch_raises(tmp_path):
         read_coeff_event(path, 0)
 
 
-def test_flatbands_lens_must_match_the_basis():
-    """`_flat_rows` derives band and tau from basis.band_lengths and ignores
-    FlatBands.lens, so a mismatch silently re-tags every coefficient of the plane
-    rather than raising. The list path always checked this; the FlatBands branch
-    `continue`d past it — the same `continue` that once dropped sigma_threshold.
-
-    Reachable in production: `event_coeff_event` derives ONE event-wide basis
-    from an arbitrary plane (`next(iter(results.values()))`) and applies it to
-    every plane, so planes that disagree on padded length hit exactly this.
-    """
-    import importlib.util
-    import numpy as np
-    import pytest
-    from helix.core.wavelet import FlatBands, SparseResult
-    from helix.core.coeff_event import CoeffEvent
+def test_band_lengths_must_match_the_basis():
+    """A plane whose band split disagrees with basis.band_lengths must raise, not
+    have its coefficients silently re-tagged (same total width, different split)."""
+    from helix.core.wavelet import SparseResult
     from helix.core.provenance import BasisDescriptor
 
     lens = (4, 4, 8)
@@ -236,30 +225,16 @@ def test_flatbands_lens_must_match_the_basis():
                             removal={}, threshold={}, sigma_norm=2.6)
     nw = 3
 
-    # The ACCEPT half decodes through `_flat_rows`, a jax-only kernel. The REJECT
-    # half below is pure validation and must run everywhere — it is the actual
-    # regression, and gating the whole test on jax would hide it in exactly the
-    # bare install where nothing else covers this path either.
-    try:                       # find_spec itself raises on a broken install
-        _has_jax = importlib.util.find_spec("jax") is not None
-    except Exception:
-        _has_jax = False
-    if _has_jax:
-        good = FlatBands(np.zeros((nw, sum(lens)), np.float32), list(lens))
-        good.flat[0, 0] = 1.0
-        res_ok = SparseResult(coeffs=good, n_kept=1, n_total=good.flat.size,
-                              sigma_per_band=np.ones(len(lens), np.float32),
-                              wavelet="db2", level=2, mode="periodization")
-        ce = CoeffEvent.from_sparse_results({0: res_ok}, basis=basis, run="r",
-                                            source_file="s.h5", event=0)
-        assert ce.n_coeff == 1
+    def _res(split):
+        bands = [np.zeros((nw, L), np.float32) for L in split]
+        bands[0][0, 0] = 1.0
+        return SparseResult(coeffs=bands, n_kept=1, n_total=nw * sum(split),
+                            sigma_per_band=np.ones(len(split), np.float32),
+                            wavelet="db2", level=2, mode="periodization")
 
-    bad_lens = (4, 8, 4)                      # same total width, different split
-    bad = FlatBands(np.zeros((nw, sum(bad_lens)), np.float32), list(bad_lens))
-    bad.flat[0, 0] = 1.0
-    res_bad = SparseResult(coeffs=bad, n_kept=1, n_total=bad.flat.size,
-                           sigma_per_band=np.ones(len(bad_lens), np.float32),
-                           wavelet="db2", level=2, mode="periodization")
-    with pytest.raises(ValueError, match="FlatBands lens"):
-        CoeffEvent.from_sparse_results({0: res_bad}, basis=basis, run="r",
+    ce = CoeffEvent.from_sparse_results({0: _res(lens)}, basis=basis, run="r",
+                                        source_file="s.h5", event=0)
+    assert ce.n_coeff == 1
+    with pytest.raises(ValueError, match="band_lengths"):
+        CoeffEvent.from_sparse_results({0: _res((4, 8, 4))}, basis=basis, run="r",
                                        source_file="s.h5", event=0)

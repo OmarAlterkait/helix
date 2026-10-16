@@ -70,6 +70,10 @@ container:
   # This is a mutable tag while helix pins digests everywhere else. Shifter's
   # store is keyed by the tag it was pulled under, so resolve the digest at
   # submit time and record it WITH the run: `shifterimg lookup <tag>`.
+  # STALE: this tag names an image built WITH jax. helix no longer has a jax
+  # backend and container/ no longer installs it; the image must be rebuilt
+  # without jax (.github/workflows/docker.yml no longer publishes a jax-* tag),
+  # and this line pointed at the new tag or, better, its digest.
   image: ghcr.io/omaralterkait/helix-nersc:jax-cuda12
   python: /opt/pimm/.venv/bin/python
   # shifter needs no -B: NERSC mounts $HOME, $CFS and $SCRATCH into every image.

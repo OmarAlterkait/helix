@@ -1,7 +1,7 @@
 """Torch backend for coefficient-space smart gating (the qualified R2).
 
-Backend module of the ``helix.tpc.coherent_gate_ops`` family — dispatched via
-``backend.ops()``; call it through :func:`helix.tpc.coherent_gate.coherent_gate`.
+Backend module of the ``helix.tpc.coherent_gate_ops`` family — the TPC chain's
+``block_gate`` (:class:`helix.tpc.chain.TPCChain`) picks it on a torch device.
 
 A port of :mod:`helix.tpc.coherent_gate_ops_numpy` — same
 mechanism, same qualified defaults (kgate=3.0, ksig=3.0, npass=2, group_size=64,
@@ -11,7 +11,7 @@ evidence behind the defaults.
 
 It reproduces the numpy reference's MECHANISM and conventions, not its bits:
 float32 reduction order differs, so the two agree to ~1e-4 ADC on real
-coefficients. See the tolerance discussion in :mod:`helix.tpc.coherent_gate`.
+coefficients. See the tolerance discussion in :mod:`helix.tpc.coherent_gate_ops_numpy`.
 
 Two things this port must get exactly right, because both silently change gate
 decisions rather than failing:
@@ -109,9 +109,8 @@ def _sigc(M: torch.Tensor, mode: str) -> torch.Tensor:
     ``'median'`` is an alias, not a second algorithm: numpy implements it with
     ``np.median``, which is bit-identical to ``np.quantile(..., 0.5)``. The
     distinction its docstring draws is against the OLD torch.median (lower of two
-    middles), which no backend reproduces any more — jax rejects the mode
-    outright, and nothing in production sets it (``sigc_mode`` is not even a
-    DetectorConfig field). Implementing it here with ``torch.median`` would make
+    middles), which no backend reproduces any more, and nothing in production
+    sets it (``sigc_mode`` is not a chain config key). Implementing it here with ``torch.median`` would make
     the same mode name mean different arithmetic on different backends, in a
     branch nothing exercises — a silent divergence with no upside.
     """

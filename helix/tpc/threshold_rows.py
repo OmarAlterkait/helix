@@ -19,11 +19,9 @@ kept (3.3 M instead of ~35 k). :func:`threshold_bands_rows`:
     valid and ``sigma_scope="plane"`` identical to threshold_bands with the TPC spec).
 
 Backends: numpy (reference) and torch (``helix.tpc.threshold_rows_ops_{numpy,torch}``),
-chosen by the input's type or the active backend; jax inputs run on numpy.
+chosen by the input's type or the active backend.
 """
 from __future__ import annotations
-
-import numpy as np
 
 from helix.core import backend
 
@@ -34,17 +32,6 @@ def _ops_for(x):
     if backend.kind_of(x) == "torch" or backend.get_backend() == "torch":
         return backend.import_backend_module(_OPS, "torch")
     return backend.import_backend_module(_OPS, "numpy")
-
-
-def _via_numpy(res):
-    """jax inputs run on the numpy backend (no jax port); bands go back to jax."""
-    import jax.numpy as jnp
-    bands, kept, total, sig = res
-    return [jnp.asarray(b) for b in bands], kept, total, sig
-
-
-def _np_kw(kw):
-    return {k: (np.asarray(v) if backend.kind_of(v) == "jax" else v) for k, v in kw.items()}
 
 
 def band_sigma_rows(c, valid, sigma_scope="plane", groups=None):
@@ -60,8 +47,6 @@ def threshold_bands_rows(coeffs, kappa=1.0, valid=None, sigma_scope="plane", gro
     is the median of the per-row sigmas over live rows."""
     kw = dict(kappa=kappa, valid=valid, sigma_scope=sigma_scope, groups=groups, threshold_approx=threshold_approx,
               floor=floor)
-    if backend.kind_of(coeffs[0]) == "jax":
-        return _via_numpy(_ops_for(None).threshold_bands_rows([np.asarray(c) for c in coeffs], **_np_kw(kw)))
     return _ops_for(coeffs[0]).threshold_bands_rows(coeffs, **kw)
 
 
@@ -69,6 +54,4 @@ def threshold_planes_rows(planes):
     """Several planes at once: ``planes`` = list of (bands, kwargs of
     :func:`threshold_bands_rows`) -> list of its results. Same result as one call per plane;
     torch grows the hysteresis bands of all planes together (fewer, larger kernels)."""
-    if backend.kind_of(planes[0][0][0]) == "jax":
-        return [threshold_bands_rows(b, **kw) for b, kw in planes]
     return _ops_for(planes[0][0][0]).threshold_planes_rows(planes)

@@ -22,129 +22,25 @@ from dataclasses import dataclass
 import numpy as np
 
 from helix.core.provenance import BasisDescriptor
-from helix.core.wavelet import SparseResult, reconstruct, FlatBands
+from helix.core.wavelet import SparseResult, reconstruct
 
 
-_COMPACT = None
-_XFER_CAP = 1 << 16          # static transfer prefix; only ever grows
-# Sized to the REAL kept-coefficient count (~55k/plane at 0.65% occupancy), not a
-# guess. The prefix must be static so the slice never retraces, but an oversized
-# one is paid on every transfer: at 1<<19 we shipped 524288 elements to recover
-# ~55k (2.61 ms/plane); at 1<<16 the transfer is ~9x smaller. It grows
-# monotonically, so a denser detector simply settles one or two rungs higher.
+def nonzero_rows(cband):
+    """``(wire_idx, tau_idx, value)`` of the nonzeros of one band (numpy or torch).
 
-
-def _xfer_cap(n):
-    """Static prefix length for the compacted transfer (monotonic, so the slice
-    shape is stable and never retraces)."""
-    global _XFER_CAP
-    while n > _XFER_CAP:
-        _XFER_CAP <<= 1
-    return _XFER_CAP
-
-
-def _compact_fn():
-    """Jitted O(N) stream compaction: cumsum → scatter.
-
-    The output is sized to the FULL band (not the nonzero count), so the jit
-    specializes on the band SHAPE alone — ~10 compiles for a TPC event and never
-    any more. Sizing it to the count instead (even rounded to a power of two)
-    makes the shape vary per band *per event*, which recompiles constantly: that
-    cost 9.8 s/event in a real 36-event build while a repeated-event profile
-    showed 0.6 s and hid it entirely.
-    """
-    global _COMPACT
-    if _COMPACT is None:
-        import jax
-        import jax.numpy as jnp
-
-        @jax.jit
-        def _c(flat):
-            n = flat.size
-            m = flat != 0
-            pos = jnp.cumsum(m) - 1
-            tgt = jnp.where(m, pos, n)                   # zeros scatter out of range
-            idx = jnp.zeros(n, jnp.int32).at[tgt].set(
-                jnp.arange(n, dtype=jnp.int32), mode="drop")
-            val = jnp.zeros(n, jnp.float32).at[tgt].set(flat, mode="drop")
-            return idx, val
-
-        _COMPACT = _c
-    return _COMPACT
-
-
-def nonzero_rows(cband, n=None):
-    """``(wire_idx, tau_idx, value)`` of the nonzeros of one band.
-
-    On a device (jax) array the extraction runs ON DEVICE and only the sparse rows
-    (~1% of the band) come back. Pulling the dense band to the host and running
-    ``np.nonzero`` costs ~740 ms/event over the 51M dense coefficients and
-    dominated the GPU build; ``jnp.nonzero`` is sort-based and still costs
-    ~236 ms. This uses an O(N) cumsum+scatter compaction (verified identical to
-    ``np.nonzero``), sized by band SHAPE so the jit never recompiles per event.
+    A torch tensor is compacted where it lives (``torch.nonzero``) and only the
+    sparse rows (~1% of the band) come back to the host.
     """
     from helix.core.backend import kind_of
-    knd = kind_of(cband)
-
-    if knd == "torch":
-        # torch is EAGER: none of the jax machinery below (jitted cumsum+scatter,
-        # a static transfer cap) has any purpose here. That machinery exists to
-        # stop jax retracing on a per-event shape; torch has no trace to
-        # invalidate, so the direct nonzero is both simpler and correct.
+    if kind_of(cband) == "torch":
         import torch
         nz = torch.nonzero(cband, as_tuple=True)
         vals = cband[nz]
         return (nz[0].to(torch.int32).cpu().numpy(),
                 nz[1].to(torch.int32).cpu().numpy(),
                 vals.to(torch.float32).cpu().numpy())
-
-    if knd != "jax":
-        wi, ti = np.nonzero(cband)
-        return wi.astype(np.int32), ti.astype(np.int32), cband[wi, ti].astype(np.float32)
-
-    import jax.numpy as jnp
-    if n is None:                                       # caller may batch this sync
-        n = int(jnp.count_nonzero(cband))
-    if n == 0:
-        z = np.empty(0, np.int32)
-        return z, z.copy(), np.empty(0, np.float32)
-    idx, val = _compact_fn()(cband.ravel())
-    # Transfer only a STATIC prefix, not the full band. The compaction output is
-    # band-sized (that keeps its own shape static), but shipping all of it back
-    # moves ~410 MB/event to recover ~6 MB of sparse rows. A monotonic cap keeps
-    # the slice shape stable — `idx[:n]` with a per-event n would retrace, which
-    # is the trap this whole path already hit twice.
-    cap = _xfer_cap(n)
-    flat = np.asarray(idx[:cap], np.int32)[:n]
-    Lb = cband.shape[1]
-    return (flat // Lb).astype(np.int32), (flat % Lb).astype(np.int32), \
-        np.asarray(val[:cap], np.float32)[:n]
-
-
-def _flat_rows(fb, band_lengths, gid):
-    """Sparse rows of a whole plane from ONE flat compaction.
-
-    ``fb.flat`` is ``(n_wires, sum(band_lengths))``; a flat position p maps to
-    ``wire = p // C``, ``col = p % C``, then band/tau come from the static column
-    offsets. One kernel per plane instead of one per band.
-    """
-    import jax.numpy as jnp
-    flat = fb.flat
-    C = int(flat.shape[-1])
-    n = int(jnp.count_nonzero(flat))
-    if n == 0:
-        z = np.empty(0, np.int32)
-        return np.empty(0, np.uint8), z, z.copy(), np.empty(0, np.float32)
-    idx, val = _compact_fn()(flat.ravel())
-    cap = _xfer_cap(n)
-    pos = np.asarray(idx[:cap], np.int64)[:n]
-    vals = np.asarray(val[:cap], np.float32)[:n]
-    wire = (pos // C).astype(np.int32)
-    col = (pos % C).astype(np.int64)
-    offs = np.concatenate([[0], np.cumsum(np.asarray(band_lengths, np.int64))])
-    band = (np.searchsorted(offs, col, side="right") - 1).astype(np.uint8)
-    tau = (col - offs[band]).astype(np.int32)
-    return band, wire, tau, vals
+    wi, ti = np.nonzero(cband)
+    return wi.astype(np.int32), ti.astype(np.int32), cband[wi, ti].astype(np.float32)
 
 
 @dataclass
@@ -194,17 +90,17 @@ class CoeffEvent:
         for gi, gid in enumerate(gids):
             res = results[int(gid)]
             coeffs = res.coeffs
-            if not isinstance(coeffs, (list, FlatBands)):
-                raise TypeError("from_sparse_results expects a band list or FlatBands")
+            if not isinstance(coeffs, list):
+                raise TypeError("from_sparse_results expects a band list")
             if len(coeffs) != n_bands:
                 raise ValueError(
                     f"gid {gid}: {len(coeffs)} bands but basis has {n_bands}")
             nw = coeffs[0].shape[0]
             n_wires[gi] = nw
-            # sigma_threshold FIRST — BOTH paths need it. (It used to sit after
-            # the FlatBands branch, whose `continue` skipped it, so every jax-built
-            # shard carried sigma_threshold == 0 and therefore norm_sigma == 0 —
-            # silently destroying the normalization table the tokenizer needs.)
+            # sigma_threshold FIRST, before any per-band early exit. (It once sat
+            # after a branch whose `continue` skipped it, so those shards carried
+            # sigma_threshold == 0 and therefore norm_sigma == 0 — silently
+            # destroying the normalization table the tokenizer needs.)
             if res.sigma_per_band is None:
                 raise ValueError(f"gid {gid}: sigma_per_band is None (needed for sigma_threshold)")
             spb = np.asarray(res.sigma_per_band, dtype=np.float32).ravel()
@@ -214,39 +110,6 @@ class CoeffEvent:
             if not np.all(np.isfinite(spb)):
                 raise ValueError(f"gid {gid}: sigma_per_band is non-finite ({spb})")
             sigma[gi, :] = spb
-            if isinstance(coeffs, FlatBands):
-                # The SAME per-band length check the list path does below. It is
-                # load-bearing here, not redundant: _flat_rows derives band and
-                # tau purely from basis.band_lengths and ignores fb.lens, so a
-                # FlatBands whose lens disagree gets its coefficients silently
-                # re-tagged (a marker at band 4 tau 0 was recorded as tau 8).
-                # Reachable because event_coeff_event derives the event-wide basis
-                # from ONE arbitrary plane and applies it to all of them.
-                if tuple(int(x) for x in coeffs.lens) != tuple(int(x) for x in basis.band_lengths):
-                    raise ValueError(
-                        f"gid {gid}: FlatBands lens {tuple(int(x) for x in coeffs.lens)} != "
-                        f"basis.band_lengths {tuple(int(x) for x in basis.band_lengths)} — "
-                        f"band/tau would be mis-derived for every coefficient of this plane.")
-                # ONE compaction for the whole plane instead of one per band, and
-                # band/tau are derived from the flat column on the host.
-                bb, ww, tt, vv = _flat_rows(coeffs, basis.band_lengths, gid)
-                if bb.size:
-                    b_l.append(bb); p_l.append(np.full(bb.size, gid, np.int32))
-                    w_l.append(ww); t_l.append(tt); v_l.append(vv)
-                continue
-            # One stacked count for the whole plane (was one sync per band). This
-            # is a JAX-specific optimisation — it batches what would otherwise be
-            # one device->host sync per band. torch needs no such batching (eager,
-            # and `nonzero_rows` does not consume `n` on that path), so dispatch on
-            # the FRAMEWORK, not merely on "is it on a device": widening the latter
-            # to include torch sent CUDA tensors into `jnp.count_nonzero`.
-            from helix.core.backend import kind_of
-            if kind_of(coeffs[0]) == "jax":
-                import jax.numpy as _jnp
-                nnz = [int(x) for x in np.asarray(
-                    _jnp.stack([_jnp.count_nonzero(c) for c in coeffs]))]
-            else:
-                nnz = [None] * len(coeffs)
             for b, cband in enumerate(coeffs):
                 if cband.shape[-1] != basis.band_lengths[b]:
                     raise ValueError(
@@ -255,7 +118,7 @@ class CoeffEvent:
                 if cband.shape[0] != nw:
                     raise ValueError(
                         f"gid {gid} band {b}: {cband.shape[0]} wires != band-0 count {nw}")
-                wi, ti, vals = nonzero_rows(cband, nnz[b])   # device-side when jax
+                wi, ti, vals = nonzero_rows(cband)
                 if wi.size == 0:
                     continue
                 b_l.append(np.full(wi.size, b, dtype=np.uint8))

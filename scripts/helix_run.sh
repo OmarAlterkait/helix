@@ -83,14 +83,13 @@ for k in ${HELIX_SITE_ENV_NAMES:-}; do
 done
 # ...plus anything the caller names in HELIX_FORWARD_ENV (space-separated).
 #
-# This exists because its absence produced a WRONG ANSWER. Diagnosing the jax
-# backend's accuracy, `JAX_DEFAULT_MATMUL_PRECISION=highest ./helix_run.sh ...`
-# appeared to show that precision was not the cause -- but the variable was set
-# on the host and never forwarded, so the container ran at the default. The real
-# cause WAS precision. A silently dropped variable does not look like a dropped
+# This exists because its absence produced a WRONG ANSWER. Diagnosing a backend's
+# accuracy, a matmul-precision variable set on the host appeared to show that
+# precision was not the cause -- but it was never forwarded, so the container ran
+# at the default. The real cause WAS precision. A silently dropped variable does not look like a dropped
 # variable; it looks like evidence.
 #
-#   HELIX_FORWARD_ENV="JAX_DEFAULT_MATMUL_PRECISION XLA_FLAGS" scripts/helix_run.sh ...
+#   HELIX_FORWARD_ENV="CUDA_LAUNCH_BLOCKING TORCH_LOGS" scripts/helix_run.sh ...
 for k in ${HELIX_FORWARD_ENV:-}; do
   if [ -z "${!k:-}" ]; then
     echo "helix_run.sh: HELIX_FORWARD_ENV names $k, which is unset -- not forwarded." >&2

@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from helix.tpc.coherent_gate import coherent_gate
+from helix.tpc.coherent_gate_ops_numpy import gate_bands as coherent_gate
 
 GS = 64
 
@@ -117,7 +117,7 @@ def test_nonfinite_fails_open():
 def test_kgate_sequence_longer_than_npass_raises():
     """A per-pass kgate longer than npass must NOT be silently truncated.
 
-    `pipeline.py` stamps `removal_json` with the kgate the caller passed, so
+    The corpus stamps its removal config with the kgate the caller passed, so
     truncation ships coefficients that the recorded provenance does not describe:
     `--kgate 2.5,3.5` at npass=1 built a k=2.5 corpus labelled [2.5, 3.5]. Found
     by an audit of the per-pass option, which had exactly this hole.

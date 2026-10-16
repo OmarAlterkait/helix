@@ -122,7 +122,7 @@ def coherent_gate_labeled(bands: Sequence[np.ndarray], labels_or_groups, *, kgat
     with channel groups. ``labels_or_groups``: per-row integer labels (-1 = excluded)
     or a prebuilt :class:`ChannelGroups` (reuse it across events: it depends only on
     the channel map). Same parameters and fail-open behaviour as
-    :func:`helix.tpc.coherent_gate.coherent_gate`."""
+    :func:`helix.tpc.coherent_gate_ops_numpy.gate_bands`."""
     groups = labels_or_groups if isinstance(labels_or_groups, ChannelGroups) else ChannelGroups(labels_or_groups)
     out = []
     for i, b in enumerate(bands):

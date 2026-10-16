@@ -34,9 +34,6 @@
 # pimm-nersc, by digest: MPICH, parallel HDF5, MPI-enabled mpi4py and h5py.
 FROM ghcr.io/deeplearnphysics/pimm-nersc@sha256:562c9128dbbdd0e45d36da7351576c214cc5941700322f00c0efcc087c118e91
 
-# cuda12 (default) or cpu, exactly as the standard image.
-ARG JAX_EXTRA=cuda12
-
 # libnl, WITHOUT WHICH EVERY MULTI-NODE ALL-REDUCE RUNS OVER TCP.
 #
 # NERSC injects its Slingshot NCCL plugin at runtime via `shifter
@@ -77,12 +74,11 @@ COPY pyproject.toml /opt/helix-build/pyproject.toml
 # binary wheel replacing the source build would not raise, it would just remove
 # collective I/O, and that is the kind of thing found months later.
 RUN --mount=type=cache,target=/tmp/uvcache \
-    JAX_EXTRA=${JAX_EXTRA} bash /opt/helix-build/install.sh
+    bash /opt/helix-build/install.sh
 
 LABEL helix.purpose="corpus building and FM training at NERSC" \
       helix.base="ghcr.io/deeplearnphysics/pimm-nersc" \
       helix.base_digest="sha256:562c9128dbbdd0e45d36da7351576c214cc5941700322f00c0efcc087c118e91" \
-      helix.jax="${JAX_EXTRA}" \
       helix.variant="nersc"
 
 # Fail the BUILD if libnl is absent, rather than a 128-GPU run six hours in.

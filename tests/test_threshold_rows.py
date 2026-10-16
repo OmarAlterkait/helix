@@ -2,9 +2,12 @@
 import numpy as np
 import pywt
 
-from helix.core.wavelet import threshold_bands
-from helix.tpc.config import DetectorConfig
+from helix.core.wavelet import ThresholdSpec, threshold_bands
 from helix.tpc.threshold_rows import threshold_bands_rows
+
+#: The TPC's universal rule: per-band MAD sigma, approximation band thresholded too.
+_UNIVERSAL = ThresholdSpec(method="universal", func="hard", scale=1.0,
+                           per_band_sigma=True, threshold_approx=True)
 
 
 def _bands(seed=0, rows=400):
@@ -16,7 +19,7 @@ def _bands(seed=0, rows=400):
 
 def test_parity_with_threshold_bands_all_rows_valid():
     b = _bands()
-    ref, kref, _, _ = threshold_bands(b, DetectorConfig().threshold_spec())
+    ref, kref, _, _ = threshold_bands(b, _UNIVERSAL)
     got, kgot, _, _ = threshold_bands_rows(b, kappa=1.0, floor=None)          # seeds only = universal
     assert kgot == kref
     for r, g in zip(ref, got):
@@ -27,7 +30,7 @@ def test_missing_rows_do_not_collapse_sigma():
     b = _bands(seed=1)
     valid = np.ones(400, bool); valid[:250] = False            # most of the plane missing
     zeroed = [np.where(valid[:, None], c, 0.0).astype(np.float32) for c in b]
-    _, k_all_rows, _, _ = threshold_bands(zeroed, DetectorConfig().threshold_spec())
+    _, k_all_rows, _, _ = threshold_bands(zeroed, _UNIVERSAL)
     _, k_live, _, _ = threshold_bands_rows(zeroed, kappa=1.0, valid=valid)
     _, k_ref, _, _ = threshold_bands_rows([c[valid] for c in b], kappa=1.0)
     assert k_all_rows > 20 * k_live                           # the bug: sigma from mostly-zero rows
@@ -54,22 +57,21 @@ def test_hysteresis_is_a_superset_grown_through_the_floor():
     assert ks == kp
 
 
-def test_sim_pipeline_hysteresis_default():
-    """helix.tpc.pipeline thresholds with hysteresis by default: a superset of the seeds-only
-    (old universal) survivors, recorded in the basis (seeds-only keeps the old digest)."""
-    from dataclasses import replace
-    from helix.tpc.pipeline import basis_from_config, process_plane
+def test_sim_chain_hysteresis_default():
+    """The simulation chain thresholds with hysteresis by default: a superset of the
+    seeds-only (old universal) survivors, and recorded in the chain digest."""
+    from helix.tpc.chain import TPCChain, sim_config
     rng = np.random.default_rng(4)
     img = rng.normal(0, 2, (128, 2701)).astype(np.float32)
     img[40:60, 1000:1012] += 25
-    ch = DetectorConfig()
-    cu = replace(ch, threshold_floor=None)
-    pu = process_plane(img, cu, removal="none", with_images=False).sparse
-    ph = process_plane(img, ch, removal="none", with_images=False).sparse
-    assert ph.n_kept > pu.n_kept
-    for a, b in zip(pu.coeffs, ph.coeffs):
-        assert np.array_equal(np.asarray(b)[np.asarray(a) != 0], np.asarray(a)[np.asarray(a) != 0])
-    bl = [c.shape[-1] for c in pu.coeffs]
-    bu = basis_from_config(cu, band_lengths=bl, level=4)
-    assert "rule" not in bu.threshold
-    assert basis_from_config(ch, band_lengths=bl, level=4).digest() != bu.digest()
+    nw = [[128, 128, 128]]
+    ch = TPCChain(sim_config(nw, {"coherent": {"method": "none"}}))
+    cu = TPCChain(sim_config(nw, {"coherent": {"method": "none"}, "threshold": {"floor": None}}))
+    assert ch.cfg["threshold"]["floor"] == 2.0
+    ph = ch.process_images([img] * 3, tpc=0)[0]
+    pu = cu.process_images([img] * 3, tpc=0)[0]
+    assert ph["n_kept"] > pu["n_kept"]
+    for a, b in zip(pu["bands"], ph["bands"]):
+        a, b = np.asarray(a), np.asarray(b)
+        assert np.array_equal(b[a != 0], a[a != 0])
+    assert ch.digest != cu.digest

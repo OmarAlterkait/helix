@@ -4,7 +4,7 @@ Forward noise model for LArTPC wire planes — a tagged numpy function.
 This is pimm-data's lightweight, load-time noise applicator. It mirrors the
 forward noise model that lives in JAXTPC (``tools/noise.py`` incoherent +
 ``tools/coherent_noise.py`` coherent) but is implemented in plain numpy with no
-JAX / torch dependency, so it runs inside DataLoader workers.
+torch dependency, so it runs inside DataLoader workers.
 
 Two additive components, selected by tags:
 
@@ -15,17 +15,16 @@ Two additive components, selected by tags:
 * **coherent** — a per-GROUP *shared* waveform: ``group_size`` channels share
   one realization. RMS is per-group and is **NOT** divided by ``sqrt(N)`` — the
   shared waveform must survive per-channel averaging, which is exactly what the
-  inverse (``helix.tpc.remove_coherent``'s per-group median) is built to kill.
+  inverse (the chain's per-block coherent gate) is built to kill.
 
 Parameters are **inline defaults** documented to match JAXTPC's
 ``config/noise_spectrum.npz`` + the YAML coherent block.
-``tests/test_forward_noise.py`` pins them: the ENC formula, and the fact that
-``DetectorConfig``'s third copy of the same constants agrees with DEFAULT_ENC.
+``tests/test_forward_noise.py`` pins them: the ENC formula against DEFAULT_ENC.
 (This used to cite ``tests/test_noise.py``, which exists in neither repo — the
 reconciliation against JAXTPC's own config lives in
 ``tests/test_dense_chain.py``, which skips when JAXTPC is not importable.) The grouping convention
 (``arange(n) // group_size``) is identical to JAXTPC ``broadcast_to_wires`` and
-helix ``broadcast_groups`` — that single integer is the whole "don't drift"
+the block gate's ``arange(W) // group_size`` — that single integer is the whole "don't drift"
 contract between forward injection and inverse removal.
 
 The LArTPC forward model. This used to be a MIRROR of ``pimm_data.noise``,
@@ -35,9 +34,11 @@ depend on the other. The boundary moved: the forward model is helix's, the
 densification that consumes it is pimm-data's, and there is one copy.
 
 Note this is the FORWARD model — noise injection and digitisation, what the
-detector does to a signal. ``helix.tpc.coherent`` is the INVERSE (coherent-noise
-removal); the two must agree on the grouping convention, which is the whole
-"don't drift" contract.
+detector does to a signal. The TPC chain's block gate
+(:mod:`helix.tpc.coherent_gate_ops_numpy`, ``group_size`` from
+:data:`helix.tpc.chain.SIM_BASE`) is the INVERSE (coherent-noise removal); the
+two must agree on the grouping convention, which is the whole "don't drift"
+contract.
 """
 
 from __future__ import annotations

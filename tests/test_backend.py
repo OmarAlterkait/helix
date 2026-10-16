@@ -26,8 +26,8 @@ def test_set_backend_validates():
 
 def test_env_override(monkeypatch):
     backend._override = None
-    monkeypatch.setenv("HELIX_BACKEND", "jax")
-    assert backend.get_backend() == "jax"
+    monkeypatch.setenv("HELIX_BACKEND", "torch")
+    assert backend.get_backend() == "torch"
 
 
 def _signal():
@@ -37,7 +37,7 @@ def _signal():
     return x
 
 
-@pytest.mark.parametrize("be", ["numpy", "jax", "torch"])
+@pytest.mark.parametrize("be", ["numpy", "torch"])
 def test_backend_roundtrip(be):
     pytest.importorskip(be if be != "numpy" else "numpy")
     backend.set_backend(be)
@@ -52,7 +52,7 @@ def test_backend_roundtrip(be):
 
 
 def test_numpy_torch_coeffs_identical():
-    """torch FFT periodization DWT is now pywt-exact (== numpy/jax), not just
+    """torch FFT periodization DWT is now pywt-exact (== numpy), not just
     a self-consistent PR pair. Coeffs, n_kept and reconstruction all agree to
     float32 precision."""
     torch = pytest.importorskip("torch")
@@ -92,7 +92,7 @@ def test_torch_dwt_matches_pywt_long():
 
 def test_torch_tpc_threshold_spec_matches_numpy():
     """The TPC production threshold options (per_band_sigma + threshold_approx,
-    what DetectorConfig.threshold_spec() sets) are honored on torch, matching
+    the TPC universal rule) are honored on torch, matching
     the numpy reference — previously torch silently ran the optical method
     (per-signal sigma, approx band always kept), inflating kept coeffs on
     colored TPC noise."""

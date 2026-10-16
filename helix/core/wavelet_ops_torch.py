@@ -4,7 +4,7 @@ DWT/IDWT via FFT-based circular convolution -> exact 'periodization' boundary,
 O(N log N), batched over signals, GPU-resident, and free of the N^2 dense-matrix
 blow-up that rules matmul out for long (~36k-sample) optical chunks.
 
-**Coefficient-identical to pywt** (== the numpy and jax backends). The
+**Coefficient-identical to pywt** (== the numpy backend). The
 periodization filter bank is matched to pywt's exact convention:
   analysis:  cA = roll(circular_conv(x, dec_lo), -dec_len//2)[0::2]   (dec_hi → cD)
   synthesis: upsample into [0::2], circular-correlate with the dec filters,
@@ -131,7 +131,7 @@ def wavedec(image, wavelet: str, level: int, mode: str):
     The public half of the two-step seam (the other is :func:`threshold_bands`),
     so a coefficient-space step — the TPC coherent gate — can run BETWEEN the
     transform and thresholding. ``lev`` is the effective level, clamped to what
-    the signal length allows, exactly as numpy/jax clamp it.
+    the signal length allows, exactly as numpy clamps it.
 
     ``mode`` must be ``'periodization'``: this backend's filter bank is built on
     FFT circular convolution, which IS periodization. Accepting another mode

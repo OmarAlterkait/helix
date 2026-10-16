@@ -14,7 +14,8 @@ This file can exist because a TEST may import both packages even though
 helix.tpc may not. That is the whole trick, and it is why the pin belongs here
 rather than in either package.
 
-What is deliberately NOT pinned: canonical_plane_gid (helix) and
+What is deliberately NOT pinned: helix's plane-label parser
+(helix.tpc.geometry._label_gid, over helix.tpc.readout.canonical_plane_gid) and
 canonical_plane_id (pimm-data) have ALREADY diverged on purpose -- helix's is
 wire-only and raises on `volume_N_Pixel`, pimm-data's handles it, which is why
 test_canonical_plane_id_stable stayed in pimm-data during the move. A test

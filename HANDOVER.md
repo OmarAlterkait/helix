@@ -31,7 +31,7 @@ single commit on top of `main`, and that commit only pins a dependency.
 
 `helix.core` and `helix.tpc` must never import `pimm_data`; `helix.data` and
 `helix.integrations` may. A test enforces this, which is what lets the DSP half
-run in environments where torch and jax do not exist.
+run in environments where torch does not exist.
 
 ### The `coeff-fm` branch is not a fork
 
@@ -113,7 +113,7 @@ credentials needed:
 
 ```bash
 # resolve the digest the rolling tag currently points at, then pull THAT
-D=$(skopeo inspect docker://ghcr.io/omaralterkait/helix:jax-cuda12 --format '{{.Digest}}')
+D=$(skopeo inspect docker://ghcr.io/omaralterkait/helix:main --format '{{.Digest}}')
 apptainer pull helix-train.sif "docker://ghcr.io/omaralterkait/helix@${D}"
 echo "pinned: $D"     # record this next to the run it produced
 ```
@@ -167,14 +167,11 @@ revisions. The base is
 `ghcr.io/deeplearnphysics/pimm v0.5.1`, pinned by digest
 `sha256:c0dc5a64…a776bf`, so the build does not drift when that tag moves.
 
-**jax build variant.** The def takes `%arguments JAX_EXTRA`, default `cuda12`.
-For a CPU-only site:
-
-    apptainer build --fakeroot --build-arg JAX_EXTRA=cpu helix-train.sif container/helix-train.def
-
-The build refuses to finish if installing jax *moves* any nvidia wheel torch is
-using — added wheels are fine, moved ones are not, because that silently
-reshuffles torch's CUDA stack.
+**No jax.** helix's DSP backends are numpy and torch; the image no longer
+installs jax (images built before that change still carry it, and the published
+`jax-*` tags are no longer updated). The build still refuses to finish if its
+install *moves* any nvidia wheel torch is using — added wheels are fine, moved
+ones are not, because that silently reshuffles torch's CUDA stack.
 
 ---
 

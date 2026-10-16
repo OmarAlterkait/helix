@@ -1,16 +1,16 @@
 """HELIX — Hierarchical Encoding for Learned Inference on eXperimental data.
 
   helix.core    — detector-agnostic wavelet sparsification, the coefficient
-                  shard codec, and lazy backend dispatch (numpy / jax / torch,
+                  shard codec, and lazy backend dispatch (numpy / torch,
                   imported only when selected)
-  helix.tpc     — wire-plane pipeline: coherent noise removal + wavelet, and
-                  the corpus builder
+  helix.tpc     — wire-plane chain (helix.tpc.chain.TPCChain): coherent noise
+                  removal + wavelet threshold, and the corpus builder
   helix.optical — optical waveforms (SBND PMT / X-ARAPUCA, goop): one codec, optical shards
   helix.model   — the coefficient foundation model and its tokenizer
 
 **Every name below is resolved lazily** (PEP 562). This is not a style choice.
 
-The umbrella used to import ``helix.tpc.{config,pipeline,io}`` eagerly, so
+The umbrella used to import the wire-plane modules eagerly, so
 ``import helix.core.coeff_io`` — or ``helix.model.tokenize``, which pimm-data
 runs inside every DataLoader worker — pulled in the whole wire-plane HDF5 stack.
 Measured: importing the tokenizer cost 1.07s and dragged ``h5py``, for a module
@@ -43,9 +43,9 @@ _LAZY = {
     "get_backend": "helix.core.backend",
     "set_backend": "helix.core.backend",
     "sparsify": "helix.core.wavelet",
-    "DetectorConfig": "helix.tpc.config",
-    "process_plane": "helix.tpc.pipeline",
-    "process_event": "helix.tpc.pipeline",
+    "TPCChain": "helix.tpc.chain",
+    "sim_config": "helix.tpc.chain",
+    "sensor_layout": "helix.tpc.io",
     "config_from_file": "helix.tpc.io",
     "build_corpus": "helix.tpc.corpus",
     "build_corpus_stream": "helix.tpc.corpus",

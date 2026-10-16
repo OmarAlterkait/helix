@@ -1,6 +1,6 @@
 """Coherent gate with arbitrary channel groups (e.g. front-end boards).
 
-The R2 smart gate (:mod:`helix.tpc.coherent_gate`) estimates the common mode of
+The R2 smart gate (:mod:`helix.tpc.coherent_gate_ops_numpy`) estimates the common mode of
 contiguous ``group_size``-wire blocks. On a real detector the coherent noise follows
 the readout electronics: on SBND one FEMB reads 128 channels, which on the top boards
 are 32 U + 32 V + 64 Y wires, so a board's group spans three planes and is not a
@@ -86,8 +86,6 @@ def _groups(labels_or_groups):
 def _ops_for(x):
     if backend.kind_of(x) == "torch" or backend.get_backend() == "torch":
         return backend.import_backend_module(_OPS, "torch")
-    if backend.kind_of(x) == "jax":
-        raise NotImplementedError("coherent_gate_labels: no jax backend; use numpy or torch")
     return backend.import_backend_module(_OPS, "numpy")
 
 
@@ -113,7 +111,7 @@ def coherent_gate_labeled(bands: Sequence, labels_or_groups, *, kgate=3.0, ksig=
     with channel groups. ``labels_or_groups``: per-row integer labels (-1 = excluded)
     or a prebuilt :class:`ChannelGroups` (reuse it across events: it depends only on
     the channel map). Same parameters and fail-open behaviour as
-    :func:`helix.tpc.coherent_gate.coherent_gate`."""
+    :func:`helix.tpc.coherent_gate_ops_numpy.gate_bands`."""
     return _ops_for(bands[0]).coherent_gate_labeled(
         bands, _groups(labels_or_groups), kgate=kgate, ksig=ksig, npass=npass, gate_approx=gate_approx, tau=tau,
         sigc_mode=sigc_mode, sigc_scope=sigc_scope)

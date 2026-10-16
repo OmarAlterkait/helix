@@ -70,13 +70,10 @@ All 8 runs built: 790 shards, 344 GB, ~158k events (train 150,239 / val 4,641 /
 probe 3,111). The bins were NOT re-derived — see DECISIONS.md for why, and for
 the yardstick that would overturn it.
 
-## 6. `--backend jax` still imports pimm-data
+## 6. The jax backend — RETIRED
 
-`scripts/build_coeff_corpus.py` imports `pimm_data` on EVERY backend (the
-reader/dataset layer is pimm-data's), so the jax path is not the special case
-this entry used to claim. `tests/test_forward_mirror.py`, cited here as the pin,
-was deleted with the forward model. torch is the production backend
-(`--backend torch`, measured 10.6 ms), so jax remains an override.
+Removed: helix's DSP backends are numpy and torch. (`scripts/build_coeff_corpus.py`
+imports `pimm_data` on every backend; the reader/dataset layer is pimm-data's.)
 
 ## 7. Housekeeping
 

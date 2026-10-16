@@ -1,9 +1,8 @@
-"""Cross-backend parity for the coherent gate: jax (GPU) must match numpy.
+"""Cross-backend parity for the coherent gate and the wavelet seam: torch must match numpy.
 
-``jnp.quantile`` and ``np.quantile`` share semantics (both average the two middle
-values), so the JAX backend reproduces the numpy A-parity ``sigc`` essentially
-exactly — measured max abs 1e-13…1e-16, median relative diff 0.0 on a real
-1969x4336 plane. This test pins that: a drift in either backend breaks it.
+The gate's backends agree to ~1e-4 ADC, not exactly (float32 reduction order; see
+:mod:`helix.tpc.coherent_gate_ops_numpy`), so these pin a tolerance, not equality.
+Runs on CUDA when available, otherwise on CPU torch; skips without torch.
 """
 from __future__ import annotations
 
@@ -11,20 +10,20 @@ import numpy as np
 import pytest
 
 from helix.core import backend
-from helix.tpc.coherent_gate import coherent_gate
+from helix.tpc import coherent_gate_ops_numpy as gate_np
+
+torch = pytest.importorskip("torch")
+from helix.tpc import coherent_gate_ops_torch as gate_t  # noqa: E402
 
 GS = 64
-
-jax = pytest.importorskip("jax", reason="jax not installed")
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @pytest.fixture(autouse=True)
 def _restore_backend():
-    """``set_backend`` writes a module global, and every test here flips it. A
-    bare reset on the last line is SKIPPED when the test fails, leaking 'jax'
-    into everything that runs after (demonstrated: inject a failure before the
-    reset and the next test observes backend='jax'). test_backend.py already
-    guards this way; this file was the outlier."""
+    """``set_backend`` writes a module global, and tests here flip it. A bare reset
+    on the last line is SKIPPED when the test fails, leaking 'torch' into everything
+    that runs after. test_backend.py guards the same way."""
     yield
     backend.set_backend("numpy")
 
@@ -44,63 +43,67 @@ def _bands(rng, W=200, lbs=(24, 24, 48)):
     return out
 
 
+def _t(bands):
+    return [torch.as_tensor(b).to(DEV) for b in bands]
+
+
+def _np(x):
+    return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
+
+
+def _close(ref, got, tol=1e-4, what=""):
+    assert len(ref) == len(got)
+    for i, (a, b) in enumerate(zip(ref, got)):
+        a, b = _np(a), _np(b)
+        assert a.shape == b.shape
+        np.testing.assert_allclose(b, a, rtol=tol, atol=tol, err_msg=f"band {i} {what}")
+
+
+@pytest.mark.parametrize("npass", [1, 2])
+@pytest.mark.parametrize("gs", [64, 48])
+def test_torch_gate_matches_numpy(npass, gs):
+    """The torch gate must reproduce numpy, including the partial trailing block
+    (W=200 is not a multiple of either group size) and the 2-pass signal
+    re-detection. The gate is the removal step, so a divergence here changes every
+    coefficient downstream."""
+    bands = _bands(np.random.default_rng(2))
+    a = gate_np.gate_bands(bands, group_size=gs, npass=npass)
+    t = gate_t.gate_bands(_t(bands), group_size=gs, npass=npass)
+    _close(a, t, what=f"(npass={npass}, gs={gs})")
+
+
 @pytest.mark.parametrize("npass", [1, 2])
 @pytest.mark.parametrize("kgate", [3.0, 4.0])
-def test_jax_matches_numpy(npass, kgate):
+def test_torch_gate_matches_numpy_kgate(npass, kgate):
     bands = _bands(np.random.default_rng(0))
-
-    backend.set_backend("numpy")
-    ref = coherent_gate(bands, group_size=GS, kgate=kgate, ksig=3.0, npass=npass)
-    backend.set_backend("jax")
-    got = coherent_gate(bands, group_size=GS, kgate=kgate, ksig=3.0, npass=npass)
-    backend.set_backend("numpy")
-
-    for i, (a, b) in enumerate(zip(ref, got)):
-        a, b = np.asarray(a), np.asarray(b)
-        assert a.shape == b.shape
-        np.testing.assert_allclose(b, a, rtol=1e-5, atol=1e-5,
-                                   err_msg=f"band {i} (npass={npass}, kgate={kgate})")
+    ref = gate_np.gate_bands(bands, group_size=GS, kgate=kgate, ksig=3.0, npass=npass)
+    got = gate_t.gate_bands(_t(bands), group_size=GS, kgate=kgate, ksig=3.0, npass=npass)
+    _close(ref, got, what=f"(npass={npass}, kgate={kgate})")
 
 
 def test_partial_trailing_block():
-    """W not a multiple of group_size exercises the NaN-padded partial block."""
+    """W not a multiple of group_size exercises the partial trailing block."""
     bands = _bands(np.random.default_rng(1), W=173)          # 173 = 2*64 + 45
-    backend.set_backend("numpy")
-    ref = coherent_gate(bands, group_size=GS, npass=2)
-    backend.set_backend("jax")
-    got = coherent_gate(bands, group_size=GS, npass=2)
-    backend.set_backend("numpy")
-    for i, (a, b) in enumerate(zip(ref, got)):
-        np.testing.assert_allclose(np.asarray(b), np.asarray(a), rtol=1e-5, atol=1e-5,
-                                   err_msg=f"band {i}")
+    ref = gate_np.gate_bands(bands, group_size=GS, npass=2)
+    got = gate_t.gate_bands(_t(bands), group_size=GS, npass=2)
+    _close(ref, got)
 
 
-def test_gate_approx_false_and_dispatch():
+def test_gate_approx_false():
     bands = _bands(np.random.default_rng(2))
-    backend.set_backend("jax")
-    out = coherent_gate(bands, gate_approx=False)
-    np.testing.assert_array_equal(np.asarray(out[0]), bands[0])   # cA untouched
-    assert not np.array_equal(np.asarray(out[1]), bands[1])       # details gated
-    backend.set_backend("numpy")
+    out = gate_t.gate_bands(_t(bands), gate_approx=False)
+    np.testing.assert_array_equal(_np(out[0]), bands[0])   # cA untouched
+    assert not np.array_equal(_np(out[1]), bands[1])       # details gated
 
 
-def test_jax_rejects_legacy_median_sigc():
-    bands = _bands(np.random.default_rng(3))
-    backend.set_backend("jax")
-    with pytest.raises(ValueError, match="quantile"):
-        coherent_gate(bands, sigc_mode="median")
-    backend.set_backend("numpy")
-
-
-# ---- the shared wavelet seam: jax must match numpy for EVERY method ---------
+# ---- the shared wavelet seam: torch must match numpy for EVERY method -------
 
 def test_threshold_bands_honours_method_and_sigma_across_backends():
     """`helix.core.wavelet.threshold_bands` is the DETECTOR-AGNOSTIC seam — the
-    two-step (wavedec, then gate, then threshold) entry point. The jax backend
-    dispatched every call to a universal-only fused kernel, so `method='topk'`
-    silently returned universal-thresholded coefficients and an explicit
-    `sigma=` was ignored outright. Nothing raised, and no test covered it: the
-    suite exercised topk/sigma only through `sparsify()`, the correct twin.
+    two-step (wavedec, then gate, then threshold) entry point. A backend that
+    dispatched every call to a universal-only kernel once returned
+    universal-thresholded coefficients for `method='topk'` and ignored an explicit
+    `sigma=`, with nothing raising. Every method and the explicit sigma are pinned.
     """
     from helix.core.wavelet import threshold_bands, ThresholdSpec
 
@@ -109,54 +112,27 @@ def test_threshold_bands_honours_method_and_sigma_across_backends():
 
     def run(bk, th, sigma=None):
         backend.set_backend(bk)
-        out, n_kept, _, _ = threshold_bands(bands, th, sigma=sigma)
-        arrs = [np.asarray(c) for c in (out.to_list() if hasattr(out, "to_list") else out)]
-        return np.concatenate(arrs, axis=-1), int(n_kept)
+        out, n_kept, _, _ = threshold_bands(bands if bk == "numpy" else _t(bands), th, sigma=sigma)
+        return np.concatenate([_np(c) for c in out], axis=-1), int(n_kept)
 
     for th in (ThresholdSpec(method="universal"),
                ThresholdSpec(method="topk", keep=0.02),
                ThresholdSpec(method="energy", energy=0.99)):
         a, ka = run("numpy", th)
-        b, kb = run("jax", th)
-        assert ka == kb, f"{th.method}: n_kept numpy {ka} vs jax {kb}"
+        b, kb = run("torch", th)
+        assert ka == kb, f"{th.method}: n_kept numpy {ka} vs torch {kb}"
         np.testing.assert_allclose(b, a, rtol=1e-4, atol=1e-4, err_msg=th.method)
 
     # an explicit sigma must actually be used, not silently recomputed
     th = ThresholdSpec(method="universal")
     a, ka = run("numpy", th, sigma=5.0)
-    b, kb = run("jax", th, sigma=5.0)
-    assert ka == kb, f"explicit sigma: n_kept numpy {ka} vs jax {kb}"
+    b, kb = run("torch", th, sigma=5.0)
+    assert ka == kb, f"explicit sigma: n_kept numpy {ka} vs torch {kb}"
     np.testing.assert_allclose(b, a, rtol=1e-4, atol=1e-4)
-    _, k_free = run("jax", th)
+    _, k_free = run("torch", th)
     assert kb != k_free, "sigma= made no difference — it is being ignored"
 
 
-# ---- torch: the gate's third backend ---------------------------------------
-
-_HAS_CUDA = torch.cuda.is_available() if (torch := __import__("torch")) else False
-
-
-@pytest.mark.skipif(not _HAS_CUDA, reason="torch has no CUDA device")
-@pytest.mark.parametrize("npass", [1, 2])
-@pytest.mark.parametrize("gs", [64, 48])
-def test_torch_gate_matches_numpy(npass, gs):
-    """The torch gate must reproduce numpy, including the partial trailing block
-    (W=200 is not a multiple of either group size) and the 2-pass signal
-    re-detection. Ported for the same reason jax was: the gate is the removal
-    step, so a divergence here changes every coefficient downstream."""
-    import torch
-    bands = _bands(np.random.default_rng(2))
-    backend.set_backend("numpy")
-    a = coherent_gate(bands, group_size=gs, npass=npass)
-    backend.set_backend("torch")
-    t = coherent_gate([torch.as_tensor(b).cuda() for b in bands],
-                      group_size=gs, npass=npass)
-    for i, (x, y) in enumerate(zip(a, t)):
-        np.testing.assert_allclose(y.detach().cpu().numpy(), np.asarray(x),
-                                   rtol=1e-4, atol=1e-4, err_msg=f"band {i}")
-
-
-@pytest.mark.skipif(not _HAS_CUDA, reason="torch has no CUDA device")
 def test_torch_q50_is_not_torch_median():
     """The convention that decides which coefficients survive.
 
@@ -166,7 +142,6 @@ def test_torch_q50_is_not_torch_median():
     the torch backend kept 1-2 extra coefficients per event, always more, never
     fewer, until band_sigma switched to q50.
     """
-    import torch
     from helix.core.backend import torch_q50
     x = torch.tensor([1.0, 2.0, 3.0, 4.0])
     assert float(torch_q50(x, 0)) == 2.5            # average of the two middles
@@ -180,12 +155,8 @@ def test_torch_q50_is_not_torch_median():
                                np.median(m.numpy(), axis=-1), rtol=1e-6, atol=1e-6)
 
 
-@pytest.mark.skipif(not _HAS_CUDA, reason="torch has no CUDA device")
 def test_torch_threshold_bands_matches_numpy():
-    """The other half of the two-step seam. torch had no public wavedec or
-    threshold_bands at all, so `--backend torch` could not run the TPC gate path
-    (wavedec -> gate -> threshold) even though its DWT was complete."""
-    import torch
+    """The other half of the two-step seam: wavedec -> threshold on torch equals numpy."""
     from helix.core.wavelet import wavedec, threshold_bands, ThresholdSpec
     rng = np.random.default_rng(5)
     img = rng.standard_normal((64, 256)).astype(np.float32) * 2.0
@@ -194,21 +165,17 @@ def test_torch_threshold_bands_matches_numpy():
     bn, ln = wavedec(img, wavelet="db2", level=3, mode="periodization")
     on, kn, tn, sn = threshold_bands(bn, th)
     backend.set_backend("torch")
-    bt, lt = wavedec(torch.as_tensor(img).cuda(), wavelet="db2", level=3, mode="periodization")
+    bt, lt = wavedec(torch.as_tensor(img).to(DEV), wavelet="db2", level=3, mode="periodization")
     ot, kt, tt, st = threshold_bands(bt, th)
     assert ln == lt and kn == kt and tn == tt, f"n_kept {kn} vs {kt}"
-    np.testing.assert_allclose(st, sn, rtol=1e-5, atol=1e-6)
-    for i, (x, y) in enumerate(zip(on, ot)):
-        np.testing.assert_allclose(y.detach().cpu().numpy(), np.asarray(x),
-                                   rtol=1e-4, atol=1e-4, err_msg=f"band {i}")
+    np.testing.assert_allclose(_np(st), sn, rtol=1e-5, atol=1e-6)
+    _close(on, ot)
 
 
-@pytest.mark.skipif(not _HAS_CUDA, reason="torch has no CUDA device")
 def test_torch_wavedec_refuses_non_periodization():
     """The FFT filter bank IS periodization; silently accepting another mode
     would return coefficients that disagree with numpy for the same call."""
-    import torch
     from helix.core.wavelet import wavedec
     backend.set_backend("torch")
     with pytest.raises(ValueError, match="periodization"):
-        wavedec(torch.zeros(8, 64).cuda(), wavelet="db2", level=2, mode="symmetric")
+        wavedec(torch.zeros(8, 64).to(DEV), wavelet="db2", level=2, mode="symmetric")

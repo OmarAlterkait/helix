@@ -15,52 +15,6 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 # --------------------------------------------------------------------------
-# MAD sigma: np.partition(a, mid) does not order position mid-1
-# --------------------------------------------------------------------------
-
-def test_mad_sigma_numpy_matches_true_median():
-    """The even-length branch must be the real median of |residual|.
-
-    ``np.partition(a, mid)`` guarantees only that position ``mid`` holds the
-    mid-th order statistic; everything below it is unordered. Reading
-    ``p[:, mid-1]`` therefore returned an arbitrary element below the median.
-    Tick counts are even in production, so this was the branch that always ran.
-    """
-    from helix.tpc.coherent_ops_numpy import mad_sigma_per_wire
-
-    rng = np.random.default_rng(0)
-    for n_t in (256, 4096):                       # even: the production case
-        res = rng.normal(0, 1.0, size=(500, n_t))
-        want = np.median(np.abs(res), axis=1) / 0.6745
-        np.testing.assert_allclose(mad_sigma_per_wire(res), want,
-                                   rtol=1e-6, atol=0)
-    for n_t in (257, 4095):                       # odd: was already correct
-        res = rng.normal(0, 1.0, size=(500, n_t))
-        want = np.median(np.abs(res), axis=1) / 0.6745
-        np.testing.assert_allclose(mad_sigma_per_wire(res), want,
-                                   rtol=1e-6, atol=0)
-
-
-def test_mad_sigma_backends_agree():
-    """numpy and torch are hand-written twins; nothing else diffs them.
-
-    The whole justification for keeping a separate implementation per backend is
-    that a reference exists to compare against. That only holds if something
-    actually compares. The partition bug put these two out of step and no test
-    noticed.
-    """
-    torch = pytest.importorskip("torch")
-    from helix.tpc.coherent_ops_numpy import mad_sigma_per_wire as np_mad
-    from helix.tpc.coherent_ops_torch import mad_sigma_per_wire as t_mad
-
-    rng = np.random.default_rng(1)
-    res = rng.normal(0, 1.0, size=(500, 4096)).astype(np.float32)
-    np.testing.assert_allclose(np_mad(res),
-                               t_mad(torch.from_numpy(res)).numpy(),
-                               rtol=1e-5, atol=1e-6)
-
-
-# --------------------------------------------------------------------------
 # Event-name seeding: hash() is salted per process
 # --------------------------------------------------------------------------
 

@@ -25,8 +25,6 @@ _OPS = "helix.core.hysteresis_ops"
 def _ops_for(x):
     if backend.kind_of(x) == "torch" or backend.get_backend() == "torch":
         return backend.import_backend_module(_OPS, "torch")
-    if backend.kind_of(x) == "jax":
-        raise NotImplementedError("hysteresis: no jax backend; use numpy or torch")
     return backend.import_backend_module(_OPS, "numpy")
 
 

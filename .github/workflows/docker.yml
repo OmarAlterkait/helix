@@ -7,8 +7,7 @@ name: Docker
 # was an eleven-minute manual apptainer job on a cluster node, and the result was
 # copied to a shared path by hand. That produced exactly what you would expect --
 # three differently-named .sif files, the canonical one built months earlier from
-# a local path source with CPU jax, while helix.paths and five documents all
-# pointed at it.
+# a local path source, while helix.paths and five documents all pointed at it.
 #
 # The cluster then pulls a tested image instead of building one:
 #
@@ -47,13 +46,6 @@ on:
       - 'scripts/**'
       - '.github/workflows/docker.yml'
   workflow_dispatch:
-    inputs:
-      jax_extra:
-        description: jax variant to build
-        required: true
-        default: cuda12
-        type: choice
-        options: [cuda12, cpu]
 
 permissions:
   contents: read
@@ -85,7 +77,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # torch+CUDA+jax is far larger than a default runner's free space. The
+      # torch+CUDA is far larger than a default runner's free space. The
       # preinstalled toolchains are worth ~25 GB and helix needs none of them.
       - name: Free disk space
         run: |
@@ -121,7 +113,6 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=jax-${{ github.event.inputs.jax_extra || 'cuda12' }}
 
       - name: Build
         id: build
@@ -132,8 +123,6 @@ jobs:
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            JAX_EXTRA=${{ github.event.inputs.jax_extra || 'cuda12' }}
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}
           cache-to: ${{ steps.push.outputs.enabled == 'true' && format('type=registry,ref={0},mode=max,ignore-error=true', env.CACHE_IMAGE) || '' }}
           provenance: false
@@ -292,7 +281,6 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=jax-${{ github.event.inputs.jax_extra || 'cuda12' }}
 
       - name: Build
         id: build
@@ -303,8 +291,6 @@ jobs:
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            JAX_EXTRA=${{ github.event.inputs.jax_extra || 'cuda12' }}
           cache-from: type=registry,ref=${{ env.NERSC_CACHE_IMAGE }}
           cache-to: ${{ steps.push.outputs.enabled == 'true' && format('type=registry,ref={0},mode=max,ignore-error=true', env.NERSC_CACHE_IMAGE) || '' }}
           # Shifter and podman-hpc cannot consume OCI indexes or attestation
@@ -353,7 +339,7 @@ jobs:
           docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
             -e PYTHONNOUSERSITE=1 -e PYTHONPATH=/work -e HELIX_ROOT=/work \
             "$REF" /opt/pimm/.venv/bin/python - <<'PY'
-          import h5py, mpi4py, pimm_data, pywt, jax, torch
+          import h5py, mpi4py, pimm_data, pywt, torch
           if not h5py.get_config().mpi:
               raise SystemExit("h5py lost MPI support: this image is the standard one in disguise")
           from pimm_data.transform import TRANSFORMS
@@ -363,7 +349,7 @@ jobs:
               assert gone not in names, f"pimm_data still registers {gone}: lockstep violated"
           print(f"OK: h5py {h5py.__version__} (MPI), mpi4py {mpi4py.__version__}, "
                 f"pimm_data {pimm_data.__version__}, pywt {pywt.__version__}, "
-                f"jax {jax.__version__}, torch {torch.__version__}")
+                f"torch {torch.__version__}")
           PY
           docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
             -e PYTHONNOUSERSITE=1 -e PYTHONPATH=/work -e HELIX_ROOT=/work \

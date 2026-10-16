@@ -239,7 +239,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
         per plane   F0 min 0.871        per-event mean F0 0.910-0.917
         off-support RMS(recon - truth) per-event mean 0.43-0.52, max 0.692 ADC
 
-    The earlier path (helix.tpc.pipeline gate, D1 kept) on the same event-0 input gave
+    The earlier simulation path (since retired: gate, D1 kept) on the same event-0 input gave
     the same F0 to 0.001 per plane, against the raw clean image. The floors below are
     the ones that path used.
 
