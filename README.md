@@ -54,7 +54,7 @@ simulated PMTs (`python -m helix.optical.goop_run --input light_output.h5 --outp
 goop_shard.h5 [--device cuda]`): deconvolution with the system's measured
 single-photon response, integer-Haar differences kept where the light (or the
 departure from it) reaches threshold, coarse sums always; written as optical shards
-(`helix.tpc.sparse_io.read_optical`) with 128-slot tokens (`helix.optical.tokens`),
+(`helix.optical.shard`, one modality per file next to the TPC coefficient shards) with 128-slot tokens (`helix.optical.tokens`),
 so simulation and data share one representation. The earlier goop pipeline
 (`helix.optical.process_event`: coif3 + VisuShrink, and the `scripts/optical`
 sweeps) is kept as a reference; it loses most isolated photons and part of the slow

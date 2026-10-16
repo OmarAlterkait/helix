@@ -50,13 +50,13 @@ SBND_DEFAULT = {
 }
 
 # The simulation (JAXTPC sensor files): its wire layout as the readout (``sim_config``), pedestals
-# already subtracted by the reader, no status cuts (no dead or noisy wires in simulation), HELIX's
+# already subtracted by the reader, SBND's status cuts (they cut no simulated wire), HELIX's
 # contiguous-block gate (the coherent noise model's 64-wire groups; occupancy tolerance 0.05),
 # the same threshold and basis as SBND.
 SIM_BASE = {
     "readout": {"kind": "layout", "num_wires": [], "group_size": 64},
     "pedestal": {"method": "file", "clip_k": 3.5},
-    "status": {"method": "none", "dead_rms": 0.3, "noisy_factor": 4.0, "clip_k": 3.5, "step_k": 10.0, "step_ticks": 500},
+    "status": {"method": "cuts", "dead_rms": 0.3, "noisy_factor": 4.0, "clip_k": 3.5, "step_k": 10.0, "step_ticks": 500},
     "dwt": {"wavelet": "coif3", "level": 4, "mode": "periodization"},
     "coherent": {"method": "block_gate", "groups": "block", "cross_plane": False, "kgate": 3.0, "ksig": 3.0,
                  "npass": 2, "tau": 0.05, "sigc_scope": "group", "group_size": 64},

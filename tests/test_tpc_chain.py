@@ -1,9 +1,9 @@
-"""The configurable TPC chain (helix.tpc.chain) and its sparse files (helix.tpc.sparse_io)."""
+"""The configurable TPC chain (helix.tpc.chain) and its CoeffEvents (helix.tpc.chain_coeff)."""
 import numpy as np
 import pytest
 
 from helix.tpc import chain as ch
-from helix.tpc import sparse_io
+from helix.tpc import chain_coeff
 from helix.tpc.readout import load_readout
 
 
@@ -79,30 +79,24 @@ def test_hysteresis_keeps_a_faint_track_end_universal_drops():
     assert kept["hysteresis"] > 1.5 * kept["universal"]
 
 
-@pytest.mark.parametrize("flush_every", [1, 8])
-@pytest.mark.parametrize("encoding", ["columns", "compact"])
-def test_sparse_roundtrip(tmp_path, encoding, flush_every):
-    adc, ped, present = _event(seed=1)
+def test_coeff_shard_roundtrip(tmp_path):
+    """Chain results -> CoeffEvent -> coeff_io shard -> the same coefficients."""
+    from helix.core import coeff_io
     chain = ch.TPCChain()
-    res = chain.process_event(adc, ped, present)
-    p = tmp_path / f"x_{encoding}.h5"
-    with sparse_io.Writer(p, chain, encoding=encoding, flush_every=flush_every) as w:
-        for e in range(3):
-            w.add(res, run=1, event=7 + e)
-    for i in (0, 1, 2):
-        got = sparse_io.read_event(p, i)
-        for r in res:
-            gid = r["tpc"] * 3 + "UVY".index(r["plane"])
-            for a, b in zip(r["bands"], got[gid]["bands"]):
-                if encoding == "columns":
-                    np.testing.assert_array_equal(b, a)
-                else:
-                    np.testing.assert_allclose(b, a, rtol=1e-3, atol=0)
-                    assert np.array_equal(b != 0, a != 0)
+    ces = [chain_coeff.coeff_event(chain, chain.process_event(*_event(seed=1 + e)), run="1", source_file="x.h5", event=7 + e)
+           for e in range(3)]
+    p = tmp_path / "x.h5"
+    coeff_io.write_coeff_shard(p, ces)
+    coeff_io.audit_shard(p)
+    for i, ce in enumerate(ces):
+        back = coeff_io.read_coeff_event(p, i)
+        for k in ("band", "plane_gid", "wire", "tau", "value"):
+            np.testing.assert_array_equal(getattr(back, k), getattr(ce, k))
+        assert back.event == 7 + i
 
 
 def test_coeff_event_physical_wires_and_validity(tmp_path):
-    """SBND sparse file -> CoeffEvent: physical wire numbers (uninstrumented wires are
+    """SBND chain -> CoeffEvent: physical wire numbers (uninstrumented wires are
     gaps), per-wire validity through the shard, and the tokenizer gives excluded wires
     no target."""
     from helix.core import coeff_io
@@ -111,10 +105,7 @@ def test_coeff_event_physical_wires_and_validity(tmp_path):
     adc, ped, present = _event(seed=4)
     chain = ch.TPCChain()
     res = chain.process_event(adc, ped, present)
-    p = tmp_path / "s.h5"
-    with sparse_io.Writer(p, chain) as w:
-        w.add(res, run=1, event=3)
-    ce = sparse_io.coeff_event(p, 0)
+    ce = chain_coeff.coeff_event(chain, res, run="1", source_file="s.h5", event=3)
     y0 = int(np.where(ce.gids == 2)[0][0])
     yw = ro.wire[(ro.tpc == 0) & (ro.plane == 2)]
     assert ce.n_wires[y0] == yw.max() + 1

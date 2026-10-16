@@ -1,13 +1,15 @@
-"""Compress SBND events with the configurable TPC chain.
+"""Compress SBND events: the TPC chain and the optical codec, into HELIX's shards.
 
-    python -m helix.tpc.sbnd_run --input RUN_DIR/*.h5 --output out.h5 --device cuda \\
-        [--config overrides.json|yaml] [--encoding compact|columns] [--workers 4] \\
-        [--first 0 --count 100] [--profile]
+    python -m helix.tpc.sbnd_run --input RUN_DIR/*.h5 --output OUT/PREFIX --device cuda \\
+        [--config overrides.json|yaml] [--optical-config ...] [--workers 4] \\
+        [--first 0 --count 100] [--events-per-shard 100] [--profile]
 
-Reads the extracted HDF5 files (:mod:`helix.tpc.io_sbnd`, decoded in worker processes),
-runs :class:`helix.tpc.chain.TPCChain` on each event (numpy without ``--device``) and
-writes :mod:`helix.tpc.sparse_io`. Prints per-event and summary timing: waiting for
-input, the chain (per stage with ``--profile``), extracting and writing.
+Reads the extracted HDF5 files (:mod:`helix.tpc.io_sbnd`, decoded in worker processes), runs
+:class:`helix.tpc.chain.TPCChain` (numpy without ``--device``) and the optical codec on each
+event and writes, per ``--events-per-shard`` events, the TPC coefficient shard
+``PREFIX_coeff_NNNN.h5`` (:mod:`helix.core.coeff_io`, the corpus format the model reads) and the
+optical shard ``PREFIX_optical_NNNN.h5`` (:mod:`helix.optical.shard`), joined on (run,
+source_file, event). Prints per-event and summary timing.
 """
 from __future__ import annotations
 
@@ -34,7 +36,6 @@ def main(argv=None):
     ap.add_argument("--output", required=True)
     ap.add_argument("--config", default=None)
     ap.add_argument("--device", default=None)
-    ap.add_argument("--encoding", default="compact", choices=["compact", "columns"])
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--first", type=int, default=0)
     ap.add_argument("--count", type=int, default=None)
@@ -44,7 +45,8 @@ def main(argv=None):
     ap.add_argument("--profile", action="store_true")
     ap.add_argument("--no-optical", action="store_true", help="TPC only")
     ap.add_argument("--deflate", type=int, default=4, help="deflate level of the output (0-9)")
-    ap.add_argument("--flush-every", type=int, default=8)
+    ap.add_argument("--events-per-shard", type=int, default=100)
+    ap.add_argument("--dataset-name", default="sbnd")
     ap.add_argument("--optical-config", default=None, help="per-system OpticalSpec overrides (helix.optical.codec)")
     ap.add_argument("--serial-optical", action="store_true",
                     help="run the optical codec after the TPC chain (default on CUDA: in a thread on its own stream, "
@@ -53,7 +55,11 @@ def main(argv=None):
 
     from helix.tpc.chain import TPCChain
     from helix.tpc.io_sbnd import SBNDEvents, loader
-    from helix.tpc.sparse_io import Writer
+    from pathlib import Path
+    from helix.core.coeff_io import write_coeff_shard, audit_shard
+    from helix.optical.shard import OpticalWriter
+    from helix.tpc import chain_coeff
+    from helix.tpc.corpus import normalization_table
     from helix.optical.codec import OpticalChain
     systems = () if a.no_optical else ("pmt", "xarapuca")
     ochain = OpticalChain(_overrides(a.optical_config), device=a.device) if systems else None
@@ -89,9 +95,37 @@ def main(argv=None):
     okept = {s: 0 for s in systems}; osamp = {s: 0 for s in systems}
     kept, n = [], 0
     t_start = time.perf_counter()
-    w = Writer(a.output, chain, encoding=a.encoding, level=a.deflate, flush_every=a.flush_every)
-    # compression and HDF5 writes run in a writer thread, overlapping the next event's
-    # device work (the main thread only extracts the sparse entries to the host)
+    prefix = Path(a.output); prefix.parent.mkdir(parents=True, exist_ok=True)
+    outputs = []
+
+    class ShardWriter:
+        """Per ``--events-per-shard`` events: one coeff_io TPC shard and one optical shard."""
+
+        def __init__(self):
+            self.k, self.ces, self.ow = 0, [], None
+
+        def add_prepared(self, item):
+            ce, ores, ident = item
+            if self.ow is None and systems:
+                self.ow = OpticalWriter(f"{prefix}_optical_{self.k:04d}.h5", level=a.deflate)
+            self.ces.append(ce)
+            if self.ow is not None:
+                self.ow.add(ores, **ident)
+            if len(self.ces) >= a.events_per_shard:
+                self.close()
+
+        def close(self):
+            if self.ces:
+                pth = f"{prefix}_coeff_{self.k:04d}.h5"
+                write_coeff_shard(pth, self.ces, dataset_name=a.dataset_name, file_index=self.k,
+                                  norm_sigma=normalization_table(self.ces))
+                audit_shard(pth); outputs.append(pth)
+            if self.ow is not None:
+                self.ow.close(); outputs.append(f"{prefix}_optical_{self.k:04d}.h5")
+            self.ces, self.ow = [], None; self.k += 1
+    w = ShardWriter()
+    # shard writes run in a writer thread, overlapping the next event's device work (the main
+    # thread extracts the sparse entries to the host)
     import queue
     import threading
     q = queue.Queue(maxsize=4)
@@ -121,7 +155,10 @@ def main(argv=None):
         ores = fut.result() if fut is not None else optical(ev)       # overlapped: the wait beyond the TPC chain
         sync(); t3 = time.perf_counter(); T["optical"] += t3 - t2
         m = ev["meta"]
-        q.put(w.prepare(res, ores, run=m["run"], subrun=m["subrun"], event=m["event"], time=m["time"]))
+        ident = dict(run=str(m["run"]), source_file=Path(m["file"]).name, event=int(m["event"]), subrun=int(m["subrun"]),
+                     time=float(m["time"]))
+        ce = chain_coeff.coeff_event(chain, res, run=ident["run"], source_file=ident["source_file"], event=ident["event"])
+        q.put((ce, ores, ident))
         for r in ores:
             okept[r["system"]] += r["n_kept"]; osamp[r["system"]] += r["n_samples"]
         t = time.perf_counter(); T["write"] += t - t3
@@ -148,28 +185,30 @@ def main(argv=None):
                    stages_per_event_s=None if chain.timings is None else {k: v / max(n, 1) for k, v in chain.timings.items()},
                    kept_mean=float(np.mean(kept)) if kept else 0.0, config_digest=chain.digest, device=a.device,
                    writer_thread_busy_s_per_event=wstat["busy"] / max(n, 1),
-                   workers=a.workers, encoding=a.encoding, deflate=a.deflate,
+                   workers=a.workers, deflate=a.deflate, outputs=outputs,
                    optical_compression={s: osamp[s] / max(okept[s], 1) for s in systems})
     if a.device and a.device.startswith("cuda"):
         import torch
         summary["gpu_max_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
         summary["gpu"] = torch.cuda.get_device_name()
     import os
-    summary["output_mb"] = os.path.getsize(a.output) / 1e6
     import h5py
-    with h5py.File(a.output, "r") as f:                          # stored (compressed) bytes per system
-        def stored(g):
-            tot = 0
+
+    def stored(path, group=None):
+        tot = 0
+        with h5py.File(path, "r") as f:
             def v(_, o):
                 nonlocal tot
                 if isinstance(o, h5py.Dataset):
                     tot += o.id.get_storage_size()
-            g.visititems(v)
-            return tot
-        summary["stored_mb_per_event"] = {"tpc": stored(f["coeffs"]) / 1e6 / max(n, 1)}
-        for s_ in systems:
-            summary["stored_mb_per_event"][s_] = stored(f["optical"][s_]) / 1e6 / max(n, 1)
-    summary["output_mb_per_event"] = summary["output_mb"] / max(n, 1)
+            (f[group] if group else f).visititems(v)
+        return tot
+    tpc = [p for p in outputs if "_coeff_" in p]; opt = [p for p in outputs if "_optical_" in p]
+    summary["stored_mb_per_event"] = {"tpc": sum(stored(p) for p in tpc) / 1e6 / max(n, 1)}
+    for s_ in systems:
+        summary["stored_mb_per_event"][s_] = sum(stored(p, f"optical/{s_}") for p in opt
+                                                 if s_ in h5py.File(p, "r")["optical"]) / 1e6 / max(n, 1)
+    summary["output_mb_per_event"] = sum(os.path.getsize(p) for p in outputs) / 1e6 / max(n, 1)
     print(json.dumps(summary, indent=1))
     return summary
 
