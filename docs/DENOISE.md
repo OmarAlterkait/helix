@@ -530,3 +530,37 @@ detection efficiencies, +-0.0002 on the bright median.
   faint floor is set by the corpus threshold and the physics, not by the label.
 - **Still open:** the faintest predicted bin (102-500 e-) remains 13-15% low after calo. The decoder's bright
   median sits 0.5% low, a log-space residual the Jensen table does not remove (`fit.mu_log`, not applied).
+
+### Causes of the high-charge floor and the event-wide coupling, and their fixes: M10lin / M11 (2026-10-12..16)
+
+Every claim tested directly (baselines/uboone_sp/causes/results/m7_tests_{plan,results}.md). Above ~64 k e- M7dc's
+per-cell error was flat at ~3-4% while an exact-kernel linear inversion of the same corpus input reached 1-2%. Ruled
+out: missing information, input rounding, the decoder's local view, numerical jitter, smoothing of real
+fluctuations, noise handling, overfitting (train = test), convergence (first-order minimum), the head (every
+converged head on the frozen encoder lands at M7dc's error), pretraining / the FM's bins (from scratch reaches the
+same floor at full scale), attention group size. The cause found: the encoder reads arcsinh(value / sigma) only --
+log-compressed amplitudes. Adding the amplitude sinh(value) / 30 as an input channel (SerialFMModel lin_amp_scale,
+new embedding columns zero-initialised) and training M7dc's full recipe with it (M10lin) cut the per-cell spread vs
+M7dc by 8 / 18 / 27% on Y (16-64 k / 64-256 k / >= 256 k), 6 / 14 / 21% on U, 1 / 6 / 18% on V, growing with charge.
+
+Separately, the denoiser read charge relative to the event's visible amplitude (gain response 0.70; scaling one TPC
+volume lowered the other volume's charge). Not a property of the simulation (no event-level scale; volumes' charge
+correlates +0.17); seeded by pretraining; carried by the encoder's drift-layer attention groups, which sorted by time
+alone and so mixed both volumes. Fixes: drift layouts sorted by (volume, time) (drift_planes_per_volume=3) and
+charge-scaling augmentation (per plane / 64-wire block gain on the SIGNAL via the clean shards, truth scaled alike).
+Near the shared cathode, cross-volume attention does help Y by ~2% (paired); a signed-x drift coordinate would keep
+that, but needs re-pretraining (as a fine-tune it cost ~2%).
+
+M11 = M7dc's recipe + amplitude channel + both coupling fixes. Products standard (5 draws, complete truth):
+
+| | M7dc | M10lin | M11 |
+|---|---|---|---|
+| bright median / res68 | 0.9967 / 0.0413 | 0.9989 / 0.0374 | 1.0023 / 0.0382 |
+| plane totals U / V / Y | 0.994 / 0.992 / 0.998 | 0.995 / 0.993 / 0.999 | 0.999 / 0.997 / 1.002 |
+| clean L1 | 0.0529 | 0.0488 | 0.0492 |
+| p_cal LL / ECE (q > 25) | 0.0774 / 0.0031 | 0.0773 / 0.0030 | 0.0773 / 0.0028 |
+| isolated near detection | 0.555 | 0.563 | 0.574 |
+| whole-event gain response | 0.70 | 0.87 | 0.97 |
+
+Remaining: half the gap to the inversion at high charge (Y >= 256 k 0.027 vs 0.009); faint-bin calo linearity 1.5-2%
+worse (1-2 k: 1.022 vs 1.007); the cathode gain lost with volume separation.

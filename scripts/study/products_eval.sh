@@ -9,6 +9,8 @@ declare -A CK=( [M4n]=$W/denoise/M4n_ft_full_near/final.pt [M6d]=$D/M6d_ft_full_
 for t in lb_dec_hits lb_dec_cond_hits lb_dec_ct lb_dec_cond_ct sp_dec_c25 sp_dec_c102 sp_dec_cond_c25 sp_dec_cond_c102; do
   CK[$t]=$D/$t/best.pt; done
 CK[M7d]=$D/M7d_ft_full_dec_ct25/final.pt; CK[M7dc]=$D/M7dc_ft_full_dec_cond_ct25/final.pt
+CK[M10lin]=$D/M10lin_ft_full_dec_cond_ct25/final.pt
+CK[M11]=$D/M11_ft_full_dec_cond_ct25/final.pt
 i=${GPU0:-0}
 for n in "$@"; do
   CUDA_VISIBLE_DEVICES=$(( i % 4 )) HELIX_INTERACTIVE=0 HDF5_USE_FILE_LOCKING=FALSE OMP_NUM_THREADS=4 scripts/helix_run.sh python \
