@@ -2,13 +2,18 @@
 """Build the coeff corpus from real doraemon sensor shards (the production plane_fn).
 
 Composes pimm-data (geometry + noise — the COLORED incoherent spectrum the old
-build omitted, which defaulted to white) with helix (process_plane gate +
-build_corpus). This is a BUILD-TIME composer: it imports both helix and pimm-data
+build omitted, which defaulted to white) with helix (the TPC chain,
+helix.tpc.chain.sim_config + build_corpus). This is a BUILD-TIME composer: it imports both helix and pimm-data
 (allowed at build time; the read path never does). Not part of the helix package.
 
 plane_fn(event) -> (noisy_planes, clean_planes):
   noisy = digitize( clean_image + incoherent(colored) + coherent )
   clean = the noise-free digitized image (co-supported target at the noisy mask)
+
+The DSP is helix.tpc.chain.TPCChain(sim_config(layout.num_wires, overrides)): the
+sensor file's wire layout as the readout, HELIX's block gate, coif3 L4, hysteresis
+threshold, D1 dropped. Backends: numpy, or torch on the GPU (densify, noise,
+digitize and the chain all on the device).
 
 Usage:
   python build_coeff_corpus.py --shard <sensor.h5> --out <dir> --events 100 \
@@ -79,19 +84,17 @@ def _add_repo_paths(helix_root, pimm_src):
             sys.path.insert(0, p)
 
 
-def _loader_stream(args, cfg, reg, noise_spec):
-    """Mode A: pimm-data DataLoader workers + the torch dense tail -> dlpack -> jax.
+def _loader_stream(args, reg, noise_spec):
+    """Mode A: pimm-data DataLoader workers + the torch dense tail -> the chain.
 
     The head (`Collect`) runs per-event in worker PROCESSES on sparse COO, so the
     HDF5 decode overlaps GPU work (measured DataLoader wait: 2.5 ms/event). The
     tail densifies/noises/digitizes on-device with pimm-data's tested torch ops;
-    the grids cross to jax zero-copy via dlpack.
+    the grids stay on the device for the chain.
 
     Densify runs BEFORE AddNoise, so the clean target is simply the densified
     image captured before noise is added — no second pass over the event.
     """
-    import jax
-    import torch
     from torch.utils.data import DataLoader, Subset
     from pimm_data import JAXTPCDataset
     from pimm_data.collate import collate_fn
@@ -130,9 +133,8 @@ def _loader_stream(args, cfg, reg, noise_spec):
             f"--event-start {args.event_start} is past the end of the joint index "
             f"({n_total} events in {root}/{split}); nothing to build.")
     ds = Subset(ds, sel)
-    # spawn, NOT fork: DataLoader workers fork while jax is initialised in the
-    # parent, and jax warns that fork + its threads "will likely lead to a
-    # deadlock". spawn re-imports cleanly in each worker.
+    # spawn, NOT fork: the parent has initialised CUDA, which a forked worker
+    # cannot use safely. spawn re-imports cleanly in each worker.
     dl = DataLoader(ds, batch_size=1, num_workers=args.workers, collate_fn=collate_fn,
                     persistent_workers=args.workers > 0,
                     multiprocessing_context="spawn" if args.workers > 0 else None,
@@ -140,11 +142,9 @@ def _loader_stream(args, cfg, reg, noise_spec):
     for b in dl:
         b = dense(b)
         grids = b["sensor_dense"]
-        clean = {int(g): jax.dlpack.from_dlpack(t[0].clone().contiguous())
-                 for g, t in grids.items()}            # capture BEFORE noise
+        clean = {int(g): t[0].clone() for g, t in grids.items()}   # capture BEFORE noise
         b = noise(b)
-        noisy = {int(g): jax.dlpack.from_dlpack(t[0].contiguous())
-                 for g, t in b["sensor_dense"].items()}
+        noisy = {int(g): t[0] for g, t in b["sensor_dense"].items()}
         # Carry the TRUE identity ("<file>_evt<NNN>"), which the batch already
         # holds. The builder used to fabricate provenance from --file-index, so a
         # shard recorded source_file="..._0001.h5" over bytes read from _0000.h5.
@@ -193,7 +193,7 @@ def main():
     ap.add_argument("--dataset-name", default=None)
     ap.add_argument("--kgate", type=str, default=None,
                     help="coherent-gate threshold in units of the per-band coherent "
-                         "scale. None -> DetectorConfig's default (3.0), which is "
+                         "scale (chain coherent.kgate). None -> sim_config's default (3.0), which is "
                          "what run_0027575715 was built with. The research figures "
                          "and evals all used 4.0; at 3.0 genuine coherent excursions "
                          "are misclassified as signal and survive as block-wide "
@@ -201,12 +201,12 @@ def main():
                          "F0). Recorded in removal_json either way. Accepts a "
                          "comma-separated PER-PASS sequence too (npass=2), e.g. "
                          "'4.0,3.0' = aggressive first pass then a permissive "
-                         "second; gate_band already indexes kgate by pass.")
+                         "second; the block gate indexes kgate by pass.")
     ap.add_argument("--tau", type=str, default=None,
                     help="occupancy tolerance on the gate's REFUSAL: refuse only "
                          "when |M| is large AND more than this fraction of the "
-                         "block's wires were flagged. Default (unset) is "
-                         "DetectorConfig's 0.05 = 3 of 64. Recorded in "
+                         "block's wires were flagged (chain coherent.tau). Default "
+                         "(unset) is sim_config's 0.05 = 3 of 64. Recorded in "
                          "removal_json. The legacy magnitude-only rule ('none', "
                          "what pre-2026-08-16 corpora used) lives on the "
                          "legacy-corpus-repro branch, not here.")
@@ -232,17 +232,14 @@ def main():
     ap.add_argument("--allow-index-mismatch", action="store_true",
                     help="serial mode: permit --file-index to disagree with --shard's "
                          "numeric suffix (mislabels provenance; use only deliberately)")
-    ap.add_argument("--backend", choices=["numpy", "torch", "jax"], default="torch",
-                    help="GPU DSP backend. torch is the DEFAULT: it measured 10.6 ms "
-                         "vs jax 8.5 ms for DWT+threshold on a real plane (jax is 1.25x "
-                         "faster), which does not pay for a second GPU runtime in the "
-                         "same process — jax alongside torch forces "
-                         "XLA_PYTHON_CLIENT_PREALLOCATE, spawn-only DataLoader workers, "
-                         "and a dlpack bridge. jax stays selectable for that 25%.")
+    ap.add_argument("--backend", choices=["numpy", "torch"], default="torch",
+                    help="DSP backend: torch (the DEFAULT) runs densify, noise, "
+                         "digitize and the TPC chain on the GPU (cuda); numpy runs "
+                         "everything on the host.")
     ap.add_argument("--mode", choices=["serial", "loader"], default="serial",
                     help="loader: pimm-data DataLoader workers + the torch dense tail "
-                         "(ToDevice/Densify/AddNoise/Digitize) handed to jax via dlpack. "
-                         "Fastest measured path (181 vs 536 ms/event); read overlaps the GPU.")
+                         "(ToDevice/Densify/AddNoise/Digitize) fed to the chain on the "
+                         "GPU; the read overlaps the GPU. Needs --backend torch.")
     ap.add_argument("--workers", type=int, default=4, help="DataLoader workers (loader mode)")
     ap.add_argument("--split", default=None, help="run dir under data_root (loader mode)")
     ap.add_argument("--data-root", default=None, help="dataset root (loader mode)")
@@ -297,12 +294,12 @@ def main():
             f"--npz {args.npz} does not exist. helix ships its own copy; pass "
             f"--npz explicitly, or unset HELIX_JAXTPC_ROOT to use the packaged one.")
 
-    if args.backend == "jax":                    # keep XLA from grabbing the whole card
-        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    if args.mode == "loader" and args.backend != "torch":
+        raise SystemExit("--mode loader runs the torch dense tail on the GPU: use --backend torch")
     from helix.core import backend
     backend.set_backend(args.backend)
-    from helix.tpc.io import (config_from_file, read_sensor_event,
-                              read_sensor_event_coo, count_events, list_events)
+    from helix.tpc.io import (sensor_layout, read_sensor_event,
+                              read_sensor_event_coo, list_events)
     from helix.core.coeff_io import _code_version
 
     def _device_name(backend):
@@ -314,8 +311,7 @@ def main():
                     if torch.cuda.is_available() else "torch:cpu")
         except Exception:
             return "torch:unknown"
-    from helix.tpc.config import DetectorConfig
-    from helix.tpc.pipeline import canonical_plane_gid
+    from helix.tpc.chain import TPCChain, sim_config
     from helix.tpc.corpus import build_corpus
     from helix.tpc.geometry import load_plane_registry
     from helix.tpc.noise import generate_noise, digitize
@@ -325,27 +321,33 @@ def main():
     npz = np.load(args.npz, allow_pickle=True)
     noise_spec = (npz["spectrum_freqs_hz"], npz["spectrum_shape"])
     reg = load_plane_registry(args.geom)
-    base = config_from_file(args.shard)
-    cfg = DetectorConfig(num_time_steps=base.num_time_steps,
-                         plane_labels=base.plane_labels, pedestals=base.pedestals,
-                         **({} if args.kgate is None else dict(gate_kgate=_parse_kgate(args.kgate))),
-                         **({} if args.tau is None else
-                            dict(gate_tau=_parse_tau(args.tau))))
-    print(f"n_time={cfg.num_time_steps} planes={len(cfg.plane_labels)} "
-          f"wavelet={cfg.wavelet} L{cfg.dwt_level} removal={cfg.removal} "
-          f"k{cfg.gate_kgate}/np{cfg.gate_npass}/tau{cfg.gate_tau} noise=colored")
+    layout = sensor_layout(args.shard)
+    if layout.num_wires is None:
+        raise SystemExit(f"{args.shard}: no /config/num_wires and the planes do not form a "
+                         f"volume x plane grid; the chain needs the wire layout")
+    coherent = {}
+    if args.kgate is not None:
+        coherent["kgate"] = _parse_kgate(args.kgate)
+    if args.tau is not None:
+        coherent["tau"] = _parse_tau(args.tau)
+    overrides = {"coherent": coherent} if coherent else None
 
-    use_jax = args.backend == "jax"
     use_torch = args.backend == "torch"
+    dev = None
     if use_torch:
         import torch
         from helix.tpc import dense_ops as _dops
         from pimm_data.dense_ops import densify as _densify  # going to dense
-    if use_jax:
-        import jax
-        import jax.numpy as jnp
-        from helix.tpc.noise_jax import generate_noise_jax
-        from pimm_data.dense_ops_jax import densify_plane_jax
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+    chain = TPCChain(sim_config(layout.num_wires, overrides), device=dev)
+    # The coherent noise model's channel groups ARE the readout layout's groups (the
+    # block gate removes per group): one number, read from the chain, never set twice.
+    group_size = int(chain.cfg["readout"]["group_size"])
+    _co, _dw = chain.cfg["coherent"], chain.cfg["dwt"]
+    print(f"n_time={layout.num_time_steps} planes={len(layout.plane_labels)} "
+          f"wavelet={_dw['wavelet']} L{_dw['level']} removal={_co['method']} "
+          f"k{_co['kgate']}/np{_co['npass']}/tau{_co['tau']} group={group_size} "
+          f"chain={chain.digest} device={dev or 'numpy'} noise=colored")
 
     _src_name = Path(args.shard).name
 
@@ -365,27 +367,21 @@ def main():
             hashlib.blake2b(f"{args.run}/{_src_name}/ev{ev}".encode(),
                             digest_size=8).digest(), "little") & 0xFFFFFFFF
 
-    def _digitize_jax(x, ped, n_bits=12):
-        """On-device twin of helix.tpc.noise.digitize (round -> clip -> unpedestal)."""
-        adc_max = (1 << n_bits) - 1
-        return jnp.clip(jnp.round(x + ped), 0, adc_max) - ped
-
     def _plane_fn_torch(ev):
         """Torch: densify + noise + digitize ON DEVICE, same ops as loader mode.
 
         Without this the torch backend read a dense NUMPY image and noised it on
-        the host before handing it to the GPU DSP — 19.6 s/event against jax's
-        9.1, which made torch look slow when what was slow was the host prologue.
+        the host before handing it to the GPU DSP (19.6 s/event, nearly all of it
+        the host prologue).
         Uses pimm-data's batched dense ops with B=1; those are the same
         implementations the loader tail runs, and the bounds-guarded ones.
         """
-        spec = read_sensor_event_coo(args.shard, ev, cfg)
+        spec = read_sensor_event_coo(args.shard, ev, layout)
         seed = _seed(ev)
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
         w_l, t_l, v_l, p_l = [], [], [], []
         gmap = {}
         for label, (w, t, v, nw, nt) in spec.items():
-            gid = canonical_plane_gid(label)
+            gid = layout.plane_gid(label)
             gmap[gid] = label
             w_l.append(torch.as_tensor(np.asarray(w), dtype=torch.long, device=dev))
             t_l.append(torch.as_tensor(np.asarray(t), dtype=torch.long, device=dev))
@@ -398,47 +394,28 @@ def main():
         clean = {int(g): x[0].clone() for g, x in grids.items()}   # BEFORE noise
         grids = _dops.add_intrinsic_noise(
             grids, reg, seeds=[seed], incoherent=True, coherent=True,
-            series_spectrum=noise_spec, group_size=cfg.group_size)
-        peds = {int(g): cfg.pedestals.get(gmap[int(g)].split("_")[-1], 0) for g in grids}
+            series_spectrum=noise_spec, group_size=group_size)
+        peds = {int(g): layout.pedestal(gmap[int(g)]) for g in grids}
         grids = _dops.digitize(grids, peds, n_bits=12)
         return {int(g): x[0] for g, x in grids.items()}, clean
 
     def plane_fn(ev):
         if use_torch:
             return _plane_fn_torch(ev)
-        # jax path reads SPARSE COO and densifies ON DEVICE — building the dense
-        # image on the CPU and copying it across was pure overhead.
-        planes = (read_sensor_event_coo(args.shard, ev, cfg) if use_jax
-                  else read_sensor_event(args.shard, ev, cfg))
-        seed = _seed(ev)
-        rng = None if use_jax else np.random.default_rng(seed)
-        key = jax.random.PRNGKey(seed) if use_jax else None
+        planes = read_sensor_event(args.shard, ev, layout)
+        rng = np.random.default_rng(_seed(ev))
         noisy, clean = {}, {}
-        for i, (label, spec) in enumerate(planes.items()):
-            gid = canonical_plane_gid(label)
-            if use_jax:
-                w, t, v, nw, nt = spec
-                img = densify_plane_jax(w, t, v, nw, nt)      # on GPU
-            else:
-                img = spec
-                nw = img.shape[0]
+        for label, img in planes.items():
+            gid = layout.plane_gid(label)
+            nw = img.shape[0]
             wl = np.asarray(reg.get(gid, {}).get("wire_lengths", []), np.float64)
             if wl.size != nw:
                 wl = np.full(nw, 2.33, np.float64)
-            ped = cfg.pedestals.get(label.split("_")[-1], 0)
-            if use_jax:                                   # noise + digitize on GPU
-                k = jax.random.fold_in(key, i)            # per-plane substream
-                noise = generate_noise_jax(
-                    k, img.shape, wire_lengths_m=wl, incoherent=True, coherent=True,
-                    series_spectrum=noise_spec, group_size=cfg.group_size)
-                noisy[gid] = _digitize_jax(img + noise, ped)
-                clean[gid] = img
-            else:
-                noise = generate_noise(img.shape, rng=rng, wire_lengths_m=wl,
-                                       incoherent=True, coherent=True,
-                                       series_spectrum=noise_spec, group_size=cfg.group_size)
-                noisy[gid] = digitize(img + noise, ped)
-                clean[gid] = img.astype(np.float32)
+            noise = generate_noise(img.shape, rng=rng, wire_lengths_m=wl,
+                                   incoherent=True, coherent=True,
+                                   series_spectrum=noise_spec, group_size=group_size)
+            noisy[gid] = digitize(img + noise, layout.pedestal(label))
+            clean[gid] = img.astype(np.float32)
         return noisy, clean
 
     norm_in = np.load(args.norm_sigma) if args.norm_sigma else None
@@ -512,15 +489,15 @@ def main():
 
     noise_meta = dict(kind="colored",
                       incoherent=True, coherent=True,
-                      group_size=int(cfg.group_size),
+                      group_size=group_size,
                       spectrum=os.path.basename(args.npz),
                       mode=args.mode, backend=args.backend)
     t0 = time.perf_counter()
     if args.mode == "loader":
         from helix.tpc.corpus import build_corpus_stream
-        stream = _loader_stream(args, cfg, reg, noise_spec)
+        stream = _loader_stream(args, reg, noise_spec)
         noisy, clean, norm = build_corpus_stream(
-            stream, cfg, args.out, dataset_name=args.dataset_name, run=args.run,
+            stream, chain, args.out, dataset_name=args.dataset_name, run=args.run,
             file_index=args.file_index, norm_sigma=norm_in, noise=noise_meta,
             provenance=provenance_meta, write=not args.calibrate,
             with_clean=not args.calibrate,
@@ -541,7 +518,7 @@ def main():
         # carry (source_file, event, resolved_seed) so /ident records the true
         # origin AND the one noise realisation this shard bakes in
         events = [(_src_name, e, _seed(e)) for e in _evs]
-        noisy, clean, norm = build_corpus(events, plane_fn, cfg, args.out,
+        noisy, clean, norm = build_corpus(events, plane_fn, chain, args.out,
                                           dataset_name=args.dataset_name, run=args.run,
                                           file_index=args.file_index, norm_sigma=norm_in,
                                           noise=noise_meta,

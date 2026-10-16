@@ -31,7 +31,7 @@
 #                        process, so at 200 events/job torch wins outright
 #                        (134 s vs 149 s). jax leads only in steady state, by
 #                        1.16x, which does not repay its warmup until ~361
-#                        events. Pass --backend jax to override.
+#                        events. (The builder no longer offers jax.)
 #   100 jobs/run       : 100 files x 200 events = 20,000 events. Eight such
 #                        submissions (RUN_INDEX 0..7) give the 160,000-event
 #                        corpus; they cannot be one array here (see --array).
@@ -118,7 +118,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/helix_env.sh"
 # nothing here. It is kept as a deprecated override.
 SRC=${SRC_ROOT:-${HELIX_SENSOR_ROOT:?HELIX_SENSOR_ROOT not resolved; run python -m helix.paths}}
 # The R1 root, matching the DEFAULT gate below. It used to name .../coeff_tpc,
-# which is the PRE-R1 corpus: `--tau` unset means DetectorConfig's 0.05, so the
+# which is the PRE-R1 corpus: `--tau` unset means sim_config's 0.05, so the
 # ordinary default invocation built r1-gated shards and wrote them into the tree
 # whose shards were built with the legacy magnitude-only rule. Nothing in the
 # output said so, and the reader's cross-shard check passed — the two corpora
@@ -138,7 +138,7 @@ EVENTS_PER_SHARD=${EVENTS_PER_SHARD:-200}   # = one source file
 SHARDS_PER_RUN=${SHARDS_PER_RUN:-100}      # = files per run
 RUNS_FILE=${RUNS_FILE:-$OUT/_calib/RUNS.txt}
 # Must match the kgate the frozen norm_sigma was calibrated at (see
-# calibrate_norm_sigma.sh). Empty -> DetectorConfig's default of 3.0, which is
+# calibrate_norm_sigma.sh). Empty -> sim_config's default of 3.0, which is
 # what run_0027575715 was built with and which leaves block-wide coherent strips.
 KGATE=${KGATE:-}
 KG_ARG=""; [ -n "$KGATE" ] && KG_ARG="--kgate $KGATE"

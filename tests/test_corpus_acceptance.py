@@ -6,8 +6,9 @@ co-support checks. Nothing asserted that a value must be *populated*, must
 *vary*, or must *reconstruct the physics*. These do.
 
   1. degenerate-field audit  — catches all-zero / constant / out-of-range content
-  2. backend equivalence     — numpy vs jax on the SAME noisy input
-  3. physics acceptance (F0) — reconstruct a built shard vs the clean truth
+  2. backend equivalence     — the chain on numpy vs torch (cuda) on the SAME noisy input
+  3. physics acceptance (F0) — reconstruct a built shard vs the clean truth projected
+                               onto the bands the chain keeps
 """
 from __future__ import annotations
 
@@ -18,42 +19,26 @@ import numpy as np
 import pytest
 import h5py
 
-# find_spec, NOT pytest.importorskip: importorskip raises Skipped at DECORATION
-# time, which aborts collection of the WHOLE module. Used in a decorator it
-# silently dropped all 8 non-jax tests here — the audit_shard corruption sweep,
-# the real-data F0 acceptance, and both normalisation tests — in any environment
-# without jax, which includes a bare `pip install -e .` (jax is an extra).
-def _jax_available():
-    # find_spec, not import: importing jax here would initialise CUDA at
-    # COLLECTION time, which turns a bad driver into a collection error instead
-    # of a skip. try/except because find_spec itself raises on a broken install.
-    try:
-        return importlib.util.find_spec("jax") is not None
-    except Exception:
-        return False
-
-
-_HAS_JAX = _jax_available()
-
-from helix.core.backend import set_backend
 from helix.core.coeff_io import audit_shard, read_coeff_event
-from helix.tpc.config import DetectorConfig
+from helix.tpc.chain import TPCChain, sim_config
 from helix.tpc.corpus import build_corpus
 
-GIDS = [0, 1]
-NW = [8, 6]
+NW = [8, 6, 5]                             # U, V, Y wires of each volume
+N_VOL = 2
+GIDS = list(range(3 * N_VOL))
 NT = 102
 
 
-def _config():
-    return DetectorConfig(num_time_steps=NT, wavelet="db2", dwt_level=2,
-                          group_size=64, threshold_kappa=1.0)
+def _chain(device=None):
+    """The simulation chain for this toy layout (db2 L2 so 102 ticks pad to 104)."""
+    return TPCChain(sim_config([NW] * N_VOL, {"dwt": {"wavelet": "db2", "level": 2}}), device=device)
 
 
 def _plane_fn(ev):
     rng = np.random.default_rng(1000 + ev)
     clean, noisy = {}, {}
-    for gid, w in zip(GIDS, NW):
+    for gid in GIDS:
+        w = NW[gid % 3]
         c = np.zeros((w, NT), np.float32)
         for _ in range(3):
             c[rng.integers(w), rng.integers(NT)] = rng.uniform(20, 40)
@@ -68,8 +53,7 @@ def _plane_fn(ev):
 # ---- 1. degenerate-field audit --------------------------------------------
 
 def test_audit_passes_a_good_shard(tmp_path):
-    set_backend("numpy")
-    build_corpus(range(4), _plane_fn, _config(), tmp_path, dataset_name="cx")
+    build_corpus(range(4), _plane_fn, _chain(), tmp_path, dataset_name="cx")
     assert audit_shard(tmp_path / "cx_coeff_0000.h5", strict=False) == []
 
 
@@ -87,8 +71,7 @@ def test_audit_passes_a_good_shard(tmp_path):
 def test_audit_catches_corruption(tmp_path, corrupt, expect):
     """Each of these is a shape the codec would happily write and every
     structural test would happily accept."""
-    set_backend("numpy")
-    build_corpus(range(4), _plane_fn, _config(), tmp_path, dataset_name="cx")
+    build_corpus(range(4), _plane_fn, _chain(), tmp_path, dataset_name="cx")
     p = tmp_path / "cx_coeff_0000.h5"
     with h5py.File(p, "a") as f:
         if corrupt == "sigma_zero":
@@ -110,9 +93,9 @@ def test_audit_catches_corruption(tmp_path, corrupt, expect):
             s = f["coord/sigma_threshold"][:]; s[:, 1, :] = 0.0
             f["coord/sigma_threshold"][...] = s
         elif corrupt == "gids_unsorted":
-            f["config/gids"][...] = np.array([1, 0], np.int32)
+            f["config/gids"][...] = np.array([1, 0, 2, 3, 4, 5], np.int32)
         elif corrupt == "gids_duplicate":
-            f["config/gids"][...] = np.array([0, 0], np.int32)
+            f["config/gids"][...] = np.array([0, 0, 2, 3, 4, 5], np.int32)
         elif corrupt == "digest_break":
             d = f["coord/coord_digest"][:]; d[0] ^= np.uint64(0xDEADBEEF)
             f["coord/coord_digest"][...] = d
@@ -128,8 +111,7 @@ def test_clean_shard_is_values_only_and_pairs_by_digest(tmp_path):
     must raise, because silent misalignment of every target row is precisely the
     failure this codebase has already shipped twice."""
     from helix.core.coeff_io import coord_digest, write_coeff_shard
-    set_backend("numpy")
-    build_corpus(range(4), _plane_fn, _config(), tmp_path, dataset_name="cx")
+    build_corpus(range(4), _plane_fn, _chain(), tmp_path, dataset_name="cx")
     p_noisy = tmp_path / "cx_coeff_0000.h5"
     p_clean = tmp_path / "cx_coeff_clean_0000.h5"
 
@@ -148,7 +130,7 @@ def test_clean_shard_is_values_only_and_pairs_by_digest(tmp_path):
     # a shard from a DIFFERENT build has the same shapes but different coords:
     # the digest is what catches it. Positional length checks would not.
     other = tmp_path / "other"
-    build_corpus(range(4, 8), _plane_fn, _config(), other, dataset_name="cx")
+    build_corpus(range(4, 8), _plane_fn, _chain(), other, dataset_name="cx")
     p_other = other / "cx_coeff_0000.h5"
     with pytest.raises(ValueError, match="coord_digest mismatch|not co-supported"):
         read_coeff_event(p_clean, 0, coords_from=p_other)
@@ -163,8 +145,7 @@ def test_noise_mode_is_recorded_on_disk(tmp_path):
     """Two shards built with different noise are otherwise indistinguishable —
     a silently mixed-noise corpus. /config/noise_json pins it."""
     import json as _json
-    set_backend("numpy")
-    build_corpus(range(2), _plane_fn, _config(), tmp_path, dataset_name="cx",
+    build_corpus(range(2), _plane_fn, _chain(), tmp_path, dataset_name="cx",
                  noise=dict(kind="white", coherent=True, incoherent=True))
     with h5py.File(tmp_path / "cx_coeff_0000.h5", "r") as f:
         assert _json.loads(f["config"].attrs["noise_json"])["kind"] == "white"
@@ -172,7 +153,7 @@ def test_noise_mode_is_recorded_on_disk(tmp_path):
         assert _json.loads(f["config"].attrs["noise_json"])["kind"] == "white"
 
 
-# ---- 2. backend equivalence (same noisy input, numpy vs jax) --------------
+# ---- 2. backend equivalence (same noisy input, numpy vs torch) ------------
 
 def _has(bk):
     try:
@@ -181,57 +162,42 @@ def _has(bk):
         return False
 
 
-@pytest.mark.parametrize("bk", ["jax", "torch"])
-def test_backend_equivalent_on_same_input(tmp_path, bk):
-    """Every backend must produce the SAME corpus from the same input.
+def test_backend_equivalent_on_same_input(tmp_path):
+    """The chain must produce the SAME corpus on numpy and on torch (cuda) from the
+    same input, inputs handed over as device tensors as the builder does.
 
     Noise is fixed (the RNG streams differ per backend), so this compares the DSP
-    + extraction + assembly only. It also compares the CLEAN target and
-    sigma_threshold, which an earlier version did not — it looked at the noisy
-    events alone, so a clean-side or sigma-side divergence would have passed.
-
-    torch caught a real one that way: its band sigma used ``torch.median`` (the
-    LOWER of two middles) where numpy uses ``np.median`` (their average). A MAD
-    feeds a threshold, and a threshold is discontinuous, so torch kept 1-2 extra
-    coefficients per event — always more, never fewer. See backend.torch_q50.
+    + extraction + assembly only. It also compares the CLEAN target (gathered on the
+    device) and sigma_threshold: comparing the noisy events alone once hid a
+    clean-side divergence, and torch's band sigma once used ``torch.median`` (the
+    LOWER of two middles) where numpy averages them — a MAD feeds a threshold, which
+    is discontinuous, so torch kept 1-2 extra coefficients per event. See
+    backend.torch_q50.
     """
-    if not _has(bk):
-        pytest.skip(f"{bk} not installed")
-    if bk == "torch":
-        import torch
-        if not torch.cuda.is_available():
-            pytest.skip("torch has no CUDA device")
+    if not _has("torch"):
+        pytest.skip("torch not installed")
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("torch has no CUDA device")
 
-    def to_dev(fn):
-        def f(ev):
-            n, c = fn(ev)
-            if bk == "torch":
-                import torch
-                return ({k: torch.as_tensor(v).cuda() for k, v in n.items()},
-                        {k: torch.as_tensor(v).cuda() for k, v in c.items()})
-            import jax.numpy as jnp
-            return ({k: jnp.asarray(v) for k, v in n.items()},
-                    {k: jnp.asarray(v) for k, v in c.items()})
-        return f
+    def to_dev(ev):
+        n, c = _plane_fn(ev)
+        return ({k: torch.as_tensor(v).cuda() for k, v in n.items()},
+                {k: torch.as_tensor(v).cuda() for k, v in c.items()})
 
-    cfg = _config()
     out = {}
-    for name, pf in (("numpy", _plane_fn), (bk, to_dev(_plane_fn))):
-        set_backend(name)
-        ces, cls, norm = build_corpus(range(3), pf, cfg, tmp_path / name,
+    for name, pf, dev in (("numpy", _plane_fn, None), ("torch", to_dev, "cuda")):
+        ces, cls, norm = build_corpus(range(3), pf, _chain(dev), tmp_path / name,
                                       dataset_name="cx", write=False)
         out[name] = (ces, norm, cls)
-    set_backend("numpy")
 
     def canon(ce):
-        """Sort rows canonically. The two backends emit the SAME rows in a
-        different order — numpy loops per band, so it is band-major; jax compacts
-        the raveled flat plane, so it is wire-major. Row order within an event is
-        not part of the format contract, so equivalence is compared as a set."""
+        """Sort rows canonically: row order within an event is not part of the
+        format contract, so equivalence is compared as a set."""
         o = np.lexsort((ce.tau, ce.wire, ce.band, ce.plane_gid))
         return (ce.band[o], ce.plane_gid[o], ce.wire[o], ce.tau[o], ce.value[o])
 
-    for i, (a, b) in enumerate(zip(out["numpy"][0], out[bk][0])):
+    for i, (a, b) in enumerate(zip(out["numpy"][0], out["torch"][0])):
         assert a.n_coeff == b.n_coeff, f"event {i}: {a.n_coeff} vs {b.n_coeff} coeffs"
         ca, cb = canon(a), canon(b)
         for k, x, y in zip(("band", "plane_gid", "wire", "tau"), ca[:4], cb[:4]):
@@ -241,12 +207,12 @@ def test_backend_equivalent_on_same_input(tmp_path, bk):
         np.testing.assert_allclose(b.sigma_threshold, a.sigma_threshold,
                                    rtol=1e-4, atol=1e-6)
         # ...and the CLEAN target, which shares the noisy support so it sorts the
-        # same way. Comparing only the noisy events hid a backend divergence once.
+        # same way.
         oa = np.lexsort((a.tau, a.wire, a.band, a.plane_gid))
         ob = np.lexsort((b.tau, b.wire, b.band, b.plane_gid))
-        np.testing.assert_allclose(out[bk][2][i].value[ob], out["numpy"][2][i].value[oa],
+        np.testing.assert_allclose(out["torch"][2][i].value[ob], out["numpy"][2][i].value[oa],
                                    rtol=1e-4, atol=1e-4, err_msg=f"clean target, event {i}")
-    np.testing.assert_allclose(out[bk][1], out["numpy"][1], rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(out["torch"][1], out["numpy"][1], rtol=1e-4, atol=1e-6)
 
 
 # ---- 3. physics acceptance (F0) on real data ------------------------------
@@ -260,77 +226,73 @@ REAL = sensor_shard("run_0027575715", "sim_wire_sensor_0000.h5")
 def test_f0_on_a_real_built_shard(tmp_path):
     """Reconstruct a built shard and compare to the clean truth.
 
-    F0 = 1 - sum|recon-clean|/sum|clean| over the true-signal support — one number
-    that exercises band/tau mapping, padding, sigma, gate, threshold and codec
-    together.
+    F0 = 1 - sum|recon-truth|/sum|truth| over the true-signal support (|clean| > 0) —
+    one number that exercises band/tau mapping, padding, sigma, gate, threshold and
+    codec together. ``truth`` is the noise-free image PROJECTED onto the bands the
+    chain keeps (its own transform with D1 zeroed, reconstructed): D1 is dropped by
+    design (the FM tokenizes A4, D4, D3, D2), so the dropped band is not a fidelity
+    loss to charge the DSP with. The projection alone keeps 0.989-0.995 of the clean
+    signal on this event.
 
-    Thresholds derive from a MATCHED measurement (8 events x 6 planes, one run,
-    noise held fixed between arms), not from the achieved value:
+    Floors from the chain on this shard (numpy, events 0-3 x 6 planes, this noise):
 
-        shipped   gate k=3.0 npass=2   mean F0 0.9259   min 0.8772
-        research  gate k=4.0 npass=1   mean F0 0.9208   min 0.8627
-        legacy    R1 classic multipass mean F0 0.9192   min 0.8712
+        per plane   F0 min 0.871        per-event mean F0 0.910-0.917
+        off-support RMS(recon - truth) per-event mean 0.43-0.52, max 0.692 ADC
 
-    The shipped defaults win 47 of 48 event x plane rows, so the gate re-tune
-    IMPROVED fidelity. An earlier version of this docstring compared 0.905 to "the
-    old pipeline's 0.91-0.96" and set the bar beneath it; that figure came from
-    research/wire_denoise/RESULTS.md P10, which used a different remover (R1), a
-    different per-plane kappa, a different noise injector and different events —
-    it was never a like-for-like number.
+    The earlier path (helix.tpc.pipeline gate, D1 kept) on the same event-0 input gave
+    the same F0 to 0.001 per plane, against the raw clean image. The floors below are
+    the ones that path used.
 
     F0 is measured ON the signal support, so it is structurally blind to junk left
-    OFF it — and that is exactly where the re-tune costs: a less aggressive gate
-    keeps more residual coherent noise (off-support RMS 0.477 vs 0.341 ADC for
-    k=4). test_off_support_residual pins that axis so a future re-tune cannot
-    trade it away invisibly.
+    OFF it — a less aggressive gate keeps more residual coherent noise while F0
+    improves. The off-support RMS pins that axis so a future re-tune cannot trade it
+    away invisibly.
     """
-    pytest.importorskip("pimm_data")
-    from pimm_data.geometry import load_plane_registry
+    from helix.tpc.geometry import load_plane_registry
     from helix.tpc.noise import generate_noise, digitize
-    from helix.tpc.io import config_from_file, read_sensor_event
-    from helix.tpc.pipeline import canonical_plane_gid
+    from helix.tpc.io import sensor_layout, read_sensor_event
 
-    set_backend("numpy")
-    b0 = config_from_file(REAL)
-    cfg = DetectorConfig(num_time_steps=b0.num_time_steps,
-                         plane_labels=b0.plane_labels, pedestals=b0.pedestals)
+    layout = sensor_layout(REAL)
+    chain = TPCChain(sim_config(layout.num_wires))
+    group_size = int(chain.cfg["readout"]["group_size"])
     reg = load_plane_registry("cubic_wireplane_geometry.json")
+    nt = layout.num_time_steps
+    made = {}
 
     def plane_fn(ev):
-        planes = read_sensor_event(REAL, ev, cfg)
+        planes = read_sensor_event(REAL, ev, layout)
         rng = np.random.default_rng(7 + ev)
         noisy, clean = {}, {}
         for lab, img in planes.items():
-            g = canonical_plane_gid(lab); nw = img.shape[0]
+            g = layout.plane_gid(lab); nw = img.shape[0]
             wl = np.asarray(reg.get(g, {}).get("wire_lengths", []), np.float64)
             wl = wl if wl.size == nw else np.full(nw, 2.33)
-            ped = cfg.pedestals.get(lab.split("_")[-1], 0)
             n = generate_noise(img.shape, rng=rng, wire_lengths_m=wl, incoherent=True,
-                               coherent=True, group_size=cfg.group_size)
-            noisy[g] = digitize(img + n, ped)
+                               coherent=True, group_size=group_size)
+            noisy[g] = digitize(img + n, layout.pedestal(lab))
             clean[g] = img.astype(np.float32)
+        made[ev] = clean
         return noisy, clean
 
-    build_corpus(range(1), plane_fn, cfg, tmp_path, dataset_name="cx")
+    build_corpus(range(1), plane_fn, chain, tmp_path, dataset_name="cx")
     ce = read_coeff_event(tmp_path / "cx_coeff_0000.h5", 0)
-    recon = ce.reconstruct_images(cfg.num_time_steps)
-    _, clean = plane_fn(0)
+    recon = ce.reconstruct_images(nt)
+    d = chain.cfg["dwt"]
     f0s, off_rms = [], []
     for gid, r in recon.items():
-        c = np.asarray(clean[gid])
-        rr = np.asarray(r)[:, :cfg.num_time_steps]
+        c = np.asarray(made[0][gid])
+        truth = np.asarray(chain.wops.reconstruct(chain.dwt_rows(c), d["wavelet"], d["level"],
+                                                  d["mode"], nt))[:, :nt]
+        rr = np.asarray(r)[:, :nt]
         sig = np.abs(c) > 0
         if sig.any():
-            f0s.append(1.0 - np.abs(rr[sig] - c[sig]).sum() / np.abs(c[sig]).sum())
+            f0s.append(1.0 - np.abs(rr[sig] - truth[sig]).sum() / np.abs(truth[sig]).sum())
         if (~sig).any():
             # energy left where there is no true signal — F0 cannot see this
-            off_rms.append(float(np.sqrt((rr[~sig] ** 2).mean())))
+            off_rms.append(float(np.sqrt(((rr - truth)[~sig] ** 2).mean())))
     assert f0s, "no signal support found"
-    # matched-measurement floors (worst observed: min 0.877, per-event mean 0.912)
     assert min(f0s) > 0.85, f"F0 per plane too low: {[round(v,3) for v in f0s]}"
     assert np.mean(f0s) > 0.90, f"mean F0 {np.mean(f0s):.3f} below acceptance"
-    # F0's blind spot: a less aggressive gate keeps more residual coherent noise
-    # while F0 IMPROVES, so fidelity and cleanliness must be pinned separately.
     assert off_rms, "no off-support region found"
     assert np.mean(off_rms) < 0.6, \
         f"off-support RMS {np.mean(off_rms):.3f} ADC too high: {[round(v,3) for v in off_rms]}"
@@ -394,12 +356,11 @@ def test_noise_seed_and_external_inputs_are_recorded(tmp_path):
     change to either would make old and new shards silently incomparable.
     """
     import json as _json
-    set_backend("numpy")
     prov = dict(geom_sha256="a" * 64, spectrum_sha256="b" * 64,
                 seed_formula="test:fixed")
     seeds = [111, 222, 333, 444]
     build_corpus([(f"src_{e:04d}.h5", e, seeds[e]) for e in range(4)],
-                 _plane_fn, _config(), tmp_path, dataset_name="cx",
+                 _plane_fn, _chain(), tmp_path, dataset_name="cx",
                  noise=dict(kind="colored"), provenance=prov)
 
     for name in ("cx_coeff_0000.h5", "cx_coeff_clean_0000.h5"):
@@ -424,7 +385,7 @@ def test_noise_seed_and_external_inputs_are_recorded(tmp_path):
 
     # a build that supplies no seeds must not invent one
     plain = tmp_path / "plain"
-    build_corpus(range(2), _plane_fn, _config(), plain, dataset_name="cx")
+    build_corpus(range(2), _plane_fn, _chain(), plain, dataset_name="cx")
     with h5py.File(plain / "cx_coeff_0000.h5", "r") as f:
         assert "noise_seed" not in f["ident"]
         # No caller provenance -> only the writer's own code stamp. It is

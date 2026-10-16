@@ -1,4 +1,4 @@
-"""HDF5 I/O for JAXTPC production sensor files and processed output.
+"""HDF5 readers for JAXTPC production sensor files.
 
 Reads the CURRENT JAXTPC sensor schema (doraemon productions, e.g.
 ``wire_test_00_00_02``)::
@@ -26,8 +26,8 @@ missing plugin surfaces as ``OSError: can't open directory ... plugin`` on read)
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import h5py
@@ -37,8 +37,7 @@ try:                       # registers HDF5 compression filters (production file
 except ImportError:        # synthetic/uncompressed files still work without it
     pass
 
-from helix.tpc.config import DetectorConfig
-from helix.core.wavelet import SparseResult
+from helix.tpc.readout import canonical_plane_gid
 
 
 def _event_key(f: h5py.File, event_idx: int) -> str:
@@ -71,13 +70,69 @@ def _plane_column(evt: h5py.Group, plane_label: str) -> tuple[int, int]:
     return v, keys.index(plane)
 
 
-def config_from_file(path: str | Path, **overrides) -> DetectorConfig:
-    """Build a DetectorConfig by reading geometry from a sensor HDF5 file.
+@dataclass(frozen=True, eq=False)
+class SensorLayout:
+    """A sensor file's readout layout: what the readers and the TPC chain need.
+
+    ``plane_labels``  ``volume_{V}_{P}`` (current schema) or flat labels (legacy);
+    ``num_time_steps`` ticks per plane;
+    ``pedestals``      ``{plane type: ADC}`` (U / V / Y);
+    ``num_wires``      (n_volumes, n_planes) int array: ``/config/num_wires``, or
+                       derived from the first event's plane shapes when the file has
+                       no such table (``None`` when the labels do not form a
+                       volume x plane grid). It is the chain's layout readout
+                       (:func:`helix.tpc.chain.sim_config`).
+    """
+    plane_labels: tuple
+    num_time_steps: int
+    pedestals: dict
+    num_wires: np.ndarray | None = None
+
+    def pedestal(self, plane_label) -> int:
+        pt = plane_label.split("_")[-1] if "_" in plane_label else plane_label
+        return int(self.pedestals.get(pt, 0))
+
+    def plane_gid(self, plane_label) -> int:
+        """Canonical plane id ``volume * 3 + {U: 0, V: 1, Y: 2}`` (pimm-data's;
+        :func:`helix.tpc.readout.canonical_plane_gid`)."""
+        vol, plane = _split_label(plane_label)
+        return canonical_plane_gid(vol, _PLANE_INDEX[plane])
+
+
+_PLANE_INDEX = {"U": 0, "V": 1, "Y": 2}
+
+
+def _split_label(plane_label):
+    """``'volume_1_V'`` -> (1, 'V'); a flat legacy label ``'V'`` -> (0, 'V')."""
+    if plane_label.startswith("volume_"):
+        vol, plane = plane_label.rsplit("_", 1)
+        return int(vol.split("_")[1]), plane
+    return 0, plane_label.split("_")[-1]
+
+
+def _num_wires_grid(labels, n_wires):
+    """(n_volumes, n_planes) from ``{label: n_wires}``, or None when the labels do
+    not form a full volume x plane grid."""
+    by_vol = {}
+    for lab in labels:
+        v, p = _split_label(lab)
+        by_vol.setdefault(v, {})[p] = int(n_wires[lab])
+    vols = sorted(by_vol)
+    cols = [sorted(by_vol[v]) for v in vols]
+    if not vols or vols != list(range(len(vols))) or any(c != cols[0] for c in cols):
+        return None
+    return np.array([[by_vol[v][p] for p in cols[0]] for v in vols], np.int32)
+
+
+def sensor_layout(path: str | Path) -> SensorLayout:
+    """Read a sensor HDF5 file's :class:`SensorLayout`.
 
     Current schema: ``/config`` attrs + tables; plane labels discovered from
-    the first event's ``volume_V/P`` nesting. Legacy flat schema: previous
-    behavior (labels = event-level groups, pedestal from plane attrs).
+    the first event's ``volume_V/P`` nesting. Legacy flat schema: labels =
+    event-level groups, pedestal from plane attrs. ``num_wires`` comes from
+    ``/config/num_wires`` when present, otherwise from the first event's planes.
     """
+    num_wires = None
     with h5py.File(path, "r") as f:
         evt_keys = sorted(k for k in f.keys() if k.startswith("event_"))
         if not evt_keys:
@@ -100,6 +155,8 @@ def config_from_file(path: str | Path, **overrides) -> DetectorConfig:
                     if ped_tab is not None:
                         v = int(vol_key.split("_")[1])
                         pedestals[p] = int(ped_tab[v, col])   # per plane TYPE
+            if "num_wires" in cfg:
+                num_wires = np.asarray(cfg["num_wires"][:], np.int32)
         else:                                          # ── legacy flat schema ──
             plane_labels = [k for k in evt.keys() if isinstance(evt[k], h5py.Group)]
             num_time_steps = int(evt.attrs.get("num_time_steps", 2701))
@@ -107,12 +164,19 @@ def config_from_file(path: str | Path, **overrides) -> DetectorConfig:
             for label in plane_labels:
                 pt = label.split("_")[-1] if "_" in label else label
                 pedestals[pt] = int(evt[label].attrs.get("pedestal", 0))
+        first = int(evt_keys[0].split("_", 1)[1])
 
-    kwargs: dict[str, Any] = dict(plane_labels=tuple(plane_labels),
-                                  num_time_steps=num_time_steps,
-                                  pedestals=pedestals)
-    kwargs.update(overrides)
-    return DetectorConfig(**kwargs)
+    if num_wires is None:                              # derive from the first event
+        nw = {lab: read_sensor_plane_coo(path, first, lab, num_time_steps,
+                                         pedestals.get(lab.split("_")[-1], 0))[3]
+              for lab in plane_labels}
+        num_wires = _num_wires_grid(plane_labels, nw)
+    return SensorLayout(plane_labels=tuple(plane_labels), num_time_steps=num_time_steps,
+                        pedestals=pedestals, num_wires=num_wires)
+
+
+# helix.tpc/__init__ and the legacy readers' tests import this name.
+config_from_file = sensor_layout
 
 
 def _empty_plane_shape(f, evt, plane_label, num_time_steps):
@@ -139,9 +203,9 @@ def read_sensor_plane_coo(path, event_idx, plane_label, num_time_steps=None,
     """Read one plane as SPARSE COO → ``(wire, time, value, n_wires, n_ticks)``.
 
     The decode half of :func:`read_sensor_plane` without the dense scatter, so a
-    GPU pipeline can densify on-device (``pimm_data.dense_ops_jax`` /
-    ``dense_ops``) instead of building the dense image on the CPU and copying it
-    across. ``value`` is pedestal-subtracted, matching the dense reader.
+    GPU pipeline can densify on-device (``pimm_data.dense_ops``) instead of
+    building the dense image on the CPU and copying it across. ``value`` is
+    pedestal-subtracted, matching the dense reader.
     """
     with h5py.File(path, "r") as f:
         evt = f[_event_key(f, event_idx)]
@@ -182,7 +246,7 @@ def read_sensor_plane_coo(path, event_idx, plane_label, num_time_steps=None,
     return wire, time, values, n_wires, nt
 
 
-def read_sensor_event_coo(path, event_idx, config: DetectorConfig):
+def read_sensor_event_coo(path, event_idx, layout: SensorLayout):
     """All planes of one event as sparse COO → ``{label: (wire,time,value,nw,nt)}``."""
     out = {}
     with h5py.File(path, "r") as f:
@@ -193,12 +257,11 @@ def read_sensor_event_coo(path, event_idx, config: DetectorConfig):
                 available.update(f"{k}_{p}" for p in evt[k].keys())
             elif isinstance(evt[k], h5py.Group):
                 available.add(k)
-    for label in config.plane_labels:
+    for label in layout.plane_labels:
         if label in available:
-            pt = label.split("_")[-1] if "_" in label else label
             out[label] = read_sensor_plane_coo(path, event_idx, label,
-                                               config.num_time_steps,
-                                               config.pedestals.get(pt, 0))
+                                               layout.num_time_steps,
+                                               layout.pedestal(label))
     return out
 
 
@@ -253,7 +316,7 @@ def read_sensor_plane(path, event_idx, plane_label, num_time_steps=None,
     return image
 
 
-def read_sensor_event(path, event_idx, config: DetectorConfig) -> dict[str, np.ndarray]:
+def read_sensor_event(path, event_idx, layout: SensorLayout) -> dict[str, np.ndarray]:
     planes = {}
     with h5py.File(path, "r") as f:
         evt = f[_event_key(f, event_idx)]
@@ -263,12 +326,11 @@ def read_sensor_event(path, event_idx, config: DetectorConfig) -> dict[str, np.n
                 available.update(f"{k}_{p}" for p in evt[k].keys())
             elif isinstance(evt[k], h5py.Group):
                 available.add(k)
-    for label in config.plane_labels:
+    for label in layout.plane_labels:
         if label in available:
-            pt = label.split("_")[-1] if "_" in label else label
-            ped = config.pedestals.get(pt, 0)
             planes[label] = read_sensor_plane(path, event_idx, label,
-                                              config.num_time_steps, ped)
+                                              layout.num_time_steps,
+                                              layout.pedestal(label))
     return planes
 
 
@@ -290,37 +352,3 @@ def list_events(path) -> tuple[int, ...]:
     with h5py.File(path, "r") as f:
         return tuple(sorted(int(k.split("_", 1)[1]) for k in f.keys()
                             if k.startswith("event_")))
-
-
-def write_processed(path, event_idx, planes: dict[str, SparseResult], config: DetectorConfig) -> None:
-    """Write processed sparse results to HDF5 (numpy list-of-bands coeffs)."""
-    with h5py.File(path, "a") as f:
-        evt = f.require_group(f"event_{event_idx:03d}")
-        evt.attrs["wavelet"] = config.wavelet
-        evt.attrs["dwt_level"] = config.dwt_level
-        evt.attrs["threshold_kappa"] = config.threshold_kappa
-        for label, result in planes.items():
-            grp = evt.require_group(label)
-            grp.attrs["n_kept"] = result.n_kept
-            grp.attrs["n_total"] = result.n_total
-            grp.attrs["sparsity"] = result.sparsity
-            grp.attrs["sigma_per_band"] = np.asarray(result.sigma_per_band)
-            coeffs = result.coeffs
-            if not isinstance(coeffs, list):  # flat (jax) — store densely
-                arr = np.asarray(coeffs)
-                if "coeffs_flat" in grp:
-                    del grp["coeffs_flat"]
-                grp.create_dataset("coeffs_flat", data=arr.astype(np.float32))
-                continue
-            for i, c in enumerate(coeffs):
-                c = np.asarray(c)
-                band_name = "cA" if i == 0 else f"cD_{len(coeffs) - i}"
-                if band_name in grp:
-                    del grp[band_name]
-                nz = np.nonzero(c)
-                if len(nz[0]) > 0:
-                    bg = grp.require_group(band_name)
-                    bg["wire"] = nz[0].astype(np.int32)
-                    bg["coeff_idx"] = nz[1].astype(np.int32)
-                    bg["values"] = c[nz].astype(np.float32)
-                    bg.attrs["shape"] = c.shape

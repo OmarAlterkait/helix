@@ -86,10 +86,12 @@ def test_production_scripts_use_the_intended_backend():
 
     # the builder's own default
     src = (root / "scripts" / "build_coeff_corpus.py").read_text()
-    m = re.search(r'"--backend",\s*choices=\[[^\]]*\],\s*default="([a-z]+)"', src)
+    m = re.search(r'"--backend",\s*choices=(\[[^\]]*\]),\s*default="([a-z]+)"', src)
     assert m, "could not find the --backend default in build_coeff_corpus.py"
-    default = m.group(1)
+    default = m.group(2)
     assert default == "torch", f"build default is {default!r}, expected 'torch'"
+    # the builder runs the TPC chain, which is numpy or torch: no jax path is left
+    assert "jax" not in m.group(1), f"build_coeff_corpus.py still offers {m.group(1)}"
 
     # and every shipped script must agree with it on its EXECUTABLE lines
     for name in ("submit_coeff_corpus.sh", "calibrate_norm_sigma.sh"):
