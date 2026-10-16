@@ -27,8 +27,10 @@ whether disk sits in the middle:
   C. train from corpus  :  read → [tokenize] → model      (CoeffTPCDataset)
 ```
 
-- **compute** = `process_event(raw, cfg, removal=…) → CoeffEvent` (per-plane worker
-  `process_plane`). The DSP: removal → DWT → threshold. Shared by A and B.
+- **compute** = `TPCChain(cfg).process_images(...)` / `process_event(...)` →
+  `chain_coeff.coeff_event` → `CoeffEvent` (`helix/tpc/chain.py`, one chain for
+  simulation and SBND data). The DSP: status → DWT → coherent gate → threshold.
+  Shared by A and B.
 - **codec** = a lossless `CoeffEvent ⇄ h5` pair. B and C are the two halves of the
   **same** codec — that is why naming them as separate "modes" felt incomplete.
 - **tokenize** (`CoeffEvent → rows → tokens`) is a *later* stage (pimm), not a mode.
@@ -42,7 +44,7 @@ Naming (adopted from pimm-data house style):
 | concept | name | home |
 |---|---|---|
 | in-memory event object | `CoeffEvent` | `helix/core/coeff_event.py` |
-| DSP compute | `process_event` / `process_plane` | `helix/tpc/pipeline.py` |
+| DSP compute | `TPCChain` / `chain_coeff.coeff_event` | `helix/tpc/chain.py`, `helix/tpc/chain_coeff.py` |
 | pure (de)serialization | `arrays_to_coeff_event` (the forward `coeff_event_to_arrays` was unused and is deleted; `write_coeff_shard` builds its columns itself) | `helix/core/coeff_io.py` |
 | reference shard codec + gate | `write_coeff_shard` / `read_coeff_event` | `helix/core/coeff_io.py` |
 | basis/provenance | `basis_descriptor` / `descriptor_digest` | `helix/core/provenance.py` |

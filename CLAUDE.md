@@ -81,8 +81,8 @@ See `docs/RUNBOOK.md` for corpus → train → eval → probe, and
 
 ## Structural patterns worth knowing
 
-**Lazy multi-backend dispatch (`helix.core.backend`).** jax/torch are imported
-only when their backend is selected, never at `import helix` time. Each op
+**Lazy multi-backend dispatch (`helix.core.backend`).** torch is imported
+only when its backend is selected, never at `import helix` time. Each op
 family ships `<family>_<backend>.py`; `backend.ops(...)` imports only the active
 one. Adding an op means adding it to every backend module, or it silently works
 on one.

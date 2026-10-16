@@ -138,7 +138,7 @@ Or rebuild from `container/helix-train.def` in about eleven minutes — see
 apptainer, because the def pins its base by digest and the result is
 byte-reproducible in the ways that matter.
 
-Currently baked: `pimm_data 2b20573c`, jax `cuda12`, torch `2.10.0+cu126`,
+Currently baked: `pimm_data 2b20573c`, torch `2.10.0+cu126` (jax in images built before its removal),
 PyWavelets 1.8.0, base `ghcr.io/deeplearnphysics/pimm v0.5.1`.
 
 ---

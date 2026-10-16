@@ -12,7 +12,7 @@ pimm-data 0.4.0). Where a number appears, the way it was measured is named.
 
 **helix** — LArTPC signal processing, the coefficient corpus, the foundation
 model, and the 3D probe. Base install is `numpy`, `h5py`, `PyWavelets`, `scipy`.
-torch and jax are OPTIONAL extras; `pimm-data` is the optional `[pimm]` extra.
+torch is an OPTIONAL extra (the GPU backend; numpy is the reference); `pimm-data` is the optional `[pimm]` extra.
 
 **pimm-data** — a generic data layer between sharded HDF5 detector output and
 PyTorch training loops, serving four detector families (jaxtpc, lucid, optical,
@@ -78,7 +78,7 @@ particular detector's physics.*
 | `densify`, `offset2batch` | pimm-data | generic scatter, any family |
 | `dense_ops_jax.densify_plane_jax` | pimm-data | still densification, despite the filename |
 | `Densify` transform | pimm-data | |
-| `noise.py`, `noise_jax.py` | **helix** | LArTPC physics |
+| `noise.py` | **helix** | LArTPC physics |
 | `add_intrinsic_noise`, `digitize` | **helix** | |
 | `AddNoise`, `Digitize` transforms | **helix** (`helix/data/transforms.py`) | |
 | `configs/jaxtpc/sensor_dense_gpu.py` | **helix** | a recipe applying helix physics to jaxtpc shards |
@@ -171,12 +171,8 @@ on a login node with no CUDA toolkit — and then:
 * adds PyWavelets, helix's only dependency the base image lacked
 * adds pytest, because the first thing anyone does with a new environment is ask
   whether it works
-* adds **jax CPU, deliberately not `jax[cuda12]`**. The corpus builder DEFAULTS
-  to `--backend torch` ("measured 10.6 ms") and `submit_coeff_corpus.sh` passes
-  it, so jax is an override rather than the production path. A CUDA jax would
-  install its own `nvidia-*` wheels beside torch's, which is how a pinned CUDA
-  stack gets broken. CPU jax costs nothing and lets 19 jax-parametrised tests
-  actually run instead of skipping.
+* no jax: helix's DSP backends are numpy and torch (the corpus builder runs
+  `--backend torch`). Images built before jax was removed still carry it, unused.
 
 **pimm and helix are NOT installed in the image.** They are the code under
 development and arrive by bind mount / PYTHONPATH, so editing either does not
@@ -196,7 +192,7 @@ Pull the one CI built and tested, by **digest**:
     apptainer pull helix-train.sif docker://ghcr.io/omaralterkait/helix@sha256:<digest>
 
 Pin the digest, not the tag. A tag is a mutable alias, and this image is half of
-a lockstep pair — "whatever `:jax-cuda12` points at today" is the ambiguity that
+a lockstep pair — "whatever a tag points at today" is the ambiguity that
 once produced three differently-named `.sif` files, the canonical one built from
 a local path source with CPU jax while every default pointed at it. Each build
 prints its digest.
@@ -304,7 +300,7 @@ others leave, and each was mutation-tested by actually adding
 
 1. **Package-level import probes.** `helix`, `helix.core`, `helix.tpc`,
    `helix.model.tokenize`, `helix.integrations` must each import in a clean
-   subprocess with pimm_data, torch and jax all absent.
+   subprocess with pimm_data and torch absent.
 
 2. **A source scan.** A grep alone false-positives: `helix/tpc/dense_ops.py`,
    `geometry.py`, `io.py` and `noise.py` all NAME pimm_data in comments, and
@@ -312,14 +308,13 @@ others leave, and each was mutation-tested by actually adding
    that mention it do not import it.
 
 3. **A per-submodule sweep.** The necessary one. `import helix.tpc` executes
-   only its `__init__`, which pulls **5** submodules — `noise`, `dense_ops`,
-   `geometry` and `noise_jax` are NOT among them, so part 1 cannot see a
-   violation in any of those files. Part 3 imports each submodule alone, and
-   catches violations *transitively*: the mutation in `noise.py` also failed
-   `dense_ops` and `noise_jax`, which import it.
+   only its `__init__` — `noise`, `dense_ops` and `geometry` are NOT among its
+   imports, so part 1 cannot see a violation in any of those files. Part 3
+   imports each submodule alone, and catches violations *transitively*: the
+   mutation in `noise.py` also failed `dense_ops`, which imports it.
 
-Only `pimm_data` is forbidden in part 3. torch and jax are not — the backend
-modules (`wavelet_ops_torch`, `coherent_ops_jax`, `dense_ops`) import them at
+Only `pimm_data` is forbidden in part 3. torch is not — the backend modules
+(`wavelet_ops_torch`, `coherent_gate_ops_torch`, `dense_ops`) import it at
 module scope by design and are declared optional extras. The invariant this file
 defends is about pimm-data, not about weight of imports.
 

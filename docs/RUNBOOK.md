@@ -130,7 +130,7 @@ says "run phase 1 first" — which is misleading, because phase 1 needs it too.
 
 **`KGATE` must match between steps 1 and 2.** The frozen table is calibrated at a
 particular gate, and `submit_coeff_corpus.sh` defaults `KGATE` to empty, meaning
-`DetectorConfig`'s 3.0. Calibrating at one gate and building at another
+the simulation chain's 3.0 (`helix.tpc.chain.SIM_BASE`). Calibrating at one gate and building at another
 mis-normalises the whole corpus with nothing to say so.
 
 **Each corpus root carries its OWN `_calib`.** `norm_sigma` is computed from the
@@ -175,8 +175,7 @@ is a real failure.
 
 That is the production path: a Slurm job array, `--backend torch` (the default —
 measured 10.6 ms/plane, vs 176 ms on numpy), one GPU per task, `turing`
-partition. `--backend jax` exists as an override; it is not what built the
-current corpus.
+partition. `--backend numpy` is the reference.
 
 Single-shard, interactively, to check the chain end to end:
 
