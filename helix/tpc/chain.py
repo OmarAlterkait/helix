@@ -40,7 +40,7 @@ from helix.tpc.readout import load_readout
 SBND_DEFAULT = {
     "readout": "sbnd",
     "pedestal": {"method": "file", "clip_k": 3.5},
-    "status": {"dead_rms": 0.3, "noisy_factor": 4.0, "clip_k": 3.5, "step_k": 10.0, "step_ticks": 500},
+    "status": {"method": "cuts", "dead_rms": 0.3, "noisy_factor": 4.0, "clip_k": 3.5, "step_k": 10.0, "step_ticks": 500},
     # HELIX's basis (coif3, level 4), so SBND coefficients tokenize with the FM's band set
     "dwt": {"wavelet": "coif3", "level": 4, "mode": "periodization"},
     "coherent": {"method": "label_gate", "groups": "femb", "cross_plane": True, "kgate": 3.0, "ksig": 3.0,
@@ -49,8 +49,31 @@ SBND_DEFAULT = {
                   "threshold_approx": True, "drop_finest": 1},
 }
 
+# The simulation (JAXTPC sensor files): its wire layout as the readout (``sim_config``), pedestals
+# already subtracted by the reader, no status cuts (no dead or noisy wires in simulation), HELIX's
+# contiguous-block gate (the coherent noise model's 64-wire groups; occupancy tolerance 0.05),
+# the same threshold and basis as SBND.
+SIM_BASE = {
+    "readout": {"kind": "layout", "num_wires": [], "group_size": 64},
+    "pedestal": {"method": "file", "clip_k": 3.5},
+    "status": {"method": "none", "dead_rms": 0.3, "noisy_factor": 4.0, "clip_k": 3.5, "step_k": 10.0, "step_ticks": 500},
+    "dwt": {"wavelet": "coif3", "level": 4, "mode": "periodization"},
+    "coherent": {"method": "block_gate", "groups": "block", "cross_plane": False, "kgate": 3.0, "ksig": 3.0,
+                 "npass": 2, "tau": 0.05, "sigc_scope": "group", "group_size": 64},
+    "threshold": {"kappa": 1.0, "floor": 2.0, "sigma_scope": "plane", "threshold_approx": True, "drop_finest": 1},
+}
+
+
+def sim_config(num_wires, overrides=None):
+    """The simulation chain config for a sensor file's wire layout (``helix.tpc.io.sim_layout``)."""
+    o = dict(overrides or {})
+    o["readout"] = dict(SIM_BASE["readout"], num_wires=[[int(x) for x in r] for r in np.asarray(num_wires)])
+    return make_config(o, base=SIM_BASE)
+
+
 _CHOICES = {
     ("pedestal", "method"): ("file", "clipped_mean"),
+    ("status", "method"): ("cuts", "none"),
     ("coherent", "method"): ("label_gate", "block_gate", "none"),
     ("threshold", "sigma_scope"): ("plane", "channel", "group"),
     ("coherent", "sigc_scope"): ("global", "group"),
@@ -76,8 +99,9 @@ def per_plane(v, plane):
     return v[plane] if _is_per_plane(v) else v
 
 
-def make_config(overrides=None, base=SBND_DEFAULT):
-    """Defaults merged with ``overrides`` (nested dict), validated."""
+def make_config(overrides=None, base=None):
+    """Defaults (``base``: SBND_DEFAULT) merged with ``overrides`` (nested dict), validated."""
+    base = SBND_DEFAULT if base is None else base
     cfg = _merge(base, overrides)
     for (sec, key), allowed in _CHOICES.items():
         val = cfg[sec][key]
@@ -85,7 +109,7 @@ def make_config(overrides=None, base=SBND_DEFAULT):
             if v not in allowed:
                 raise ValueError(f"{sec}.{key} = {v!r}; allowed: {allowed}")
     for sec in cfg:
-        if isinstance(cfg[sec], dict):
+        if sec != "readout" and isinstance(cfg[sec], dict):
             unknown = set(cfg[sec]) - set(base.get(sec, {}))
             if unknown:
                 raise ValueError(f"unknown {sec} keys: {sorted(unknown)}")
@@ -183,6 +207,8 @@ class TPCChain:
             sd = np.nan_to_num(sd, nan=0.0)
         else:
             sd = sd.nan_to_num(nan=0.0)
+        if c["method"] == "none":                               # simulation: every present row is valid
+            return present, sd
         n = min(int(c["step_ticks"]), img.shape[1] // 2)
         if self.kind == "numpy":
             step = np.abs(np.median(img[:, -n:], axis=1) - np.median(img[:, :n], axis=1))
@@ -200,12 +226,10 @@ class TPCChain:
     def process_tpc(self, adc, ped, present, tpc, return_images=False):
         """``adc`` (channels, ticks), ``ped`` (channels,), ``present`` (channels,) bool
         for the WHOLE detector (numpy or torch). Returns one dict per plane."""
-        cfg, ro = self.cfg, self.readout
-        planes = ro.planes
-        rows_bp = self._rows[tpc]
+        cfg = self.cfg
         self._mark(None)
-        imgs, valid, sds = [], [], []
-        for r in rows_bp:
+        imgs, pres = [], []
+        for r in self._rows[tpc]:
             ri = r if self.kind == "numpy" else self._to(r)
             raw = self._to(adc[ri], np.float32)
             if cfg["pedestal"]["method"] == "file":
@@ -213,9 +237,34 @@ class TPCChain:
             else:
                 p, _, _ = robust.clipped_stats(raw, k=cfg["pedestal"]["clip_k"])
                 p = p.nan_to_num(nan=0.0) if self.kind == "torch" else np.nan_to_num(p)
-            img = raw - p[:, None]
-            pres = self._to(present[ri], bool)
-            ok, sd = self.status(img, pres)
+            imgs.append(raw - p[:, None]); pres.append(self._to(present[ri], bool))
+        return self._planes(imgs, pres, tpc, return_images)
+
+    def process_images(self, images, tpc, present=None, return_images=False):
+        """Pedestal-subtracted (wires, ticks) images of one TPC's planes, in plane order
+        (simulation: the sensor reader's planes). Returns one dict per plane."""
+        self._mark(None)
+        imgs = [self._to(im, np.float32) for im in images]
+        pres = [self._to(np.ones(im.shape[0], bool) if present is None else present[i], bool) for i, im in enumerate(images)]
+        return self._planes(imgs, pres, tpc, return_images)
+
+    def dwt_rows(self, img):
+        """The chain's transform of one plane image (no gate, no threshold), the dropped finest
+        bands zeroed: the basis of the noise-free target (helix.tpc.corpus)."""
+        d = self.cfg["dwt"]
+        b = self._dwt(self._to(img, np.float32), d["wavelet"], d["level"])
+        nd = int(self.cfg["threshold"]["drop_finest"])
+        for i in range(len(b) - nd, len(b)):
+            b[i] = b[i] * 0
+        return b
+
+    def _planes(self, raw_imgs, pres, tpc, return_images):
+        cfg, ro = self.cfg, self.readout
+        planes = ro.planes
+        rows_bp = self._rows[tpc]
+        imgs, valid, sds = [], [], []
+        for img, pr in zip(raw_imgs, pres):
+            ok, sd = self.status(img, pr)
             imgs.append(self._where_rows(img, ok)); valid.append(ok); sds.append(sd)
         self._mark("pedestal_status")
         nt = imgs[0].shape[1]

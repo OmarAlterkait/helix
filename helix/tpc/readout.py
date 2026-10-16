@@ -2,7 +2,10 @@
 electronics groups, plus the pulse templates of the candidate-region filter.
 
 A detector ships one ``helix/tpc/data/<name>_readout.npz`` (SBND: exported from the
-channel map and geometry by the SBND-data-helix study, scripts/export_helix_readout.py):
+channel map and geometry by the SBND-data-helix study, scripts/export_helix_readout.py), or is
+described by its wire layout (simulation: ``{"kind": "layout", "num_wires": [[U, V, Y] per volume],
+"group_size": 64}`` - channels volume-major then plane then wire, every wire instrumented, coherent
+groups of ``group_size`` contiguous wires, the simulation's noise model):
 per offline channel ``tpc, plane, wire, instrumented`` and one integer array per
 electronics grouping (SBND: ``femb``, ``asic``), plus ``templates`` (planes x samples,
 peak at ``meta.template_pre``) and a JSON ``meta``.
@@ -19,9 +22,9 @@ _DATA = Path(__file__).resolve().parent / "data"
 
 
 class ReadoutMap:
-    def __init__(self, path):
-        d = np.load(path, allow_pickle=False)
-        self.path = str(path)
+    def __init__(self, path=None, arrays=None):
+        d = np.load(path, allow_pickle=False) if arrays is None else arrays
+        self.path = str(path) if arrays is None else "layout"
         self.meta = json.loads(str(d["meta"]))
         self.tpc = d["tpc"].astype(np.int64)
         self.plane = d["plane"].astype(np.int64)
@@ -52,9 +55,42 @@ class ReadoutMap:
         return lab
 
 
+def layout_arrays(num_wires, planes=("U", "V", "Y"), group_size=64):
+    """The arrays of a :class:`ReadoutMap` for a wire layout (see the module docstring)."""
+    nw = np.asarray(num_wires, np.int64)
+    tpc, plane, wire, grp = [], [], [], []
+    g0 = 0
+    for v in range(nw.shape[0]):
+        for p in range(nw.shape[1]):
+            n = int(nw[v, p])
+            tpc.append(np.full(n, v)); plane.append(np.full(n, p)); wire.append(np.arange(n))
+            grp.append(g0 + np.arange(n) // group_size); g0 += -(-n // group_size)
+    meta = dict(planes=list(planes), group_kinds=["block"], template_pre=0, group_size=int(group_size),
+                num_wires=nw.tolist())
+    n = int(nw.sum())
+    return dict(meta=json.dumps(meta), tpc=np.concatenate(tpc), plane=np.concatenate(plane), wire=np.concatenate(wire),
+                instrumented=np.ones(n, bool), block=np.concatenate(grp), templates=np.zeros((len(planes), 1), np.float32))
+
+
 @lru_cache(maxsize=None)
-def load_readout(name_or_path="sbnd") -> ReadoutMap:
-    p = Path(name_or_path)
+def _load(key) -> ReadoutMap:
+    spec = json.loads(key)
+    if isinstance(spec, dict):
+        if spec.get("kind") != "layout":
+            raise ValueError(f"unknown readout {spec!r}")
+        return ReadoutMap(arrays=layout_arrays(spec["num_wires"], tuple(spec.get("planes", ("U", "V", "Y"))),
+                                               int(spec.get("group_size", 64))))
+    p = Path(spec)
     if not p.suffix:
-        p = _DATA / f"{name_or_path}_readout.npz"
+        p = _DATA / f"{spec}_readout.npz"
     return ReadoutMap(p)
+
+
+def load_readout(spec="sbnd") -> ReadoutMap:
+    """A packaged readout name ("sbnd"), an .npz path, or a layout dict (simulation)."""
+    return _load(json.dumps(spec, sort_keys=True))
+
+
+def canonical_plane_gid(tpc, plane, n_planes=3):
+    """The corpus plane id: tpc * n_planes + plane index."""
+    return int(tpc) * n_planes + int(plane)
