@@ -48,11 +48,17 @@ This repository contains two pipelines. Everything above — corpus, foundation
 model, probe — is the **wire** path, and it is what the documentation, the
 tests and the runbook describe.
 
-`helix/optical` and `scripts/optical` (18 files) are a **separate PMT-light
-pipeline**: wavelet compression of goop waveform chunks, with its own config and
-metrics. It shares `helix.core` and nothing else — no corpus, no tokenizer, no
-model. It is live code, not dead, but it is not part of the FM pipeline and is
-not exercised by the handover validation.
+`helix/optical` holds the **optical path**: one codec (`helix.optical.codec`) for
+every light system - SBND PMT and X-ARAPUCA data (`helix.tpc.sbnd_run`) and goop's
+simulated PMTs (`python -m helix.optical.goop_run --input light_output.h5 --output
+goop_shard.h5 [--device cuda]`): deconvolution with the system's measured
+single-photon response, integer-Haar differences kept where the light (or the
+departure from it) reaches threshold, coarse sums always; written as optical shards
+(`helix.tpc.sparse_io.read_optical`) with 128-slot tokens (`helix.optical.tokens`),
+so simulation and data share one representation. The earlier goop pipeline
+(`helix.optical.process_event`: coif3 + VisuShrink, and the `scripts/optical`
+sweeps) is kept as a reference; it loses most isolated photons and part of the slow
+light. The optical tokens are not yet fed to the model.
 
 The intent is for optical to grow the same way the wire path did — its own
 wavelet compression, its own corpus, feeding the same model. See

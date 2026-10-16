@@ -58,8 +58,13 @@ class DetectorConfig:
     wavelet: str = "coif3"
     dwt_level: int = 4
     dwt_mode: str = "periodization"
+    # hysteresis (helix.tpc.threshold_rows): seeds at the universal threshold
+    # kappa * sigma * sqrt(2 ln N), grown (8-connected, within a band) through
+    # |c| >= threshold_floor * sigma. Validated on SBND data, SBND MC and this sim
+    # (SBND-data-helix study). threshold_floor None: seeds only (the old universal rule).
     threshold_kappa: float = 1.0
     threshold_mode: str = "hard"
+    threshold_floor: float | None = 2.0
     threshold_include_approx: bool = True
     # tokenize normalization scalar (asinh(value / (norm_sigma/sigma_norm))); recorded
     # in the shard basis so the corpus tracks the model's SIGMA. Default = the FM's 2.6.

@@ -5,7 +5,7 @@
                   imported only when selected)
   helix.tpc     — wire-plane pipeline: coherent noise removal + wavelet, and
                   the corpus builder
-  helix.optical — PMT optical-waveform pipeline (goop light files)
+  helix.optical — optical waveforms (SBND PMT / X-ARAPUCA, goop): one codec, optical shards
   helix.model   — the coefficient foundation model and its tokenizer
 
 **Every name below is resolved lazily** (PEP 562). This is not a style choice.

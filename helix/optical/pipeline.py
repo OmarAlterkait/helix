@@ -46,7 +46,7 @@ def process_event(
     th = threshold or config.threshold
     ec = _io.read_event_chunks(path, event_key, config)
     batch, lengths = _io.pad_batch(ec.chunks, config.dwt_level)
-    sigma = _io.chunk_noise_sigma(ec.chunks)            # padding-free noise estimate
+    sigma = _io.chunk_noise_sigma(ec.chunks, config.noise_sigma_method)   # padding-free noise estimate
 
     x = _to_backend(batch)
     result = sparsify(x, wavelet=config.wavelet, level=config.dwt_level,

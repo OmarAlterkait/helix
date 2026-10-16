@@ -303,7 +303,11 @@ class CoeffTPCDataset(ShardEventDataset):
 
     @staticmethod
     def _build_coeff(raw, meta=None):
-        """Neutral coeff rows: coords as columns + value as an (M,1) feature."""
+        """Neutral coeff rows: coords as columns + value as an (M,1) feature. A shard
+        with per-wire validity adds ``wire_valid`` (G, max n_wires) to ``_meta``."""
+        if meta and raw.get('_wire_valid') is not None:
+            from helix.core.coeff_io import unpack_wire_valid
+            meta = {**meta, 'wire_valid': unpack_wire_valid(raw['_wire_valid'], meta['n_wires'])}
         return {
             'band': raw['band'],
             'plane_gid': raw['plane_gid'],

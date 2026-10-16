@@ -275,6 +275,8 @@ class CoeffTPCReader(ShardReaderBase):
         out = {"value": f["value"][a:b].astype(np.float32)}
         if "coord_digest" in coord:
             out["_coord_digest"] = int(coord["coord_digest"][ev])
+        if "wire_valid" in coord:                    # packed (G, ceil(max n_wires / 8))
+            out["_wire_valid"] = coord["wire_valid"][ev]
         ident = self._ident_by_path.get(path)
         if ident is not None:
             out["_ident"] = dict(run=ident["run"][ev],

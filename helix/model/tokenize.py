@@ -289,7 +289,7 @@ def pixel_cells(plane_gid, wire, tick, band_lengths, cfg=None):
 
 def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
              norm_sigma, cfg=None, value_clean=None, dead_frac=0.0,
-             rng=None):
+             rng=None, wire_valid=None):
     """Coefficient rows -> per-band 2-D patch tokens (stateless, pure numpy).
 
     Faithful port of ``vit_tpc.assemble_tpc_band``. The one substantive change is
@@ -298,6 +298,11 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     ``arcsinh(raw/sigma_tab)``. The corpus now stores RAW values, so we compute
     ``arcsinh(raw/norm_sigma)`` directly — identical output, one less place for a
     baked-in constant to drift.
+
+    ``wire_valid`` (G, >= max n_wires) bool, rows in ``gids`` order: False marks an
+    excluded channel (dead, noisy, not instrumented; real detectors). Its slots are
+    not valid (no target), like slots past ``n_wires``: the detector recorded nothing
+    there to predict. ``None`` = every wire valid (simulation).
 
     Returns numpy arrays; converting to tensors is the caller's job (the pimm
     transform), keeping this importable without torch.
@@ -360,6 +365,10 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     wi = np.arange(pw)[None, :]
     ti = np.arange(pt)[None, :]
     wok = (cell_wb[:, None] * pw + wi) < nw[:, None]
+    if wire_valid is not None:
+        wv = np.asarray(wire_valid, bool)
+        w_abs = np.minimum(cell_wb[:, None] * pw + wi, wv.shape[1] - 1)
+        wok &= wv[gid_rows(cell_gid, gids)[:, None], w_abs]
     tok = (cell_tb[:, None] * pt + ti) < Lb[:, None]
     valid = (wok[:, :, None] & tok[:, None, :]).reshape(n_cells, nslot)
 
@@ -723,7 +732,7 @@ class CoeffTokenize:
             norm_sigma=m["norm_sigma"], cfg=self.cfg,
             value_clean=(None if clean is None
                          else np.asarray(clean["value"]).reshape(-1)),
-            dead_frac=self.dead_frac, rng=rng)
+            dead_frac=self.dead_frac, rng=rng, wire_valid=m.get("wire_valid"))
         n_cells = tok.pop("n_cells")
         # Emit the names fm/model.py gathers, not assemble()'s cell_* vocabulary.
         # Without this the first batch dies on B["band_id"] (model.py:266), and

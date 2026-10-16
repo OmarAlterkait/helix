@@ -89,18 +89,52 @@ def read_event_chunks(path: str | Path, event_key: str, config: OpticalConfig) -
                        t0_ns=np.array(t0s, np.float64), lengths=np.array(lens), pe_counts=pe)
 
 
-def chunk_noise_sigma(chunks: list[np.ndarray]) -> np.ndarray:
-    """Per-chunk noise sigma from the UNPADDED chunk's finest db1 detail (MAD).
+def chunk_noise_sigma(chunks: list[np.ndarray], method: str = "mad") -> np.ndarray:
+    """Per-chunk noise sigma from the UNPADDED chunk's finest db1 detail.
 
     Padding-independent — used for the VisuShrink threshold so zero-padding in
-    the batch can't collapse the MAD estimate. Returns (n_chunks,) float32.
+    the batch can't collapse the estimate. Returns (n_chunks,) float32.
+
+    ``method="mad"`` (default, unchanged): median(|d|)/0.6745. On INTEGER ADC codes
+    this is quantised: the db1 detail takes values k/sqrt(2), so the estimate moves
+    in steps of 1/(sqrt(2) 0.6745) = 1.048 ADC, and it is exactly 0 when the noise
+    is below ~0.6 ADC (measured: every SBND X-ARAPUCA waveform, sigma = 0.46 ADC,
+    returns 0 — the threshold vanishes and nothing is compressed).
+
+    ``method="clipped"``: iterative 3.5-sigma clipped RMS of the same detail band,
+    corrected for the Gaussian truncation — continuous, unbiased on digitised
+    Gaussian noise down to sigma ~ 0.45 ADC. Vectorised over chunks.
     """
     import pywt
-    out = []
-    for c in chunks:
-        d = pywt.wavedec(np.asarray(c, np.float64), "db1", level=1, mode="periodization")[-1]
-        out.append(np.median(np.abs(d)) / 0.6745)
-    return np.asarray(out, np.float32)
+    if method == "mad":
+        # the original per-chunk pywt path, kept verbatim so the default is bit-identical
+        out = []
+        for c in chunks:
+            d = pywt.wavedec(np.asarray(c, np.float64), "db1", level=1, mode="periodization")[-1]
+            out.append(np.median(np.abs(d)) / 0.6745)
+        return np.asarray(out, np.float32)
+    if method != "clipped":
+        raise ValueError(f"unknown noise-sigma method {method!r} (mad|clipped)")
+    n = np.array([len(c) // 2 for c in chunks])
+    D = np.zeros((len(chunks), max(int(n.max()), 1)), np.float64)
+    pad = np.arange(D.shape[1])[None, :] >= n[:, None]
+    for i, c in enumerate(chunks):
+        c = np.asarray(c, np.float64)[: 2 * n[i]]
+        D[i, : n[i]] = (c[0::2] - c[1::2]) / np.sqrt(2.0)
+    return _clipped_rms(D, ~pad).astype(np.float32)
+
+
+def _clipped_rms(D, valid, k: float = 3.5, n_iter: int = 6):
+    """Row-wise zero-centred clipped RMS with truncation correction."""
+    from math import erf, exp, pi, sqrt
+    corr = sqrt(1.0 - 2 * k * exp(-0.5 * k * k) / sqrt(2 * pi) / erf(k / sqrt(2)))
+    q = np.where(valid, np.abs(D), np.nan)
+    sd = np.maximum(np.nanpercentile(q, 50, axis=1) / 0.6745, 0.3)
+    for _ in range(n_iter):
+        sel = valid & (np.abs(D) <= k * sd[:, None])
+        nn = np.maximum(sel.sum(1), 2)
+        sd = np.maximum(np.sqrt((np.where(sel, D, 0.0) ** 2).sum(1) / nn) / corr, 1e-6)
+    return sd
 
 
 def quantize_coeffs(coeffs, bits: int):

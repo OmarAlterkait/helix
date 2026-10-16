@@ -10,6 +10,8 @@ figures/
 # (DEFAULT_SERIES_SPECTRUM), so an untracked copy means a clone or a wheel
 # raises FileNotFoundError on the default path. 3.8 kB.
 !helix/tpc/data/*.npz
+# ...and the optical matched-filter templates (helix.optical.sbnd_chain, 1 kB).
+!helix/optical/data/*.npz
 temp/
 
 # ── retired trees (2026-09-09) ──

@@ -89,3 +89,43 @@ def test_decomposition_viz_runs():
         fig = plot_decomposition(sig, wavelet="coif3", level=6, style=style)
         assert fig is not None
         import matplotlib.pyplot as plt; plt.close(fig)
+
+
+def test_clipped_noise_sigma_below_one_adc():
+    # integer codes with sigma < 1 ADC: the MAD estimate is exactly 0, the clipped one is not
+    from helix.optical.io import chunk_noise_sigma
+    rng = np.random.default_rng(3)
+    chunks = [np.round(rng.normal(0, 0.45, 800)).astype(np.float32) for _ in range(20)]
+    assert np.all(chunk_noise_sigma(chunks, "mad") == 0.0)
+    s = chunk_noise_sigma(chunks, "clipped")
+    assert abs(np.median(s) - np.sqrt(0.45 ** 2 + 1 / 12)) < 0.03, s   # ~3% low at 0.45 ADC
+    assert np.all(s > 0.4)
+    # and it is unbiased at the usual noise level (MAD is quantised in 1.048-ADC steps)
+    chunks = [np.round(rng.normal(0, 2.6, 5000)).astype(np.float32) for _ in range(20)]
+    s = chunk_noise_sigma(chunks, "clipped")
+    assert abs(np.median(s) - np.sqrt(2.6 ** 2 + 1 / 12)) < 0.05
+
+
+def test_clipped_noise_sigma_default_unchanged():
+    from helix.optical.io import chunk_noise_sigma
+    chunks = _chunks()
+    import pywt
+    ref = [np.median(np.abs(pywt.wavedec(np.asarray(c, np.float64), "db1", level=1,
+                                         mode="periodization")[-1])) / 0.6745 for c in chunks]
+    assert np.allclose(chunk_noise_sigma(chunks), ref, rtol=1e-6)
+
+
+def test_process_event_config_defaults_unchanged():
+    from helix.optical import OpticalConfig
+    c = OpticalConfig()
+    assert c.noise_sigma_method == "mad"
+
+
+def test_mad_sigma_odd_length_bit_identical():
+    import pywt
+    from helix.optical.io import chunk_noise_sigma
+    rng = np.random.default_rng(2)
+    chunks = [rng.normal(0, 2, n).astype(np.float32) for n in (101, 1001, 35999)]
+    ref = [np.median(np.abs(pywt.wavedec(np.asarray(c, np.float64), "db1", level=1,
+                                         mode="periodization")[-1])) / 0.6745 for c in chunks]
+    assert np.array_equal(chunk_noise_sigma(chunks), np.asarray(ref, np.float32))

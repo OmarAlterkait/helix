@@ -18,6 +18,8 @@ Layout (one modality per file, flat columnar — see COEFF_CORPUS_DESIGN.md §3)
                                                      ← absent when has_coords=False
               event_offset int64 (n_events+1,)   ← slice [off[i]:off[i+1]]
               coord_digest uint64 (n_events,)    ← pairing key for a clean shard
+              wire_valid uint8 (n_events, G, ceil(max n_wires / 8))  ← packbits of
+                  CoeffEvent.wire_valid (False = excluded channel); absent = all valid
               sigma_threshold float32 (n_events, G, n_bands)
     /value    float32 (M,)   RAW coeff
     /ident    run (n_events,), source_file (n_events,), event int64 (n_events,)
@@ -104,7 +106,21 @@ def arrays_to_coeff_event(d: dict, basis: BasisDescriptor) -> CoeffEvent:
         gids=np.asarray(d["gids"], np.int32), n_wires=np.asarray(d["n_wires"], np.int32),
         sigma_threshold=np.asarray(d["sigma_threshold"], np.float32),
         basis=basis, run=str(d["run"]), source_file=str(d["source_file"]), event=int(d["event"]),
+        wire_valid=None if d.get("wire_valid") is None else np.asarray(d["wire_valid"], bool),
     )
+
+
+def pack_wire_valid(wire_valid, n_wires):
+    """(G, >= max n_wires) bool -> (G, ceil(max n_wires / 8)) uint8 (None -> all valid)."""
+    W = int(np.max(n_wires))
+    if wire_valid is None:
+        wire_valid = np.arange(W)[None, :] < np.asarray(n_wires)[:, None]
+    return np.packbits(np.asarray(wire_valid, bool)[:, :W], axis=1)
+
+
+def unpack_wire_valid(packed, n_wires):
+    """Inverse of :func:`pack_wire_valid`: (G, max n_wires) bool."""
+    return np.unpackbits(np.asarray(packed, np.uint8), axis=-1)[..., :int(np.max(n_wires))].astype(bool)
 
 
 # ---- shard codec ----------------------------------------------------------
@@ -242,6 +258,9 @@ def write_coeff_shard(
         coord.create_dataset("event_offset", data=event_offset)
         coord.create_dataset("coord_digest", data=digests)
         _ds(coord, "sigma_threshold", sigma, compression)
+        if any(e.wire_valid is not None for e in events):
+            _ds(coord, "wire_valid", np.stack([pack_wire_valid(e.wire_valid, e0.n_wires) for e in events]),
+                compression)
 
         _ds(f, "value", value, compression)
 
@@ -289,6 +308,8 @@ def read_coeff_event(path: str | Path, i: int, *,
             source_file=f["ident"]["source_file"][i].decode() if isinstance(f["ident"]["source_file"][i], bytes) else str(f["ident"]["source_file"][i]),
             event=int(f["ident"]["event"][i]),
         )
+        if "wire_valid" in f["coord"]:
+            d["wire_valid"] = unpack_wire_valid(f["coord"]["wire_valid"][i], d["n_wires"])
         if has_coords:
             d.update(band=f["coord"]["band"][a:b], plane_gid=f["coord"]["plane_gid"][a:b],
                      wire=f["coord"]["wire"][a:b], tau=f["coord"]["tau"][a:b])

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from helix.core.wavelet import (
-    reconstruct, wavedec, threshold_bands, SparseResult,
+    reconstruct, wavedec, SparseResult,
 )
 from helix.core.provenance import BasisDescriptor, padded_length_of
 from helix.core.coeff_event import CoeffEvent
@@ -67,6 +67,15 @@ class ProcessedPlane:
     config: DetectorConfig
 
 
+def _threshold(coeffs, config: DetectorConfig):
+    """Hysteresis hard threshold (:mod:`helix.tpc.threshold_rows`)."""
+    if config.threshold_mode != "hard":
+        raise ValueError(f"threshold_mode {config.threshold_mode!r}: the TPC threshold is hard")
+    from helix.tpc.threshold_rows import threshold_bands_rows
+    return threshold_bands_rows(list(coeffs), kappa=config.threshold_kappa, floor=config.threshold_floor,
+                                threshold_approx=config.threshold_include_approx)
+
+
 def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None = None,
                   *, removal: str | None = None, with_images: bool = True) -> ProcessedPlane:
     """One plane: (n_wires, n_ticks) → cleaned + sparse coeffs + reconstruction.
@@ -85,7 +94,7 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
         xin = _pad_time(cleaned, config.dwt_level)           # same padded-4336 basis as gate/none
         coeffs, lev = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
                               mode=config.dwt_mode)
-        out, n_kept, n_total, band_sigma = threshold_bands(coeffs, config.threshold_spec())
+        out, n_kept, n_total, band_sigma = _threshold(coeffs, config)
         sparse = SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
                               sigma_per_band=band_sigma, wavelet=config.wavelet,
                               level=lev, mode=config.dwt_mode)
@@ -96,7 +105,7 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
         gated = coherent_gate(coeffs, group_size=config.group_size, kgate=config.gate_kgate,
                               ksig=config.gate_ksig, npass=config.gate_npass,
                               tau=config.gate_tau, gate_approx=True)
-        out, n_kept, n_total, band_sigma = threshold_bands(gated, config.threshold_spec())
+        out, n_kept, n_total, band_sigma = _threshold(gated, config)
         sparse = SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
                               sigma_per_band=band_sigma, wavelet=config.wavelet,
                               level=lev, mode=config.dwt_mode)
@@ -110,7 +119,7 @@ def process_plane(image: Any, config: DetectorConfig, sigma_per_wire: Any | None
         xin = _pad_time(image, config.dwt_level)
         coeffs, lev = wavedec(xin, wavelet=config.wavelet, level=config.dwt_level,
                               mode=config.dwt_mode)
-        out, n_kept, n_total, band_sigma = threshold_bands(coeffs, config.threshold_spec())
+        out, n_kept, n_total, band_sigma = _threshold(coeffs, config)
         sparse = SparseResult(coeffs=out, n_kept=n_kept, n_total=n_total,
                               sigma_per_band=band_sigma, wavelet=config.wavelet,
                               level=lev, mode=config.dwt_mode)
@@ -168,7 +177,10 @@ def basis_from_config(config: DetectorConfig, *, band_lengths, level: int,
                      group_size=config.group_size),
         threshold=dict(method="universal", func=config.threshold_mode,
                        scale=config.threshold_kappa, per_band_sigma=True,
-                       threshold_approx=config.threshold_include_approx),
+                       threshold_approx=config.threshold_include_approx,
+                       # the old universal rule (floor None) keeps its basis_digest
+                       **({} if config.threshold_floor is None else
+                          dict(rule="hysteresis", floor=config.threshold_floor))),
     )
 
 

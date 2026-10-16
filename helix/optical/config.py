@@ -41,3 +41,8 @@ class OpticalConfig:
     threshold: ThresholdSpec = field(   # κ=1.2 → 1× noise-RMS operating point (~33×)
         default_factory=lambda: ThresholdSpec(method="universal", func="hard", scale=1.2))
     quant_bits: int = 12        # quantize surviving coefficients for storage (near-lossless ~0.1% peak)
+
+    # ── noise sigma (defaults reproduce goop tuning) ──
+    # "clipped" is required for data whose noise is < ~0.6 ADC (the MAD of integer
+    # codes is 0 there) and removes the 1.05-ADC quantisation of the MAD estimate.
+    noise_sigma_method: str = "mad"

@@ -47,12 +47,20 @@ def _cfft(h, N):
 
 
 def _dwt1(x, dlo, dhi, L):
-    """pywt periodization: cA = roll(circ_conv(x, dec_lo), -L//2)[0::2] (cD ← dec_hi)."""
+    """pywt periodization: cA = roll(circ_conv(x, dec_lo), -L//2)[0::2] (cD ← dec_hi),
+    i.e. cA[k] = sum_n dec_lo[n] x[(2k + L//2 - n) mod N]: one stride-2 conv1d with both
+    (flipped) filters over the circularly padded signal. Computes only the kept half,
+    in O(N L) (L <= 18 here): ~10x faster than the full-length FFT convolution."""
+    import torch.nn.functional as F
     N = x.shape[-1]
-    Xf = _fft.rfft(x, dim=-1)
-    lo = torch.roll(_fft.irfft(Xf * _cfft(dlo, N), n=N, dim=-1), -(L // 2), dims=-1)
-    hi = torch.roll(_fft.irfft(Xf * _cfft(dhi, N), n=N, dim=-1), -(L // 2), dims=-1)
-    return lo[..., 0::2], hi[..., 0::2]
+    off = L // 2 - L + 1                                   # x index of filter tap L-1 at k = 0
+    xr = x.reshape(-1, 1, N)
+    if off or L > 2:
+        xr = F.pad(xr, (-off, L - 2 + off), mode="circular")
+    w = torch.stack([dlo.flip(0), dhi.flip(0)])[:, None, :]
+    y = F.conv1d(xr, w, stride=2)
+    shp = x.shape[:-1] + (N // 2,)
+    return y[:, 0].reshape(shp), y[:, 1].reshape(shp)
 
 
 def _idwt1(cA, cD, dlo, dhi, L):

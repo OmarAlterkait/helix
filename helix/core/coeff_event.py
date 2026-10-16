@@ -164,6 +164,9 @@ class CoeffEvent:
     run: str = ""
     source_file: str = ""
     event: int = -1
+    # per-wire validity (G, max(n_wires)) bool, False = excluded channel (dead, noisy,
+    # not instrumented): no input and no target for the model. None = all valid.
+    wire_valid: np.ndarray | None = None
 
     # ---- construction ---------------------------------------------------
 
