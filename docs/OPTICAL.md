@@ -56,10 +56,10 @@ real light-free windows (SBND) or on goop's exact noise model; error = signal dr
 kept, in a fixed reference sigma_j measured on the noise before injection; the oracle keeps
 exactly the true differences above sigma_j.
 
-Previous support rule vs this codec (SBND-data-helix `scripts/rule_truth2.py`, region scoring):
+Previous support rule vs this codec (SBND-data-helix `archive/scripts/rule_truth2.py`, region scoring):
 PMT per photon 13.0 values at 25.0 sigma^2 vs 6.4 at 11.5 (oracle 6.2 / 9.1); per flash 698 at 1310
 vs 484 at 827 (oracle 495 / 645); X-ARAPUCA per photon 27.5 at 58.6 vs 9.2 at 17.3. goop
-(`scripts/goop_compare.py`, exact truth): whole-chunk error 3.5k sigma^2 at ~1950 values vs >= 5.7k
+(SBND-data-helix `archive/scripts/goop_compare.py`, exact truth): whole-chunk error 3.5k sigma^2 at ~1950 values vs >= 5.7k
 for coif3 at any threshold; late single photons 450 vs >= 1230.
 
 ## Files

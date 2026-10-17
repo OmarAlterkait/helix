@@ -2,7 +2,7 @@
 electronics groups, plus the pulse templates of the candidate-region filter.
 
 A detector ships one ``helix/tpc/data/<name>_readout.npz`` (SBND: exported from the
-channel map and geometry by the SBND-data-helix study, scripts/export_helix_readout.py), or is
+channel map and geometry by the SBND-data-helix study, archive/scripts/export_helix_readout.py), or is
 described by its wire layout (simulation: ``{"kind": "layout", "num_wires": [[U, V, Y] per volume],
 "group_size": 64}`` - channels volume-major then plane then wire, every wire instrumented, coherent
 groups of ``group_size`` contiguous wires, the simulation's noise model):
