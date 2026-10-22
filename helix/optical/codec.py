@@ -291,6 +291,8 @@ def _quiet_rms(stat, n):
     nn = _host(n)
     if _is_torch(stat):
         import torch
+        if k == 0:                                               # a batch of windows all shorter than a stretch
+            return (stat.pow(2).sum(1) / torch.clamp(torch.as_tensor(nn, device=stat.device), min=1)).sqrt()
         seg = stat[:, :k * QUIET].reshape(m, k, QUIET)
         r = seg.pow(2).mean(-1).sqrt()
         full = torch.as_tensor(np.arange(1, k + 1)[None, :] * QUIET <= nn[:, None], device=stat.device)
@@ -299,6 +301,8 @@ def _quiet_rms(stat, n):
         q = torch.sort(r, 1).values.gather(1, torch.clamp((nf - 1) // 2, min=0)[:, None])[:, 0]
         own = (stat.pow(2).sum(1) / torch.clamp(torch.as_tensor(nn, device=stat.device), min=1)).sqrt()
         return torch.where(nf > 0, q, own)
+    if k == 0:
+        return np.sqrt((stat.astype(np.float64) ** 2).sum(1) / np.maximum(nn, 1)).astype(np.float32)
     seg = stat[:, :k * QUIET].reshape(m, k, QUIET)
     r = np.sqrt((seg.astype(np.float64) ** 2).mean(-1))
     full = np.arange(1, k + 1)[None, :] * QUIET <= nn[:, None]

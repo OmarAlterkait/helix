@@ -349,3 +349,26 @@ def test_calibrate_recovers_a_known_response():
         assert r["n_isolated"] > 300
         err[passes] = np.abs(r["h_ls"][core] - truth[core]).max()
     assert err[1] < 0.1 and err[3] < min(err[1], 0.08)
+
+
+def test_windows_shorter_than_a_noise_stretch():
+    """A batch whose windows are all shorter than one 256-sample stretch: the noise is each
+    window's own rms (an SBND event whose batch held only windows under 193 samples - padded to
+    192 - used to fail)."""
+    rng = np.random.default_rng(3)
+    n, m = 150, 12
+    wf = dict(channel=np.arange(m, dtype=np.int32) // 3, t_us=np.zeros(m), length=np.full(m, n), offset=np.arange(m) * n,
+              buf=np.round(14250 + rng.normal(0, 3, m * n)).astype(np.uint16))
+    devices = [None]
+    try:
+        import torch
+        if torch.cuda.is_available():
+            devices.append("cuda")
+    except ImportError:
+        pass
+    for dev in devices:
+        ch = OpticalChain(device=dev)
+        res = ch.process("pmt", wf)
+        st = np.asarray(res["noise"]["stat"])
+        assert len(st) == 4 and np.all(np.isfinite(st)) and np.all(st > 0), dev
+        assert [len(x) for x in ch.reconstruct(res)] == [n] * m
