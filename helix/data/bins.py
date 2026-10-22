@@ -139,6 +139,27 @@ DEFAULTS = _defaults()
 ARRAY_KEYS = ("edges", "cent_asinh", "cent_ratio")
 PARAM_KEYS = ("K", "n_bands", "events", "corpus")
 
+#: The numpy CPU features the grid is derived WITHOUT. Where the CPU has AVX-512 (S3DF's turing
+#: Xeons), numpy runs arcsinh, log, mean and percentile through AVX-512 kernels that round
+#: differently in the last bits, so the same corpus gives a grid up to ~20 float32 ulp away
+#: (6.5e-5 at most, in cent_ratio) and different digests: that was the S3DF/NERSC "v2/v3"
+#: disagreement, with both corpora byte-identical. The reference is the grid WITHOUT them -- AMD
+#: Milan (S3DF milano, NERSC), or turing with this set -- so set it before numpy is imported;
+#: scripts/derive_coeff_bins.py does that itself.
+CANONICAL_NUMPY_ENV = {"NPY_DISABLE_CPU_FEATURES":
+                       "AVX512F AVX512CD AVX512_SKX AVX512_CLX AVX512_CNL AVX512_ICL AVX512_SPR"}
+
+
+def avx512_active() -> bool:
+    """Whether this process's numpy dispatches to AVX-512 kernels (see CANONICAL_NUMPY_ENV)."""
+    import os
+    try:
+        from numpy._core._multiarray_umath import __cpu_features__ as feats
+    except ImportError:                                    # numpy < 2
+        from numpy.core._multiarray_umath import __cpu_features__ as feats
+    off = set(os.environ.get("NPY_DISABLE_CPU_FEATURES", "").replace(",", " ").split())
+    return bool(feats.get("AVX512F")) and "AVX512F" not in off
+
 
 def derive(corpus, *, dataset_name=DEFAULTS["dataset_name"],
            events=DEFAULTS["events"], K=DEFAULTS["K"],
@@ -372,8 +393,12 @@ def check_reference(table: Mapping[str, Any]) -> dict[str, Any]:
     got = fingerprint(table)
     bad = {k: (ref["digests"][k], got[k]) for k in ARRAY_KEYS
            if ref["digests"].get(k) != got[k]}
-    return dict(status="mismatch" if bad else "match", reference=ref,
-                digest_mismatches=bad, digests=got)
+    out = dict(status="mismatch" if bad else "match", reference=ref,
+               digest_mismatches=bad, digests=got)
+    if bad and avx512_active():
+        out["hint"] = ("derived in a process whose numpy uses AVX-512 kernels: the digests are not "
+                       "comparable; derive with bins.CANONICAL_NUMPY_ENV set")
+    return out
 
 
 def compare(a: Mapping[str, Any], b: Mapping[str, Any]) -> dict[str, Any]:

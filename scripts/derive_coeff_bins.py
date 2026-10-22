@@ -25,11 +25,15 @@ non-zero if the tables differ.
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 
 from helix.data import bins as binlib
 
 
 def main(argv=None):
+    if binlib.avx512_active() and argv is None:      # the grid is defined without numpy's AVX-512 kernels
+        os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, **binlib.CANONICAL_NUMPY_ENV))
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--corpus", help="corpus dir (<root>/<run>/); with --like or "
                                      "--verify, defaults to the recorded path")

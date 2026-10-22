@@ -198,10 +198,17 @@ def test_the_production_grid_matches_its_own_packaged_fingerprint():
     pytest.importorskip("torch")
     # No parameters passed: DEFAULTS comes from the spec, so a bare derive is
     # BY CONSTRUCTION the declared one. Passing them here would test the test's
-    # copy of the config rather than the one the CLI actually uses.
-    got = binlib.derive(CORPUS)
-    r = binlib.check_reference(got)
-    assert r["status"] == "match", r
+    # copy of the config rather than the one the CLI actually uses. In a child
+    # process with the canonical numpy features: this process's numpy may already
+    # dispatch to AVX-512 kernels, whose last-bit rounding changes the digests.
+    import json, subprocess, sys
+    code = ("import json; from helix.data import bins as b; r = b.check_reference(b.derive(%r)); "
+            "print(json.dumps(dict(status=r['status'], avx512=b.avx512_active())))" % str(CORPUS))
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       env=dict(os.environ, **binlib.CANONICAL_NUMPY_ENV))
+    assert p.returncode == 0, p.stderr[-2000:]
+    r = json.loads(p.stdout.strip().splitlines()[-1])
+    assert r == dict(status="match", avx512=False), r
 
 
 @pytest.mark.skipif(not os.path.isdir(CORPUS), reason=f"corpus absent: {CORPUS}")
