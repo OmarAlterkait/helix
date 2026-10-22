@@ -533,20 +533,26 @@ detection efficiencies, +-0.0002 on the bright median.
 
 ### Causes of the high-charge floor and the event-wide coupling, and their fixes: M10lin / M11 (2026-10-12..16)
 
-Every claim tested directly (baselines/uboone_sp/causes/results/m7_tests_{plan,results}.md). Above ~64 k e- M7dc's
-per-cell error was flat at ~3-4% while an exact-kernel linear inversion of the same corpus input reached 1-2%. Ruled
-out: missing information, input rounding, the decoder's local view, numerical jitter, smoothing of real
-fluctuations, noise handling, overfitting (train = test), convergence (first-order minimum), the head (every
-converged head on the frozen encoder lands at M7dc's error), pretraining / the FM's bins (from scratch reaches the
-same floor at full scale), attention group size. The cause found: the encoder reads arcsinh(value / sigma) only --
-log-compressed amplitudes. Adding the amplitude sinh(value) / 30 as an input channel (SerialFMModel lin_amp_scale,
+Tests and an independent audit: baselines/uboone_sp/causes/results/m7_tests_{plan,results}.md. Above ~64 k e- M7dc's
+per-cell error was flat at ~3-4% while an exact-kernel Fourier Tikhonov inversion of the same corpus input reached
+1.75% / 0.86% on Y (64-256 k / >= 256 k); on U / V the inversion wins only above 256 k (2.5x / 1.7x) and is WORSE than
+the model at 64-256 k. Ruled out: missing information (Y), input rounding, numerical jitter, smoothing of real
+fluctuations, noise handling, overfitting (train = test), attention group size. NOT ruled out (audit): the head --
+a head given the raw 3x3 coefficients an exact inversion needs also stops at ~3%, so the plateau is not shown to
+belong to the encoder; pretraining -- the scratch-vs-pretrained comparison (C12) used CellHead models on hits truth,
+not M7dc's recipe; the FM's bins -- their top bins are open-ended (beyond ~84-631 sigma); 'converged' means a local
+first-order minimum at the end of an annealed schedule. One cause found: the networks read arcsinh(value / sigma)
+only -- log-compressed amplitudes. Adding the amplitude sinh(value) / 30 as an input channel (SerialFMModel lin_amp_scale,
 new embedding columns zero-initialised) and training M7dc's full recipe with it (M10lin) cut the per-cell spread vs
 M7dc by 8 / 18 / 27% on Y (16-64 k / 64-256 k / >= 256 k), 6 / 14 / 21% on U, 1 / 6 / 18% on V, growing with charge.
 
 Separately, the denoiser read charge relative to the event's visible amplitude (gain response 0.70; scaling one TPC
 volume lowered the other volume's charge). Not a property of the simulation (no event-level scale; volumes' charge
-correlates +0.17); seeded by pretraining; carried by the encoder's drift-layer attention groups, which sorted by time
-alone and so mixed both volumes. Fixes: drift layouts sorted by (volume, time) (drift_planes_per_volume=3) and
+correlates +0.17); present from scratch (-0.02 to -0.04) and larger after pretraining + fine-tuning (-0.07 to -0.11);
+carried by the encoder's drift-layer attention groups, which sorted by time alone (with axial (t, wire) RoPE, so
+equal tick and wire index -- the mirror point across the cathode -- has zero relative phase) and so mixed both
+volumes. Mechanism not established: a LayerNorm division and a log-space subtraction (a gain is an additive shift
+of arcsinh) are both consistent and untested. Fixes: drift layouts sorted by (volume, time) (drift_planes_per_volume=3) and
 charge-scaling augmentation (per plane / 64-wire block gain on the SIGNAL via the clean shards, truth scaled alike).
 Near the shared cathode, cross-volume attention does help Y by ~2% (paired); a signed-x drift coordinate would keep
 that, but needs re-pretraining (as a fine-tune it cost ~2%).
@@ -562,5 +568,10 @@ M11 = M7dc's recipe + amplitude channel + both coupling fixes. Products standard
 | isolated near detection | 0.555 | 0.563 | 0.574 |
 | whole-event gain response | 0.70 | 0.87 | 0.97 |
 
-Remaining: half the gap to the inversion at high charge (Y >= 256 k 0.027 vs 0.009); faint-bin calo linearity 1.5-2%
-worse (1-2 k: 1.022 vs 1.007); the cathode gain lost with volume separation.
+Remaining: ~64% of the Y >= 256 k gap to the inversion (raw hw68 0.027 vs inversion calo-ratio hw68 0.009 -- not the
+same metric); faint-bin calo linearity 1.5-2% worse (1-2 k: 1.022 vs 1.007); M11 vs M10lin near the cathode Y 16-64 k
+1.041 [1.004, 1.073] (the cathode gain lost with volume separation). M11's volume separation is not complete by
+construction: varlen groups are consecutive chunks of the sorted order, so one group per layout straddles the volume
+boundary and the rolled drift layout wraps volume 1's end onto volume 0's start (measured coupling still +-0.001).
+M7dc's val.jsonl has two step-40000 rows (0.012303 / 0.012345, duplicate loop) whose gap exceeds M11 - M10lin;
+single-seed full runs.
