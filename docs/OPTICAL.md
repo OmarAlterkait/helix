@@ -67,7 +67,9 @@ for coif3 at any threshold; late single photons 450 vs >= 1230.
 * Optical shards (`helix.optical.shard`): one modality per file next to the TPC coefficient
   shards, joined on `(run, source_file, event)`; exact integer streams; `read_optical`.
 * Tokens (`helix.optical.tokens`): 128-sample tree blocks with a stored difference + coarse
-  tokens (128 slots, like a TPC token). Not yet fed to the model.
+  tokens (128 slots, like a TPC token); `shard_tokens` decodes and tokenizes an event's windows
+  together (`shard.read_event`; one SBND event on a CPU core: PMT ~0.3 s, X-ARAPUCA ~0.08 s).
+  Not yet fed to the model.
 
 ## Running
 

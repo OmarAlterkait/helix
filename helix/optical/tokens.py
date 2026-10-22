@@ -30,34 +30,73 @@ def layout(level):
     return [1 << (TOKEN - level)] + [1 << (TOKEN - j) for j in range(level, 0, -1)]
 
 
+def _medians(x, counts):
+    """Median of each consecutive segment of ``x`` (lengths ``counts``; 0 for an empty one)."""
+    w = np.repeat(np.arange(len(counts)), counts)
+    v = x[np.lexsort((x, w))]
+    s = np.cumsum(counts) - counts
+    lo, hi = s + np.maximum(counts - 1, 0) // 2, s + counts // 2
+    return np.where(counts > 0, (v[np.minimum(lo, len(v) - 1)] + v[np.minimum(hi, len(v) - 1)]) / 2 if len(v) else 0.0, 0.0)
+
+
+def event_tokens(ev):
+    """All windows of :func:`helix.optical.shard.read_event` at once -> dict(waveform, kind,
+    first_sample, values (T, 128) float32, mask (T, 128) bool, sigma (T, 128) float32) per token,
+    each window's block tokens then its coarse tokens; base per window."""
+    lev = ev["level"]
+    per = layout(lev)
+    off, nco = ev["offset"], ev["n_coarse"].astype(np.int64)
+    W, P = len(nco), np.diff(off)
+    ws, nbw = np.arange(W), P >> TOKEN                               # block tokens per window
+    co = ev["coarse"].astype(np.float64)
+    cw = np.repeat(ws, P >> lev)
+    ci = np.arange(len(co)) - np.repeat(off[:-1] >> lev, P >> lev)   # coarse index within its window
+    valid = ci < nco[cw]
+    base = _medians(co[valid], nco)
+    sig_lev = np.asarray(ev["sigma_level"], np.float32).reshape(W, lev)
+    sig = np.concatenate([np.repeat(sig_lev[:, :1], per[0], 1)] + [np.repeat(sig_lev[:, i:i + 1], k, 1)
+                                                                    for i, k in enumerate(per[1:])], 1)
+    nb = int(nbw.sum())
+    blk = np.unique(np.concatenate([np.flatnonzero(st) // k for st, k in zip(ev["stored"], per[1:])]))
+    V = np.concatenate([np.where(valid, co - base[cw], 0).reshape(nb, per[0])[blk]]
+                       + [d.reshape(nb, k)[blk] for d, k in zip(ev["details"], per[1:])], 1)
+    M = np.concatenate([valid.reshape(nb, per[0])[blk]] + [st.reshape(nb, k)[blk] for st, k in zip(ev["stored"], per[1:])], 1)
+    bw = np.repeat(ws, nbw)
+    b_first = (blk - np.repeat(np.cumsum(nbw) - nbw, nbw)[blk]) << TOKEN
+    ntc = -(-nco // SLOTS)                                           # coarse tokens per window
+    t0 = np.cumsum(ntc) - ntc
+    nt = int(ntc.sum())
+    cv, cm = np.zeros((nt, SLOTS)), np.zeros((nt, SLOTS), bool)
+    t, slot = t0[cw[valid]] + ci[valid] // SLOTS, ci[valid] % SLOTS
+    cv[t, slot], cm[t, slot] = co[valid] - base[cw[valid]], True
+    tw = np.repeat(ws, ntc)
+    c_first = ((np.arange(nt) - t0[tw]) * SLOTS) << lev
+    kind = np.r_[np.zeros(len(blk), np.int8), np.ones(nt, np.int8)]
+    wav = np.r_[bw[blk], tw].astype(np.int64)
+    order = np.argsort(2 * wav + kind, kind="stable")
+    Mo = np.concatenate([M, cm])[order]
+    return dict(waveform=wav[order], kind=kind[order], first_sample=np.r_[b_first, c_first].astype(np.int64)[order],
+                values=np.where(Mo, np.concatenate([V, cv])[order], 0).astype(np.float32), mask=Mo,
+                sigma=np.concatenate([sig[bw[blk]], np.repeat(sig[:, :1], SLOTS, 1)[tw]])[order].astype(np.float32),
+                base=base)
+
+
 def waveform_tokens(wf):
     """One waveform of :func:`helix.optical.shard.read_optical` -> dict(kind, first_sample,
     values (T, 128) float32, mask (T, 128) bool, sigma (T, 128) float32, base)."""
     lev = wf["level"]
-    per = layout(lev)
     n_co = -(-wf["length"] // (1 << lev))
-    co = wf["coarse"][:n_co].astype(np.float64)
-    base = float(np.median(co)) if n_co else 0.0
-    sig_lev = np.asarray(wf["sigma_level"], np.float32)                 # levels coarse..fine
-    nb = -(-n_co // per[0])
-    pad = lambda a, k, v=0: np.r_[a, np.full(nb * k - len(a), v, a.dtype)]  # noqa: E731
-    bands = [pad(co - base, per[0])] + [pad(d.astype(np.float64), k) for d, k in zip(wf["details"], per[1:])]
-    masks = [pad(np.ones(n_co, bool), per[0], False)] + [pad(s, k, False) for s, k in zip(wf["stored"], per[1:])]
-    sig = np.concatenate([np.full(per[0], sig_lev[0])] + [np.full(k, sig_lev[i]) for i, k in enumerate(per[1:])])
-    V = np.concatenate([b.reshape(nb, k) for b, k in zip(bands, per)], 1)
-    M = np.concatenate([m.reshape(nb, k) for m, k in zip(masks, per)], 1)
-    blk = np.nonzero(M[:, per[0]:].any(1))[0]
-    vs, ms, ss, kind, first = [V[blk]], [M[blk]], [np.broadcast_to(sig, (len(blk), SLOTS))], \
-        [np.zeros(len(blk), np.int8)], [blk << TOKEN]
-    for c0 in range(0, n_co, SLOTS):                                    # coarse tokens
-        k = min(SLOTS, n_co - c0)
-        vs.append(np.r_[co[c0:c0 + k] - base, np.zeros(SLOTS - k)][None])
-        ms.append((np.arange(SLOTS) < k)[None]); ss.append(np.full((1, SLOTS), sig_lev[0]))
-        kind.append(np.ones(1, np.int8)); first.append(np.array([c0 << lev]))
-    M = np.concatenate(ms)
-    return dict(kind=np.concatenate(kind), first_sample=np.concatenate(first).astype(np.int64),
-                values=np.where(M, np.concatenate(vs), 0).astype(np.float32), mask=M,
-                sigma=np.concatenate(ss).astype(np.float32), base=base)
+    Lw = n_co << lev
+    P = -(-Lw // SLOTS) * SLOTS
+    pad = lambda a, j: np.r_[np.asarray(a)[:Lw >> j], np.zeros((P - Lw) >> j, np.asarray(a).dtype)]  # noqa: E731
+    lv = range(lev, 0, -1)
+    tk = event_tokens(dict(level=lev, offset=np.array([0, P]), n_coarse=np.array([n_co]),
+                           sigma_level=np.asarray(wf["sigma_level"], np.float32)[None], coarse=pad(wf["coarse"], lev),
+                           details=[pad(d, j) for d, j in zip(wf["details"], lv)],
+                           stored=[pad(st, j) for st, j in zip(wf["stored"], lv)]))
+    tk.pop("waveform")
+    tk["base"] = float(tk["base"][0])
+    return tk
 
 
 def from_tokens(tok, length, level):
@@ -85,13 +124,9 @@ def from_tokens(tok, length, level):
 def shard_tokens(path, system, event):
     """Tokens of one event's waveforms of ``system`` -> dict(waveform, channel, t_us, kind,
     first_sample, values, mask, sigma) per token."""
-    from helix.optical.shard import read_optical
-    out = {k: [] for k in ("waveform", "channel", "t_us", "kind", "first_sample", "values", "mask", "sigma")}
-    for w, wf in enumerate(read_optical(path, system, event)):
-        tk = waveform_tokens(wf)
-        k = len(tk["kind"])
-        out["waveform"].append(np.full(k, w)); out["channel"].append(np.full(k, wf["channel"]))
-        out["t_us"].append(np.full(k, wf["t_us"]))
-        for key in ("kind", "first_sample", "values", "mask", "sigma"):
-            out[key].append(tk[key])
-    return {k: (np.concatenate(v) if v else np.zeros(0)) for k, v in out.items()}
+    from helix.optical.shard import read_event
+    ev = read_event(path, system, event)
+    tk = event_tokens(ev)
+    tk.pop("base")
+    w = tk["waveform"]
+    return dict(waveform=w, channel=ev["channel"][w], t_us=ev["t_us"][w], **{k: v for k, v in tk.items() if k != "waveform"})

@@ -202,6 +202,10 @@ def test_tokens_roundtrip(tmp_path):
             np.testing.assert_array_equal(sa, sb)
             np.testing.assert_array_equal(a[sa], b[sb])
     assert tokens.layout(6) == [2, 2, 4, 8, 16, 32, 64]
+    per = [tokens.waveform_tokens(g) for g in read_optical(p, "pmt", 0)]      # the event at once == window by window
+    for k in ("kind", "first_sample", "values", "mask", "sigma"):
+        np.testing.assert_array_equal(tk[k], np.concatenate([t[k] for t in per]))
+    np.testing.assert_array_equal(tk["waveform"], np.concatenate([np.full(len(t["kind"]), w) for w, t in enumerate(per)]))
 
 
 def test_event_without_windows(tmp_path):
@@ -216,6 +220,7 @@ def test_event_without_windows(tmp_path):
     p = tmp_path / "e.h5"
     w = OpticalWriter(p); w.add([r0]); w.add([r1]); w.close()
     assert read_optical(p, "pmt", 0) == [] and len(read_optical(p, "pmt", 1)) == len(wf["length"])
+    assert tokens.shard_tokens(p, "pmt", 0)["values"].shape == (0, tokens.SLOTS)
 
 
 def test_xarapuca_deconv_closer_to_truth_than_raw():

@@ -17,7 +17,8 @@ Layout::
                          levels coarse to fine, ascending within a level
         noise per event and channel: noise_channel, noise_stat, noise_level (n, level)
 
-:func:`read_optical` returns per-waveform coarse sums, differences and stored masks;
+:func:`read_optical` returns per-waveform coarse sums, differences and stored masks
+(:func:`read_event`: all of an event's windows in one set of arrays);
 :func:`helix.optical.codec.unhaar` decodes; :func:`helix.optical.tokens.shard_tokens` tokenizes.
 """
 from __future__ import annotations
@@ -213,48 +214,96 @@ def n_events(path):
         return int(f["config"].attrs["n_events"])
 
 
+def _within(x, counts):
+    """Running sum of ``x`` restarted at each segment of ``counts`` (inclusive)."""
+    c = np.concatenate([[0], np.cumsum(x)])
+    return c[1:] - np.repeat(c[np.cumsum(counts) - counts], counts)
+
+
+def read_event(path, system, i):
+    """Event ``i``'s waveforms of ``system``, decoded together -> dict(level; per waveform
+    channel, t_us, length, n_coarse, sigma_stat, sigma_level (W, level), offset (W + 1, each
+    window's first sample, windows padded with nothing stored to a multiple of 2^max(level, 7)
+    samples); over the padded samples roi, coarse (one per 2^level samples), details / stored
+    [levels coarse to fine, one per 2^j samples], integers)."""
+    with h5py.File(path, "r") as f:
+        g = f["optical"][system]
+        lev = json.loads(g.attrs["spec_json"])["level"]
+        a, b = int(g["wf_offsets"][i]), int(g["wf_offsets"][i + 1])
+        cnt = {k: g[k][:b].astype(np.int64) for k in ("n_region", "n_cand", "n_value", "length")}
+        cnt["n_coarse"] = (cnt["length"] + (1 << lev) - 1) >> lev
+        cnt["n_byte"] = (cnt["n_cand"] + 7) // 8
+        o = {k: int(v[:a].sum()) for k, v in cnt.items()}
+        e = {k: o[k] + int(v[a:b].sum()) for k, v in cnt.items()}
+        gap = g["region_gap"][o["n_region"]:e["n_region"]].astype(np.int64)
+        rl = g["region_len"][o["n_region"]:e["n_region"]].astype(np.int64)
+        val = g["value"][o["n_value"]:e["n_value"]].astype(np.int64)
+        dco = g["coarse"][o["n_coarse"]:e["n_coarse"]].astype(np.int64)
+        bits = g["keep_bits"][o["n_byte"]:e["n_byte"]]
+        chan, t_us = g["channel"][a:b].astype(np.int32), g["t_us"][a:b].astype(np.float64)
+        n0, n1 = int(g["noise_offsets"][i]), int(g["noise_offsets"][i + 1])
+        nch, nst, nlv = g["noise_channel"][n0:n1], g["noise_stat"][n0:n1], g["noise_level"][n0:n1]
+    cnt = {k: v[a:b] for k, v in cnt.items()}
+    W, nco = b - a, cnt["n_coarse"]
+    align = 1 << max(lev, 7)
+    P = -(-(nco << lev) // align) * align                          # padded samples per window
+    off = np.concatenate([[0], np.cumsum(P)]).astype(np.int64)
+    tot = int(off[-1])
+    # stored blocks: region starts are gaps after the previous region's end, per window
+    m = cnt["n_region"]
+    prev = np.r_[0, rl][:-1]; prev[(np.cumsum(m) - m)[m > 0]] = 0
+    s0 = np.repeat(off[:-1], m) + _within(gap + prev, m)
+    e0 = s0 + rl
+    roi = np.repeat(np.r_[np.tile([False, True], len(s0)), False],
+                    np.r_[np.c_[s0 - np.r_[0, e0[:-1]], rl].ravel(), tot - (e0[-1] if len(e0) else 0)])
+    # candidates (blocks touching the marks) in the stream's order: window, level coarse to fine, position
+    levels = range(lev, 0, -1)
+    cand, c = [], roi
+    for _ in levels:
+        c = c[0::2] | c[1::2]; cand.insert(0, c)
+    idx = [np.flatnonzero(c) for c in cand]
+    cw = np.concatenate([np.searchsorted(off[1:] >> j, ix, side="right") for j, ix in zip(levels, idx)]).astype(np.int64)
+    cq = np.concatenate([np.full(len(ix), q) for q, ix in enumerate(idx)]).astype(np.int64)
+    ci = np.concatenate(idx).astype(np.int64)
+    order = np.argsort(cw * lev + cq, kind="stable")
+    cw, cq, ci = cw[order], cq[order], ci[order]
+    if not np.array_equal(np.bincount(cw, minlength=W), cnt["n_cand"]):
+        raise ValueError(f"optical {system} event {i}: the stored blocks do not match the candidate counts")
+    bit0 = 8 * (np.cumsum(cnt["n_byte"]) - cnt["n_byte"])
+    pos = np.arange(len(cw)) - np.repeat(np.cumsum(cnt["n_cand"]) - cnt["n_cand"], cnt["n_cand"])
+    kb = np.unpackbits(bits)[bit0[cw] + pos].astype(bool) if len(cw) else np.zeros(0, bool)
+    if kb.sum() != len(val):
+        raise ValueError(f"optical {system} event {i}: {kb.sum()} kept differences, {len(val)} values")
+    rank = np.cumsum(kb) - 1                                        # the kept candidate's value
+    details, stored = [], []
+    for q, j in enumerate(levels):
+        sel = kb & (cq == q)
+        d, st = np.zeros(tot >> j, np.int64), np.zeros(tot >> j, bool)
+        d[ci[sel]], st[ci[sel]] = val[rank[sel]], True
+        details.append(d); stored.append(st)
+    coarse = np.zeros(tot >> lev, np.int64)
+    coarse[np.repeat((off[:-1] >> lev) - (np.cumsum(nco) - nco), nco) + np.arange(nco.sum())] = _within(dco, nco)
+    srt = np.argsort(nch, kind="stable"); nch, nst, nlv = nch[srt], nst[srt], nlv[srt]
+    k = np.minimum(np.searchsorted(nch, chan), len(nch) - 1)
+    hit = (nch[k] == chan) if len(nch) else np.zeros(W, bool)     # a channel without noise: nan
+    sigma_stat, sigma_level = np.full(W, np.nan), np.full((W, lev), np.nan, np.float32)
+    sigma_stat[hit], sigma_level[hit] = nst[k[hit]], nlv[k[hit]]
+    return dict(level=lev, channel=chan, t_us=t_us, length=cnt["length"], n_coarse=nco, offset=off,
+                sigma_stat=sigma_stat, sigma_level=sigma_level, roi=roi, coarse=coarse, details=details, stored=stored)
+
+
 def read_optical(path, system, i):
     """Event ``i``'s waveforms of ``system`` -> list of dict(channel, t_us, length, level, roi,
     coarse, details [d_level..d_1], stored [masks], sigma_stat, sigma_level): integer arrays over
-    the window padded to a multiple of 2^level; :func:`helix.optical.codec.unhaar` decodes."""
-    out = []
-    with h5py.File(path, "r") as f:
-        g = f["optical"][system]
-        spec = json.loads(g.attrs["spec_json"])
-        lev = spec["level"]
-        a, b = int(g["wf_offsets"][i]), int(g["wf_offsets"][i + 1])
-        cnt = {k: g[k][:b].astype(np.int64) for k in ("n_region", "n_cand", "n_value", "length")}
-        nco = (cnt["length"] + (1 << lev) - 1) >> lev
-        o = {k: int(v[:a].sum()) for k, v in dict(r=cnt["n_region"], v=cnt["n_value"], c=nco,
-                                                  b=(cnt["n_cand"] + 7) // 8).items()}
-        e = {k: o[k] + int(v[a:b].sum()) for k, v in dict(r=cnt["n_region"], v=cnt["n_value"], c=nco,
-                                                         b=(cnt["n_cand"] + 7) // 8).items()}
-        gap, rl = g["region_gap"][o["r"]:e["r"]].astype(np.int64), g["region_len"][o["r"]:e["r"]].astype(np.int64)
-        val, co = g["value"][o["v"]:e["v"]].astype(np.int64), g["coarse"][o["c"]:e["c"]].astype(np.int64)
-        bits = g["keep_bits"][o["b"]:e["b"]]
-        n0, n1 = int(g["noise_offsets"][i]), int(g["noise_offsets"][i + 1])
-        nch = g["noise_channel"][n0:n1]; nst = g["noise_stat"][n0:n1]; nlv = g["noise_level"][n0:n1]
-        noise = {int(c): (float(s_), lv) for c, s_, lv in zip(nch, nst, nlv)}
-        rp = vp = cp = bp = 0
-        for w in range(a, b):
-            n = int(cnt["length"][w]); Lw = int(nco[w]) << lev
-            m = int(cnt["n_region"][w]); roi = np.zeros(Lw, bool)
-            st = np.cumsum(np.r_[0, rl[rp:rp + m - 1]] + gap[rp:rp + m]) if m else np.zeros(0, np.int64)
-            for s0, ln in zip(st, rl[rp:rp + m]):
-                roi[s0:s0 + ln] = True
-            rp += m
-            cand = [roi.reshape(Lw >> j, 1 << j).any(-1) for j in range(lev, 0, -1)]
-            isq = np.concatenate([np.full(Lw >> j, True) for j in range(lev, 0, -1)])
-            C = np.concatenate(cand)
-            nc = int(cnt["n_cand"][w]); kb = np.unpackbits(bits[bp:bp + (nc + 7) // 8])[:nc].astype(bool)
-            bp += (nc + 7) // 8
-            S = C.copy(); qpos = np.nonzero(C & isq)[0]; S[qpos[~kb]] = False
-            k = int(cnt["n_value"][w]); flat = np.zeros(len(C), np.int64); flat[S] = val[vp:vp + k]; vp += k
-            cut = np.cumsum([0] + [Lw >> j for j in range(lev, 0, -1)])
-            c = np.zeros(Lw >> lev, np.int64); c[:int(nco[w])] = np.cumsum(co[cp:cp + int(nco[w])]); cp += int(nco[w])
-            ch = int(g["channel"][w]); sstat, slev = noise.get(ch, (np.nan, np.full(lev, np.nan, np.float32)))
-            out.append(dict(channel=ch, t_us=float(g["t_us"][w]), length=n, level=lev, roi=roi, coarse=c,
-                            details=[flat[cut[q]:cut[q + 1]] for q in range(lev)],
-                            stored=[S[cut[q]:cut[q + 1]] for q in range(lev)], sigma_stat=sstat,
-                            sigma_level=np.asarray(slev, np.float32)))
+    the window padded to a multiple of 2^level; :func:`helix.optical.codec.unhaar` decodes.
+    :func:`read_event` gives the same, all windows in one set of arrays."""
+    ev = read_event(path, system, i)
+    lev, out = ev["level"], []
+    for w in range(len(ev["length"])):
+        s0, Lw = int(ev["offset"][w]), int(ev["n_coarse"][w]) << lev
+        out.append(dict(channel=int(ev["channel"][w]), t_us=float(ev["t_us"][w]), length=int(ev["length"][w]),
+                        level=lev, roi=ev["roi"][s0:s0 + Lw], coarse=ev["coarse"][s0 >> lev:(s0 + Lw) >> lev],
+                        details=[d[s0 >> j:(s0 + Lw) >> j] for d, j in zip(ev["details"], range(lev, 0, -1))],
+                        stored=[st[s0 >> j:(s0 + Lw) >> j] for st, j in zip(ev["stored"], range(lev, 0, -1))],
+                        sigma_stat=float(ev["sigma_stat"][w]), sigma_level=ev["sigma_level"][w]))
     return out
