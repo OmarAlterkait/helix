@@ -109,7 +109,7 @@ fi
   echo "FATAL: no scripts/build_coeff_corpus.py under H=$H."
   echo "       Set HELIX_ROOT to the checkout, or sbatch from it."
   exit 1; }
-source "$(dirname "${BASH_SOURCE[0]}")/helix_env.sh"
+source "$H/scripts/helix_env.sh"      # $H, not BASH_SOURCE: under sbatch that is the spool copy
 # HELIX_SENSOR_ROOT is the declared name for this root. SRC_ROOT was a SECOND
 # spelling with its own S3DF literal, so setting the documented variable did
 # nothing here. It is kept as a deprecated override.
@@ -155,7 +155,7 @@ if [ -n "$CONTAINER" ]; then
   # The runtime, binds and in-image interpreter all come from the site profile.
   # This was `singularity exec --nv -B /sdf,/lscratch ... python3`, every part of
   # which is S3DF-only: there is no singularity at NERSC and no /sdf to bind.
-  PY=("$(dirname "${BASH_SOURCE[0]}")/helix_run.sh" python)
+  PY=("$H/scripts/helix_run.sh" python)
   # helix only. pimm-data comes from the image at its PINNED revision; a
   # checkout here would shadow it and the corpus would be built by code the pin
   # does not describe -- which every shard then records as its provenance.
