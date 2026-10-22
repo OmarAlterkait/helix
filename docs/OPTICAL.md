@@ -44,7 +44,9 @@ exponential model if it describes it (goop: `-0.015 exp(-t / 632 ns)`), else smo
 (SBND PMT: ringing at 16-80 ns, 20-80 standard errors, and the AC undershoot to ~600 ns).
 A stack of matched-filter maxima — the earlier estimate — selects noise peaks in quiet windows
 and returns the noise's autocorrelation (digitizer clock lines). Recovery of a known response
-injected on noise: goop core within 0.04 of the peak, tail within 0.001; SBND PMT 0.09 / 0.005.
+injected on noise (rms error, units of the peak): from the true response goop core 0.006, tail
+0.0004, SBND PMT 0.013 / 0.004; from a 30% wider start, one pass, goop 0.017 / 0.007, PMT
+0.021 / 0.004 (the start's error enters through the photons it deconvolves; passes reduce it).
 On data, late light correlated with each photon (argon's slow component) trades against a longer
 tail: one pass from the previous response. The X-ARAPUCA response (16 ns, short self-triggered
 windows, few isolated photons) is not recovered reliably and stays the mean isolated pulse.

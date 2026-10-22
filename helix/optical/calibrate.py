@@ -25,9 +25,13 @@ against correlated late light and drifts). Lengths in samples from the peak.
 
 A stack of matched-filter maxima (the earlier method) selects noise peaks in quiet windows and
 returns the noise's autocorrelation (digitizer clock lines); bunched photons bias its core.
-Validated by recovering a known response injected on real noise (``inject=``): goop core within
-0.04 of the peak and tail within 0.001, SBND PMT 0.09 / 0.005; the 16 ns X-ARAPUCA is not
-recovered reliably (short self-triggered windows, few isolated photons).
+Validated by recovering a known response injected on real noise (``inject=``; rms / max error in
+units of the peak, core -pre..core, tail beyond): from the true response, goop core 0.006 / 0.014,
+tail 0.0004 / 0.002, SBND PMT 0.013 / 0.047 and 0.004 / 0.012; from a 30% wider start, one pass,
+goop 0.017 / 0.10 and 0.007 / 0.026, PMT 0.021 / 0.096 and 0.004 / 0.015 - the start's error
+enters through the photons it deconvolves (their amplitudes 18% low), and passes reduce it (three:
+goop 0.015 / 0.070 and 0.006, PMT 0.016 / 0.071 and 0.004). The 16 ns X-ARAPUCA is not recovered
+reliably (short self-triggered windows, few isolated photons).
 """
 from __future__ import annotations
 
@@ -70,8 +74,8 @@ def fit_response(events, chain, system, *, pre, core, length, k_est=5.0, full_sc
     digitizer's maximum code (windows reaching it are skipped). ``inject``: a known response
     added to every window first (with ``amplitude(rng)`` per photon) - the recovery check.
     ``passes``: each pass starts from the previous result. Without correlated light (injected
-    photons) passes converge to the noise floor (goop's response from a 30% wider start: core
-    error 0.091, 0.054, 0.044, 0.042 of the peak); on data, late light correlated with each photon
+    photons) passes converge towards the noise floor (goop's response from a 30% wider start: core
+    error at most 0.100 of the peak after one pass, 0.070 after three); on data, late light correlated with each photon
     (argon's slow component) is traded against a longer tail and the passes drift - use 1."""
     events = list(events)
     out = None
