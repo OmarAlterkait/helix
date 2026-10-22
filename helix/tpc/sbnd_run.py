@@ -2,7 +2,8 @@
 
     python -m helix.tpc.sbnd_run --input RUN_DIR/*.h5 --output OUT/PREFIX --device cuda \\
         [--config overrides.json|yaml] [--optical-config ...] [--workers 4] \\
-        [--first 0 --count 100] [--events-per-shard 100] [--profile]
+        [--first 0 --count 100] [--events-per-shard 100] [--profile] \\
+        [--norm-sigma TABLE.npy --shard-start K]
 
 Reads the extracted HDF5 files (:mod:`helix.tpc.io_sbnd`, decoded in worker processes), runs
 :class:`helix.tpc.chain.TPCChain` (numpy without ``--device``) and the optical codec on each
@@ -47,6 +48,11 @@ def main(argv=None):
     ap.add_argument("--deflate", type=int, default=4, help="deflate level of the output (0-9)")
     ap.add_argument("--events-per-shard", type=int, default=100)
     ap.add_argument("--dataset-name", default="sbnd")
+    ap.add_argument("--norm-sigma", default=None,
+                    help="a corpus-wide (G, n_bands) norm_sigma table (.npy) written into every shard "
+                         "(default: each shard's own, from its events; one corpus needs one table)")
+    ap.add_argument("--shard-start", type=int, default=0,
+                    help="number of the first shard (jobs splitting one run's events write disjoint shards)")
     ap.add_argument("--optical-config", default=None, help="per-system OpticalSpec overrides (helix.optical.codec)")
     ap.add_argument("--serial-optical", action="store_true",
                     help="run the optical codec after the TPC chain (default on CUDA: in a thread on its own stream, "
@@ -64,6 +70,7 @@ def main(argv=None):
     systems = () if a.no_optical else ("pmt", "xarapuca")
     ochain = OpticalChain(_overrides(a.optical_config), device=a.device) if systems else None
 
+    norm = None if a.norm_sigma is None else np.load(a.norm_sigma).astype(np.float32)
     files = sorted(a.input)
     n_all = len(SBNDEvents(files))
     last = n_all if a.count is None else min(n_all, a.first + a.count)
@@ -102,7 +109,7 @@ def main(argv=None):
         """Per ``--events-per-shard`` events: one coeff_io TPC shard and one optical shard."""
 
         def __init__(self):
-            self.k, self.ces, self.ow = 0, [], None
+            self.k, self.ces, self.ow = a.shard_start, [], None
 
         def add_prepared(self, item):
             ce, ores, ident = item
@@ -118,7 +125,7 @@ def main(argv=None):
             if self.ces:
                 pth = f"{prefix}_coeff_{self.k:04d}.h5"
                 write_coeff_shard(pth, self.ces, dataset_name=a.dataset_name, file_index=self.k,
-                                  norm_sigma=normalization_table(self.ces))
+                                  norm_sigma=normalization_table(self.ces) if norm is None else norm)
                 audit_shard(pth); outputs.append(pth)
             if self.ow is not None:
                 self.ow.close(); outputs.append(f"{prefix}_optical_{self.k:04d}.h5")
