@@ -6,7 +6,12 @@ and cells keep their geometry; ``n_wires`` = the plane's physical wire count; ``
 False for every wire without a valid row in the event (not instrumented, dead, noisy, baseline
 step): the tokenizer gives those slots no target. ``sigma_threshold`` = the threshold sigma per
 band (0 for dropped finest bands). The basis records the chain's coherent removal (with the
-readout) and threshold, so ``basis_digest`` separates every configuration.
+readout), threshold and value step, so ``basis_digest`` separates every configuration.
+
+Values are stored rounded to a power-of-two step <= sigma / q of their (plane, band)
+(:func:`quantize`; config ``store``: q = 16 for the input, 32 for the clean target): float32 still,
+so every reader reads them unchanged, and the bits below the step — noise, ~13 of the 23 mantissa
+bits — no longer cost bytes (values 3.6 -> 1.4 B per coefficient).
 """
 from __future__ import annotations
 
@@ -38,7 +43,23 @@ def basis(chain, band_lengths, n_ticks, sigma_norm=2.6) -> BasisDescriptor:
     return BasisDescriptor(wavelet=d["wavelet"], level=int(d["level"]), mode=d["mode"], n_ticks_raw=int(n_ticks),
                            pad=int(padded - n_ticks), band_lengths=bl,
                            removal=dict(cfg["coherent"], readout=cfg["readout"], status=cfg["status"]["method"]),
-                           threshold=dict(cfg["threshold"]), sigma_norm=float(sigma_norm))
+                           threshold=dict(cfg["threshold"], value_step=dict(cfg["store"])), sigma_norm=float(sigma_norm))
+
+
+def value_step(sigma_threshold, q):
+    """(G, n_bands) step: the largest power of two <= sigma / q (0 where sigma is 0, or q is 0)."""
+    s = np.asarray(sigma_threshold, np.float64)
+    if not q:
+        return np.zeros_like(s, np.float32)
+    return np.where(s > 0, np.exp2(np.floor(np.log2(np.where(s > 0, s, 1.0) / q))), 0.0).astype(np.float32)
+
+
+def quantize(value, band, plane_gid, gids, step):
+    """``value`` rounded to the nearest multiple of its (plane, band) ``step`` (float32; a 0
+    step leaves the value exact). The error is <= step / 2, uniform, independent of the value."""
+    d = np.asarray(step, np.float64)[np.searchsorted(gids, plane_gid), band]
+    v = np.asarray(value, np.float64)
+    return np.where(d > 0, np.round(v / np.where(d > 0, d, 1.0)) * d, v).astype(np.float32)
 
 
 def plane_gid(chain, result):
@@ -66,8 +87,11 @@ def coeff_event(chain, results, *, run="", source_file="", event=-1, sigma_norm=
             cols["value"].append(np.asarray(v, np.float32))
     r0 = by_gid[int(gids[0])]
     bs = basis(chain, r0["band_lengths"], r0["n_ticks"], sigma_norm)
-    return CoeffEvent(**{k: np.concatenate(v) for k, v in cols.items()}, gids=gids, n_wires=n_wires,
-                      sigma_threshold=np.stack([_host(by_gid[int(g)]["sigma_per_band"]) for g in gids]).astype(np.float32),
+    cols = {k: np.concatenate(v) for k, v in cols.items()}
+    sig = np.stack([_host(by_gid[int(g)]["sigma_per_band"]) for g in gids]).astype(np.float32)
+    cols["value"] = quantize(cols["value"], cols["band"], cols["plane_gid"], gids,
+                             value_step(sig, chain.cfg["store"]["step_input"]))
+    return CoeffEvent(**cols, gids=gids, n_wires=n_wires, sigma_threshold=sig,
                       basis=bs, run=str(run), source_file=str(source_file), event=int(event),
                       wire_valid=None if all(wire_valid[i, :n].all() for i, n in enumerate(n_wires)) else wire_valid)
 
@@ -107,6 +131,8 @@ def clean_coeff_event(chain, noisy: CoeffEvent, clean_images) -> CoeffEvent:
                             torch.as_tensor(cols, device=cat.device)].float().cpu().numpy()
         else:
             vals[sel] = np.concatenate(list(bands), axis=1)[rows, cols]
+    vals = quantize(vals, noisy.band, noisy.plane_gid, noisy.gids,
+                    value_step(noisy.sigma_threshold, chain.cfg["store"]["step_target"]))
     # SHARE the noisy coords, do not copy them: identical by construction (co-supported), never
     # persisted for the clean target (written coords=False), never mutated. Copying them doubled
     # the builder's accumulation (~19.6 MB/event) and got a 1000-event shard OOM-killed at 16 GB.

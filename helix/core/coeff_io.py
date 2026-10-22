@@ -21,7 +21,8 @@ Layout (one modality per file, flat columnar — see COEFF_CORPUS_DESIGN.md §3)
               wire_valid uint8 (n_events, G, ceil(max n_wires / 8))  ← packbits of
                   CoeffEvent.wire_valid (False = excluded channel); absent = all valid
               sigma_threshold float32 (n_events, G, n_bands)
-    /value    float32 (M,)   RAW coeff
+    /value    float32 (M,)   RAW coeff (a chain build rounds it to a power-of-two step <=
+                             sigma_threshold / q: threshold_json's value_step)
     /ident    run (n_events,), source_file (n_events,), event int64 (n_events,)
 
 The co-supported clean target is written ``coords=False`` (values only): its four
@@ -29,7 +30,7 @@ coordinate columns would duplicate the noisy shard's byte for byte — 13 of eve
 34 bytes in a pair. ``coord_digest`` is written to BOTH shards so joining them is
 a uint64 compare, and a mispairing raises rather than misaligning silently.
 
-Compression defaults to gzip (always readable); the layout — not the filter — is
+Compression defaults to gzip with the byte shuffle (always readable); the layout — not the filter — is
 the contract, so pimm-data may write blosc-zstd over the same schema.
 """
 from __future__ import annotations
@@ -66,7 +67,7 @@ def coord_digest(band, plane_gid, wire, tau) -> int:
 
 
 def _ds(grp, name, data, comp):
-    kw = dict(compression=comp, compression_opts=4) if comp == "gzip" else {}
+    kw = dict(compression=comp, compression_opts=4, shuffle=True) if comp == "gzip" else {}
     grp.create_dataset(name, data=data, **kw)
 
 

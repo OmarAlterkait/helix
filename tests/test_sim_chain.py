@@ -76,3 +76,23 @@ def test_sim_coeff_event_and_clean_target():
     assert np.array_equal(cl.wire, ce.wire) and cl.basis == ce.basis
     big = np.abs(ce.value) > 20                                           # strong signal: noisy ~ clean
     assert np.median(np.abs(ce.value[big] - cl.value[big]) / np.abs(ce.value[big])) < 0.2
+
+
+def test_stored_values_on_their_step():
+    """Input and target values lie on a power-of-two grid <= sigma / q of their (plane, band),
+    within half a step of the exact values; q = 0 stores them exact."""
+    clean, noisy = _planes(seed=1)
+    exact = TPCChain(sim_config([[len(x) for x in noisy]], {"store": {"step_input": 0, "step_target": 0}}))
+    ch = TPCChain(sim_config([[len(x) for x in noisy]]))
+    res = ch.process_images(noisy, tpc=0)
+    ce0, ce = (chain_coeff.coeff_event(c, res) for c in (exact, ch))
+    cl0, cl = (chain_coeff.clean_coeff_event(c, e, {g: clean[g] for g in range(3)}) for c, e in ((exact, ce0), (ch, ce)))
+    assert ce.basis.threshold["value_step"] == {"step_input": 16, "step_target": 32}
+    assert ce.basis.digest() != ce0.basis.digest()
+    for q, x0, x in ((16, ce0, ce), (32, cl0, cl)):
+        step = chain_coeff.value_step(ce.sigma_threshold, q)[np.searchsorted(ce.gids, ce.plane_gid), ce.band].astype(np.float64)
+        sig = ce.sigma_threshold[np.searchsorted(ce.gids, ce.plane_gid), ce.band]
+        assert (step > 0).all() and (step <= sig / q).all() and (step > sig / (2 * q)).all()
+        np.testing.assert_array_equal(np.mod(x.value / step, 1), 0)
+        assert (np.abs(x.value.astype(np.float64) - x0.value) <= step / 2).all()
+        assert x.value.dtype == np.float32

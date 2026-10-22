@@ -47,6 +47,10 @@ SBND_DEFAULT = {
                  "npass": 2, "tau": None, "sigc_scope": "group", "group_size": 64},
     "threshold": {"kappa": 1.0, "floor": 2.0, "sigma_scope": "plane",
                   "threshold_approx": True, "drop_finest": 1},
+    # stored values rounded to a power-of-two step <= sigma / q of their (plane, band), sigma the
+    # event's threshold sigma (helix.tpc.chain_coeff.quantize; 0 = exact float32): the input
+    # gains a variance <= sigma^2 / (12 q^2), the noise in its mantissa bits costs no bytes
+    "store": {"step_input": 16, "step_target": 32},
 }
 
 # The simulation (JAXTPC sensor files): its wire layout as the readout (``sim_config``), pedestals
@@ -61,6 +65,7 @@ SIM_BASE = {
     "coherent": {"method": "block_gate", "groups": "block", "cross_plane": False, "kgate": 3.0, "ksig": 3.0,
                  "npass": 2, "tau": 0.05, "sigc_scope": "group", "group_size": 64},
     "threshold": {"kappa": 1.0, "floor": 2.0, "sigma_scope": "plane", "threshold_approx": True, "drop_finest": 1},
+    "store": {"step_input": 16, "step_target": 32},
 }
 
 

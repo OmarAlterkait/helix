@@ -66,13 +66,15 @@ def test_build_corpus_matches_old_semantics(tmp_path):
         for k in ("band", "plane_gid", "wire", "tau"):
             np.testing.assert_array_equal(getattr(ce_c, k), getattr(ce_n, k))
         np.testing.assert_array_equal(ce_c.sigma_threshold, ce_n.sigma_threshold)
-    # spot-check clean values == the chain's clean transform at the noisy coords
+    # spot-check clean values == the chain's clean transform at the noisy coords, on the target's
+    # value step
     ce_n, ce_c = noisy[0], clean[0]
     _, cl = _plane_fn(0)
     clean_bands = {g: ch.dwt_rows(cl[g]) for g in GIDS}
-    for i in range(ce_n.n_coeff):
-        gid, b, w, t = int(ce_n.plane_gid[i]), int(ce_n.band[i]), int(ce_n.wire[i]), int(ce_n.tau[i])
-        assert ce_c.value[i] == np.float32(clean_bands[gid][b][w, t])
+    exact = np.array([clean_bands[int(g)][int(b)][int(w), int(t)]
+                      for g, b, w, t in zip(ce_n.plane_gid, ce_n.band, ce_n.wire, ce_n.tau)], np.float32)
+    step = chain_coeff.value_step(ce_n.sigma_threshold, ch.cfg["store"]["step_target"])
+    np.testing.assert_array_equal(ce_c.value, chain_coeff.quantize(exact, ce_n.band, ce_n.plane_gid, ce_n.gids, step))
 
     # (3) norm_sigma = mean of the cal events' sigma_threshold
     np.testing.assert_allclose(norm, normalization_table([noisy[0], noisy[1]]))

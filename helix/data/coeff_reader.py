@@ -378,7 +378,7 @@ def basis_digest(*, wavelet, dwt_level, dwt_mode, n_ticks_raw, pad, band_lengths
 
 
 def _ds(grp, name, data, comp):
-    kw = dict(compression=comp, compression_opts=4) if comp == "gzip" else {}
+    kw = dict(compression=comp, compression_opts=4, shuffle=True) if comp == "gzip" else {}
     grp.create_dataset(name, data=data, **kw)
 
 
