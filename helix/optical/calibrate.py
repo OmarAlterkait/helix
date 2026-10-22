@@ -48,7 +48,12 @@ def _photons(a_row):
 
 
 def _inject(wf, h, polarity, amplitude, rng, every=300):
-    """``wf`` with photons of response ``h`` added: one every ~``every`` samples per window."""
+    """``wf`` with photons of response ``h`` added: one every ~``every`` samples per window.
+
+    The sum is rounded at random (floor(x + u), u uniform in [0, 1): exact on average). The windows
+    are integer codes already, so plain rounding would round each photon's own pulse with no noise
+    to dither it - every part below half a count (a 13 ADC photon's whole -0.2 ADC undershoot)
+    rewritten the same way each time, and the fit would recover that, not ``h``."""
     buf = np.asarray(wf["buf"]).astype(np.float64).copy(); p = int(np.argmax(h)); off = np.arange(len(h)) - p
     for o, n in zip(wf["offset"], wf["length"]):
         x = np.zeros(n)
@@ -56,7 +61,7 @@ def _inject(wf, h, polarity, amplitude, rng, every=300):
             i = int(t); lo, hi = max(0, i + off[0] - 1), min(n, i + off[-1] + 2)
             x[lo:hi] += amplitude(rng) * np.interp(np.arange(lo, hi) - t, off, h, left=0, right=0)
         buf[o:o + n] += polarity * x
-    return dict(wf, buf=np.round(buf).astype(np.int64))
+    return dict(wf, buf=np.floor(buf + rng.uniform(0, 1, len(buf))).astype(np.int64))
 
 
 def fit_response(events, chain, system, *, pre, core, length, k_est=5.0, full_scale=None, inject=None,
