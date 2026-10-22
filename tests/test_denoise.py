@@ -116,3 +116,25 @@ def test_cell_decoder_output_is_not_bounded():
         head.q0[-1].bias += 1000.0                              # a large residual stream...
         y2 = head(feats, idx, aux, nbr=nbr, B=B)
     assert (y2 - y1).abs().max() > 10                           # ...must reach the output
+
+
+def test_charge_loss_weighting():
+    """charge_loss: POW 0 is the plain mean over present rows (the old expression); POW k weights each present row
+    by (1 + q / Q0) ** k = exp(k y), normalised; absent rows never count; the weighting is not differentiated."""
+    from helix.model.denoise import charge_loss
+    g = torch.Generator().manual_seed(0)
+    y = torch.rand(64, generator=g) * 6
+    p = (y + 0.1 * torch.randn(64, generator=g)).requires_grad_(True)
+    pos = y > 1.0
+    old = ((p - y) ** 2 * pos).sum() / pos.sum().clamp(min=1)
+    assert torch.allclose(charge_loss(p, y, pos, 0.0), old)
+    for k in (1.0, 2.0):
+        w = torch.exp(k * y) * pos
+        ref = ((p - y) ** 2 * w).sum() / w.sum()
+        assert torch.allclose(charge_loss(p, y, pos, k), ref, rtol=1e-5)
+    p2 = p.detach().clone(); p2[~pos] += 100.0                     # absent rows: no effect
+    assert torch.allclose(charge_loss(p2, y, pos, 2.0), charge_loss(p.detach(), y, pos, 2.0))
+    p.grad = None; charge_loss(p, y, pos, 2.0).backward()
+    gref = 2 * (p.detach() - y) * torch.exp(2 * y) * pos / (torch.exp(2 * y) * pos).sum()
+    assert torch.allclose(p.grad, gref, rtol=1e-4, atol=1e-8)
+    assert charge_loss(p.detach(), y, torch.zeros_like(pos), 2.0) == 0

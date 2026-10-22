@@ -48,6 +48,11 @@ def parse():
     ap.add_argument("--presence", action="store_true",
                     help="hurdle head: also a BCE logit for q > 0 (window scores by presence)")
     ap.add_argument("--presence-w", type=float, default=1.0, help="weight of the presence BCE")
+    ap.add_argument("--charge-weight-pow", type=float, default=0.0,
+                    help="with --cond-charge: weight each present row's charge loss by (1 + q / Q0) ** POW "
+                         "(helix.model.denoise.charge_loss); 0 = the plain mean, 2 ~ squared error in linear charge")
+    ap.add_argument("--keep-every", type=int, default=0,
+                    help="also keep a copy of the checkpoint every N steps (step<N>.pt), to follow convergence")
     ap.add_argument("--cond-charge", action="store_true",
                     help="with --presence: regress charge on charged cells only (hurdle: presence x conditional "
                          "charge); validation and evaluation gate charge by presence > 0.5")
@@ -65,7 +70,7 @@ def parse():
     ap.add_argument("--cov-per-sig", type=float, default=2.0,
                     help="empty cells drawn uniformly inside token footprints, per charge cell")
     ap.add_argument("--near-any-per-sig", type=float, default=0.0,
-                    help="cells within +-8 of charge, coefficient or not, per charge cell (activity's surroundings)")
+                    help="cells within +-16 wires / +-128 ticks of charge, coefficient or not, per charge cell (activity's surroundings)")
     ap.add_argument("--win-near-per-event", type=int, default=0,
                     help="charge-free windows NEAR activity per event, every cell (helix.probe.resolution.near_windows)")
     ap.add_argument("--override", nargs="*", default=[], metavar="KEY=VALUE", help="FM arch overrides")
@@ -77,6 +82,11 @@ def parse():
                     help="... and of a per-(gid, --gain-block-wires wires) gain on top")
     ap.add_argument("--gain-block-wires", type=int, default=64)
     ap.add_argument("--clean-root", default=None, help="corpus root of the co-supported clean shards (needed by the gains)")
+    ap.add_argument("--cell", default="2x16", help="fine cell WIRESxTICKS; the truth root must be built on the same cell")
+    ap.add_argument("--q0", type=float, default=None,
+                    help="target scale y = log1p(q / Q0); default the 2x16 value (median positive cell charge)")
+    ap.add_argument("--sig-cap", type=int, default=20000, help="charged cells sampled per event, at most")
+    ap.add_argument("--freeze-encoder", action="store_true", help="train the head only (encoder from --init/--init-denoiser)")
     return ap.parse_args()
 
 
@@ -92,13 +102,16 @@ def to_device(item, dev):
 
 def main():
     a = parse()
+    from helix.probe.resolution import set_cell
+    cell = tuple(int(x) for x in a.cell.split("x"))
+    set_cell(*cell)                                           # before any dataset (loader workers fork and inherit it)
     import ast
     import torch
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
     from helix.data.denoise import DenoiseEvents, split_events
     from helix.model.artifact import load
-    from helix.model.denoise import build_denoise
+    from helix.model.denoise import build_denoise, charge_loss
     from helix.paths import root
 
     dist.init_process_group("nccl")
@@ -119,6 +132,8 @@ def main():
     arch = load(a.arch_from).arch
     sd = load(a.init).state_dict if a.init else None
     torch.manual_seed(a.seed)
+    if a.charge_weight_pow and not a.cond_charge:
+        raise SystemExit("--charge-weight-pow needs --cond-charge")
     if a.cond_charge and not a.presence:
         raise SystemExit("--cond-charge needs --presence: the charge head no longer sees empty cells")
     head_kw = dict(presence=a.presence)
@@ -129,24 +144,28 @@ def main():
         from helix.model.denoise import pad_input_columns
         sd0 = torch.load(a.init_denoiser, map_location="cpu", weights_only=False)["model"]
         model.load_state_dict(pad_input_columns(model, sd0))          # new input columns (lin_amp_scale) start at zero
+    if a.freeze_encoder:
+        for p_ in model.fm.parameters():
+            p_.requires_grad_(False)
     n_train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
     say(f"[denoise] arch {a.arch_from} init {a.init or 'scratch'} trainable {n_train_p/1e6:.1f}M world {world}")
 
-    train = DenoiseEvents(corpus_root, runs, a.truth_root, "train", n_events=a.n_events, subset_seed=a.subset_seed,
+    dkw = dict(sig_cap=a.sig_cap, **({"q0": a.q0} if a.q0 else {}))
+    train = DenoiseEvents(corpus_root, runs, a.truth_root, "train", n_events=a.n_events, subset_seed=a.subset_seed, **dkw,
                           cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
                           near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event,
                           neighbors=a.head == "decoder", support_min_q=a.support_min_q,
                           gain_sigma_plane=a.gain_sigma_plane, gain_sigma_block=a.gain_sigma_block,
                           gain_block_wires=a.gain_block_wires, clean_root=a.clean_root)
     val_items = split_events(corpus_root, runs[:1], "val")[:a.val_events]
-    val = DenoiseEvents(corpus_root, runs, a.truth_root, "val", items=val_items, sample_seed=1234,
+    val = DenoiseEvents(corpus_root, runs, a.truth_root, "val", items=val_items, sample_seed=1234, **dkw,
                         cov_per_sig=a.cov_per_sig, win_per_event=a.win_per_event,
                         near_any_per_sig=a.near_any_per_sig, win_near_per_event=a.win_near_per_event,
                           neighbors=a.head == "decoder", support_min_q=a.support_min_q)
     say(f"[denoise] train events {len(train)}  val events {len(val)}  runs {len(runs)}")
 
     ddp = DDP(model, device_ids=[lrank], find_unused_parameters=False)
-    opt = torch.optim.AdamW(model.param_groups(a.lr, a.lr_head, a.wd), betas=(0.9, 0.95))
+    opt = torch.optim.AdamW([g for g in model.param_groups(a.lr, a.lr_head, a.wd) if g["params"]], betas=(0.9, 0.95))
     base = [g["lr"] for g in opt.param_groups]
 
     def lr_at(s):
@@ -165,7 +184,7 @@ def main():
         say(f"[denoise] resumed at step {step}")
     y_sup = float(np.log1p(a.support_min_q / train.q0))      # presence threshold in target units
     meta = dict(arch=arch, overrides=overrides, args=vars(a), q0=train.q0, runs=runs,
-                head_kw=head_kw, cond_charge=a.cond_charge)
+                head_kw=head_kw, cond_charge=a.cond_charge, cell=list(cell))
 
     def save(path, extra=None):
         if rank:
@@ -226,7 +245,7 @@ def main():
             p, logit = p[0].float(), p[1].float()
             pos = y > y_sup                                        # present: charge above the support threshold
             if a.cond_charge:                                      # charge only where there is charge
-                reg = ((p - y) ** 2 * pos).sum() / pos.sum().clamp(min=1)
+                reg = charge_loss(p, y, pos, a.charge_weight_pow)
             else:
                 reg = torch.nn.functional.mse_loss(p, y)
             loss = reg + a.presence_w * torch.nn.functional.binary_cross_entropy_with_logits(logit, pos.float())
@@ -263,6 +282,8 @@ def main():
                     fh.write(json.dumps(dict(step=step, mse=v, mse_charge=vp, mse_empty=vn)) + "\n")
         if step % a.ckpt_every == 0 or step == a.steps:
             save(last)
+        if a.keep_every and step % a.keep_every == 0:
+            save(os.path.join(a.out, f"step{step}.pt"))
     save(os.path.join(a.out, "final.pt"))
     say(f"[denoise] done: best val mse {best:.5f}")
     dist.barrier(); dist.destroy_process_group()

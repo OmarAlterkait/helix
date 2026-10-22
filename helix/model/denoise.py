@@ -148,6 +148,18 @@ class DenoiseModel(nn.Module):
         return groups
 
 
+def charge_loss(p, y, pos, weight_pow=0.0):
+    """The hurdle's conditional-charge loss: squared error in the target y = log1p(q / Q0) over the present rows
+    ``pos``, each row weighted by (1 + q / Q0) ** weight_pow = exp(weight_pow * y), normalised by the summed weight.
+
+    0 is the plain mean (every cell's RELATIVE error counts equally); 1 counts each unit of charge equally; 2 is, to
+    first order in the error, squared error in linear charge -- what a least-squares linear map minimises, and why
+    such a map is precise where charge is bright. The output representation is unchanged; only the weighting moves.
+    """
+    w = pos.to(p.dtype) if weight_pow == 0 else torch.exp(weight_pow * (y - y.max()).detach()) * pos
+    return ((p - y) ** 2 * w).sum() / w.sum().clamp(min=torch.finfo(w.dtype).tiny)
+
+
 def pad_input_columns(module, state_dict):
     """``state_dict`` with every matrix that has FEWER input columns than ``module``'s own (an encoder option such
     as ``lin_amp_scale`` added input features) zero-padded to fit: the old columns copied, the new ones zero, so the
