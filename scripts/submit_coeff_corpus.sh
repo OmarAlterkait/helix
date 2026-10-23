@@ -215,7 +215,7 @@ cd "$H"
   --out   "$OUT/$RUN" \
   --dataset-name sim_wire --run "$RUN" \
   --file-index "$K" --event-start 0 --events "$EVENTS_PER_SHARD" \
-  --mode serial --backend torch \
+  --mode serial \
   $KG_ARG \
   --norm-sigma "$NORM"
 

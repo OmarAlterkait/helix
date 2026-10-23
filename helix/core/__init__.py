@@ -1,8 +1,9 @@
 """helix.core — detector-agnostic signal-processing shared by TPC and optical.
 
-Public surface: backend selection and the wavelet sparsification API. Heavy
-framework (torch) is imported lazily by the backend dispatcher, never at
-``import helix`` time.
+Public surface: the coefficient event and its shard codec, the basis descriptor,
+the wavelet transform. Signal processing is torch (any device); torch is imported
+by the functions that compute, never at ``import helix`` time, so readers of the
+corpus run without it.
 
 **On the vocabulary.** ``CoeffEvent`` and the shard codec speak TPC:
 ``(band, plane_gid, wire, tau)``. The STRUCTURE is detector-agnostic — ``wire``
@@ -13,8 +14,7 @@ what the tokenizer and the trained checkpoints assume, and renaming them would
 change the format and every golden for no functional gain. Read ``wire``/``tau``
 as ``row``/``col`` when working on another detector.
 """
-from helix.core.backend import get_backend, set_backend
-from helix.core.wavelet import SparseResult, ThresholdSpec, sparsify, reconstruct
+from helix.core.wavelet import SparseResult, wavedec, reconstruct
 from helix.core.provenance import BasisDescriptor, derive_band_lengths, descriptor_digest
 from helix.core.coeff_event import CoeffEvent
 from helix.core.coeff_io import (
@@ -23,8 +23,7 @@ from helix.core.coeff_io import (
 )
 
 __all__ = [
-    "get_backend", "set_backend",
-    "SparseResult", "ThresholdSpec", "sparsify", "reconstruct",
+    "SparseResult", "wavedec", "reconstruct",
     "BasisDescriptor", "derive_band_lengths", "descriptor_digest",
     "CoeffEvent",
     "write_coeff_shard", "read_coeff_event", "read_coeff_shard", "n_events",

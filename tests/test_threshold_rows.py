@@ -1,13 +1,25 @@
-"""Live-row threshold: parity with threshold_bands and robustness to missing channels."""
+"""Live-row threshold: parity with the universal threshold and robustness to missing channels."""
 import numpy as np
+import pytest
 import pywt
 
-from helix.core.wavelet import ThresholdSpec, threshold_bands
-from helix.tpc.threshold_rows import threshold_bands_rows
+torch = pytest.importorskip("torch")
+from helix.tpc import threshold_rows as tr  # noqa: E402
 
-#: The TPC's universal rule: per-band MAD sigma, approximation band thresholded too.
-_UNIVERSAL = ThresholdSpec(method="universal", func="hard", scale=1.0,
-                           per_band_sigma=True, threshold_approx=True)
+
+def threshold_bands_rows(coeffs, **kw):
+    out, k, n, s = tr.threshold_bands_rows(coeffs, **kw)
+    return [o.numpy() for o in out], k, n, s
+
+
+def _universal(bands):
+    """HELIX's universal rule in numpy: per-band MAD sigma over all rows, every band
+    (approximation too) hard-thresholded at sigma sqrt(2 ln N_band)."""
+    out = []
+    for c in bands:
+        s = np.float32(np.median(np.abs(c)) / 0.6745)
+        out.append(np.where(np.abs(c) >= s * np.float32(np.sqrt(2 * np.log(c.shape[-1]))), c, 0).astype(np.float32))
+    return out, int(sum(np.count_nonzero(o) for o in out))
 
 
 def _bands(seed=0, rows=400):
@@ -19,18 +31,20 @@ def _bands(seed=0, rows=400):
 
 def test_parity_with_threshold_bands_all_rows_valid():
     b = _bands()
-    ref, kref, _, _ = threshold_bands(b, _UNIVERSAL)
+    ref, kref = _universal(b)
     got, kgot, _, _ = threshold_bands_rows(b, kappa=1.0, floor=None)          # seeds only = universal
-    assert kgot == kref
+    assert abs(kgot - kref) <= 2                              # float32 sigma: only values on the threshold flip
     for r, g in zip(ref, got):
-        np.testing.assert_array_equal(r, g)
+        both = (r != 0) & (g != 0)
+        assert both.sum() >= (r != 0).sum() - 2
+        np.testing.assert_array_equal(r[both], g[both])
 
 
 def test_missing_rows_do_not_collapse_sigma():
     b = _bands(seed=1)
     valid = np.ones(400, bool); valid[:250] = False            # most of the plane missing
     zeroed = [np.where(valid[:, None], c, 0.0).astype(np.float32) for c in b]
-    _, k_all_rows, _, _ = threshold_bands(zeroed, _UNIVERSAL)
+    _, k_all_rows = _universal(zeroed)
     _, k_live, _, _ = threshold_bands_rows(zeroed, kappa=1.0, valid=valid)
     _, k_ref, _, _ = threshold_bands_rows([c[valid] for c in b], kappa=1.0)
     assert k_all_rows > 20 * k_live                           # the bug: sigma from mostly-zero rows
@@ -72,6 +86,6 @@ def test_sim_chain_hysteresis_default():
     pu = cu.process_images([img] * 3, tpc=0)[0]
     assert ph["n_kept"] > pu["n_kept"]
     for a, b in zip(pu["bands"], ph["bands"]):
-        a, b = np.asarray(a), np.asarray(b)
+        a, b = a.numpy(), b.numpy()
         assert np.array_equal(b[a != 0], a[a != 0])
     assert ch.digest != cu.digest

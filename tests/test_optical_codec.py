@@ -1,10 +1,11 @@
-"""Optical codec (helix.optical.codec): exact integer Haar, pulses kept, backends agree, the
+"""Optical codec (helix.optical.codec): exact integer Haar, pulses kept, devices agree, the
 shard and the tokens round-trip."""
 import numpy as np
 import pytest
 
-from helix.optical import codec, tokens
-from helix.optical.codec import OpticalChain
+torch = pytest.importorskip("torch")
+from helix.optical import codec, tokens  # noqa: E402
+from helix.optical.codec import OpticalChain  # noqa: E402
 
 
 def _template(system="pmt"):
@@ -83,23 +84,21 @@ def test_matched_filter_lines_up_with_the_pulse_peak(system):
     h = codec.load_templates()[0][f"{system}_response"]; hp = int(np.argmax(h))
     u, lag, pre, post = codec.matched_filter(h)
     z = np.zeros((1, 2048), np.float32); z[0, 300 - hp:300 - hp + len(h)] = h
-    assert abs(int(np.argmax(codec._correlate(z, u, lag))) - 300) <= 1
+    assert abs(int(np.argmax(codec._correlate(torch.as_tensor(z), u, lag).numpy())) - 300) <= 1
     assert abs(u.sum()) < 1e-9 and abs((u ** 2).sum() - 1) < 1e-9 and pre >= 0 and post > 0
 
 
 def test_batches_bound_the_padding():
     rng = np.random.default_rng(3)
     L = np.r_[rng.integers(10000, 48000, 169), [700, 5000, 5000]]
-    for torch_ in (False, True):
-        b = codec.batches(L, 7, torch_)
-        seen = np.concatenate([i[i >= 0] for _, i in b])
-        assert sorted(seen.tolist()) == list(range(len(L)))
-        for Lp, idx in b:
-            real = idx[idx >= 0]
-            assert Lp % 128 == 0 and (L[real] <= Lp).all() and (Lp <= 1.25 * (L[real].min() + 128)).all()
-            if torch_:
-                r = len(idx); assert r & (r - 1) == 0 or r % 256 == 0
-        assert len(b) <= 12
+    b = codec.batches(L, 7)
+    seen = np.concatenate([i[i >= 0] for _, i in b])
+    assert sorted(seen.tolist()) == list(range(len(L)))
+    for Lp, idx in b:
+        real = idx[idx >= 0]
+        assert Lp % 128 == 0 and (L[real] <= Lp).all() and (Lp <= 1.25 * (L[real].min() + 128)).all()
+        r = len(idx); assert r & (r - 1) == 0 or r % 256 == 0
+    assert len(b) <= 12
 
 
 def test_coarse_sums_are_block_sums():
@@ -110,19 +109,18 @@ def test_coarse_sums_are_block_sums():
         np.testing.assert_array_equal(np.asarray(g["coarse"])[0, :nb], raw[:nb * 64].reshape(nb, 64).sum(1))
 
 
-def test_torch_matches_numpy():
-    torch = pytest.importorskip("torch")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_cuda_matches_cpu():
     wf, _ = _wf(seed=6)
     ref = OpticalChain().process("pmt", wf)
-    for dev in ["cpu"] + (["cuda"] if torch.cuda.is_available() else []):
-        got = OpticalChain(device=dev).process("pmt", wf)
-        assert abs(got["n_kept"] - ref["n_kept"]) <= max(3, 1e-3 * ref["n_kept"])
-        np.testing.assert_allclose(got["noise"]["level"], ref["noise"]["level"], rtol=1e-3)
-        for gr, gg in zip(ref["groups"], got["groups"]):
-            assert np.mean(np.asarray(gr["roi"]) != gg["roi"].cpu().numpy()) < 1e-3
-            np.testing.assert_array_equal(gr["coarse"], gg["coarse"].cpu().numpy())
-            for a, b in zip(gr["details"], gg["details"]):
-                np.testing.assert_array_equal(a, b.cpu().numpy())
+    got = OpticalChain(device="cuda").process("pmt", wf)
+    assert abs(got["n_kept"] - ref["n_kept"]) <= max(3, 1e-3 * ref["n_kept"])
+    np.testing.assert_allclose(got["noise"]["level"], ref["noise"]["level"], rtol=1e-3)
+    for gr, gg in zip(ref["groups"], got["groups"]):
+        assert np.mean(gr["roi"].numpy() != gg["roi"].cpu().numpy()) < 1e-3
+        np.testing.assert_array_equal(gr["coarse"].numpy(), gg["coarse"].cpu().numpy())
+        for a, b in zip(gr["details"], gg["details"]):
+            np.testing.assert_array_equal(a.numpy(), b.cpu().numpy())
 
 
 def _shard(tmp_path, res):
@@ -134,13 +132,10 @@ def _shard(tmp_path, res):
     return p
 
 
-@pytest.mark.parametrize("dev", [None, "cpu"])
-def test_shard_roundtrip(tmp_path, dev):
-    if dev is not None:
-        pytest.importorskip("torch")
+def test_shard_roundtrip(tmp_path):
     from helix.optical.shard import read_optical
     wf, _ = _wf(seed=7)
-    ch = OpticalChain(device=dev)
+    ch = OpticalChain()
     res = ch.process("pmt", wf)
     rec = ch.reconstruct(res)
     p = _shard(tmp_path, res)
@@ -359,14 +354,7 @@ def test_windows_shorter_than_a_noise_stretch():
     n, m = 150, 12
     wf = dict(channel=np.arange(m, dtype=np.int32) // 3, t_us=np.zeros(m), length=np.full(m, n), offset=np.arange(m) * n,
               buf=np.round(14250 + rng.normal(0, 3, m * n)).astype(np.uint16))
-    devices = [None]
-    try:
-        import torch
-        if torch.cuda.is_available():
-            devices.append("cuda")
-    except ImportError:
-        pass
-    for dev in devices:
+    for dev in [None] + (["cuda"] if torch.cuda.is_available() else []):
         ch = OpticalChain(device=dev)
         res = ch.process("pmt", wf)
         st = np.asarray(res["noise"]["stat"])

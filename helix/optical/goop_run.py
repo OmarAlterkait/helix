@@ -83,7 +83,7 @@ def main(argv=None):
         mb = sum(ds.id.get_storage_size() for ds in _datasets(o["optical/goop"])) / 1e6 if "optical/goop" in o else 0.0
         summary = dict(events=len(keys), values_per_event=kept / n, samples_per_event=samples / n,
                        compression=samples / max(kept, 1), stored_mb_per_event=mb / n, codec_s_per_event=t_codec / n,
-                       events_per_s=len(keys) / wall, device=a.device or "numpy")
+                       events_per_s=len(keys) / wall, device=a.device or "cpu")
         o.attrs["summary_json"] = json.dumps(summary)
     print(json.dumps(summary, indent=1))
 

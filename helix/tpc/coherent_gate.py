@@ -1,27 +1,37 @@
-"""Torch backend for coefficient-space smart gating (the qualified R2).
+"""Coefficient-space coherent-noise gate on contiguous wire blocks (the qualified R2): the TPC
+chain's ``block_gate`` (:class:`helix.tpc.chain.TPCChain`, simulation). Torch, any device.
 
-Backend module of the ``helix.tpc.coherent_gate_ops`` family — the TPC chain's
-``block_gate`` (:class:`helix.tpc.chain.TPCChain`) picks it on a torch device.
+Given the per-band DWT coefficients of a plane, it removes the common-mode coherent noise
+that is rank-1 within `group_size`-wire blocks, *without* an image round-trip (the
+DWT is linear, so the cleaned image's bands == band − gated block common-mode).
 
-A port of :mod:`helix.tpc.coherent_gate_ops_numpy` — same
-mechanism, same qualified defaults (kgate=3.0, ksig=3.0, npass=2, group_size=64,
-A-parity ``sigc``), same fail-open on non-finite bands. See that module's
-docstring for the algorithm and ``research/r2_qualification/REPORT.md`` for the
-evidence behind the defaults.
+Mechanism, per band, per `npass`:
+  1. robust per-(block, coeff-position) common mode M — a ksig-masked mean over the
+     wires of each block, excluding wires flagged as signal (so signal doesn't bias
+     the estimate);
+  2. coherent scale `sigc` = MAD of M over blocks;
+  3. gate: keep `|M| < kgate·sigc` (that is the coherent part → subtract), drop the
+     rest (large ⇒ real signal → protect);
+  4. subtract the gated common-mode from the band.
+Between passes, signal is (re)detected on the cleaned band and excluded from the
+next common-mode estimate — a purer estimate that removes more noise at no signal
+cost (the qualified 2-pass result).
 
-It reproduces the numpy reference's MECHANISM and conventions, not its bits:
-float32 reduction order differs, so the two agree to ~1e-4 ADC on real
-coefficients. See the tolerance discussion in :mod:`helix.tpc.coherent_gate_ops_numpy`.
+Qualified default: kgate=3.0, ksig=3.0, npass=2, group_size=64, A-parity `sigc`
+(`quantile(0.5)`). See research/r2_qualification/REPORT.md. Ported from
+`measure_coeffs.smart_gate_bands` (1-pass) + `r2_qualification/grid.py` (2-pass).
 
-Two things this port must get exactly right, because both silently change gate
-decisions rather than failing:
+A corpus is architecture-specific: float32 reductions depend on summation order, the
+threshold comparisons on those floats are discrete, and one block decision is broadcast to
+all its wires, so one GPU generation builds a whole corpus.
 
-1. **quantile(0.5), not median.** ``torch.median`` returns the LOWER of the two
-   middle values; ``np.quantile(..., 0.5)`` AVERAGES them. They differ by ~1e-4
-   relative on even-length inputs, which flips a handful of gate decisions per
-   event. ``_q50`` below reproduces the averaging convention. (This is the exact
-   distinction ``sigc_mode='quantile'`` names, and why the legacy ``'median'``
-   mode is kept selectable but is not the default.)
+Two things must be exactly right, because both silently change gate decisions rather than
+failing:
+
+1. **np.median, not torch.median.** ``torch.median`` returns the LOWER of the two
+   middle values; :func:`helix.core.robust.q50` AVERAGES them, as ``np.quantile(..., 0.5)``
+   does. They differ by ~1e-4 relative on even-length inputs, which flips a handful of
+   gate decisions per event.
 2. **Signal exclusion.** The ``~smf`` term in the common-mode estimate excludes
    wires already flagged as signal. Dropping it is nearly invisible on aggregate
    metrics but degrades the 2-pass result it exists to produce.
@@ -34,14 +44,9 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from helix.core.backend import torch_q50 as _q50
+from helix.core.robust import mad, q50 as _q50
 
 _EPS = 1e-6
-
-
-def _mad(x: torch.Tensor, dim: int) -> torch.Tensor:
-    """MAD-derived sigma = quantile(|x|, 0.5) / 0.6745 (A-parity)."""
-    return torch.clamp_min(_q50(x.abs(), dim) / 0.6745, _EPS)
 
 
 def _block_common_mode(b: torch.Tensor, ksig: float, sigmask: torch.Tensor,
@@ -61,7 +66,7 @@ def _block_common_mode(b: torch.Tensor, ksig: float, sigmask: torch.Tensor,
         smf = sigmask[:ngf * group_size].reshape(ngf, group_size, Lb)
         med = _q50(bf, dim=1)                                   # (ngf, Lb)
         resid = bf - med[:, None]
-        sg = _mad(resid.reshape(ngf, -1), dim=1)                # (ngf,)
+        sg = mad(resid.reshape(ngf, -1), 1, _EPS)                # (ngf,)
         uf = (resid.abs() <= ksig * sg[:, None, None]) & (~smf)
         nuf = uf.sum(1)
         mean = (bf * uf).sum(1) / torch.clamp_min(nuf, 1)
@@ -74,7 +79,7 @@ def _block_common_mode(b: torch.Tensor, ksig: float, sigmask: torch.Tensor,
         smr = sigmask[ngf * group_size:]
         med = _q50(blk, dim=0)
         resid = blk - med
-        sg = _mad(resid.reshape(-1), dim=0)
+        sg = mad(resid.reshape(-1), 0, _EPS)
         uf = (resid.abs() <= ksig * sg) & (~smr)
         nuf = uf.sum(0)
         mean = (blk * uf).sum(0) / torch.clamp_min(nuf, 1)
@@ -93,28 +98,20 @@ def _detect_signal(cleaned_band: torch.Tensor, ksig: float, group_size: int) -> 
     cf = cleaned_band.abs()
     if ngf > 0:
         cb = cf[:ngf * group_size].reshape(ngf, group_size, Lb)
-        csg = _mad(cb.reshape(ngf, -1), dim=1)                   # (ngf,)
+        csg = mad(cb.reshape(ngf, -1), 1, _EPS)                   # (ngf,)
         sm[:ngf * group_size] = (cb > ksig * csg[:, None, None]).reshape(ngf * group_size, Lb)
     rem = W - ngf * group_size
     if rem > 0:
         cr = cf[ngf * group_size:]
-        csg = _mad(cr.reshape(-1), dim=0)
+        csg = mad(cr.reshape(-1), 0, _EPS)
         sm[ngf * group_size:] = cr > ksig * csg
     return sm
 
 
 def _sigc(M: torch.Tensor, mode: str) -> torch.Tensor:
-    """Coherent scale — q50 for BOTH modes, exactly as the numpy backend does.
-
-    ``'median'`` is an alias, not a second algorithm: numpy implements it with
-    ``np.median``, which is bit-identical to ``np.quantile(..., 0.5)``. The
-    distinction its docstring draws is against the OLD torch.median (lower of two
-    middles), which no backend reproduces any more, and nothing in production
-    sets it (``sigc_mode`` is not a chain config key). Implementing it here with ``torch.median`` would make
-    the same mode name mean different arithmetic on different backends, in a
-    branch nothing exercises — a silent divergence with no upside.
-    """
-    return torch.clamp_min(_q50(M.abs().reshape(-1), dim=0) / 0.6745, _EPS)
+    """Coherent scale: the MAD of M over the band (``sigc_mode`` 'median' and 'quantile' are the
+    same np.median arithmetic; it is not a chain config key)."""
+    return mad(M.reshape(-1), 0, _EPS)
 
 
 def gate_band(b: torch.Tensor, *, group_size: int, kgate, ksig: float,
@@ -123,8 +120,18 @@ def gate_band(b: torch.Tensor, *, group_size: int, kgate, ksig: float,
 
     ``tau`` adds the occupancy condition — refuse only when |M| is large AND more
     than ``tau`` of the block's wires were flagged. ``None`` reproduces the legacy
-    magnitude-only rule bit-for-bit. See the numpy twin for why the magnitude
-    test alone is wrong, and why occupancy must come from pass 1.
+    magnitude-only rule bit-for-bit.
+
+    The rule the magnitude test alone gets wrong: coherent noise is identical on
+    every wire of a block, so it CANNOT produce an outlier. An empty mask is
+    therefore positive evidence that nothing but coherent noise is present and M
+    is the plain mean of all wires — refusing it because |M| landed in the
+    coherent's own Gaussian tail leaves the whole component behind, one block
+    wide, which is the leftover-coherent "blip" population.
+
+    Occupancy MUST come from pass 1. At a cell pass 1 refused, the cleaned band
+    still holds the full coherent, so ``_detect_signal`` flags every wire and
+    pass-2 occupancy is 1.0 by construction — the statistic destroys itself.
     """
     W = b.shape[0]
     kg = list(kgate) if isinstance(kgate, (list, tuple, np.ndarray)) else [kgate] * npass
@@ -176,8 +183,7 @@ def gate_bands(
 
     ``gate_approx=False`` leaves the approx band untouched. ``kgate`` may be a
     scalar or a per-pass sequence. A non-finite band fails OPEN — returned
-    unchanged, whole-band, matching the numpy backend exactly — so a bad event
-    never propagates corrupted coefficients.
+    unchanged, whole-band — so a bad event never propagates corrupted coefficients.
     """
     out = []
     for i, b in enumerate(bands):

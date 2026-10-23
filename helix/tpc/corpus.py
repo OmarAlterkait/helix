@@ -121,8 +121,7 @@ def build_corpus_stream(stream, chain, out_dir, *,
 
     The stream form is what a DataLoader gives (sequential, prefetched in worker
     processes); :func:`build_corpus` is the random-access wrapper over it. Planes
-    may be numpy arrays or tensors; ``chain`` moves them to its device (numpy when it
-    has none).
+    may be numpy arrays or tensors; ``chain`` moves them to its device.
 
     ``event_id`` is either an ``int`` (event N of this shard's own source file)
     or a ``(source_file, event)`` pair when the producer reads across files.

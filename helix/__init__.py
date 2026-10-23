@@ -1,8 +1,7 @@
 """HELIX — Hierarchical Encoding for Learned Inference on eXperimental data.
 
-  helix.core    — detector-agnostic wavelet sparsification, the coefficient
-                  shard codec, and lazy backend dispatch (numpy / torch,
-                  imported only when selected)
+  helix.core    — the coefficient shard codec, the wavelet transform, robust
+                  statistics and hysteresis (torch, imported when they compute)
   helix.tpc     — wire-plane chain (helix.tpc.chain.TPCChain): coherent noise
                   removal + wavelet threshold, and the corpus builder
   helix.optical — optical waveforms (SBND PMT / X-ARAPUCA, goop): one codec, optical shards
@@ -40,13 +39,9 @@ _LAZY = {
     "audit_shard": "helix.core.coeff_io",
     "coord_digest": "helix.core.coeff_io",
     # -- DSP ----------------------------------------------------------------
-    "get_backend": "helix.core.backend",
-    "set_backend": "helix.core.backend",
-    "sparsify": "helix.core.wavelet",
     "TPCChain": "helix.tpc.chain",
     "sim_config": "helix.tpc.chain",
     "sensor_layout": "helix.tpc.io",
-    "config_from_file": "helix.tpc.io",
     "build_corpus": "helix.tpc.corpus",
     "build_corpus_stream": "helix.tpc.corpus",
     # -- model: torch is imported only if one of these is touched -----------
@@ -55,7 +50,7 @@ _LAZY = {
     "CoeffTokenize": "helix.model.tokenize",
     # -- data: the coeff corpus as a pimm-data family. Importing these pulls
     #    pimm_data (and so torch); they are lazy for the same reason the model
-    #    entries are, which is what keeps a numpy-only DSP install working.
+    #    entries are, which is what keeps a numpy-only corpus reader working.
     "CoeffTPCDataset": "helix.data",
     "CoeffTPCReader": "helix.data",
 }

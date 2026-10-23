@@ -72,8 +72,8 @@ the yardstick that would overturn it.
 
 ## 6. The jax backend — RETIRED
 
-Removed: helix's DSP backends are numpy and torch. (`scripts/build_coeff_corpus.py`
-imports `pimm_data` on every backend; the reader/dataset layer is pimm-data's.)
+Removed: helix's DSP is torch. (`scripts/build_coeff_corpus.py`
+always imports `pimm_data`; the reader/dataset layer is pimm-data's.)
 
 ## 7. Housekeeping
 

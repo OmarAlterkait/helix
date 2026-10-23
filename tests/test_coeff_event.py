@@ -10,9 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from helix.core.backend import set_backend
 from helix.core.provenance import BasisDescriptor, derive_band_lengths
-from helix.core.wavelet import SparseResult, ThresholdSpec, sparsify, reconstruct
+from helix.core.wavelet import SparseResult
 from helix.core.coeff_event import CoeffEvent
 from helix.core.coeff_io import write_coeff_shard, read_coeff_event, read_coeff_shard, n_events
 
@@ -58,11 +57,6 @@ def _assert_event_equal(a: CoeffEvent, b: CoeffEvent):
         np.testing.assert_array_equal(av, bv, err_msg=f"{name} differs")
     assert a.run == b.run and a.source_file == b.source_file and a.event == b.event
     assert a.basis.digest() == b.basis.digest()
-
-
-@pytest.fixture(autouse=True)
-def _numpy_backend():
-    set_backend("numpy")
 
 
 # ---- level 1: codec bit-identity -----------------------------------------
@@ -123,21 +117,25 @@ def test_multi_event_shard(tmp_path):
 def test_reconstruct_matches(tmp_path):
     basis = _basis()
     rng = np.random.default_rng(2)
-    # real DSP: sparsify a synthetic multi-plane event, then round-trip the coeffs
+    # real DSP: transform and threshold a synthetic multi-plane event, then round-trip the coeffs
+    pytest.importorskip("torch")
+    from helix.core.wavelet import wavedec, reconstruct
     results = {}
-    images = {}
     for gid, nw in ((0, 8), (1, 6)):
         img = rng.standard_normal((nw, NT)).astype(np.float32)
-        images[gid] = img
-        results[gid] = sparsify(img, wavelet=WAVELET, level=LEVEL, mode=MODE,
-                                threshold=ThresholdSpec(method="universal", scale=1.0,
-                                                        per_band_sigma=True))
+        bands, lev = wavedec(img, WAVELET, LEVEL, MODE)
+        bands = [b.numpy() for b in bands]
+        sig = [np.median(np.abs(b)) / 0.6745 for b in bands]
+        kept = [np.where(np.abs(b) >= s * np.sqrt(2 * np.log(b.shape[1])), b, 0).astype(np.float32)
+                for b, s in zip(bands, sig)]
+        results[gid] = SparseResult(coeffs=kept, n_kept=0, n_total=0, sigma_per_band=np.float32(sig),
+                                    wavelet=WAVELET, level=lev, mode=MODE)
     ce = CoeffEvent.from_sparse_results(results, basis=basis)
     path = tmp_path / "s_coeff_0000.h5"
     write_coeff_shard(path, [ce])
     ce2 = read_coeff_event(path, 0)
 
-    recon_direct = {g: reconstruct(results[g], NT) for g in results}
+    recon_direct = {g: reconstruct(results[g].coeffs, WAVELET, NT).numpy() for g in results}
     recon_roundtrip = ce2.reconstruct_images(NT)
     for g in results:
         np.testing.assert_array_equal(recon_roundtrip[g], recon_direct[g],

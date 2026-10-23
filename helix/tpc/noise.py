@@ -35,7 +35,7 @@ densification that consumes it is pimm-data's, and there is one copy.
 
 Note this is the FORWARD model — noise injection and digitisation, what the
 detector does to a signal. The TPC chain's block gate
-(:mod:`helix.tpc.coherent_gate_ops_numpy`, ``group_size`` from
+(:mod:`helix.tpc.coherent_gate`, ``group_size`` from
 :data:`helix.tpc.chain.SIM_BASE`) is the INVERSE (coherent-noise removal); the
 two must agree on the grouping convention, which is the whole "don't drift"
 contract.

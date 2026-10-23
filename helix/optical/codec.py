@@ -25,8 +25,11 @@ Decoding is the exact inverse: a stored difference is exact, a missing one split
 evenly. Validation against injected truth: helix.optical.validate; numbers: docs/OPTICAL.md.
 
 Batching: windows of one length class are one batch - lengths within 25% padding of the
-batch's longest (Haar and baseline blocks round them up); on the GPU rows are padded to a power
-of two (multiples of 256 above), so shapes repeat without padding short batches to 256 rows.
+batch's longest (Haar and baseline blocks round them up); rows are padded to a power of two
+(multiples of 256 above), so shapes repeat without padding short batches to 256 rows.
+
+Encoding is torch on ``device`` (default CPU); decoding (:func:`unhaar`) is numpy, so readers
+run without torch.
 """
 from __future__ import annotations
 
@@ -37,8 +40,6 @@ from pathlib import Path
 
 import numpy as np
 
-from helix.core import backend
-from helix.tpc import robust
 
 _DATA = Path(__file__).resolve().parent / "data"
 BLOCK = 64                      # local-baseline block (samples)
@@ -106,9 +107,10 @@ def matched_filter(h):
     return u, lag, p - a, b - p
 
 
-def batches(lengths, level, torch_=False):
+def batches(lengths, level):
     """Windows grouped for batching: [(padded length, row indices (-1: padding row))]. Sorted by
-    length; a batch takes windows whose padded length is within PAD_FRACTION of its longest's."""
+    length; a batch takes windows whose padded length is within PAD_FRACTION of its longest's;
+    rows padded to a power of two (multiples of 256 above)."""
     unit = max(1 << level, BLOCK)
     Lp = (np.maximum(np.asarray(lengths, np.int64), 1) + unit - 1) // unit * unit
     order = np.argsort(-Lp, kind="stable"); out = []; i = 0
@@ -117,31 +119,20 @@ def batches(lengths, level, torch_=False):
         while j < len(order) and Lp[order[j]] * (1 + PAD_FRACTION) >= L:
             j += 1
         idx = np.sort(order[i:j])
-        if torch_:
-            nb = len(idx); r = 1 << int(np.ceil(np.log2(nb))) if nb < 256 else -(-nb // 256) * 256
-            idx = np.concatenate([idx, np.full(r - nb, -1, np.int64)])
+        nb = len(idx); r = 1 << int(np.ceil(np.log2(nb))) if nb < 256 else -(-nb // 256) * 256
+        idx = np.concatenate([idx, np.full(r - nb, -1, np.int64)])
         out.append((L, idx)); i = j
     return out
 
 
-# ---------------------------------------------------------------- array helpers (numpy / torch)
-def _is_torch(x):
-    return hasattr(x, "detach")
-
-
-def _cat(xs, axis=1):
-    if _is_torch(xs[0]):
-        import torch
-        return torch.cat(xs, axis)
-    return np.concatenate(xs, axis)
-
-
+# ---------------------------------------------------------------- array helpers
 def _host(x):
-    return x.detach().cpu().numpy() if _is_torch(x) else np.asarray(x)
+    return x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x)
 
 
 def haar(x, level):
-    """Integer Haar of the rows of ``x`` (length a multiple of 2^level): (coarse sums, [d_level, ..., d_1])."""
+    """Integer Haar of the rows of ``x`` (array or tensor; length a multiple of 2^level):
+    (coarse sums, [d_level, ..., d_1])."""
     s, ds = x, []
     for _ in range(level):
         a, b = s[:, 0::2], s[:, 1::2]
@@ -160,7 +151,6 @@ def unhaar(coarse, details, stored=None):
     return s
 
 
-
 def _baseline(y):
     """Local baseline: block means, linearly interpolated between block centres (edges flat)."""
     n, L = y.shape
@@ -169,9 +159,8 @@ def _baseline(y):
     i0 = np.clip(np.floor(pos), 0, L // BLOCK - 1).astype(np.int64)
     i1 = np.minimum(i0 + 1, L // BLOCK - 1)
     w = np.clip(pos - i0, 0, 1).astype(np.float32)
-    if _is_torch(y):
-        import torch
-        i0, i1, w = (torch.as_tensor(a, device=y.device) for a in (i0, i1, w))
+    import torch
+    i0, i1, w = (torch.as_tensor(a, device=y.device) for a in (i0, i1, w))
     return bm[:, i0] * (1 - w) + bm[:, i1] * w
 
 
@@ -182,20 +171,13 @@ def _correlate(z, u, lag):
     n, L = z.shape
     K = len(u)
     a, b = K - 1 - (K - 1) // 2, (K - 1) // 2
-    if _is_torch(z):
-        import torch
-        import torch.nn.functional as F
-        zp = F.pad(z, (a, b))
-        y = zp[:, 0:L] * float(u[0])
-        for j in range(1, K):
-            y.add_(zp[:, j:j + L], alpha=float(u[j]))
-        out = torch.zeros_like(y)
-    else:
-        zp = np.pad(z, ((0, 0), (a, b)))
-        y = zp[:, 0:L] * np.float32(u[0])
-        for j in range(1, K):
-            y += zp[:, j:j + L] * np.float32(u[j])
-        out = np.zeros_like(y)
+    import torch
+    import torch.nn.functional as F
+    zp = F.pad(z, (a, b))
+    y = zp[:, 0:L] * float(u[0])
+    for j in range(1, K):
+        y.add_(zp[:, j:j + L], alpha=float(u[j]))
+    out = torch.zeros_like(y)
     if lag > 0:
         out[:, :L - lag] = y[:, lag:]
     elif lag < 0:
@@ -232,20 +214,11 @@ def _deconvolve(y, w, lam, h, peak, iters=DECONV_ITER, return_a=False):
     m, L = y.shape
     n = len(h)
     Lf = _fast_len(L + n)                                         # linear convolution: no wrap-around
-    torch_ = _is_torch(y)
+    import torch
     hc = np.zeros(Lf); hc[(np.arange(n) - peak) % Lf] = h       # circular kernel, peak at 0
     lip = float((np.abs(np.fft.rfft(hc)) ** 2).max())
-    if torch_:
-        import torch
-        H = torch.fft.rfft(torch.as_tensor(hc, dtype=y.dtype, device=y.device))
-        conv = lambda a, K=H: torch.fft.irfft(torch.fft.rfft(a, Lf, dim=1) * K, Lf, dim=1)[:, :L]  # noqa: E731
-        relu_ = lambda x: x.clamp_(min=0)  # noqa: E731
-        lerp = torch.lerp
-    else:
-        H = np.fft.rfft(hc)
-        conv = lambda a, K=H: np.fft.irfft(np.fft.rfft(a, Lf, axis=1) * K, Lf, axis=1)[:, :L]  # noqa: E731
-        relu_ = lambda x: np.maximum(x, 0, out=x)  # noqa: E731
-        lerp = lambda a, b, c: a + c * (b - a)  # noqa: E731
+    H = torch.fft.rfft(torch.as_tensor(hc, dtype=y.dtype, device=y.device))
+    conv = lambda a, K=H: torch.fft.irfft(torch.fft.rfft(a, Lf, dim=1) * K, Lf, dim=1)[:, :L]  # noqa: E731
     Hc = H.conj()
     y = y * w
     act = (conv(y, Hc) > lam).any(1)                              # rows where a photon can enter (else a = 0)
@@ -262,11 +235,11 @@ def _deconvolve(y, w, lam, h, peak, iters=DECONV_ITER, return_a=False):
             an = z - conv(r, Hs)
             if lam_ is not None:
                 an -= lam_
-            relu_(an)
+            an.clamp_(min=0)
             if supp is not None:
                 an *= supp
             tn = (1 + np.sqrt(1 + 4 * t * t)) / 2
-            z = lerp(a, an, 1 + (t - 1) / tn); a, t = an, tn
+            z = torch.lerp(a, an, 1 + (t - 1) / tn); a, t = an, tn
         return a
     a = fista(y * 0, lam / lip, None, iters[0])
     a = fista(a, None, (a > 0) * 1.0, iters[1])
@@ -289,28 +262,17 @@ def _quiet_rms(stat, n):
     m, L = stat.shape
     k = L // QUIET
     nn = _host(n)
-    if _is_torch(stat):
-        import torch
-        if k == 0:                                               # a batch of windows all shorter than a stretch
-            return (stat.pow(2).sum(1) / torch.clamp(torch.as_tensor(nn, device=stat.device), min=1)).sqrt()
-        seg = stat[:, :k * QUIET].reshape(m, k, QUIET)
-        r = seg.pow(2).mean(-1).sqrt()
-        full = torch.as_tensor(np.arange(1, k + 1)[None, :] * QUIET <= nn[:, None], device=stat.device)
-        r = torch.where(full, r, torch.full_like(r, float("inf")))
-        nf = full.sum(1)
-        q = torch.sort(r, 1).values.gather(1, torch.clamp((nf - 1) // 2, min=0)[:, None])[:, 0]
-        own = (stat.pow(2).sum(1) / torch.clamp(torch.as_tensor(nn, device=stat.device), min=1)).sqrt()
-        return torch.where(nf > 0, q, own)
-    if k == 0:
-        return np.sqrt((stat.astype(np.float64) ** 2).sum(1) / np.maximum(nn, 1)).astype(np.float32)
+    import torch
+    if k == 0:                                                   # a batch of windows all shorter than a stretch
+        return (stat.pow(2).sum(1) / torch.clamp(torch.as_tensor(nn, device=stat.device), min=1)).sqrt()
     seg = stat[:, :k * QUIET].reshape(m, k, QUIET)
-    r = np.sqrt((seg.astype(np.float64) ** 2).mean(-1))
-    full = np.arange(1, k + 1)[None, :] * QUIET <= nn[:, None]
-    r = np.where(full, r, np.inf)
+    r = seg.pow(2).mean(-1).sqrt()
+    full = torch.as_tensor(np.arange(1, k + 1)[None, :] * QUIET <= nn[:, None], device=stat.device)
+    r = torch.where(full, r, torch.full_like(r, float("inf")))
     nf = full.sum(1)
-    q = np.sort(r, 1)[np.arange(m), np.maximum((nf - 1) // 2, 0)]
-    own = np.sqrt((stat.astype(np.float64) ** 2).sum(1) / np.maximum(nn, 1))
-    return np.where(nf > 0, q, own).astype(np.float32)
+    q = torch.sort(r, 1).values.gather(1, torch.clamp((nf - 1) // 2, min=0)[:, None])[:, 0]
+    own = (stat.pow(2).sum(1) / torch.clamp(torch.as_tensor(nn, device=stat.device), min=1)).sqrt()
+    return torch.where(nf > 0, q, own)
 
 
 def _channel_median(v, ch):
@@ -347,9 +309,7 @@ class OpticalChain:
             self.templates, self.template_meta = {k: np.asarray(v, np.float64) for k, v in templates.items()}, {}
         else:
             self.templates, self.template_meta = load_templates(templates)
-        self.device = device
-        self.kind = "torch" if device is not None else "numpy"
-        self.wa = backend.import_backend_module("helix.core.hysteresis_ops", self.kind).window_any
+        self.device = "cpu" if device is None else device
         self._mf = {}
         self.capture = None                     # a list: (window indices, y, valid, photon train a) per batch
                                                 # are appended to it (helix.optical.calibrate)
@@ -365,8 +325,8 @@ class OpticalChain:
         sample - valid whenever the block is - of a coarser stored block no finer mark touches)."""
         h = self.templates[spec.response]
         valid = g["valid"]; m = valid.shape[0]; lev = spec.level
-        w = valid.to(g["y"].dtype) if self.kind == "torch" else valid.astype(np.float64)
-        y = g["y"] if self.kind == "torch" else g["y"].astype(np.float64)
+        w = valid.to(g["y"].dtype)
+        y = g["y"]
         lam = spec.k * cg[:, :1] * float(np.sqrt(np.sum(h ** 2)))     # (rows, 1)
         if self.capture is not None:
             light, a = _deconvolve(y, w, lam, h, int(np.argmax(h)), return_a=True)
@@ -379,12 +339,9 @@ class OpticalChain:
         for li in range(lev - 1, -1, -1):                            # D1 first
             B = 1 << (lev - li); nbk = dl[li].shape[1]
             sj = cg[:, 1 + li:2 + li]; ok = valid.reshape(m, nbk, B).any(-1)
-            a = dl[li].abs() if self.kind == "torch" else np.abs(dl[li])
-            s_ = (a >= spec.q * sj) & ok
+            s_ = (dl[li].abs() >= spec.q * sj) & ok
             if spec.residual:                                        # what the light model does not explain
-                d = g["details"][li]
-                r_ = (d.to(dl[li].dtype) if self.kind == "torch" else d.astype(np.float64)) - dl[li]
-                r_ = r_.abs() if self.kind == "torch" else np.abs(r_)
+                r_ = (g["details"][li].to(dl[li].dtype) - dl[li]).abs()
                 s_ = s_ | ((r_ >= spec.residual * sj) & ok)
             stored[li] = s_
             r3 = roi.reshape(m, nbk, B)
@@ -400,17 +357,8 @@ class OpticalChain:
         pad = np.asarray(idx) < 0
         n = np.where(pad, 0, np.asarray(wf["length"])[np.where(pad, 0, idx)]).astype(np.int64)
         o = np.where(pad, 0, np.asarray(wf["offset"])[np.where(pad, 0, idx)]).astype(np.int64)
-        if self.kind == "numpy":
-            ar = np.arange(L)
-            pos = o[:, None] + np.minimum(ar[None, :], np.maximum(n - 1, 0)[:, None])
-            X = np.where(n[:, None] > 0, buf[np.minimum(pos, max(len(buf) - 1, 0))], 0).astype(np.int32)
-            valid = ar[None, :] < n[:, None]
-            Xs = np.sort(np.where(valid, X, np.iinfo(np.int32).max), axis=1).astype(np.float64)
-            r = np.arange(len(idx)); lo, hi = np.maximum((n - 1) // 2, 0), np.maximum(n // 2, 0)
-            med = np.where(n > 0, 0.5 * (Xs[r, lo] + Xs[r, hi]), 0.0).astype(np.float32)
-            return X, valid, n, med
         import torch
-        from helix.tpc.coherent_gate_labels_ops_torch import _masked_median
+        from helix.core.robust import masked_median
         dev = self.device
         ar = torch.arange(L, device=dev)
         nt = torch.as_tensor(n, device=dev); ot = torch.as_tensor(o, device=dev)
@@ -418,7 +366,7 @@ class OpticalChain:
         X = torch.where(nt[:, None] > 0, buf[torch.clamp(pos, max=max(buf.shape[0] - 1, 0))].to(torch.int32),
                         torch.zeros((), dtype=torch.int32, device=dev))
         valid = ar[None, :] < nt[:, None]
-        med = torch.nan_to_num(_masked_median(X.to(torch.float32), valid, dim=1), nan=0.0)
+        med = torch.nan_to_num(masked_median(X.to(torch.float32), valid, dim=1), nan=0.0)
         return X, valid, nt, med
 
     def process(self, system, wf):
@@ -436,18 +384,19 @@ class OpticalChain:
                         length=n_all, groups=[], n_kept=0, n_samples=0,
                         noise=dict(channel=np.zeros(0, np.int32), stat=np.zeros(0, np.float32),
                                    level=np.zeros((0, lev), np.float32)))
+        import torch
+        from helix.core import robust
+        from helix.core.hysteresis import window_any
         buf = np.asarray(wf["buf"])
-        if self.kind == "torch":
-            import torch
-            buf = torch.as_tensor(buf.view(np.int16) if buf.dtype == np.uint16 else buf.astype(np.int32)).to(self.device)
-            if buf.dtype == torch.int16:                         # 14/15-bit codes: int16 on the way, int32 here
-                buf = buf.to(torch.int32)
+        buf = torch.as_tensor(buf.view(np.int16) if buf.dtype == np.uint16 else buf.astype(np.int32)).to(self.device)
+        if buf.dtype == torch.int16:                             # 14/15-bit codes: int16 on the way, int32 here
+            buf = buf.to(torch.int32)
         # pass 1: statistic and transform per batch; noise per window
         groups, wnoise, rows = [], [], []
-        for L, idx in batches(n_all, lev, self.kind == "torch"):
+        for L, idx in batches(n_all, lev):
             nb = int((idx >= 0).sum())
             X, valid, n, med = self._batch(wf, idx, L, buf)
-            y = X.to(torch.float32) - med[:, None] if self.kind == "torch" else X.astype(np.float32) - med[:, None]
+            y = X.to(torch.float32) - med[:, None]
             z = spec.polarity * (y - _baseline(y)) * valid
             stat = _correlate(z, u, lag) * valid
             coarse, details = haar(X, lev)
@@ -459,7 +408,7 @@ class OpticalChain:
         dead = (idx_all < 0) | (n_all[np.maximum(idx_all, 0)] == 0)
 
         def channel(per_group):                                   # one host round trip per estimate
-            v = _host(_cat(per_group, 0)).astype(np.float64)
+            v = _host(torch.cat(per_group, 0)).astype(np.float64)
             v = v.reshape(len(v), -1)
             v[dead] = np.nan
             return _channel_median(v, ch_rows)
@@ -468,19 +417,17 @@ class OpticalChain:
         cn0, wnoise, wbase, off = channel(wnoise), [], [], 0
         for g in groups:
             m = len(g["index"]); c0 = cn0[off:off + m, :1]; off += m
-            if self.kind == "torch":
-                c0 = torch.as_tensor(c0, dtype=torch.float32, device=self.device)
-            lit = self.wa((g["stat"] > spec.k * c0) & g["valid"], post, pre) | ~g["valid"]
-            zero = torch.zeros(m, device=self.device) if self.kind == "torch" else np.zeros(m)
+            c0 = torch.as_tensor(c0, dtype=torch.float32, device=self.device)
+            lit = window_any((g["stat"] > spec.k * c0) & g["valid"], post, pre) | ~g["valid"]
+            zero = torch.zeros(m, device=self.device)
             est = [robust.clipped_stats(g["stat"], mask=lit, center=zero)[1]]
             for li, d in enumerate(g["details"]):
                 j = lev - li
                 cm = lit.reshape(m, d.shape[1], 1 << j).any(-1)
                 pad = np.arange(d.shape[1])[None, :] >= (_host(g["n"]) >> j)[:, None]
-                cm = cm | (torch.as_tensor(pad, device=self.device) if self.kind == "torch" else pad)
-                est.append(robust.clipped_stats(d.to(torch.float32) if self.kind == "torch" else d.astype(np.float32),
-                                                mask=cm, center=zero)[1])
-            wnoise.append(torch.stack(est, 1) if self.kind == "torch" else np.stack(est, 1))
+                cm = cm | torch.as_tensor(pad, device=self.device)
+                est.append(robust.clipped_stats(d.to(torch.float32), mask=cm, center=zero)[1])
+            wnoise.append(torch.stack(est, 1))
             wbase.append(robust.clipped_stats(g["y"], mask=lit)[0][:, None])
         cn = channel(wnoise)
         cbase = channel(wbase)
@@ -493,22 +440,19 @@ class OpticalChain:
         out = []
         for g in groups:
             m = len(g["index"])
-            cg = cn[off:off + m]; cb = cbase[off:off + m]; off += m
-            if self.kind == "torch":
-                cg = torch.as_tensor(cg, dtype=torch.float32, device=self.device)
-                cb = torch.as_tensor(cb, dtype=torch.float32, device=self.device)
+            cg = torch.as_tensor(cn[off:off + m], dtype=torch.float32, device=self.device)
+            cb = torch.as_tensor(cbase[off:off + m], dtype=torch.float32, device=self.device)
+            off += m
             g["y"] = (g["y"] - cb) * g["valid"]
             roi, stored = self._store(g, cg, spec)
-            sl = np.nonzero(g["index"] >= 0)[0]
-            if self.kind == "torch":
-                sl = torch.as_tensor(sl, device=self.device)
+            sl = torch.as_tensor(np.nonzero(g["index"] >= 0)[0], device=self.device)
             idx = g["index"][g["index"] >= 0]
             roi, coarse = roi[sl], g["coarse"][sl]
             details, stored = [d[sl] for d in g["details"]], [s_[sl] for s_ in stored]
             kept.append(sum(s_.sum() for s_ in stored))
             out.append(dict(index=idx, L=g["L"], level=lev, roi=roi, coarse=coarse, details=details,
                             stored=stored, lengths=n_all[idx]))
-        n_kept = int(sum(int(k) for k in kept)) if self.kind == "numpy" else int(torch.stack(kept).sum())
+        n_kept = int(torch.stack(kept).sum())
         n_kept += int(sum(-(-n_all // (1 << lev))))               # coarse sums within each window
         return dict(system=system, spec=dataclasses.asdict(spec), channel=chans, t_us=np.asarray(wf["t_us"]),
                     length=n_all, groups=out, noise=noise, n_kept=n_kept, n_samples=int(n_all.sum()))

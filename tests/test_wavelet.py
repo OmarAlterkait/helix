@@ -1,10 +1,10 @@
-"""The torch DWT (stride-2 conv1d, periodization) is coefficient-identical to pywt."""
+"""The DWT (stride-2 conv1d, periodization) and its inverse are coefficient-identical to pywt."""
 import numpy as np
 import pytest
 import pywt
 
 torch = pytest.importorskip("torch")
-from helix.core import wavelet_ops_torch as W  # noqa: E402
+from helix.core import wavelet as W  # noqa: E402
 
 
 @pytest.mark.parametrize("name", ["haar", "db2", "db4", "coif3", "sym4", "bior2.2"])
@@ -18,4 +18,4 @@ def test_wavedec_matches_pywt(name, n, level):
     for r, g in zip(ref, got):
         np.testing.assert_allclose(g.numpy(), r, rtol=0, atol=1e-10)
     if pywt.Wavelet(name).orthogonal:                 # the torch inverse is the adjoint: orthonormal only
-        np.testing.assert_allclose(W._waverec(got, name).numpy(), x, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(W.reconstruct(got, name, n).numpy(), x, rtol=0, atol=1e-10)

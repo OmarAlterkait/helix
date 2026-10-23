@@ -1,5 +1,5 @@
 """Readout description of a wire detector: channels -> (tpc, plane, wire) and
-electronics groups, plus the pulse templates of the candidate-region filter.
+electronics groups.
 
 A detector ships one ``helix/tpc/data/<name>_readout.npz`` (SBND: exported from the
 channel map and geometry by the SBND-data-helix study, archive/scripts/export_helix_readout.py), or is
@@ -7,8 +7,8 @@ described by its wire layout (simulation: ``{"kind": "layout", "num_wires": [[U,
 "group_size": 64}`` - channels volume-major then plane then wire, every wire instrumented, coherent
 groups of ``group_size`` contiguous wires, the simulation's noise model):
 per offline channel ``tpc, plane, wire, instrumented`` and one integer array per
-electronics grouping (SBND: ``femb``, ``asic``), plus ``templates`` (planes x samples,
-peak at ``meta.template_pre``) and a JSON ``meta``.
+electronics grouping (SBND: ``femb``, ``asic``) and a JSON ``meta``. (The SBND file also holds
+``templates``, pulse shapes of the retired candidate-region filter; nothing reads them.)
 """
 from __future__ import annotations
 
@@ -31,8 +31,6 @@ class ReadoutMap:
         self.wire = d["wire"].astype(np.int64)
         self.instrumented = d["instrumented"].astype(bool)
         self.groups = {k: d[k].astype(np.int64) for k in self.meta.get("group_kinds", [])}
-        self.templates = d["templates"].astype(np.float32)
-        self.template_pre = int(self.meta["template_pre"])
         self.planes = list(self.meta["planes"])
         self.n_tpc = int(self.tpc.max()) + 1
 
@@ -65,11 +63,11 @@ def layout_arrays(num_wires, planes=("U", "V", "Y"), group_size=64):
             n = int(nw[v, p])
             tpc.append(np.full(n, v)); plane.append(np.full(n, p)); wire.append(np.arange(n))
             grp.append(g0 + np.arange(n) // group_size); g0 += -(-n // group_size)
-    meta = dict(planes=list(planes), group_kinds=["block"], template_pre=0, group_size=int(group_size),
+    meta = dict(planes=list(planes), group_kinds=["block"], group_size=int(group_size),
                 num_wires=nw.tolist())
     n = int(nw.sum())
     return dict(meta=json.dumps(meta), tpc=np.concatenate(tpc), plane=np.concatenate(plane), wire=np.concatenate(wire),
-                instrumented=np.ones(n, bool), block=np.concatenate(grp), templates=np.zeros((len(planes), 1), np.float32))
+                instrumented=np.ones(n, bool), block=np.concatenate(grp))
 
 
 @lru_cache(maxsize=None)

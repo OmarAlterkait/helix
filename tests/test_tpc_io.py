@@ -11,7 +11,7 @@ import numpy as np
 import h5py
 import pytest
 
-from helix.tpc.io import (config_from_file, count_events, read_sensor_event,
+from helix.tpc.io import (sensor_layout, count_events, read_sensor_event,
                           read_sensor_plane)
 
 N_TICKS = 64
@@ -88,10 +88,10 @@ def _write_legacy(path, n_events=2, seed=1):
 
 # ── current schema ──────────────────────────────────────────────────────────
 
-def test_current_config_from_file(tmp_path):
+def test_current_sensor_layout(tmp_path):
     path = tmp_path / "cur.h5"
     _write_current(path)
-    cfg = config_from_file(path)
+    cfg = sensor_layout(path)
     assert cfg.num_time_steps == N_TICKS
     assert cfg.plane_labels == tuple(
         f"volume_{v}_{p}" for v in range(2) for p in PLANES)
@@ -101,7 +101,7 @@ def test_current_config_from_file(tmp_path):
 def test_current_roundtrip_event(tmp_path):
     path = tmp_path / "cur.h5"
     truth = _write_current(path)
-    cfg = config_from_file(path)
+    cfg = sensor_layout(path)
     for e in range(2):
         planes = read_sensor_event(path, e, cfg)
         assert set(planes) == set(cfg.plane_labels)
@@ -125,7 +125,7 @@ def test_pixel_file_rejected(tmp_path):
         f.create_group("config").attrs["readout_type"] = "pixel"
         f.create_group("event_000")
     with pytest.raises(ValueError, match="pixel"):
-        config_from_file(path)
+        sensor_layout(path)
 
 
 # ── legacy flat schema ──────────────────────────────────────────────────────
@@ -133,7 +133,7 @@ def test_pixel_file_rejected(tmp_path):
 def test_legacy_roundtrip(tmp_path):
     path = tmp_path / "leg.h5"
     truth = _write_legacy(path)
-    cfg = config_from_file(path)
+    cfg = sensor_layout(path)
     assert cfg.num_time_steps == N_TICKS
     assert set(cfg.plane_labels) == set(PLANES)
     planes = read_sensor_event(path, 0, cfg)
@@ -157,7 +157,7 @@ REAL = sensor_shard("run_0027575715", "sim_wire_sensor_0000.h5")
 @pytest.mark.skipif(not __import__("os").path.exists(REAL),
                     reason="production shard not reachable")
 def test_real_shard_reads():
-    cfg = config_from_file(REAL)
+    cfg = sensor_layout(REAL)
     assert cfg.num_time_steps == 4321
     assert "volume_0_U" in cfg.plane_labels
     img = read_sensor_plane(REAL, 0, "volume_0_U")
@@ -236,10 +236,10 @@ def test_empty_volume_does_not_affect_its_neighbour(tmp_path):
 def test_empty_plane_survives_whole_event_read(tmp_path):
     """read_sensor_event_coo over the affected event must return every plane,
     the empty ones included, so downstream plane bookkeeping stays aligned."""
-    from helix.tpc.io import read_sensor_event_coo, config_from_file
+    from helix.tpc.io import read_sensor_event_coo, sensor_layout
     p = str(tmp_path / "empty_vol.h5")
     _write_with_empty_volume(p)
-    cfg = config_from_file(p)
+    cfg = sensor_layout(p)
     out = read_sensor_event_coo(p, 1, cfg)
     assert set(out) == set(cfg.plane_labels)
     assert all(out[f"volume_0_{pl}"][0].size == 0 for pl in PLANES)

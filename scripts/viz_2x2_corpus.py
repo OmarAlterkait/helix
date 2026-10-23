@@ -146,8 +146,6 @@ def regenerate_planes(shard_path, run, ev, geom_path, npz):
 
     import torch
 
-    from helix.core import backend as _backend
-    _backend.set_backend("torch")
     from helix.tpc import dense_ops as _dops
     from helix.tpc.chain import SIM_BASE
     from helix.tpc.io import read_sensor_event_coo, sensor_layout
@@ -310,19 +308,17 @@ def main():
         # contiguous-block gate) with its occupancy tolerance set to --r1-tau,
         # run on the regenerated noisy planes exactly as the builder feeds them.
         # The figure shows the thresholded coefficients reconstructed.
-        from helix.core import backend as _bk
         from helix.tpc import chain_coeff as _cc
         from helix.tpc.chain import TPCChain, sim_config
         from helix.tpc.corpus import process_planes
         from helix.tpc.io import sensor_layout
-        _bk.set_backend("numpy")
         _layout = sensor_layout(sensor_shard)
         _chain = TPCChain(sim_config(_layout.num_wires, {"coherent": {"tau": a.r1_tau}}))
         _lev, _wav = _chain.cfg["dwt"]["level"], _chain.cfg["dwt"]["wavelet"]
         removed_all = {}
         for _r in process_planes(_chain, {g: np.asarray(x, np.float32) for g, x in noisy_all.items()}):
-            removed_all[_cc.plane_gid(_chain, _r)] = np.asarray(
-                _chain._rec(_r["bands"], _wav, _lev, _r["n_ticks"]))[:, :_layout.num_time_steps]
+            removed_all[_cc.plane_gid(_chain, _r)] = \
+                _chain._rec(_r["bands"], _wav, _lev, _r["n_ticks"]).cpu().numpy()[:, :_layout.num_time_steps]
         kg_lbl = f"R1(tau={a.r1_tau:g})"
 
     REMOVED_TITLE = {

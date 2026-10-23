@@ -20,8 +20,7 @@ leaf outside ``dwt`` may instead be a per-plane mapping ``{"U": .., "V": .., "Y"
 merges overrides and validates; :func:`config_digest` hashes the canonical JSON so an
 output records exactly which chain produced it.
 
-Backend: numpy, or torch when ``device`` is given (inputs are moved there once; every
-stage keeps them on the device).
+Torch on ``device`` (default CPU): inputs are moved there once; every stage keeps them there.
 """
 from __future__ import annotations
 
@@ -30,10 +29,12 @@ import hashlib
 import json
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
-from helix.core import backend
-from helix.tpc import coherent_gate_labels as cgl
-from helix.tpc import robust
+from helix.core import robust, wavelet
+from helix.core.robust import q50
+from helix.tpc import coherent_gate, coherent_gate_labels as cgl
 from helix.tpc import threshold_rows as thr
 from helix.tpc.readout import load_readout
 
@@ -138,9 +139,7 @@ class TPCChain:
     def __init__(self, cfg=None, device=None):
         self.cfg = make_config(cfg)
         self.readout = load_readout(self.cfg["readout"])
-        self.device = device
-        self.kind = "torch" if device is not None else "numpy"
-        self.wops = backend.import_backend_module("helix.core.wavelet_ops", self.kind)
+        self.device = "cpu" if device is None else device
         self.digest = config_digest(self.cfg)
         self._rows = {t: self.readout.rows(t) for t in range(self.readout.n_tpc)}
         self.timings = None                     # dict stage -> seconds when timing is on
@@ -154,8 +153,7 @@ class TPCChain:
         if self.timings is None:
             return
         import time
-        if self.kind == "torch" and str(self.device).startswith("cuda"):
-            import torch
+        if str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         t = time.perf_counter()
         if self._t0 is not None and name is not None:
@@ -164,43 +162,29 @@ class TPCChain:
 
     # ---------------------------------------------------------------- helpers
     def _to(self, x, dtype=None):
-        """numpy array or tensor on the chain's device (``dtype``: np.float32 or bool)."""
-        if self.kind == "numpy":
-            x = x.cpu().numpy() if backend.kind_of(x) == "torch" else x
-            return np.asarray(x) if dtype is None else np.asarray(x, dtype)
-        import torch
+        """A tensor on the chain's device (``dtype``: np.float32 or bool)."""
         t = x if isinstance(x, torch.Tensor) else torch.as_tensor(np.asarray(x))
         t = t.to(self.device, non_blocking=True)
         return t if dtype is None else t.to({np.float32: torch.float32, bool: torch.bool}[dtype])
 
     def _where_rows(self, img, ok):
-        if self.kind == "numpy":
-            return np.where(ok[:, None], img, np.float32(0))
-        import torch
         return torch.where(ok[:, None], img, torch.zeros((), dtype=img.dtype, device=img.device))
 
     def _dwt(self, img, wav, level):
         nt = img.shape[1]
         pad = (-nt) % (2 ** level)
         if pad:
-            if self.kind == "numpy":
-                img = np.pad(img, ((0, 0), (0, pad)))
-            else:
-                import torch.nn.functional as F
-                img = F.pad(img, (0, pad))
-        bands, lev = self.wops.wavedec(img, wav, level, "periodization")
+            img = F.pad(img, (0, pad))
+        bands, lev = wavelet.wavedec(img, wav, level, "periodization")
         if lev != level:
             raise ValueError(f"level {level} too deep for {nt} ticks and {wav}")
         return list(bands)
 
     def _rec(self, bands, wav, level, nt):
-        return self.wops.reconstruct(bands, wav, level, "periodization", nt)
+        return wavelet.reconstruct(bands, wav, nt)
 
     def _median(self, x):
-        if self.kind == "numpy":
-            return float(np.median(x)) if len(x) else 0.0
-        from helix.core.backend import torch_q50
-        return torch_q50(x, dim=0) if x.numel() else x.new_zeros(())
+        return q50(x, dim=0) if x.numel() else x.new_zeros(())
 
     # ---------------------------------------------------------------- stages
     def status(self, img, present):
@@ -208,24 +192,14 @@ class TPCChain:
         docstring: dead, noisy, baseline step)."""
         c = self.cfg["status"]
         _, sd, _ = robust.clipped_stats(img, k=c["clip_k"])
-        if self.kind == "numpy":
-            sd = np.nan_to_num(sd, nan=0.0)
-        else:
-            sd = sd.nan_to_num(nan=0.0)
+        sd = sd.nan_to_num(nan=0.0)
         if c["method"] == "none":                               # simulation: every present row is valid
             return present, sd
         n = min(int(c["step_ticks"]), img.shape[1] // 2)
-        if self.kind == "numpy":
-            step = np.abs(np.median(img[:, -n:], axis=1) - np.median(img[:, :n], axis=1))
-        else:
-            from helix.core.backend import torch_q50
-            step = (torch_q50(img[:, -n:], dim=1) - torch_q50(img[:, :n], dim=1)).abs()
+        step = (q50(img[:, -n:], dim=1) - q50(img[:, :n], dim=1)).abs()
         ok = present & (sd > c["dead_rms"]) & (step <= c["step_k"] * sd)
         med = self._median(sd[ok])
-        if self.kind == "numpy":
-            ok = ok & (sd < c["noisy_factor"] * med) if med > 0 else ok
-        else:                                                   # no host sync: med 0 -> no noisy cut
-            ok = ok & ((sd < c["noisy_factor"] * med) | (med <= 0))
+        ok = ok & ((sd < c["noisy_factor"] * med) | (med <= 0))           # no host sync: med 0 -> no noisy cut
         return ok, sd
 
     def process_tpc(self, adc, ped, present, tpc, return_images=False):
@@ -235,13 +209,13 @@ class TPCChain:
         self._mark(None)
         imgs, pres = [], []
         for r in self._rows[tpc]:
-            ri = r if self.kind == "numpy" else self._to(r)
+            ri = self._to(r)
             raw = self._to(adc[ri], np.float32)
             if cfg["pedestal"]["method"] == "file":
                 p = self._to(ped[ri], np.float32)
             else:
                 p, _, _ = robust.clipped_stats(raw, k=cfg["pedestal"]["clip_k"])
-                p = p.nan_to_num(nan=0.0) if self.kind == "torch" else np.nan_to_num(p)
+                p = p.nan_to_num(nan=0.0)
             imgs.append(raw - p[:, None]); pres.append(self._to(present[ri], bool))
         return self._planes(imgs, pres, tpc, return_images)
 
@@ -288,8 +262,7 @@ class TPCChain:
                 else:
                     bands = [cgl.coherent_gate_labeled(b, lab, **gkw) for b, lab in zip(bands, labels)]
             else:
-                gops = backend.import_backend_module("helix.tpc.coherent_gate_ops", self.kind)
-                bands = [gops.gate_bands(b, group_size=coh["group_size"], **gkw) for b in bands]
+                bands = [coherent_gate.gate_bands(b, group_size=coh["group_size"], **gkw) for b in bands]
         self._mark("dwt_gate")
         tc = cfg["threshold"]
         nd = int(tc["drop_finest"])

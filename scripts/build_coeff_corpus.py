@@ -12,8 +12,8 @@ plane_fn(event) -> (noisy_planes, clean_planes):
 
 The DSP is helix.tpc.chain.TPCChain(sim_config(layout.num_wires, overrides)): the
 sensor file's wire layout as the readout, HELIX's block gate, coif3 L4, hysteresis
-threshold, D1 dropped. Backends: numpy, or torch on the GPU (densify, noise,
-digitize and the chain all on the device).
+threshold, D1 dropped. Torch: densify, noise, digitize and the chain all on the
+device (the GPU when there is one).
 
 Usage:
   python build_coeff_corpus.py --shard <sensor.h5> --out <dir> --events 100 \
@@ -232,14 +232,10 @@ def main():
     ap.add_argument("--allow-index-mismatch", action="store_true",
                     help="serial mode: permit --file-index to disagree with --shard's "
                          "numeric suffix (mislabels provenance; use only deliberately)")
-    ap.add_argument("--backend", choices=["numpy", "torch"], default="torch",
-                    help="DSP backend: torch (the DEFAULT) runs densify, noise, "
-                         "digitize and the TPC chain on the GPU (cuda); numpy runs "
-                         "everything on the host.")
     ap.add_argument("--mode", choices=["serial", "loader"], default="serial",
                     help="loader: pimm-data DataLoader workers + the torch dense tail "
                          "(ToDevice/Densify/AddNoise/Digitize) fed to the chain on the "
-                         "GPU; the read overlaps the GPU. Needs --backend torch.")
+                         "GPU; the read overlaps the GPU.")
     ap.add_argument("--workers", type=int, default=4, help="DataLoader workers (loader mode)")
     ap.add_argument("--split", default=None, help="run dir under data_root (loader mode)")
     ap.add_argument("--data-root", default=None, help="dataset root (loader mode)")
@@ -294,27 +290,15 @@ def main():
             f"--npz {args.npz} does not exist. helix ships its own copy; pass "
             f"--npz explicitly, or unset HELIX_JAXTPC_ROOT to use the packaged one.")
 
-    if args.mode == "loader" and args.backend != "torch":
-        raise SystemExit("--mode loader runs the torch dense tail on the GPU: use --backend torch")
-    from helix.core import backend
-    backend.set_backend(args.backend)
-    from helix.tpc.io import (sensor_layout, read_sensor_event,
-                              read_sensor_event_coo, list_events)
+    from helix.tpc.io import sensor_layout, read_sensor_event_coo, list_events
     from helix.core.coeff_io import _code_version
+    import torch
 
-    def _device_name(backend):
-        if backend != "torch":
-            return backend
-        try:
-            import torch
-            return (f"torch:{torch.cuda.get_device_name(0)}"
-                    if torch.cuda.is_available() else "torch:cpu")
-        except Exception:
-            return "torch:unknown"
+    def _device_name():
+        return f"torch:{torch.cuda.get_device_name(0)}" if torch.cuda.is_available() else "torch:cpu"
     from helix.tpc.chain import TPCChain, sim_config
     from helix.tpc.corpus import build_corpus
     from helix.tpc.geometry import load_plane_registry
-    from helix.tpc.noise import generate_noise, digitize
 
     # Always the MEASURED spectrum. White incoherent noise was an acknowledged
     # bug; the switch that reproduced it now lives only on legacy-corpus-repro.
@@ -332,13 +316,9 @@ def main():
         coherent["tau"] = _parse_tau(args.tau)
     overrides = {"coherent": coherent} if coherent else None
 
-    use_torch = args.backend == "torch"
-    dev = None
-    if use_torch:
-        import torch
-        from helix.tpc import dense_ops as _dops
-        from pimm_data.dense_ops import densify as _densify  # going to dense
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
+    from helix.tpc import dense_ops as _dops
+    from pimm_data.dense_ops import densify as _densify  # going to dense
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
     chain = TPCChain(sim_config(layout.num_wires, overrides), device=dev)
     # The coherent noise model's channel groups ARE the readout layout's groups (the
     # block gate removes per group): one number, read from the chain, never set twice.
@@ -347,7 +327,7 @@ def main():
     print(f"n_time={layout.num_time_steps} planes={len(layout.plane_labels)} "
           f"wavelet={_dw['wavelet']} L{_dw['level']} removal={_co['method']} "
           f"k{_co['kgate']}/np{_co['npass']}/tau{_co['tau']} group={group_size} "
-          f"chain={chain.digest} device={dev or 'numpy'} noise=colored")
+          f"chain={chain.digest} device={dev} noise=colored")
 
     _src_name = Path(args.shard).name
 
@@ -367,14 +347,10 @@ def main():
             hashlib.blake2b(f"{args.run}/{_src_name}/ev{ev}".encode(),
                             digest_size=8).digest(), "little") & 0xFFFFFFFF
 
-    def _plane_fn_torch(ev):
-        """Torch: densify + noise + digitize ON DEVICE, same ops as loader mode.
-
-        Without this the torch backend read a dense NUMPY image and noised it on
-        the host before handing it to the GPU DSP (19.6 s/event, nearly all of it
-        the host prologue).
-        Uses pimm-data's batched dense ops with B=1; those are the same
-        implementations the loader tail runs, and the bounds-guarded ones.
+    def plane_fn(ev):
+        """Densify + noise + digitize ON DEVICE, same ops as loader mode (noising a
+        dense host image first cost 19.6 s/event). pimm-data's batched dense ops
+        with B=1: the same, bounds-guarded, implementations the loader tail runs.
         """
         spec = read_sensor_event_coo(args.shard, ev, layout)
         seed = _seed(ev)
@@ -398,25 +374,6 @@ def main():
         peds = {int(g): layout.pedestal(gmap[int(g)]) for g in grids}
         grids = _dops.digitize(grids, peds, n_bits=12)
         return {int(g): x[0] for g, x in grids.items()}, clean
-
-    def plane_fn(ev):
-        if use_torch:
-            return _plane_fn_torch(ev)
-        planes = read_sensor_event(args.shard, ev, layout)
-        rng = np.random.default_rng(_seed(ev))
-        noisy, clean = {}, {}
-        for label, img in planes.items():
-            gid = layout.plane_gid(label)
-            nw = img.shape[0]
-            wl = np.asarray(reg.get(gid, {}).get("wire_lengths", []), np.float64)
-            if wl.size != nw:
-                wl = np.full(nw, 2.33, np.float64)
-            noise = generate_noise(img.shape, rng=rng, wire_lengths_m=wl,
-                                   incoherent=True, coherent=True,
-                                   series_spectrum=noise_spec, group_size=group_size)
-            noisy[gid] = digitize(img + noise, layout.pedestal(label))
-            clean[gid] = img.astype(np.float32)
-        return noisy, clean
 
     norm_in = np.load(args.norm_sigma) if args.norm_sigma else None
     if norm_in is not None:
@@ -485,13 +442,13 @@ def main():
         # torch DSP path is architecture-sensitive (turing vs A100 differ on
         # 0.016% of surviving coefficients for identical code and input), so a
         # corpus spanning generations is not one corpus.
-        device=_device_name(args.backend))
+        device=_device_name())
 
     noise_meta = dict(kind="colored",
                       incoherent=True, coherent=True,
                       group_size=group_size,
                       spectrum=os.path.basename(args.npz),
-                      mode=args.mode, backend=args.backend)
+                      mode=args.mode, backend="torch")
     t0 = time.perf_counter()
     if args.mode == "loader":
         from helix.tpc.corpus import build_corpus_stream

@@ -47,11 +47,11 @@ def test_chain_runs_and_excludes_dead_rows(overrides):
     assert y0["n_kept"] > 0
     u0 = [r for r in res if r["tpc"] == 0 and r["plane"] == "U"][0]
     assert not u0["valid"][300]
-    assert all(not np.any(b[300]) for b in u0["bands"])
+    assert all(not b[300].any() for b in u0["bands"])
     nd = chain.cfg["threshold"]["drop_finest"]
     for r in res:
         assert r["level"] == chain.cfg["dwt"]["level"]
-        assert all(not np.any(b) for b in r["bands"][len(r["bands"]) - nd:])
+        assert all(not b.any() for b in r["bands"][len(r["bands"]) - nd:])
 
 
 def test_baseline_step_row_is_excluded():

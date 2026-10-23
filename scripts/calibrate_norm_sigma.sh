@@ -76,7 +76,7 @@ for r in $RUNS; do
   python scripts/build_coeff_corpus.py \
     --shard "$SRC/$r/sim_wire_sensor_0000.h5" --out "$CALIB/$r" \
     --dataset-name sim_wire --run "$r" --file-index 0 \
-    --event-start 0 --events "$N" --mode serial --backend torch \
+    --event-start 0 --events "$N" --mode serial \
     $KG_ARG \
     --calibrate --save-norm-sigma "$CALIB/$r.npy" 2>&1 | tail -2
   printf '%s\n' "$_WANT" > "$_STAMP"

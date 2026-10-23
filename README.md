@@ -83,7 +83,7 @@ Both the simulation corpus and SBND data run through one chain,
 
 A coefficient-space gate (no image round trip: the DWT is linear). Per band and
 per pass, a robust common mode is estimated per block of wires (64-wire blocks
-in simulation, `helix.tpc.coherent_gate_ops_numpy`; front-end-board groups across
+in simulation, `helix.tpc.coherent_gate`; front-end-board groups across
 planes on SBND, `helix.tpc.coherent_gate_labels`), subtracted where it looks like
 coherent noise and refused where it looks like signal. Two passes: the second
 excludes signal detected on the first pass's output.
@@ -98,8 +98,8 @@ difference between the two corpus generations, and mixing them is the failure
 
 Per-wire coif3 DWT (level 4, periodization) with a hysteresis hard threshold
 (`helix.tpc.threshold_rows`): seeds at the universal threshold (kappa = 1.0),
-grown through 2 sigma; the finest detail band D1 is dropped. The torch backend
-uses an FFT DWT that is coefficient-identical to pywt.
+grown through 2 sigma; the finest detail band D1 is dropped. The DSP is torch (GPU,
+or CPU) with a DWT that is coefficient-identical to pywt.
 
 ### 3. The model
 
@@ -147,12 +147,7 @@ spectrum) + flat white noise + coherent group noise.
 | Wavelet only | 0.845 | 0.832 | 0.933 |
 | Full pipeline | 0.902 | 0.888 | 0.957 |
 
-| Backend | Per plane | Per event (6 planes) |
-|---------|-----------|---------------------|
-| NumPy (CPU) | 176 ms | 1.1 s |
-
-The corpus builder defaults to `--backend torch` (10.6 ms/plane), which is what
-built the current corpus.
+The corpus builder runs the chain on the GPU: 10.6 ms/plane on a 2080 Ti.
 
 ## Scripts
 

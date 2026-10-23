@@ -1,12 +1,8 @@
-"""Torch twins of the SBND additions agree with the numpy references.
+"""The SBND additions' fast paths agree with their general forms, on CPU and (when available)
+CUDA (run by hand on turing: CI has no GPU): the labeled gate's contiguous kernel for complete
+groups vs its masked kernel; all planes' hysteresis grown at once vs one plane at a time.
 
-Covers the labeled coherent gate (masked groups, per-group scale, cross-plane
-stacking) and the live-row threshold (plain and hysteresis). Runs on CPU torch and,
-when available, CUDA (run by hand on turing: CI has no GPU).
-
-Tolerances: float32 reduction order differs between the backends (as for HELIX's
-contiguous gate, ~1e-4 ADC), so values are compared to 1e-3 and discrete outputs
-(kept coefficients, seeds) may differ only where a value sits on its threshold.
+Tolerance: float32 reduction order differs between the two gate kernels (~1e-4 ADC).
 """
 import numpy as np
 import pytest
@@ -50,49 +46,14 @@ def _bands(img, wav="coif3", level=4):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-@pytest.mark.parametrize("kw", [dict(sigc_scope="global", tau=0.05),
-                                dict(sigc_scope="group", tau=None)])
-def test_label_gate_torch_matches_numpy(dev, kw):
-    imgs, labels = _planes()
-    bp = [_bands(im) for im in imgs]
-    ref = cgl.coherent_gate_planes(bp, labels, **kw)
-    got = cgl.coherent_gate_planes([[_t(b, dev) for b in bl] for bl in bp], labels, **kw)
-    for rp, gp in zip(ref, got):
-        for r, g in zip(rp, gp):
-            assert isinstance(g, torch.Tensor) and g.device.type == dev
-            np.testing.assert_allclose(_np(g), r, rtol=0, atol=1e-3)
-
-
-@pytest.mark.parametrize("dev", DEVICES)
 def test_label_gate_full_groups_fast_path(dev):
     rng = np.random.default_rng(3)
     b = rng.normal(0, 1, (256, 300)).astype(np.float32)
     g = cgl.ChannelGroups(np.arange(256) // 64)
-    ref = cgl.gate_band_labeled(b, g, npass=2, tau=0.05)
-    got = cgl.gate_band_labeled(_t(b, dev), g, npass=2, tau=0.05)
-    np.testing.assert_allclose(_np(got), ref, rtol=0, atol=1e-3)
-
-
-@pytest.mark.parametrize("dev", DEVICES)
-@pytest.mark.parametrize("kw", [dict(floor=None), dict(floor=None, sigma_scope="channel"),
-                                dict(floor=None, sigma_scope="group"), dict(), dict(floor=1.5, sigma_scope="group")])
-def test_threshold_rows_torch_matches_numpy(dev, kw):
-    imgs, labels = _planes(seed=5)
-    im, lab = imgs[0], labels[0]
-    valid = lab >= 0
-    b = _bands(im)
-    kw = dict(kw)
-    if kw.get("sigma_scope") == "group":
-        kw["groups"] = lab
-    ref, kref, nref, sref = tr.threshold_bands_rows(b, kappa=0.9, valid=valid, **kw)
-    got, kgot, ngot, sgot = tr.threshold_bands_rows([_t(c, dev) for c in b], kappa=0.9, valid=_t(valid, dev), **kw)
-    assert ngot == nref
-    assert abs(kgot - kref) <= max(2, 1e-3 * kref)           # only values on the threshold may flip
-    np.testing.assert_allclose(sgot, sref, rtol=1e-4)
-    for r, g in zip(ref, got):
-        g = _np(g)
-        both = (r != 0) & (g != 0)
-        np.testing.assert_allclose(g[both], r[both], rtol=0, atol=1e-5)
+    assert g.full
+    masked, _ = cgl.gate_band_labeled(_t(b, dev), g, npass=2, tau=0.05, return_parts=True)
+    fast = cgl.gate_band_labeled(_t(b, dev), g, npass=2, tau=0.05)
+    np.testing.assert_allclose(_np(fast), _np(masked), rtol=0, atol=1e-3)
 
 
 @pytest.mark.parametrize("dev", DEVICES)
@@ -106,6 +67,3 @@ def test_threshold_planes_rows_matches_per_plane(dev):
         assert (k, n) == (k1, n1) and np.array_equal(s, s1)
         for x, y in zip(o, o1):
             assert torch.equal(x, y)
-    ref = tr.threshold_planes_rows([([_np(c) for c in b], dict(kw, valid=_np(kw["valid"]))) for b, kw in jobs])
-    for (o, k, _, _), (r, kr, _, _) in zip(together, ref):
-        assert abs(k - kr) <= max(2, 1e-3 * kr)

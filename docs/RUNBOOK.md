@@ -72,7 +72,7 @@ container and the plumbing without a byte of production data.
                                 n_events=200, readout_type='wire')"
 
     $PY scripts/build_coeff_corpus.py --shard $W/sim/sensor/sim_wire_sensor_0000.h5 \
-        --out $W/corpus/run_synth --dataset-name sim_wire --mode serial --backend torch
+        --out $W/corpus/run_synth --dataset-name sim_wire --mode serial
     $PY -m helix.data.coeff_verify $W/corpus/run_synth --dataset-name sim_wire
     $PY scripts/write_holdout.py --corpus $W/corpus/run_synth --dataset-name sim_wire \
         --train 0.6 --val 0.2 --probe 0.2
@@ -173,9 +173,8 @@ is missing indices 51-56 and 94-97, so it yields 180 shards and 17,999 events,
 in production too. Those tasks skip with a message and exit 0. A task that FAILS
 is a real failure.
 
-That is the production path: a Slurm job array, `--backend torch` (the default —
-measured 10.6 ms/plane, vs 176 ms on numpy), one GPU per task, `turing`
-partition. `--backend numpy` is the reference.
+That is the production path: a Slurm job array, one GPU per task (10.6 ms/plane),
+`turing` partition.
 
 Single-shard, interactively, to check the chain end to end:
 
@@ -575,14 +574,12 @@ the expensive way at least once.
 | script | question | needs GPUs |
 |---|---|---|
 | `scripts/audit_runs.py` | did these runs do what their labels say? | no |
-| `scripts/probe_peak_memory.py` | how does peak memory grow with event size? | yes |
 | `scripts/probe_largest_events.py` | does the corpus's WORST event actually fit? | yes |
 | `scripts/measure_noise_scale.py` | what batch size stops paying (`B_simple`)? | yes |
 
-`probe_largest_events.py` exists because `probe_peak_memory.py` is not enough:
-fitting memory against event size and extrapolating to the maximum applied a
-2.77x max/mean ratio to an already-large sampled event and overstated the answer
-by ~40%. The five largest events are cheap to just run.
+`probe_largest_events.py` runs the five largest events instead of fitting memory
+against event size: extrapolating a fit applied a 2.77x max/mean ratio to an
+already-large sampled event and overstated the answer by ~40%.
 
 `measure_noise_scale.py` reports the SGD-derived `B_simple`, which is known to
 UNDERSTATE the critical batch size for Adam. Read it as a floor, and prefer a

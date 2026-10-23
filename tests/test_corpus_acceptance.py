@@ -6,13 +6,11 @@ co-support checks. Nothing asserted that a value must be *populated*, must
 *vary*, or must *reconstruct the physics*. These do.
 
   1. degenerate-field audit  — catches all-zero / constant / out-of-range content
-  2. backend equivalence     — the chain on numpy vs torch (cuda) on the SAME noisy input
-  3. physics acceptance (F0) — reconstruct a built shard vs the clean truth projected
+  2. physics acceptance (F0) — reconstruct a built shard vs the clean truth projected
                                onto the bands the chain keeps
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 
 import numpy as np
@@ -153,69 +151,7 @@ def test_noise_mode_is_recorded_on_disk(tmp_path):
         assert _json.loads(f["config"].attrs["noise_json"])["kind"] == "white"
 
 
-# ---- 2. backend equivalence (same noisy input, numpy vs torch) ------------
-
-def _has(bk):
-    try:
-        return importlib.util.find_spec(bk) is not None
-    except Exception:
-        return False
-
-
-def test_backend_equivalent_on_same_input(tmp_path):
-    """The chain must produce the SAME corpus on numpy and on torch (cuda) from the
-    same input, inputs handed over as device tensors as the builder does.
-
-    Noise is fixed (the RNG streams differ per backend), so this compares the DSP
-    + extraction + assembly only. It also compares the CLEAN target (gathered on the
-    device) and sigma_threshold: comparing the noisy events alone once hid a
-    clean-side divergence, and torch's band sigma once used ``torch.median`` (the
-    LOWER of two middles) where numpy averages them — a MAD feeds a threshold, which
-    is discontinuous, so torch kept 1-2 extra coefficients per event. See
-    backend.torch_q50.
-    """
-    if not _has("torch"):
-        pytest.skip("torch not installed")
-    import torch
-    if not torch.cuda.is_available():
-        pytest.skip("torch has no CUDA device")
-
-    def to_dev(ev):
-        n, c = _plane_fn(ev)
-        return ({k: torch.as_tensor(v).cuda() for k, v in n.items()},
-                {k: torch.as_tensor(v).cuda() for k, v in c.items()})
-
-    out = {}
-    for name, pf, dev in (("numpy", _plane_fn, None), ("torch", to_dev, "cuda")):
-        ces, cls, norm = build_corpus(range(3), pf, _chain(dev), tmp_path / name,
-                                      dataset_name="cx", write=False)
-        out[name] = (ces, norm, cls)
-
-    def canon(ce):
-        """Sort rows canonically: row order within an event is not part of the
-        format contract, so equivalence is compared as a set."""
-        o = np.lexsort((ce.tau, ce.wire, ce.band, ce.plane_gid))
-        return (ce.band[o], ce.plane_gid[o], ce.wire[o], ce.tau[o], ce.value[o])
-
-    for i, (a, b) in enumerate(zip(out["numpy"][0], out["torch"][0])):
-        assert a.n_coeff == b.n_coeff, f"event {i}: {a.n_coeff} vs {b.n_coeff} coeffs"
-        ca, cb = canon(a), canon(b)
-        for k, x, y in zip(("band", "plane_gid", "wire", "tau"), ca[:4], cb[:4]):
-            np.testing.assert_array_equal(x, y, err_msg=k)
-        np.testing.assert_allclose(cb[4], ca[4], rtol=1e-4, atol=1e-4)
-        # the sigma field is the one that silently diverged before the fix
-        np.testing.assert_allclose(b.sigma_threshold, a.sigma_threshold,
-                                   rtol=1e-4, atol=1e-6)
-        # ...and the CLEAN target, which shares the noisy support so it sorts the
-        # same way.
-        oa = np.lexsort((a.tau, a.wire, a.band, a.plane_gid))
-        ob = np.lexsort((b.tau, b.wire, b.band, b.plane_gid))
-        np.testing.assert_allclose(out["torch"][2][i].value[ob], out["numpy"][2][i].value[oa],
-                                   rtol=1e-4, atol=1e-4, err_msg=f"clean target, event {i}")
-    np.testing.assert_allclose(out["torch"][1], out["numpy"][1], rtol=1e-4, atol=1e-6)
-
-
-# ---- 3. physics acceptance (F0) on real data ------------------------------
+# ---- 2. physics acceptance (F0) on real data ------------------------------
 
 from _paths import sensor_shard                                # noqa: E402
 
@@ -234,7 +170,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
     loss to charge the DSP with. The projection alone keeps 0.989-0.995 of the clean
     signal on this event.
 
-    Floors from the chain on this shard (numpy, events 0-3 x 6 planes, this noise):
+    Floors from the chain on this shard (events 0-3 x 6 planes, this noise):
 
         per plane   F0 min 0.871        per-event mean F0 0.910-0.917
         off-support RMS(recon - truth) per-event mean 0.43-0.52, max 0.692 ADC
@@ -281,8 +217,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
     f0s, off_rms = [], []
     for gid, r in recon.items():
         c = np.asarray(made[0][gid])
-        truth = np.asarray(chain.wops.reconstruct(chain.dwt_rows(c), d["wavelet"], d["level"],
-                                                  d["mode"], nt))[:, :nt]
+        truth = chain._rec(chain.dwt_rows(c), d["wavelet"], d["level"], nt).cpu().numpy()[:, :nt]
         rr = np.asarray(r)[:, :nt]
         sig = np.abs(c) > 0
         if sig.any():

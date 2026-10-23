@@ -31,8 +31,7 @@ def nonzero_rows(cband):
     A torch tensor is compacted where it lives (``torch.nonzero``) and only the
     sparse rows (~1% of the band) come back to the host.
     """
-    from helix.core.backend import kind_of
-    if kind_of(cband) == "torch":
+    if type(cband).__module__.startswith("torch"):
         import torch
         nz = torch.nonzero(cband, as_tuple=True)
         vals = cband[nz]
@@ -152,17 +151,10 @@ class CoeffEvent:
         return out
 
     def reconstruct_images(self, n_time: int | None = None) -> dict[int, np.ndarray]:
-        """Inverse DWT per plane → ``{gid: (n_wires, n_time) image}`` (numpy backend)."""
+        """Inverse DWT per plane → ``{gid: (n_wires, n_time) image}`` (numpy arrays)."""
         nt = self.basis.n_ticks_raw if n_time is None else n_time
-        bands = self.to_band_lists()
-        return {
-            gid: reconstruct(
-                SparseResult(coeffs=b, n_kept=0, n_total=0, sigma_per_band=None,
-                             wavelet=self.basis.wavelet, level=self.basis.level,
-                             mode=self.basis.mode),
-                nt)
-            for gid, b in bands.items()
-        }
+        return {gid: reconstruct(b, self.basis.wavelet, nt).cpu().numpy()
+                for gid, b in self.to_band_lists().items()}
 
     @property
     def n_coeff(self) -> int:

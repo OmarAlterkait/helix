@@ -167,7 +167,7 @@ revisions. The base is
 `ghcr.io/deeplearnphysics/pimm v0.5.1`, pinned by digest
 `sha256:c0dc5a64…a776bf`, so the build does not drift when that tag moves.
 
-**No jax.** helix's DSP backends are numpy and torch; the image no longer
+**No jax.** helix's DSP is torch; the image no longer
 installs jax (images built before that change still carry it, and the published
 `jax-*` tags are no longer updated). The build still refuses to finish if its
 install *moves* any nvidia wheel torch is using — added wheels are fine, moved

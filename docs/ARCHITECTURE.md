@@ -12,7 +12,8 @@ pimm-data 0.4.0). Where a number appears, the way it was measured is named.
 
 **helix** — LArTPC signal processing, the coefficient corpus, the foundation
 model, and the 3D probe. Base install is `numpy`, `h5py`, `PyWavelets`, `scipy`.
-torch is an OPTIONAL extra (the GPU backend; numpy is the reference); `pimm-data` is the optional `[pimm]` extra.
+torch is an OPTIONAL extra: the signal processing (TPC chain, optical encoder) needs it; reading the
+corpus and tokenizing do not. `pimm-data` is the optional `[pimm]` extra.
 
 **pimm-data** — a generic data layer between sharded HDF5 detector output and
 PyTorch training loops, serving four detector families (jaxtpc, lucid, optical,
@@ -41,7 +42,7 @@ instead of one.
 
 | subpackage | modules | may import pimm_data | what it is |
 |---|---|---|---|
-| `helix.core` | 10 | **no** | wavelet transforms, coefficient IO, backend dispatch, provenance |
+| `helix.core` | 8 | **no** | wavelet transform, robust statistics, hysteresis, coefficient IO, provenance |
 | `helix.tpc` | 19 | **no** | LArTPC physics: coherent removal, the noise forward model, digitization, geometry, the corpus builder's plumbing |
 | `helix.model` | 9 | no (see below) | the foundation model: tokenizer, blocks, masking, loss, muP |
 | `helix.probe` | 8 | no | the 3D deconvolution probe |
@@ -171,8 +172,7 @@ on a login node with no CUDA toolkit — and then:
 * adds PyWavelets, helix's only dependency the base image lacked
 * adds pytest, because the first thing anyone does with a new environment is ask
   whether it works
-* no jax: helix's DSP backends are numpy and torch (the corpus builder runs
-  `--backend torch`). Images built before jax was removed still carry it, unused.
+* no jax: helix's DSP is torch. Images built before jax was removed still carry it, unused.
 
 **pimm and helix are NOT installed in the image.** They are the code under
 development and arrive by bind mount / PYTHONPATH, so editing either does not
@@ -313,8 +313,8 @@ others leave, and each was mutation-tested by actually adding
    imports each submodule alone, and catches violations *transitively*: the
    mutation in `noise.py` also failed `dense_ops`, which imports it.
 
-Only `pimm_data` is forbidden in part 3. torch is not — the backend modules
-(`wavelet_ops_torch`, `coherent_gate_ops_torch`, `dense_ops`) import it at
+Only `pimm_data` is forbidden in part 3. torch is not — the DSP modules
+(`helix.core.robust`, `helix.tpc.coherent_gate`, `dense_ops`, ...) import it at
 module scope by design and are declared optional extras. The invariant this file
 defends is about pimm-data, not about weight of imports.
 

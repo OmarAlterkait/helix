@@ -1,11 +1,27 @@
-"""Label-grouped coherent gate: parity with the contiguous-block gate and with a
+"""Label-grouped coherent gate: parity with the contiguous-block gate and with a numpy
 per-group reference on groups with excluded channels."""
 import numpy as np
 import pytest
 
-from helix.tpc.coherent_gate_ops_numpy import gate_band
-from helix.tpc.coherent_gate_labels import (ChannelGroups, gate_band_labeled, coherent_gate_labeled,
-                                            coherent_gate_planes)
+torch = pytest.importorskip("torch")
+from helix.tpc import coherent_gate, coherent_gate_labels as cgl  # noqa: E402
+from helix.tpc.coherent_gate_labels import ChannelGroups  # noqa: E402
+
+
+def gate_band(b, **kw):
+    return coherent_gate.gate_band(torch.as_tensor(b), **kw).numpy()
+
+
+def gate_band_labeled(b, groups, **kw):
+    return cgl.gate_band_labeled(b, groups, **kw).numpy()
+
+
+def coherent_gate_labeled(bands, labels, **kw):
+    return [x.numpy() for x in cgl.coherent_gate_labeled(bands, labels, **kw)]
+
+
+def coherent_gate_planes(planes, labels, **kw):
+    return [[x.numpy() for x in p] for p in cgl.coherent_gate_planes(planes, labels, **kw)]
 
 
 def _band(W=256, L=300, seed=0, gs=64):

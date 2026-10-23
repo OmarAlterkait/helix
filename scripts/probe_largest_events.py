@@ -1,9 +1,8 @@
 """Peak memory on the corpus's actual largest events — measured, not extrapolated.
 
-``probe_peak_memory.py`` samples the distribution and fits a line. That answers
-"how does memory grow with event size" but not "does the worst event fit", and
-extrapolating the fit is how a 2.77x max/mean ratio gets applied to an already-
-large sampled event and produces a number 40% too high.
+Fitting memory against event size and extrapolating answers "how does memory
+grow" but not "does the worst event fit": it applied a 2.77x max/mean ratio to an
+already-large sampled event and produced a number 40% too high.
 
 This takes the five largest events in the corpus by ``event_sizes()`` and runs a
 real forward/backward on each. One GPU, a couple of minutes, no extrapolation.

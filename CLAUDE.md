@@ -11,7 +11,7 @@ the learned representation knows where charge is.
 
 | package | may import pimm-data / pimm | what it is |
 |---|---|---|
-| `helix.core` | **no** | detector-agnostic wavelets, coeff IO, provenance, lazy backend dispatch |
+| `helix.core` | **no** | wavelet transform, robust statistics, hysteresis, coeff IO, provenance |
 | `helix.tpc` | **no** | LArTPC physics: coherent gate, forward model (noise + digitize), geometry, corpus builder |
 | `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP |
 | `helix.probe` | no | the 3D deconvolution probe |
@@ -81,11 +81,10 @@ See `docs/RUNBOOK.md` for corpus → train → eval → probe, and
 
 ## Structural patterns worth knowing
 
-**Lazy multi-backend dispatch (`helix.core.backend`).** torch is imported
-only when its backend is selected, never at `import helix` time. Each op
-family ships `<family>_<backend>.py`; `backend.ops(...)` imports only the active
-one. Adding an op means adding it to every backend module, or it silently works
-on one.
+**One backend: torch, any device.** The DSP (TPC chain, optical encoder) is torch on
+the GPU or the CPU; there is no numpy twin to keep in step. torch is still never
+imported at `import helix` time: corpus readers, the tokenizer and the optical
+decoder (`unhaar`) are numpy, and `helix.core.wavelet` imports torch when it runs.
 
 **Values are raw; normalisation is a sidecar.** The corpus stores unnormalised
 coefficients plus a `norm_sigma` table applied at tokenize — deliberately, so

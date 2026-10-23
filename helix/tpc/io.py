@@ -175,9 +175,6 @@ def sensor_layout(path: str | Path) -> SensorLayout:
                         pedestals=pedestals, num_wires=num_wires)
 
 
-# helix.tpc/__init__ and the legacy readers' tests import this name.
-config_from_file = sensor_layout
-
 
 def _empty_plane_shape(f, evt, plane_label, num_time_steps):
     """``(n_wires, n_ticks)`` for a plane group that holds no hits.

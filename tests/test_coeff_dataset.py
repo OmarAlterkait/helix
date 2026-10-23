@@ -19,7 +19,8 @@ import pytest
 # extra rather than skipping the parts that need it.
 pytest.importorskip("pimm_data")          # the framework this family plugs into
 
-from helix.data.coeff_reader import CoeffTPCReader, write_coeff_shard  # noqa: E402
+from helix.data.coeff_reader import CoeffTPCReader  # noqa: E402
+from _coeff_fixture import write_coeff_shard  # noqa: E402
 from helix.data.coeff_dataset import CoeffTPCDataset  # noqa: E402
 from pimm_data.transform import Compose   # noqa: E402
 from helix.data.coeff_verify import verify_corpus  # noqa: E402
@@ -190,12 +191,10 @@ def _import_helix():
 @pytest.mark.skipif(not os.path.isdir(_HELIX) or not _import_helix(),
                     reason="helix (consolidation worktree) not importable")
 def test_cross_repo_golden(tmp_path):
-    from helix.core.backend import set_backend
     from helix.core.provenance import BasisDescriptor, derive_band_lengths
     from helix.core.wavelet import SparseResult
     from helix.core.coeff_event import CoeffEvent
     from helix.core.coeff_io import write_coeff_shard as hx_write
-    set_backend("numpy")
 
     wl, lvl, mode, nt = "db2", 2, "periodization", 32
     bl = derive_band_lengths(wl, lvl, mode, nt)

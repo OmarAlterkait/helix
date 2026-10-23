@@ -6,7 +6,7 @@
         [--norm-sigma TABLE.npy --shard-start K]
 
 Reads the extracted HDF5 files (:mod:`helix.tpc.io_sbnd`, decoded in worker processes), runs
-:class:`helix.tpc.chain.TPCChain` (numpy without ``--device``) and the optical codec on each
+:class:`helix.tpc.chain.TPCChain` (CPU without ``--device``) and the optical codec on each
 event and writes, per ``--events-per-shard`` events, the TPC coefficient shard
 ``PREFIX_coeff_NNNN.h5`` (:mod:`helix.core.coeff_io`, the corpus format the model reads) and the
 optical shard ``PREFIX_optical_NNNN.h5`` (:mod:`helix.optical.shard`), joined on (run,

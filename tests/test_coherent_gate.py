@@ -1,9 +1,7 @@
 """Tests for the qualified coherent gate (R2).
 
-- parity: the 1-pass core reproduces the R2 algorithm transcribed inline (numpy
-  self-consistency). NOTE both sides use np.median, so this is NOT a cross-backend
-  check against the old torch.median reference (they differ by the even-n tie-break
-  ~1e-4); the shipped default is 'quantile' (A-parity) by deliberate choice.
+- parity: the 1-pass core (torch, float32) reproduces the R2 algorithm transcribed inline
+  in numpy (float64, np.median), to the float32 reduction-order floor.
 - behavioral: the gate removes block common-mode coherent noise while preserving
   signal, and the 2-pass estimate removes at least as much as 1-pass.
 - guards: gate_approx=False leaves the approx band untouched; non-finite fails open.
@@ -13,9 +11,18 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from helix.tpc.coherent_gate_ops_numpy import gate_bands as coherent_gate
+torch = pytest.importorskip("torch")
+from helix.tpc import coherent_gate as G  # noqa: E402
 
 GS = 64
+
+
+def coherent_gate(bands, **kw):
+    return [b.numpy() for b in G.gate_bands(bands, **kw)]
+
+
+def gate_band(b, **kw):
+    return G.gate_band(torch.as_tensor(b), **kw).numpy()
 
 
 def _ref_smart_gate_1pass(bands, kgate, ksig, gs):
@@ -76,7 +83,7 @@ def test_parity_1pass_median():
     got = coherent_gate(bands, group_size=GS, kgate=4.0, ksig=3.0, npass=1, sigc_mode="median")
     ref = _ref_smart_gate_1pass(bands, 4.0, 3.0, GS)
     for g, r in zip(got, ref):                       # float32 result vs float64 reference
-        np.testing.assert_allclose(g, np.asarray(r, np.float32), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(g, np.asarray(r, np.float32), rtol=1e-4, atol=1e-4)
 
 
 def test_removes_coherent_and_2pass_not_worse():
@@ -122,11 +129,6 @@ def test_kgate_sequence_longer_than_npass_raises():
     `--kgate 2.5,3.5` at npass=1 built a k=2.5 corpus labelled [2.5, 3.5]. Found
     by an audit of the per-pass option, which had exactly this hole.
     """
-    import numpy as np
-    import pytest
-
-    from helix.tpc.coherent_gate_ops_numpy import gate_band
-
     b = np.random.default_rng(0).normal(size=(200, 64)).astype(np.float32)
     # the legitimate uses still work
     gate_band(b, group_size=64, kgate=[2.5, 3.5], ksig=3.0, npass=2)
@@ -139,7 +141,6 @@ def test_kgate_sequence_longer_than_npass_raises():
 # ---- R1: the occupancy condition on the refusal -----------------------------
 
 def _rng_band(seed=0, W=1969, Lb=271):
-    import numpy as np
     rng = np.random.default_rng(seed)
     b = rng.normal(scale=3.0, size=(W, Lb)).astype(np.float32)
     # inject block-wide common mode (coherent: IDENTICAL on every wire) ...
@@ -157,26 +158,22 @@ def test_tau_none_reproduces_the_legacy_gate_bitwise():
     Corpora built before 2026-08-16 used it, so this is what makes them
     reproducible after the occupancy condition landed.
     """
-    import numpy as np
-
-    from helix.tpc.coherent_gate_ops_numpy import _block_common_mode, _sigc, gate_band
-
     b = _rng_band()
+    bt = torch.as_tensor(b)
     for npass in (1, 2):
         got = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=npass, tau=None)
-        # recompute the legacy rule inline, independent of the implementation
+        # recompute the legacy rule inline from the gate's estimators
         W = b.shape[0]
         nblk = (W + 63) // 64
-        idx = np.minimum(np.arange(W) // 64, nblk - 1)
-        sm = np.zeros_like(b, dtype=bool)
+        idx = torch.as_tensor(np.minimum(np.arange(W) // 64, nblk - 1))
+        sm = torch.zeros(b.shape, dtype=torch.bool)
         for p in range(npass):
-            M = _block_common_mode(b, 3.0, sm, 64)
-            Mc = np.where(np.abs(M) < 3.0 * _sigc(M, "quantile"), M, 0.0)
-            ref = b - Mc[idx]
+            M = G._block_common_mode(bt, 3.0, sm, 64)
+            Mc = torch.where(M.abs() < 3.0 * G._sigc(M, "quantile"), M, torch.zeros(()))
+            ref = bt - Mc[idx]
             if p + 1 < npass:
-                from helix.tpc.coherent_gate_ops_numpy import _detect_signal
-                sm = _detect_signal(ref, 3.0, 64)
-        assert np.array_equal(got, ref.astype(b.dtype, copy=False)), \
+                sm = G._detect_signal(ref, 3.0, 64)
+        assert np.array_equal(got, ref.numpy()), \
             f"tau=None diverged from the legacy rule at npass={npass}"
 
 
@@ -193,10 +190,6 @@ def test_tau_only_ever_subtracts_more_single_pass():
     common mode everywhere. R1's effect is consequently not confined to the
     cells it re-admits -- see test_tau_npass2_propagates_through_detection.
     """
-    import numpy as np
-
-    from helix.tpc.coherent_gate_ops_numpy import gate_band
-
     b = _rng_band(seed=1)
     legacy = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=1, tau=None)
     r1 = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=1, tau=0.05)
@@ -214,10 +207,6 @@ def test_tau_npass2_propagates_through_detection():
     claim: pass 1's cleaned band seeds `_detect_signal`, so a re-admitted cell
     shifts pass 2's mask and hence pass 2's estimate for its whole block.
     """
-    import numpy as np
-
-    from helix.tpc.coherent_gate_ops_numpy import gate_band
-
     b = _rng_band(seed=1)
     legacy = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=2, tau=None)
     r1 = gate_band(b, group_size=64, kgate=3.0, ksig=3.0, npass=2, tau=0.05)
@@ -235,46 +224,12 @@ def test_occupancy_uses_the_real_block_width():
     occupancy against 64 would make the same number of flagged wires look like
     less contamination there than in a full block.
     """
-    import numpy as np
-
-    from helix.tpc.coherent_gate_ops_numpy import _block_common_mode
-
     W = 1969                                   # 30 full blocks + 49
     b = np.zeros((W, 8), np.float32)
     sm = np.zeros_like(b, dtype=bool)
     b[-49:, :] = 1.0
     b[-1, :] = 500.0                           # one clear outlier in the partial block
-    _, occ = _block_common_mode(b, 3.0, sm, 64, return_occ=True)
+    _, occ = G._block_common_mode(torch.as_tensor(b), 3.0, torch.as_tensor(sm), 64, return_occ=True)
     assert occ.shape[0] == 31
-    assert occ[-1, 0] == pytest.approx(1.0 / 49.0, rel=1e-6), \
+    assert float(occ[-1, 0]) == pytest.approx(1.0 / 49.0, rel=1e-6), \
         f"partial block occupancy scored against the wrong width: {occ[-1, 0]}"
-
-
-def test_backends_agree_to_a_documented_tolerance_not_exactly():
-    """numpy and torch agree to ~1e-4 ADC, and the docs must not claim more.
-
-    float32 reduction order differs between the backends, so the masked mean and
-    the MAD differ slightly; discrete threshold comparisons then turn some of
-    those into different decisions, and the block broadcast applies each decision
-    to 64 wires. Measured max |numpy - torch| on a real event is 1.2e-4 ADC,
-    unchanged by npass or tau. This pins a bound rather than asserting equality,
-    so a genuine regression is caught without the test failing on arithmetic that
-    was never going to match.
-    """
-    import numpy as np
-    torch = pytest.importorskip("torch")
-
-    from helix.tpc.coherent_gate_ops_numpy import gate_band as gb_np
-    from helix.tpc.coherent_gate_ops_torch import gate_band as gb_t
-
-    b = _rng_band(seed=3)
-    for npass in (1, 2):
-        for tau in (None, 0.05):
-            a = gb_np(b, group_size=64, kgate=3.0, ksig=3.0, npass=npass, tau=tau)
-            c = gb_t(torch.as_tensor(b), group_size=64, kgate=3.0, ksig=3.0,
-                     npass=npass, tau=tau).numpy()
-            worst = float(np.abs(a - c).max())
-            assert worst < 1e-2, (
-                f"backends diverged by {worst:.3e} ADC at npass={npass}, tau={tau} "
-                f"- far beyond the ~1e-4 reduction-order floor, so something "
-                f"structural differs rather than the arithmetic")

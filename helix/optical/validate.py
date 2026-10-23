@@ -23,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 
 from helix.optical import codec
-from helix.tpc import robust
+from helix.core import robust
 
 
 def inject(noise, h, peak, polarity, tick_ns, amplitude, rng, *, flash=(100, 500), fast=0.3, fast_ns=6.0,
@@ -67,7 +67,7 @@ def run(chain, system, noise, channels, *, tick_ns, amplitude, h_inject=None, se
     ref = []
     for d in dn:                                                  # clipped rms per window (integer codes), median
         x = d.astype(np.float32)
-        ref.append(float(np.nanmedian(robust.clipped_stats(x, center=np.zeros(len(x)))[1])))
+        ref.append(float(np.nanmedian(robust.clipped_stats(x, center=np.zeros(len(x)))[1].numpy())))
     ref = np.asarray(ref)
     acc = {k: dict(values=0.0, error=0.0, oracle_values=0.0, oracle_error=0.0, n=0) for k in ("single", "flash")}
     nco = -(-n // (1 << lev))

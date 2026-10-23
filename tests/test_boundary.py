@@ -205,8 +205,8 @@ def _submodules(*subpkgs):
 #: so the CLEAN check above cannot see a violation in any of those files. This
 #: sweep imports each submodule on its own.
 #:
-#: Only pimm_data is forbidden here. torch is NOT: the backend modules
-#: (wavelet_ops_torch, coherent_gate_ops_torch, dense_ops, ...) import it at
+#: Only pimm_data is forbidden here. torch is NOT: the DSP modules
+#: (robust, hysteresis, coherent_gate, dense_ops, ...) import it at
 #: module scope by design, and it is a declared optional extra. The invariant this
 #: file defends is about pimm-data, not about weight of imports.
 @pytest.mark.parametrize("mod", _submodules("helix.core", "helix.tpc"))
