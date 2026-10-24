@@ -54,7 +54,7 @@ set -euo pipefail
 # invoked, trusted only if it actually looks like a checkout.
 if [ -n "${HELIX_ROOT:-}" ]; then
   H=$HELIX_ROOT
-elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "$SLURM_SUBMIT_DIR/scripts/build_coeff_corpus.py" ]; then
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "$SLURM_SUBMIT_DIR/helix/build.py" ]; then
   H=$SLURM_SUBMIT_DIR
 else
   H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

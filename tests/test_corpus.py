@@ -3,7 +3,7 @@
 - clean target is co-supported (clean coeffs at the NOISY support), as
   ``val_clean = clean[gid][b][noisy_mask]``; the clean transform is the chain's
   (``TPCChain.dwt_rows``: no gate, no threshold, the dropped finest band zeroed).
-- norm_sigma = mean over cal events of the per-event threshold σ (old sigma_tab).
+- norm_sigma = mean over the shard's events of the per-event threshold σ (old sigma_tab).
 - padding to a 2**level multiple (old ``pad(g, (0,(-nt)%4))``) — tested on a
   non-power-of-2 length so pad>0.
 - planes are grouped by TPC (gid // 3) and each TPC goes through the chain once.
@@ -16,7 +16,8 @@ import h5py
 
 from helix.tpc.chain import TPCChain, sim_config
 from helix.tpc import chain_coeff
-from helix.tpc.corpus import build_corpus, normalization_table, process_planes
+from helix.build import normalization_table
+from _build_fixture import build_corpus  # noqa: E402
 from helix.core.coeff_io import read_coeff_event, read_coeff_shard
 
 NW = [8, 6, 5]                             # U, V, Y wires of each volume
@@ -50,8 +51,7 @@ def _plane_fn(ev):
 
 def test_build_corpus_matches_old_semantics(tmp_path):
     ch = _chain()
-    noisy, clean, norm = build_corpus(range(4), _plane_fn, ch, tmp_path,
-                                      dataset_name="cx", run="run_000", cal_events=(0, 1))
+    noisy, clean, norm = build_corpus(range(4), _plane_fn, ch, tmp_path, dataset_name="cx", run="run_000")
     assert len(noisy) == 4 and len(clean) == 4
 
     # (1) padding: basis validates; padded length = 104, raw 102
@@ -76,10 +76,9 @@ def test_build_corpus_matches_old_semantics(tmp_path):
     step = chain_coeff.value_step(ce_n.sigma_threshold, ch.cfg["store"]["step_target"])
     np.testing.assert_array_equal(ce_c.value, chain_coeff.quantize(exact, ce_n.band, ce_n.plane_gid, ce_n.gids, step))
 
-    # (3) norm_sigma = mean of the cal events' sigma_threshold
-    np.testing.assert_allclose(norm, normalization_table([noisy[0], noisy[1]]))
-    np.testing.assert_allclose(
-        norm, np.stack([noisy[0].sigma_threshold, noisy[1].sigma_threshold]).mean(0), rtol=1e-6)
+    # (3) norm_sigma = mean of the events' sigma_threshold
+    np.testing.assert_allclose(norm, normalization_table(noisy))
+    np.testing.assert_allclose(norm, np.stack([e.sigma_threshold for e in noisy]).mean(0), rtol=1e-6)
 
     # (4) shards written + round-trip; /config carries norm_sigma
     for i, ce in enumerate(read_coeff_shard(tmp_path / "cx_coeff_0000.h5")):
@@ -102,12 +101,11 @@ def test_build_corpus_matches_old_semantics(tmp_path):
         read_coeff_event(p_clean, 0)
 
 
-def test_build_corpus_is_the_chain_per_tpc():
+def test_build_corpus_is_the_chain_per_tpc(tmp_path):
     """The builder adds nothing to the chain: per TPC, ``process_images`` on the planes in
     order, then ``coeff_event`` over every TPC's results."""
     ch = _chain()
-    (ce,), _, _ = build_corpus([("f.h5", 7)], _plane_fn, ch, "unused", run="r", write=False,
-                               with_clean=False)
+    (ce,), _, _ = build_corpus([("f.h5", 7)], _plane_fn, ch, tmp_path, run="r", with_clean=False)
     noisy, _ = _plane_fn(7)
     res = [r for t in range(N_VOL) for r in ch.process_images([noisy[3 * t + p] for p in range(3)], t)]
     ref = chain_coeff.coeff_event(ch, res, run="r", source_file="f.h5", event=7)
@@ -117,8 +115,7 @@ def test_build_corpus_is_the_chain_per_tpc():
 
 
 def test_build_corpus_no_clean(tmp_path):
-    noisy, clean, norm = build_corpus(range(2), _plane_fn, _chain(), tmp_path,
-                                      dataset_name="cx", with_clean=False, cal_events=(0, 1))
+    noisy, clean, norm = build_corpus(range(2), _plane_fn, _chain(), tmp_path, dataset_name="cx", with_clean=False)
     assert clean == []
     assert not (tmp_path / "cx_coeff_clean_0000.h5").exists()
     assert (tmp_path / "cx_coeff_0000.h5").exists()
@@ -126,12 +123,7 @@ def test_build_corpus_no_clean(tmp_path):
 
 # ---- regression: audit fixes ----------------------------------------------
 
-def test_cal_events_out_of_range_raises(tmp_path):
-    # explicit cal_events beyond what was built still raises
-    with pytest.raises(ValueError, match="cal_events"):
-        build_corpus(range(2), _plane_fn, _chain(), tmp_path, dataset_name="cx",
-                     cal_events=(0, 5))
-    # the DEFAULT (None) averages every event, so a 1-event build is fine
+def test_one_event_shard_has_a_table(tmp_path):
     n, c, norm = build_corpus(range(1), _plane_fn, _chain(), tmp_path, dataset_name="cx")
     assert norm.shape[0] == len(GIDS) and norm.max() > 0
 
@@ -152,7 +144,7 @@ def test_global_norm_sigma_is_frozen_across_shards(tmp_path):
     _, _, norm_own = build_corpus(range(3, 6), _plane_fn, ch, tmp_path / "c",
                                   dataset_name="cx")
     assert not np.array_equal(norm_own, norm_a)
-    with pytest.raises(ValueError, match="norm_sigma shape"):
+    with pytest.raises(ValueError, match="norm_sigma: shape"):
         build_corpus(range(2), _plane_fn, ch, tmp_path / "d", dataset_name="cx",
                      norm_sigma=np.ones((99, 3), np.float32))
 
@@ -160,7 +152,7 @@ def test_global_norm_sigma_is_frozen_across_shards(tmp_path):
 def test_clean_geometry_mismatch_raises():
     ch = _chain()
     noisy, clean = _plane_fn(0)
-    ce = chain_coeff.coeff_event(ch, process_planes(ch, noisy))
+    ce = chain_coeff.coeff_event(ch, ch.process_planes(noisy))
     bad_clean = {g: v[: v.shape[0] // 2] for g, v in clean.items()}    # half the wires
     with pytest.raises(ValueError, match="wires"):
         chain_coeff.clean_coeff_event(ch, ce, bad_clean)
@@ -175,13 +167,13 @@ def test_noisy_planes_must_fill_each_tpc():
     ch = _chain()
     noisy, _ = _plane_fn(0)
     with pytest.raises(ValueError, match="the chain needs all 3"):
-        process_planes(ch, {g: v for g, v in noisy.items() if g != 4})
+        ch.process_planes({g: v for g, v in noisy.items() if g != 4})
     with pytest.raises(ValueError, match="geometry must match"):
-        process_planes(ch, {**noisy, 1: noisy[1][:-1]})
+        ch.process_planes({**noisy, 1: noisy[1][:-1]})
     with pytest.raises(ValueError, match="tpc 2"):
-        process_planes(ch, {**noisy, 6: noisy[0], 7: noisy[1], 8: noisy[2]})
+        ch.process_planes({**noisy, 6: noisy[0], 7: noisy[1], 8: noisy[2]})
     # a whole TPC absent is fine: its gids are simply not in the event
-    ce = chain_coeff.coeff_event(ch, process_planes(ch, {g: noisy[g] for g in (3, 4, 5)}))
+    ce = chain_coeff.coeff_event(ch, ch.process_planes({g: noisy[g] for g in (3, 4, 5)}))
     assert list(ce.gids) == [3, 4, 5]
 
 
@@ -192,8 +184,7 @@ def test_sigma_threshold_and_norm_are_populated(tmp_path):
     band's column is 0 by construction (no coefficients there); every kept band
     must be populated.
     """
-    noisy, clean, norm = build_corpus(range(3), _plane_fn, _chain(), tmp_path,
-                                      dataset_name="cx", cal_events=(0, 1))
+    noisy, clean, norm = build_corpus(range(3), _plane_fn, _chain(), tmp_path, dataset_name="cx")
     for ce in noisy:
         assert ce.sigma_threshold.shape[0] == len(GIDS)
         assert np.isfinite(ce.sigma_threshold).all()

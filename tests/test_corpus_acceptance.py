@@ -19,7 +19,7 @@ import h5py
 
 from helix.core.coeff_io import audit_shard, read_coeff_event
 from helix.tpc.chain import TPCChain, sim_config
-from helix.tpc.corpus import build_corpus
+from _build_fixture import build_corpus  # noqa: E402
 
 NW = [8, 6, 5]                             # U, V, Y wires of each volume
 N_VOL = 2
@@ -304,12 +304,12 @@ def test_noise_seed_and_external_inputs_are_recorded(tmp_path):
             # The caller's fields must survive verbatim...
             assert {k: got.get(k) for k in prov} == prov, \
                 f"{name}: caller provenance not round-tripped"
-            # ...and the writer stamps exactly ONE field of its own: which helix
-            # ran. Callers cannot be relied on to record it — none did, and a
+            # ...and the build adds two of its own: which helix ran (the writer) and
+            # on which device (the DSP is architecture-sensitive). Callers cannot be relied on to record it — none did, and a
             # corpus was duly built by two different working trees with no field
             # able to show it — so write_coeff_shard adds it rather than
             # accepting it from the caller.
-            assert set(got) - set(prov) == {"code"}, \
+            assert set(got) - set(prov) == {"code", "device"}, \
                 f"{name}: unexpected writer-added provenance {set(got) - set(prov)}"
             assert "version" in got["code"], f"{name}: code block lacks a version"
             np.testing.assert_array_equal(f["ident"]["noise_seed"][:], seeds)
@@ -323,7 +323,7 @@ def test_noise_seed_and_external_inputs_are_recorded(tmp_path):
     build_corpus(range(2), _plane_fn, _chain(), plain, dataset_name="cx")
     with h5py.File(plain / "cx_coeff_0000.h5", "r") as f:
         assert "noise_seed" not in f["ident"]
-        # No caller provenance -> only the writer's own code stamp. It is
+        # No caller provenance -> only the code and device stamps. They are
         # unconditional on purpose: a shard that cannot say which helix built it
         # is exactly the gap this closes, so there is no opt-out.
-        assert set(_json.loads(f["config"].attrs["provenance_json"])) == {"code"}
+        assert set(_json.loads(f["config"].attrs["provenance_json"])) == {"code", "device"}

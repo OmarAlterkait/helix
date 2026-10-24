@@ -161,7 +161,7 @@ def test_write_holdout_exists_and_is_wired():
 def test_the_packaged_noise_spectrum_is_the_one_the_corpus_was_built_with():
     """helix ships its own copy of the DSP's external input. It must not drift.
 
-    `scripts/build_coeff_corpus.py --npz` used to default to
+    The sim build's noise spectrum used to default to
     /sdf/group/neutrino/omara/JAXTPC/config/noise_spectrum.npz -- one checkout
     on one cluster. It now defaults to the PACKAGED copy so a clone can build a
     corpus with no second repository present, which is only safe because the two

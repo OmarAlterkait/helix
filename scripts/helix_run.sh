@@ -3,7 +3,7 @@
 #
 #   scripts/helix_run.sh python -m helix.paths
 #   scripts/helix_run.sh python -m pytest tests -q
-#   scripts/helix_run.sh python scripts/build_coeff_corpus.py --shard ... --out ...
+#   scripts/helix_run.sh python -m helix.build sim --input ... --output ...
 #
 # `python` in the command is rewritten to the IN-IMAGE interpreter
 # (container.python), so a caller never names /opt/pimm/.venv/bin/python either.
@@ -74,7 +74,7 @@ done
 # silently loses HELIX_CORPUS reads whatever the site default is.
 ENVS=()
 while IFS='=' read -r k _; do
-  case "$k" in HELIX_*) ENVS+=("$k") ;; esac
+  case "$k" in HELIX_SLURM_*) ;; HELIX_*) ENVS+=("$k") ;; esac      # scheduler facts are for sbatch, not the job
 done < <(env | grep -E '^HELIX_' | sort)
 # ...plus the site's own environment, whose names are NOT HELIX_* on purpose:
 # h5py reads HDF5_USE_FILE_LOCKING, not a helix alias for it.

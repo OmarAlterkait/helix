@@ -16,13 +16,13 @@ coefficients are kept, so the noisy image has to be regenerated — which is exa
 rather than approximate, because each event records the ``noise_seed`` that
 produced it and ``/config`` records the spectrum (with sha256), the removal
 parameters and the basis. This script regenerates it through the SAME transforms
-the builder used (Densify -> AddNoise -> Digitize, build_coeff_corpus.py:60-67)
+the builder used (Densify -> AddNoise -> Digitize, helix.build (SimSource))
 and asserts the recomputed seed matches the stored one before drawing, so a
 mismatched event cannot be silently plotted against the wrong noise.
 
 One nuance worth stating on the figure: ``coeff_clean`` is CO-SUPPORTED. The
 builder stores the noise-free image's coefficients at the NOISY event's kept
-coordinates (build_coeff_corpus.py:11), not an independent sparsification of the
+coordinates (helix.build (SimSource)), not an independent sparsification of the
 clean image. So "clean" here is the regression target the FM actually sees —
 clean restricted to the denoised support — which is what makes the clean/removed
 comparison like-for-like. It is NOT the full clean image, and the difference is
@@ -128,73 +128,21 @@ def symlog_im(ax, img, title, vmax, cbar=True):
 
 
 def regenerate_planes(shard_path, run, ev, geom_path, npz):
-    """Rebuild the noisy dense planes for one event, the builder's SERIAL way.
-
-    Replicates ``build_coeff_corpus.py::_plane_fn_torch`` (lines 238-269) and its
-    ``_seed`` (lines 217-231). The serial path is the one that built this corpus
-    (``/config`` records ``noise_json.mode = "serial"``), and it seeds from the
-    SHARD NAME —
-
-        blake2b(f"{run}/{shard}/ev{ev}", digest_size=8) & 0xFFFFFFFF
-
-    — not from the loader's ``content_seed(event_name, ...)``. The two disagree,
-    so using the loader path here silently draws a different noise realisation
-    than the stored coefficients came from. Returns ``(planes, seed)``.
-    """
-    import hashlib
-    import os.path as osp
-
+    """The noisy and clean planes of one event exactly as the build made them
+    (:class:`helix.build.SimSource`: same densify, noise seed and digitization; ``run`` is the
+    sensor file's directory name, as there). Returns ``(noisy, clean, seed)``."""
     import torch
 
-    from helix.tpc import dense_ops as _dops
-    from helix.tpc.chain import SIM_BASE
-    from helix.tpc.io import read_sensor_event_coo, sensor_layout
-    from pimm_data.geometry import load_plane_registry
+    from helix.build import SimSource
+    from helix.tpc.chain import TPCChain
 
-    spec = None
-    if npz and osp.exists(npz):
-        z = np.load(npz, allow_pickle=True)
-        # (freqs_hz, shape) tuple, as build_coeff_corpus.py:194-195 builds it —
-        # handing AddNoise the raw NpzFile unpacks to the wrong arity.
-        spec = (z["spectrum_freqs_hz"], z["spectrum_shape"])
-
-    reg = load_plane_registry(geom_path)
-    layout = sensor_layout(shard_path)
-    # The coherent noise model's group width, the one the builder reads off the chain.
-    group_size = int(SIM_BASE["readout"]["group_size"])
-    seed = int.from_bytes(
-        hashlib.blake2b(f"{run}/{osp.basename(shard_path)}/ev{ev}".encode(),
-                        digest_size=8).digest(), "little") & 0xFFFFFFFF
-
-    coo = read_sensor_event_coo(shard_path, ev, layout)
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-    w_l, t_l, v_l, p_l, gmap = [], [], [], [], {}
-    for label, (w, t, v, nw, nt) in coo.items():
-        gid = layout.plane_gid(label)
-        gmap[gid] = label
-        w_l.append(torch.as_tensor(np.asarray(w), dtype=torch.long, device=dev))
-        t_l.append(torch.as_tensor(np.asarray(t), dtype=torch.long, device=dev))
-        v_l.append(torch.as_tensor(np.asarray(v), dtype=torch.float32, device=dev))
-        p_l.append(torch.full((len(w),), gid, dtype=torch.long, device=dev))
-    wire, time_ = torch.cat(w_l), torch.cat(t_l)
-    val, pid = torch.cat(v_l), torch.cat(p_l)
-    offset = torch.tensor([wire.numel()], dtype=torch.long, device=dev)
-
-    grids = _dops.densify(wire, time_, val, pid, offset, reg)
-    clean = {int(g): x[0].detach().cpu().numpy().copy() for g, x in grids.items()}
-    grids = _dops.add_intrinsic_noise(grids, reg, seeds=[seed], incoherent=True,
-                                      coherent=True, series_spectrum=spec,
-                                      group_size=group_size)
-    peds = {int(g): layout.pedestal(gmap[int(g)]) for g in grids}
-    grids = _dops.digitize(grids, peds, n_bits=12)
-    noisy = {int(g): x[0].detach().cpu().numpy() for g, x in grids.items()}
-    return noisy, clean, seed
-
-
-def regenerate_noisy(shard_path, run, ev, geom_path, npz):
-    """Back-compat shim: ``(noisy, seed)``."""
-    noisy, _clean, seed = regenerate_planes(shard_path, run, ev, geom_path, npz)
-    return noisy, seed
+    src = SimSource([shard_path], "cuda" if torch.cuda.is_available() else "cpu", geom=geom_path, npz=npz)
+    if src.run != run:
+        raise ValueError(f"{shard_path} is in run {src.run}, not {run}")
+    src.bind(TPCChain(src.chain_config(None)))
+    e = next(src.events([src.index.index((shard_path, ev))], 0))
+    host = lambda d: {g: x.detach().cpu().numpy() for g, x in d.items()}  # noqa: E731
+    return host(e["planes"]), host(e["clean"]), e["ident"]["noise_seed"]
 
 
 def main():
@@ -213,7 +161,7 @@ def main():
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json")
     ap.add_argument("--npz",
                     # helix SHIPS this (helix/tpc/data/noise_spectrum.npz) precisely so a clone
-                    # needs no JAXTPC checkout. build_coeff_corpus.py already prefers
+                    # needs no JAXTPC checkout. helix.build (SimSource) already prefers
                     # the packaged copy; this script never got the fix.
                     default=str(packaged("noise_spectrum.npz")))
     ap.add_argument("--r1-tau", type=float, default=0.0,
@@ -310,13 +258,12 @@ def main():
         # The figure shows the thresholded coefficients reconstructed.
         from helix.tpc import chain_coeff as _cc
         from helix.tpc.chain import TPCChain, sim_config
-        from helix.tpc.corpus import process_planes
         from helix.tpc.io import sensor_layout
         _layout = sensor_layout(sensor_shard)
         _chain = TPCChain(sim_config(_layout.num_wires, {"coherent": {"tau": a.r1_tau}}))
         _lev, _wav = _chain.cfg["dwt"]["level"], _chain.cfg["dwt"]["wavelet"]
         removed_all = {}
-        for _r in process_planes(_chain, {g: np.asarray(x, np.float32) for g, x in noisy_all.items()}):
+        for _r in _chain.process_planes({g: np.asarray(x, np.float32) for g, x in noisy_all.items()}):
             removed_all[_cc.plane_gid(_chain, _r)] = \
                 _chain._rec(_r["bands"], _wav, _lev, _r["n_ticks"]).cpu().numpy()[:, :_layout.num_time_steps]
         kg_lbl = f"R1(tau={a.r1_tau:g})"

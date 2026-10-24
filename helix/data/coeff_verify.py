@@ -112,7 +112,7 @@ def verify_corpus(data_root, dataset_name, *, split="", expect_events=None,
                 code.append((os.path.basename(p), _prov.get("code")))
                 # The DSP's INPUTS: which geometry file and which noise spectrum
                 # produced this shard. Both hashes are already written by
-                # build_coeff_corpus.py and were never compared — so a corpus
+                # the sim build and were never compared — so a corpus
                 # assembled from shards built against different geometry, or
                 # against a different (or white) noise spectrum, passed clean.
                 # Handled like `code`, not like the fields above: absence is

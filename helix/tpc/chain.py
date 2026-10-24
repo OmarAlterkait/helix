@@ -227,9 +227,30 @@ class TPCChain:
         pres = [self._to(np.ones(im.shape[0], bool) if present is None else present[i], bool) for i, im in enumerate(images)]
         return self._planes(imgs, pres, tpc, return_images)
 
+    def process_planes(self, planes, return_images=False):
+        """``{gid: (wires, ticks) image}`` of pedestal-subtracted planes (gid = tpc * n_planes +
+        plane), every TPC with all its planes at the readout's wire counts -> one dict per plane."""
+        n_planes = len(self.readout.planes)
+        by_tpc = {}
+        for gid, img in planes.items():
+            by_tpc.setdefault(int(gid) // n_planes, {})[int(gid) % n_planes] = img
+        out = []
+        for tpc in sorted(by_tpc):
+            pl = by_tpc[tpc]
+            if tpc >= self.readout.n_tpc:
+                raise ValueError(f"plane gids of tpc {tpc}, but the readout has {self.readout.n_tpc} tpcs")
+            if sorted(pl) != list(range(n_planes)):
+                raise ValueError(f"tpc {tpc}: planes {sorted(pl)} present; the chain needs all {n_planes}")
+            for p, rows in enumerate(self.readout.rows(tpc)):
+                if int(pl[p].shape[0]) != len(rows):
+                    raise ValueError(f"gid {tpc * n_planes + p}: image has {int(pl[p].shape[0])} wires, "
+                                     f"the readout {len(rows)} — geometry must match")
+            out += self.process_images([pl[p] for p in range(n_planes)], tpc, return_images=return_images)
+        return out
+
     def dwt_rows(self, img):
         """The chain's transform of one plane image (no gate, no threshold), the dropped finest
-        bands zeroed: the basis of the noise-free target (helix.tpc.corpus)."""
+        bands zeroed: the basis of the noise-free target (helix.build)."""
         d = self.cfg["dwt"]
         b = self._dwt(self._to(img, np.float32), d["wavelet"], d["level"])
         nd = int(self.cfg["threshold"]["drop_finest"])

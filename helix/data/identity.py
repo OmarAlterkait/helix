@@ -91,8 +91,7 @@ def corpus_runs(corpus_root=None) -> list[str]:
     Why this exists. The eight run ids were retyped as a literal list in
     ``configs/pimm/coeff_fm_train_8run.py`` and again (the first three) in
     ``coeff_fm_cooldown.py``, while the BUILD side already reads them from a
-    file: ``scripts/submit_coeff_corpus.sh`` uses ``$OUT/_calib/RUNS.txt`` and
-    ``scripts/calibrate_norm_sigma.sh`` reads ``$CALIB/RUNS.txt``. So the corpus
+    file: ``scripts/corpus.sh`` writes and reads ``$OUT/_calib/RUNS.txt``. So the corpus
     ships its own manifest and the training configs ignored it.
 
     That matters more than ordinary duplication because ``RUNS.txt`` is not

@@ -48,7 +48,7 @@ CORPUS_ROOT = str(_root("HELIX_CORPUS").parent)
 # file is hand-written and is step zero of a build (docs/RUNBOOK.md §1) -- both
 # build phases abort without it -- so it is the closest thing the corpus has to
 # a declaration of what it contains, and the build side already reads it
-# (submit_coeff_corpus.sh, calibrate_norm_sigma.sh). Only the training configs
+# (scripts/corpus.sh). Only the training configs
 # retyped it, which meant a corpus copy carrying a DIFFERENT subset would train
 # happily on whatever the literal named.
 from helix.data.identity import corpus_runs as _corpus_runs    # noqa: E402

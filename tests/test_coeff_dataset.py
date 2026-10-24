@@ -745,7 +745,7 @@ def test_shards_from_two_different_GATES_are_rejected(tmp_path):
     sigma_norm are identical, so every pre-existing agreement check passes on a
     directory holding both — they would read as one corpus and train as two.
 
-    Not hypothetical: submit_coeff_corpus.sh defaulted its output root to the
+    Not hypothetical: the old corpus submit script defaulted its output root to the
     older corpus while `--tau` unset already meant the newer gate, so the
     ordinary way to extend a corpus wrote r1 shards into the pre-r1 tree.
     """

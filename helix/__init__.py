@@ -3,8 +3,9 @@
   helix.core    — the coefficient shard codec, the wavelet transform, robust
                   statistics and hysteresis (torch, imported when they compute)
   helix.tpc     — wire-plane chain (helix.tpc.chain.TPCChain): coherent noise
-                  removal + wavelet threshold, and the corpus builder
+                  removal + wavelet threshold
   helix.optical — optical waveforms (SBND PMT / X-ARAPUCA, goop): one codec, optical shards
+  helix.build   — every source (simulation, SBND, goop) through both into shards
   helix.model   — the coefficient foundation model and its tokenizer
 
 **Every name below is resolved lazily** (PEP 562). This is not a style choice.
@@ -42,8 +43,7 @@ _LAZY = {
     "TPCChain": "helix.tpc.chain",
     "sim_config": "helix.tpc.chain",
     "sensor_layout": "helix.tpc.io",
-    "build_corpus": "helix.tpc.corpus",
-    "build_corpus_stream": "helix.tpc.corpus",
+    "build": "helix.build",
     # -- model: torch is imported only if one of these is touched -----------
     "build_fm": "helix.model",
     "FMModel": "helix.model",

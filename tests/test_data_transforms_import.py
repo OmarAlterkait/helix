@@ -60,13 +60,7 @@ def test_event_rng_is_deterministic_per_name():
 
 @pytest.mark.parametrize("name", ["AddNoise", "Digitize"])
 def test_importing_the_module_registers_the_transform(name):
-    """The builder names these by STRING, so registration is the whole contract.
-
-    scripts/build_coeff_corpus.py composes them from dicts. Before the move,
-    `from pimm_data.transform import Compose` registered them transitively; it
-    no longer does, and the builder raised "AddNoise is not in the transforms
-    registry" -- at which point the production corpus build could not run.
-    """
+    """A data config names these by STRING, so registration is the whole contract."""
     assert TRANSFORMS.get(name) is not None
 
 
@@ -81,25 +75,6 @@ def test_recipe_builders_run():
     assert isinstance(cfg, list) and cfg, "recipe must not be empty"
     stages = T.build_sensor_gpu_stages(GEOM, modality="sensor")
     assert stages is not None
-
-
-def test_the_builder_registers_before_it_composes():
-    """scripts/build_coeff_corpus.py must import this module, not rely on
-    pimm_data pulling it in. Checked as source, because running the builder
-    needs real shards and a GPU.
-
-    Resolved through helix.paths.repo() rather than opened by relative path: the
-    test read "scripts/build_coeff_corpus.py" from the process CWD, so it passed
-    only when pytest happened to be invoked from the repo root and raised
-    FileNotFoundError from anywhere else. It was the one relative open() in the
-    suite."""
-    from helix.paths import repo
-
-    src = (repo() / "scripts" / "build_coeff_corpus.py").read_text(encoding="utf-8")
-    i_import = src.find("import helix.data.transforms")
-    i_use = src.find('type="AddNoise"')
-    assert i_import != -1, "builder composes AddNoise but never registers it"
-    assert i_use == -1 or i_import < i_use, "registration must precede the Compose"
 
 
 def test_addnoise_defaults_come_from_the_noise_module():

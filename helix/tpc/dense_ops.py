@@ -68,9 +68,8 @@ def offset2batch(offset):
 # `densify` lived here and has moved to pimm_data.dense_ops: scattering sparse
 # rows into per-key dense grids is a data-layer operation that any detector
 # family wants, not LArTPC physics. What stays is the forward model applied to
-# those grids. scripts/build_coeff_corpus.py imports densify from pimm_data --
-# it is a script and may; helix.tpc may not, which is what keeps the DSP path
-# installable on numpy alone.
+# those grids. helix.build (the sim source) imports densify from pimm_data;
+# helix.tpc does not.
 
 def _series_spectrum_torch(n_ticks, series_spectrum, sampling_rate_hz, device):
     series_spectrum = resolve_series_spectrum(series_spectrum)

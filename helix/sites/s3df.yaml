@@ -60,7 +60,8 @@ scheduler:
     # corpus is built on turing only -- see DECISIONS.md.
     account: mli:default
     partition: turing
-    qos: normal
+    qos: preemptable
     gpus_flag: gpus
-    # MaxArraySize is 100 here, so one run per array submission.
-    array: 0-99%32
+    # preempted tasks are requeued (a requeued build task skips its finished shards); these turing
+    # nodes fail jobs
+    extra: --requeue --exclude=sdfturing017,sdfturing027,sdfturing020,sdfturing021,sdfturing019,sdfturing006

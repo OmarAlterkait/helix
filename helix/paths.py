@@ -262,7 +262,7 @@ def repo() -> Path:
 
     Three helix checkouts have existed side by side (`helix`, `helix-consolidate`,
     a worktree), and hardcoding one is not a portability problem but a
-    CORRECTNESS one: `scripts/build_coeff_corpus.py` records that an old default
+    CORRECTNESS one: the old corpus builder recorded that an old default
     of `helix-consolidate` was inserted at ``sys.path[0]``, so running the builder
     from any other checkout silently used that tree's code -- "32 commits behind,
     missing the MAD median fix, the packaged noise spectrum, the m113 anchoring

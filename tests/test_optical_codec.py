@@ -300,16 +300,15 @@ def _goop_file(path, n_events=2, seed=16):
     return path
 
 
-def test_goop_run_writes_readable_optical_shards(tmp_path):
+def test_goop_build_writes_readable_optical_shards(tmp_path):
     import h5py
-    import json
-    from helix.optical import goop_run
+    from helix import build
     from helix.optical.shard import read_optical
-    src = _goop_file(tmp_path / "light.h5"); out = tmp_path / "goop_shard.h5"
-    goop_run.main(["--input", str(src), "--output", str(out)])
+    src = _goop_file(tmp_path / "light.h5"); out = tmp_path / "goop_optical_0000.h5"
+    build.main(["goop", "--input", str(src), "--output", str(tmp_path / "goop")])
     ch = OpticalChain(codec.GOOP, templates="goop")
     with h5py.File(src, "r") as f:
-        wf, pe = goop_run.event_waveforms(f, "event_001")
+        wf, pe = build.GoopSource.waveforms(f, "event_001")
     rec = ch.reconstruct(ch.process("goop", wf))
     got = read_optical(out, "goop", 1)
     assert len(got) == 6 and pe.shape == (2, 3)
@@ -320,7 +319,7 @@ def test_goop_run_writes_readable_optical_shards(tmp_path):
     assert tk["values"].shape[1] == tokens.SLOTS
     with h5py.File(out, "r") as o:
         assert o["truth/pe_counts"].shape == (2, 2, 3)
-        assert json.loads(o.attrs["summary_json"])["events"] == 2
+        assert o["config"].attrs["n_events"] == 2
 
 
 def test_calibrate_recovers_a_known_response():
