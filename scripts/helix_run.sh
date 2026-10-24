@@ -3,7 +3,7 @@
 #
 #   scripts/helix_run.sh python -m helix.paths
 #   scripts/helix_run.sh python -m pytest tests -q
-#   scripts/helix_run.sh python -m helix.build sim --input ... --output ...
+#   scripts/helix_run.sh python scripts/build_sim.py --input ... --output ...
 #
 # `python` in the command is rewritten to the IN-IMAGE interpreter
 # (container.python), so a caller never names /opt/pimm/.venv/bin/python either.

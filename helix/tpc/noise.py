@@ -12,7 +12,7 @@ Two additive components:
   which is what the chain's coherent gate (on the readout's groups, the same ``wire // group_size``)
   removes.
 
-The same functions build the simulation corpus (:class:`helix.build.SimSource`) and add fresh noise at
+The same functions build the simulation corpus (``scripts/build_sim.py``) and add fresh noise at
 load time (:class:`helix.data.transforms.AddNoise`). Realisations come from per-event torch generators
 (seeded by the caller): reproducible on one device type, not across devices, and statistically, not
 bit-, equal to JAXTPC's numpy (tests/_noise_reference.py, the numpy port, is the check).

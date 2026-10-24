@@ -213,7 +213,7 @@ jobs:
               $PY -c "from pimm_data.testing import make_jaxtpc_sample; \
                       make_jaxtpc_sample(\"$W/sim\", dataset_name=\"sim_wire\", \
                                          n_events=200, readout_type=\"wire\")"
-              $PY -m helix.build sim --input $W/sim/sensor/sim_wire_sensor_0000.h5 \
+              $PY scripts/build_sim.py --input $W/sim/sensor/sim_wire_sensor_0000.h5 \
                   --output $W/corpus/run_synth/sim_wire --events-per-shard 200
               $PY -m helix.data.coeff_verify $W/corpus/run_synth --dataset-name sim_wire
               # 95/3/2 is tuned for 158k events; over 100 the 2% part can

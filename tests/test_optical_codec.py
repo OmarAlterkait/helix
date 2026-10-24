@@ -1,5 +1,8 @@
 """Optical codec (helix.optical.codec): exact integer Haar, pulses kept, devices agree, the
 shard and the tokens round-trip."""
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -302,13 +305,15 @@ def _goop_file(path, n_events=2, seed=16):
 
 def test_goop_build_writes_readable_optical_shards(tmp_path):
     import h5py
-    from helix import build
+    from helix.build import main
     from helix.optical.shard import read_optical
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from build_goop import GoopSource
     src = _goop_file(tmp_path / "light.h5"); out = tmp_path / "goop_optical_0000.h5"
-    build.main(["goop", "--input", str(src), "--output", str(tmp_path / "goop")])
+    main(GoopSource, ["--input", str(src), "--output", str(tmp_path / "goop")])
     ch = OpticalChain(codec.GOOP, templates="goop")
     with h5py.File(src, "r") as f:
-        wf, pe = build.GoopSource.waveforms(f, "event_001")
+        wf, pe = GoopSource.waveforms(f, "event_001")
     rec = ch.reconstruct(ch.process("goop", wf))
     got = read_optical(out, "goop", 1)
     assert len(got) == 6 and pe.shape == (2, 3)

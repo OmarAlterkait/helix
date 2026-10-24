@@ -16,13 +16,13 @@ coefficients are kept, so the noisy image has to be regenerated — which is exa
 rather than approximate, because each event records the ``noise_seed`` that
 produced it and ``/config`` records the spectrum (with sha256), the removal
 parameters and the basis. This script regenerates it through the SAME transforms
-the builder used (Densify -> AddNoise -> Digitize, helix.build (SimSource))
+the builder used (Densify -> AddNoise -> Digitize, scripts/build_sim.py)
 and asserts the recomputed seed matches the stored one before drawing, so a
 mismatched event cannot be silently plotted against the wrong noise.
 
 One nuance worth stating on the figure: ``coeff_clean`` is CO-SUPPORTED. The
 builder stores the noise-free image's coefficients at the NOISY event's kept
-coordinates (helix.build (SimSource)), not an independent sparsification of the
+coordinates (scripts/build_sim.py), not an independent sparsification of the
 clean image. So "clean" here is the regression target the FM actually sees —
 clean restricted to the denoised support — which is what makes the clean/removed
 comparison like-for-like. It is NOT the full clean image, and the difference is
@@ -129,11 +129,11 @@ def symlog_im(ax, img, title, vmax, cbar=True):
 
 def regenerate_planes(shard_path, run, ev, geom_path, npz):
     """The noisy and clean planes of one event exactly as the build made them
-    (:class:`helix.build.SimSource`: same densify, noise seed and digitization; ``run`` is the
+    (``scripts/build_sim.py``: same densify, noise seed and digitization; ``run`` is the
     sensor file's directory name, as there). Returns ``(noisy, clean, seed)``."""
     import torch
 
-    from helix.build import SimSource
+    from build_sim import SimSource      # scripts/, this script's directory
     from helix.tpc.chain import TPCChain
 
     src = SimSource([shard_path], "cuda" if torch.cuda.is_available() else "cpu", geom=geom_path, npz=npz)
@@ -161,7 +161,7 @@ def main():
     ap.add_argument("--geom", default="cubic_wireplane_geometry.json")
     ap.add_argument("--npz",
                     # helix SHIPS this (helix/tpc/data/noise_spectrum.npz) precisely so a clone
-                    # needs no JAXTPC checkout. helix.build (SimSource) already prefers
+                    # needs no JAXTPC checkout. scripts/build_sim.py already prefers
                     # the packaged copy; this script never got the fix.
                     default=str(packaged("noise_spectrum.npz")))
     ap.add_argument("--r1-tau", type=float, default=0.0,

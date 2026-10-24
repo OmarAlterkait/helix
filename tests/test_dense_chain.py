@@ -87,7 +87,7 @@ def _import_jaxtpc():
     returned module objects stay valid after being removed from sys.modules.
     """
     # HELIX_JAXTPC_ROOT, the name helix.paths declares and every other consumer
-    # uses (helix.build, tests/test_corpus_identity.py). This
+    # uses (scripts/build_sim.py, tests/test_corpus_identity.py). This
     # read a bare JAXTPC_ROOT with an S3DF literal beside it, so setting the
     # DOCUMENTED variable had no effect on this test and the literal was the only
     # thing that ever matched.
