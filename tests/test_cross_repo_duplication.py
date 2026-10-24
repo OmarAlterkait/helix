@@ -32,9 +32,7 @@ pytest.importorskip("pimm_data")
 pytest.importorskip("torch")
 
 import torch  # noqa: E402
-import pimm_data.dense_ops as pd_dense  # noqa: E402
 import pimm_data.geometry as pd_geom  # noqa: E402
-from helix.tpc import dense_ops as hx_dense  # noqa: E402
 from helix.tpc import geometry as hx_geom  # noqa: E402
 
 
@@ -78,29 +76,5 @@ def test_both_loaders_agree_on_every_plane():
 
 # ── the one duplicated function ─────────────────────────────────────────────
 
-@pytest.mark.parametrize("offsets", [
-    [3, 3, 5],            # an empty middle group
-    [0, 4],               # leading empty
-    [1],                  # single
-    [2, 5, 9, 9, 12],     # trailing empty
-])
-def test_offset2batch_agrees(offsets):
-    """helix.tpc.dense_ops.offset2batch is a copy of pimm_data's.
-
-    Forced: helix.tpc cannot import pimm_data, and pimm-data's densify needs it
-    independently. It converts an offsets vector into per-row batch indices, so a
-    divergence would mis-assign rows to events -- silently, and only on the
-    shapes that differ.
-    """
-    t = torch.tensor(offsets)
-    assert hx_dense.offset2batch(t).tolist() == pd_dense.offset2batch(t).tolist()
 
 
-def test_offset2batch_source_is_actually_identical():
-    """If someone edits one copy, the behavioural test above may still pass on
-    the cases it happens to cover. Compare the source too."""
-    import inspect
-    a = inspect.getsource(hx_dense.offset2batch)
-    b = inspect.getsource(pd_dense.offset2batch)
-    assert a.split("\n", 1)[1] == b.split("\n", 1)[1], (
-        "offset2batch has diverged between helix and pimm-data")

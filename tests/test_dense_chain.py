@@ -39,19 +39,19 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
-# helix.tpc.dense_ops imports torch, and pimm_data requires it too. Both are
+# helix.tpc.noise imports torch, and pimm_data requires it too. Both are
 # module-scope imports here, so without the guard this file raises a collection
 # ERROR in a DSP-only install and aborts the entire run rather than skipping
 # itself. Every other module in this suite guards the same way.
 pytest.importorskip("torch")
 pytest.importorskip("pimm_data")
 
-from helix.tpc import dense_ops as helix_dense_ops              # noqa: E402
+from helix.tpc import noise as helix_noise                      # noqa: E402
 
 from pimm_data import JAXTPCDataset, Compose                    # noqa: E402
 
-from helix.tpc.noise import (generate_noise, incoherent_noise, coherent_noise,
-                             digitize, DEFAULT_ENC, DEFAULT_SAMPLING_RATE_HZ)
+from helix.tpc.noise import DEFAULT_ENC, DEFAULT_SAMPLING_RATE_HZ  # noqa: E402
+from _noise_reference import generate_noise, incoherent_noise, coherent_noise, digitize  # noqa: E402
 
 def _sensor_sample(root, **kw):
     ds = JAXTPCDataset(data_root=root, split='', dataset_name='sim',
@@ -129,7 +129,7 @@ from pimm_data import dense_ops
 
 from pimm_data.detector_transforms import Densify
 
-from helix.tpc.noise import coherent_noise as coherent_noise_np, digitize as digitize_np
+from _noise_reference import coherent_noise as coherent_noise_np, digitize as digitize_np
 
 _WL = {'U': (0.42, 4.63), 'V': (0.42, 4.63), 'Y': (2.33, 2.33)}
 
@@ -356,28 +356,11 @@ def test_dense_ops_are_scope_sample_and_compose():
     Compose([dict(type='ToDevice', device='cpu'),
              dict(type='Densify', geom={}, modality='sensor')])   # no fence error
 
-# These two came from pimm-data's test_batch_transforms: they check the torch
-# ops against the NUMPY ORACLES, which are helix's forward model now.
-from helix.tpc.noise import (coherent_noise as coherent_noise_np,
-                             digitize as digitize_np)  # noqa: E402
-
-def test_coherent_batched_matches_numpy_oracle():
-    # the bit-exact numpy oracle is now opt-in (coherent_numpy=True); the default
-    # path is the on-device torch port (statistical parity only — see below).
-    W, T, gid, seed = 200, 2048, 0, 12345
-    geom = {gid: {'n_wires': W, 'n_ticks': T}}
-    grids = {gid: torch.zeros(1, W, T)}
-    helix_dense_ops.add_intrinsic_noise(grids, geom, seeds=[seed], coherent=True,
-                                  incoherent=False, group_size=64, coh_rms=2.5,
-                                  coherent_numpy=True)
-    expected = coherent_noise_np(W, T, np.random.default_rng(seed),
-                                 group_size=64, rms_adc=2.5)
-    assert np.allclose(grids[gid][0].numpy(), expected, atol=1e-5)
-
+# the torch model against the numpy reference (tests/_noise_reference.py)
 
 def test_digitize_matches_numpy():
     g = (torch.randn(2, 16, 32) * 1000.0)
-    out = helix_dense_ops.digitize({0: g}, pedestal=410, n_bits=12)
+    out = helix_noise.digitize({0: g}, pedestal=410, n_bits=12)
     exp = digitize_np(g.numpy(), 410, n_bits=12)
     assert np.array_equal(out[0].numpy(), exp)
 
@@ -447,7 +430,7 @@ def test_coherent_torch_default_statistical():
     W, T, gid, gs, rms, beta = 256, 4096, 0, 64, 2.5, 0.15
     geom = {gid: {'n_wires': W, 'n_ticks': T}}
     grids = {gid: torch.zeros(1, W, T)}
-    helix_dense_ops.add_intrinsic_noise(grids, geom, seeds=[3], coherent=True,
+    helix_noise.add_intrinsic_noise(grids, geom, seeds=[3], coherent=True,
                                   incoherent=False, group_size=gs, coh_rms=rms,
                                   beta=beta)
     x = grids[gid][0].numpy()
@@ -465,7 +448,7 @@ def test_incoherent_rms_matches_enc_statistical():
     geom = {gid: {'n_wires': W, 'n_ticks': T, 'wire_lengths': L}}
     grids = {gid: torch.zeros(1, W, T)}
     x, y, z = 0.90, 0.79, 0.22
-    helix_dense_ops.add_intrinsic_noise(grids, geom, seeds=[7], coherent=False,
+    helix_noise.add_intrinsic_noise(grids, geom, seeds=[7], coherent=False,
                                   incoherent=True, enc=(x, y, z))
     rms = grids[gid][0].std(dim=1, unbiased=False).numpy()
     expected = np.sqrt(x**2 + (y + z * L) ** 2)
@@ -477,7 +460,7 @@ def test_incoherent_requires_wire_lengths():
     geom = {0: {'n_wires': 8, 'n_ticks': 64}}  # no wire_lengths
     grids = {0: torch.zeros(1, 8, 64)}
     with pytest.raises(ValueError):
-        helix_dense_ops.add_intrinsic_noise(grids, geom, seeds=[0], coherent=False,
+        helix_noise.add_intrinsic_noise(grids, geom, seeds=[0], coherent=False,
                                       incoherent=True)
 
 
@@ -488,7 +471,7 @@ def test_noise_reproducible_by_seed():
 
     def run(seed):
         g = {gid: torch.zeros(1, W, T)}
-        helix_dense_ops.add_intrinsic_noise(g, geom, seeds=[seed], coherent=True,
+        helix_noise.add_intrinsic_noise(g, geom, seeds=[seed], coherent=True,
                                       incoherent=True)
         return g[gid].clone()
 
@@ -511,31 +494,6 @@ def test_move_to_device_idempotent():
 # invariant: pimm-data never imports torch.cuda
 # --------------------------------------------------------------------------
 
-# --------------------------------------------------------------------------
-# de-tautologized: BATCHED coherent path vs JAXTPC (not the pimm-data oracle)
-# --------------------------------------------------------------------------
-
-@pytest.mark.parametrize("T", [2048, 2049])
-def test_coherent_batched_matches_jaxtpc(T):
-    jx = _import_jaxtpc()
-    cn = jx[0] if jx else None
-    if cn is None:
-        pytest.skip("JAXTPC not importable")
-    W, gid, seed = 200, 0, 777
-    geom = {gid: {'n_wires': W, 'n_ticks': T}}
-    grids = {gid: torch.zeros(1, W, T)}
-    # bit-exactness to JAXTPC is the numpy oracle's contract (coherent_numpy=True);
-    # the default torch path is statistical-parity only.
-    helix_dense_ops.add_intrinsic_noise(grids, geom, seeds=[seed], coherent=True,
-                                  incoherent=False, group_size=64, coh_rms=2.5,
-                                  coherent_numpy=True)
-    expected = cn.generate_coherent_noise(
-        n_wires=W, n_ticks=T, group_size=64, beta=0.15, rms_adc=2.5,
-        corner_freq_hz=20000.0, spectral_slope=1.5, sampling_rate_hz=2e6,
-        rng=np.random.default_rng(seed))
-    assert np.allclose(grids[gid][0].numpy(), expected, atol=1e-5)
-
-
 @pytest.mark.parametrize("T", [4096, 4097])
 def test_incoherent_rms_at_odd_and_even_T(T):
     W, gid = 48, 0
@@ -543,7 +501,7 @@ def test_incoherent_rms_at_odd_and_even_T(T):
     geom = {gid: {'n_wires': W, 'n_ticks': T, 'wire_lengths': L}}
     grids = {gid: torch.zeros(1, W, T)}
     x, y, z = 0.90, 0.79, 0.22
-    helix_dense_ops.add_intrinsic_noise(grids, geom, seeds=[3], coherent=False,
+    helix_noise.add_intrinsic_noise(grids, geom, seeds=[3], coherent=False,
                                   incoherent=True, enc=(x, y, z))
     rms = grids[gid][0].std(dim=1, unbiased=False).numpy()
     expected = np.sqrt(x**2 + (y + z * L) ** 2)
@@ -558,31 +516,11 @@ def test_within_batch_events_differ_by_seed():
     W, T, gid = 32, 512, 0
     geom = {gid: {'n_wires': W, 'n_ticks': T}}
     g = {gid: torch.zeros(2, W, T)}
-    helix_dense_ops.add_intrinsic_noise(g, geom, seeds=[11, 22], coherent=True, incoherent=False)
+    helix_noise.add_intrinsic_noise(g, geom, seeds=[11, 22], coherent=True, incoherent=False)
     assert not torch.equal(g[gid][0], g[gid][1])          # distinct seeds -> distinct noise
     g2 = {gid: torch.zeros(2, W, T)}
-    helix_dense_ops.add_intrinsic_noise(g2, geom, seeds=[11, 11], coherent=True, incoherent=False)
+    helix_noise.add_intrinsic_noise(g2, geom, seeds=[11, 11], coherent=True, incoherent=False)
     assert torch.equal(g2[gid][0], g2[gid][1])            # equal seeds -> equal noise
-
-
-# --------------------------------------------------------------------------
-# canonical plane_id: stable under volume filter / empty plane; densify guards
-# --------------------------------------------------------------------------
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-def test_coherent_cpu_matches_cuda():
-    # Only the numpy oracle (coherent_numpy=True) is device-independent. The default
-    # torch coherent uses torch RNG, whose CPU/CUDA streams differ by design, so it
-    # is device-specific (like the incoherent port) — not tested for cross-device equality.
-    W, T, gid = 64, 1024, 0
-    geom = {gid: {'n_wires': W, 'n_ticks': T}}
-    out = {}
-    for dev in ('cpu', 'cuda'):
-        g = {gid: torch.zeros(1, W, T, device=dev)}
-        helix_dense_ops.add_intrinsic_noise(g, geom, seeds=[5], coherent=True,
-                                      incoherent=False, coherent_numpy=True)
-        out[dev] = g[gid].cpu()
-    assert torch.allclose(out['cpu'], out['cuda'], atol=1e-5)  # numpy oracle -> device-independent
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
@@ -592,7 +530,7 @@ def test_incoherent_rms_on_cuda():
     geom = {gid: {'n_wires': W, 'n_ticks': T, 'wire_lengths': L}}
     g = {gid: torch.zeros(1, W, T, device='cuda')}
     x, y, z = 0.90, 0.79, 0.22
-    helix_dense_ops.add_intrinsic_noise(g, geom, seeds=[3], coherent=False, incoherent=True,
+    helix_noise.add_intrinsic_noise(g, geom, seeds=[3], coherent=False, incoherent=True,
                                   enc=(x, y, z))
     rms = g[gid][0].std(dim=1, unbiased=False).cpu().numpy()
     expected = np.sqrt(x**2 + (y + z * L) ** 2)

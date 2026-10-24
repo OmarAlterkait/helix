@@ -11,8 +11,8 @@ synthetic arrays, so helix's physics tests stand alone.
 import numpy as np
 import pytest
 
-from helix.tpc.noise import (generate_noise, digitize, incoherent_noise,
-                             coherent_noise, DEFAULT_ENC)
+from helix.tpc.noise import DEFAULT_ENC
+from _noise_reference import generate_noise, digitize, incoherent_noise, coherent_noise
 
 
 def test_generate_noise_returns_noise():
@@ -126,17 +126,17 @@ def test_digitize_gain_and_nbits():
     assert outg[0, 0] == 200.0
 
 def test_torch_digitize_matches_the_numpy_formula():
-    """dense_ops.digitize (torch) == round -> clip -> unpedestal.
+    """helix.tpc.noise.digitize (torch) == round -> clip -> unpedestal.
 
     Came from pimm-data's test_dense_collapse when digitize moved here with
     the forward model. It asserts the FORMULA rather than importing an
     oracle across the boundary.
     """
     torch = pytest.importorskip("torch")
-    from helix.tpc import dense_ops
+    from helix.tpc import noise
 
     g = {0: torch.randn(2, 4, 8) * 30}
     ped = {0: 400}
-    out = dense_ops.digitize(g, ped, n_bits=12)[0].numpy()
+    out = noise.digitize(g, ped, n_bits=12)[0].numpy()
     want = np.clip(np.rint(g[0].numpy() + 400), 0, (1 << 12) - 1) - 400
     np.testing.assert_allclose(out, want)

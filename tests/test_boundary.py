@@ -16,7 +16,7 @@ Measured, not assumed: importing ``pimm_data.transform`` (to reach
 measurement is why the registered transforms live in ``helix/data/transforms.py``
 while their kernels stay in ``helix/tpc/``.
 
-A source grep cannot do this job: ``helix/tpc/dense_ops.py``, ``geometry.py``,
+A source grep cannot do this job: ``geometry.py``,
 ``io.py`` and ``noise.py`` all mention pimm_data in comments, and
 ``helix/model/tokenize.py`` documents a registration example. Only an actual
 import in a clean interpreter distinguishes a mention from a dependency.
@@ -201,12 +201,12 @@ def _submodules(*subpkgs):
 
 
 #: Importing the PACKAGE helix.tpc only executes its __init__, which pulls only
-#: its io module. noise, dense_ops, geometry and the chain are NOT among them,
+#: its io module. noise, geometry and the chain are NOT among them,
 #: so the CLEAN check above cannot see a violation in any of those files. This
 #: sweep imports each submodule on its own.
 #:
 #: Only pimm_data is forbidden here. torch is NOT: the DSP modules
-#: (robust, hysteresis, coherent_gate, dense_ops, ...) import it at
+#: (robust, hysteresis, coherent_gate, noise, ...) import it at
 #: module scope by design, and it is a declared optional extra. The invariant this
 #: file defends is about pimm-data, not about weight of imports.
 @pytest.mark.parametrize("mod", _submodules("helix.core", "helix.tpc"))

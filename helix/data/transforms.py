@@ -1,10 +1,8 @@
 """helix's LArTPC transforms, registered into pimm-data's registry.
 
-The KERNELS live in ``helix.tpc`` (numpy/torch, no pimm_data import -- that is
-what keeps the DSP path installable on numpy alone). The registered WRAPPERS
-live here, because ``@TRANSFORMS.register_module()`` requires importing
-``pimm_data.transform``, which pulls 36 pimm_data modules and torch. Measured,
-not assumed: ``helix.tpc`` imports today with neither.
+The model is :mod:`helix.tpc.noise` (torch; the one the simulation corpus is built with). The
+registered WRAPPERS live here, because ``@TRANSFORMS.register_module()`` requires importing
+``pimm_data.transform``; ``helix.tpc`` does not import pimm_data.
 
 Going to dense is NOT here. ``Densify`` stays in pimm-data: scattering sparse
 rows into per-key grids is a data-layer operation that any detector family
@@ -23,8 +21,8 @@ import torch
 from pimm_data.transform import TRANSFORMS
 from pimm_data.batch_transforms import content_seed, _seeds_for
 
-from helix.tpc import dense_ops
-from helix.tpc.noise import (generate_noise, digitize, DEFAULT_ENC,
+from helix.tpc import noise
+from helix.tpc.noise import (DEFAULT_ENC,
                              DEFAULT_SERIES_SPECTRUM, DEFAULT_SAMPLING_RATE_HZ,
                              DEFAULT_GROUP_SIZE, DEFAULT_COH_RMS_ADC,
                              DEFAULT_COH_CORNER_FREQ_HZ, DEFAULT_COH_SLOPE,
@@ -35,16 +33,11 @@ from helix.tpc.noise import (generate_noise, digitize, DEFAULT_ENC,
 class AddNoise:
     """Inject forward detector noise on dense sensor planes (after ``Densify``).
 
-    Thin adapter over :func:`helix.tpc.noise.add_noise`. Operates on a ``sensor``
-    sub-dict that already carries ``dense`` (so it must run *after* ``Densify``):
-    each plane image is perturbed in place by incoherent and/or per-group
-    coherent noise. Tags (``incoherent`` / ``coherent`` and the parameters) are
-    set from the config.
-
-    Reproducibility: the per-event RNG is derived from a stable event id
-    (``sub['name']``, surfaced by the dataset) hashed with ``base_seed`` — so the
-    same event gets the same noise every epoch regardless of which DataLoader
-    worker happens to draw it, without touching numpy's global RNG state.
+    :func:`helix.tpc.noise.add_intrinsic_noise` on a collated batch's grids (``<mod>_dense``,
+    seeds from ``batch['name']`` folded with base_seed / epoch / rank) or on one event's
+    ``dense`` planes (seed from ``sub['name']`` and ``base_seed``): fresh noise per event at
+    load time, the same model the simulation corpus was built with. The same event gets the
+    same noise whichever worker draws it.
 
     Default tags are ``incoherent=False, coherent=True``: JAXTPC output already
     carries incoherent noise, so the common load-time use is adding the coherent
@@ -70,12 +63,11 @@ class AddNoise:
                  coh_corner_freq_hz=DEFAULT_COH_CORNER_FREQ_HZ,
                  coh_spectral_slope=DEFAULT_COH_SLOPE, beta=DEFAULT_COH_BETA,
                  base_seed=0, dense_key='dense', planes=None, name_key='name',
-                 geom=None, modality=None, coherent_numpy=False, offset_key='offset'):
+                 geom=None, modality=None, offset_key='offset'):
         self.incoherent = bool(incoherent)
         # flat collated-batch path (post-collate, torch): geom + flat dense key.
         self.geom = geom
         self.modality = modality
-        self.coherent_numpy = bool(coherent_numpy)
         self.offset_key = offset_key
         self.coherent = bool(coherent)
         self.group_size = int(group_size)
@@ -92,10 +84,15 @@ class AddNoise:
         self.planes = planes
         self.name_key = name_key
 
-    def _event_rng(self, name):
+    def _event_seed(self, name):
         h = hashlib.blake2b(str(name).encode('utf-8'), digest_size=8).digest()
-        seed = (int.from_bytes(h, 'little') ^ self.base_seed) & ((1 << 64) - 1)
-        return np.random.default_rng(seed)
+        return (int.from_bytes(h, 'little') ^ self.base_seed) & ((1 << 63) - 1)
+
+    def _kw(self):
+        return dict(enc=self.enc, coherent=self.coherent, incoherent=self.incoherent,
+                    sampling_rate_hz=self.sampling_rate_hz, group_size=self.group_size, coh_rms=self.coh_rms,
+                    coh_corner_freq_hz=self.coh_corner_freq_hz, coh_spectral_slope=self.coh_spectral_slope,
+                    beta=self.beta, series_spectrum=self.series_spectrum)
 
     def __call__(self, data):
         # DISPATCH: a collated batch carries the flat <mod>_offset key (torch grids
@@ -111,21 +108,14 @@ class AddNoise:
             raise KeyError(
                 f"AddNoise: no {self.dense_key!r} in the sensor modality — run "
                 "Densify before AddNoise.")
-        rng = self._event_rng(sub.get(self.name_key, ''))
-        labels = self.planes if self.planes is not None else list(dense)
-        for label in labels:
-            if label not in dense:
-                continue
-            img = dense[label]
-            noise = generate_noise(
-                img.shape, rng=rng, wire_lengths_m=self.wire_lengths_m,
-                incoherent=self.incoherent, coherent=self.coherent,
-                enc=self.enc, series_spectrum=self.series_spectrum,
-                sampling_rate_hz=self.sampling_rate_hz,
-                group_size=self.group_size, coh_rms=self.coh_rms,
-                coh_corner_freq_hz=self.coh_corner_freq_hz,
-                coh_spectral_slope=self.coh_spectral_slope, beta=self.beta)
-            dense[label] = img + noise
+        if self.incoherent and self.wire_lengths_m is None:
+            raise ValueError("AddNoise: incoherent=True needs wire_lengths_m (scalar or per channel, meters)")
+        labels = [lb for lb in (self.planes if self.planes is not None else list(dense)) if lb in dense]
+        grids = {i: torch.as_tensor(np.asarray(dense[lb], np.float32))[None].clone() for i, lb in enumerate(labels)}
+        geom = {i: dict(wire_lengths=self.wire_lengths_m) for i in grids}
+        noise.add_intrinsic_noise(grids, geom, seeds=[self._event_seed(sub.get(self.name_key, ''))], **self._kw())
+        for i, lb in enumerate(labels):
+            dense[lb] = grids[i][0] if isinstance(dense[lb], torch.Tensor) else grids[i][0].numpy()
         return sub
 
     def _noise_batch(self, batch, pfx):
@@ -137,13 +127,7 @@ class AddNoise:
         if seeds is None:                              # no 'name' -> position fallback
             seeds = [content_seed(f"_idx{i}", self.base_seed)
                      for i in range(next(iter(grids.values())).shape[0])]
-        dense_ops.add_intrinsic_noise(
-            grids, self.geom, seeds=seeds, enc=self.enc,
-            coherent=self.coherent, incoherent=self.incoherent,
-            sampling_rate_hz=self.sampling_rate_hz, group_size=self.group_size,
-            coh_rms=self.coh_rms, coh_corner_freq_hz=self.coh_corner_freq_hz,
-            coh_spectral_slope=self.coh_spectral_slope, beta=self.beta,
-            series_spectrum=self.series_spectrum, coherent_numpy=self.coherent_numpy)
+        noise.add_intrinsic_noise(grids, self.geom, seeds=seeds, **self._kw())
         return batch
 
 
@@ -237,19 +221,20 @@ class Digitize:
             if label not in dense:
                 continue
             ped = self._pedestal_for(label, sub)
-            dense[label] = digitize(dense[label], ped, n_bits=self.n_bits,
-                                    adc_max=self.adc_max, gain=self.gain)
+            g = noise.digitize({0: torch.as_tensor(np.asarray(dense[label], np.float32))}, ped, n_bits=self.n_bits,
+                               adc_max=self.adc_max, gain=self.gain)[0]
+            dense[label] = g if isinstance(dense[label], torch.Tensor) else g.numpy()
         sub[marker] = True
         return sub
 
     def _digitize_batch(self, batch, pfx):
         """Post-collate path: quantize the collated grids ``batch[<mod>_dense]``
-        (torch, on the inputs' device) via dense_ops. Pedestal: the ``pedestal``
+        (torch, on the inputs' device). Pedestal: the ``pedestal``
         arg wins, else per-plane from ``geom``."""
         ped = self.pedestal
         if ped is None:
             ped = {gid: e.get('pedestal', 0) for gid, e in self.geom.items()}
-        batch[pfx + self.dense_key] = dense_ops.digitize(
+        batch[pfx + self.dense_key] = noise.digitize(
             batch[pfx + self.dense_key], ped, n_bits=self.n_bits,
             adc_max=self.adc_max, gain=self.gain)
         return batch

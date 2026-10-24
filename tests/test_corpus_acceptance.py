@@ -185,7 +185,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
     away invisibly.
     """
     from helix.tpc.geometry import load_plane_registry
-    from helix.tpc.noise import generate_noise, digitize
+    from _noise_reference import generate_noise, digitize
     from helix.tpc.io import sensor_layout, read_sensor_event
 
     layout = sensor_layout(REAL)

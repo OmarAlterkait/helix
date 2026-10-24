@@ -8,7 +8,7 @@
 A source only reads: per event its identity, the TPC input and the optical waveforms.
 
 * ``sim``: JAXTPC sensor files (one run). The planes are densified, noised (the colored
-  incoherent + coherent model, :mod:`helix.tpc.dense_ops`, seeded per event) and digitized on
+  incoherent + coherent model, :mod:`helix.tpc.noise`, seeded per event) and digitized on
   the device; the noise-free planes are the clean target. Chain: :func:`helix.tpc.chain.sim_config`.
 * ``sbnd``: extracted SBND files (:mod:`helix.tpc.io_sbnd`, decoded in worker processes): the
   readout (adc, pedestal, present per channel), PMT and X-ARAPUCA waveforms. Chain: SBND_DEFAULT.
@@ -118,7 +118,7 @@ class SimSource:
     def events(self, indices, workers):
         import torch
         from pimm_data.dense_ops import densify
-        from helix.tpc import dense_ops
+        from helix.tpc import noise
         from helix.tpc.io import read_sensor_event_coo
         dev = self.device or "cpu"
         for k in indices:
@@ -137,9 +137,9 @@ class SimSource:
             grids = densify(wire, torch.cat(t_l), torch.cat(v_l), torch.cat(p_l),
                             torch.tensor([wire.numel()], dtype=torch.long, device=dev), self.reg)
             clean = {int(g): x[0].clone() for g, x in grids.items()}
-            grids = dense_ops.add_intrinsic_noise(grids, self.reg, seeds=[seed], incoherent=True, coherent=True,
+            grids = noise.add_intrinsic_noise(grids, self.reg, seeds=[seed], incoherent=True, coherent=True,
                                                   series_spectrum=self.spectrum, group_size=self.group_size)
-            grids = dense_ops.digitize(grids, {int(g): layout.pedestal(gmap[int(g)]) for g in grids}, n_bits=12)
+            grids = noise.digitize(grids, {int(g): layout.pedestal(gmap[int(g)]) for g in grids}, n_bits=12)
             yield dict(ident=dict(run=self.run, source_file=Path(path).name, event=int(ev), noise_seed=seed),
                        planes={int(g): x[0] for g, x in grids.items()}, clean=clean)
 

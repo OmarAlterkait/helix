@@ -1,52 +1,30 @@
-"""
-Forward noise model for LArTPC wire planes — a tagged numpy function.
+"""The forward noise model of LArTPC wire planes, torch on the grids' device: what the detector adds
+to a signal before the ADC (:func:`add_intrinsic_noise`) and the ADC (:func:`digitize`).
 
-This is pimm-data's lightweight, load-time noise applicator. It mirrors the
-forward noise model that lives in JAXTPC (``tools/noise.py`` incoherent +
-``tools/coherent_noise.py`` coherent) but is implemented in plain numpy with no
-torch dependency, so it runs inside DataLoader workers.
+Two additive components:
 
-Two additive components, selected by tags:
+* **incoherent** — per-channel independent noise, ENC = ``sqrt(white^2 + (y + z*L)^2)`` (MicroBooNE
+  model, arXiv:1705.07341): a frequency-shaped series component renormalised to ``y + z*L`` per channel
+  (the measured spectrum by default, as JAXTPC ``_noise_core``) plus flat white noise;
+* **coherent** — one waveform per GROUP of ``group_size`` contiguous channels, adjacent groups
+  anti-correlated by ``beta``, renormalised to ``rms_adc`` after the coupling (JAXTPC
+  ``tools/coherent_noise.py``). Not divided by sqrt(N): it must survive averaging over the group,
+  which is what the chain's coherent gate (on the readout's groups, the same ``wire // group_size``)
+  removes.
 
-* **incoherent** — per-channel *independent* noise. ENC = ``sqrt(white^2 +
-  (y + z*L)^2)`` (MicroBooNE model, arXiv:1705.07341). A shaped "series"
-  component (renormalised to ``series_rms`` per channel, exactly as JAXTPC
-  ``_noise_core`` does) plus a flat white component.
-* **coherent** — a per-GROUP *shared* waveform: ``group_size`` channels share
-  one realization. RMS is per-group and is **NOT** divided by ``sqrt(N)`` — the
-  shared waveform must survive per-channel averaging, which is exactly what the
-  inverse (the chain's per-block coherent gate) is built to kill.
-
-Parameters are **inline defaults** documented to match JAXTPC's
-``config/noise_spectrum.npz`` + the YAML coherent block.
-``tests/test_forward_noise.py`` pins them: the ENC formula against DEFAULT_ENC.
-(This used to cite ``tests/test_noise.py``, which exists in neither repo — the
-reconciliation against JAXTPC's own config lives in
-``tests/test_dense_chain.py``, which skips when JAXTPC is not importable.) The grouping convention
-(``arange(n) // group_size``) is identical to JAXTPC ``broadcast_to_wires`` and
-the block gate's ``arange(W) // group_size`` — that single integer is the whole "don't drift"
-contract between forward injection and inverse removal.
-
-The LArTPC forward model. This used to be a MIRROR of ``pimm_data.noise``,
-kept in step by tests/test_forward_mirror.py -- pimm-data needed it for
-load-time augmentation and helix for the corpus builder, and neither could
-depend on the other. The boundary moved: the forward model is helix's, the
-densification that consumes it is pimm-data's, and there is one copy.
-
-Note this is the FORWARD model — noise injection and digitisation, what the
-detector does to a signal. The TPC chain's block gate
-(:mod:`helix.tpc.coherent_gate`, ``group_size`` from
-:data:`helix.tpc.chain.SIM_BASE`) is the INVERSE (coherent-noise removal); the
-two must agree on the grouping convention, which is the whole "don't drift"
-contract.
+The same functions build the simulation corpus (:class:`helix.build.SimSource`) and add fresh noise at
+load time (:class:`helix.data.transforms.AddNoise`). Realisations come from per-event torch generators
+(seeded by the caller): reproducible on one device type, not across devices, and statistically, not
+bit-, equal to JAXTPC's numpy (tests/_noise_reference.py, the numpy port, is the check).
 """
 
 from __future__ import annotations
 
 import numpy as np
+import torch
 
-# ── Inline defaults — MUST match JAXTPC config/noise_spectrum.npz + the YAML
-#    simulation.coherent_noise block (tests/test_noise.py asserts this). ──
+# ── Defaults: JAXTPC config/noise_spectrum.npz and its simulation.coherent_noise block
+#    (tests/test_forward_noise.py, tests/test_dense_chain.py). ──
 # (white_x [ADC], series_y [ADC], series_z [ADC/m]); wire length L is in METERS.
 DEFAULT_ENC = (0.90, 0.79, 0.22)
 DEFAULT_SAMPLING_RATE_HZ = 2.0e6  # 2 MHz (0.5 us / tick)
@@ -98,9 +76,8 @@ def resolve_series_spectrum(spec):
 def _series_spectrum_shape(n_ticks, series_spectrum, sampling_rate_hz):
     """Interpolated series amplitude spectrum (shape only).
 
-    The absolute scale is irrelevant: ``incoherent_noise`` renormalises the
-    series component to ``series_rms`` per channel (mirroring JAXTPC
-    ``_noise_core``), so only the spectral *shape* matters. ``series_spectrum``
+    The absolute scale is irrelevant: the series component is renormalised to
+    ``series_rms`` per channel (as JAXTPC ``_noise_core``), so only the spectral *shape* matters. ``series_spectrum``
     is ``(freqs_hz, amps)`` (as in noise_spectrum.npz) or ``None`` → flat/white.
     """
     series_spectrum = resolve_series_spectrum(series_spectrum)
@@ -112,163 +89,150 @@ def _series_spectrum_shape(n_ticks, series_spectrum, sampling_rate_hz):
                      np.asarray(amps_emp, dtype=np.float64))
 
 
-def incoherent_noise(shape, wire_lengths_m, rng, *, enc=DEFAULT_ENC,
-                     series_spectrum=DEFAULT_SERIES_SPECTRUM,
-                     sampling_rate_hz=DEFAULT_SAMPLING_RATE_HZ):
-    """Per-channel independent noise, shape ``(n_channels, n_ticks)`` [ADC].
+# decorrelate the per-component torch RNG streams from each other. Masked to 63
+# bits so they don't fight the 63-bit seed mask in manual_seed.
+_INCOH_SEED_SALT = 0x9E3779B97F4A7C15 & ((1 << 63) - 1)
+_COH_SEED_SALT = 0xD1B54A32D192ED03 & ((1 << 63) - 1)
 
-    Mirrors JAXTPC ``tools.noise._noise_core``: a frequency-shaped series
-    component renormalised to ``series_rms = y + z*L`` per channel, plus a flat
-    white component with RMS ``x``. ``wire_lengths_m`` is a scalar (uniform) or
-    a ``(n_channels,)`` array, in METERS.
-    """
+
+def _series_spectrum_torch(n_ticks, series_spectrum, sampling_rate_hz, device):
+    series_spectrum = resolve_series_spectrum(series_spectrum)
+    spec = _series_spectrum_shape(n_ticks, series_spectrum, sampling_rate_hz)
+    if spec is None:
+        return None
+    return torch.as_tensor(spec, dtype=torch.float32, device=device)
+
+
+def _incoherent_torch(shape, wire_lengths_m, *, gen, enc, series_spectrum,
+                      sampling_rate_hz, device):
+    """Incoherent noise (n_channels, n_ticks): the shaped series renormalised to ``y + z·L`` per
+    channel, plus flat white."""
     n_ch, n_ticks = int(shape[0]), int(shape[1])
     white_x, series_y, series_z = enc
-
-    L = np.asarray(wire_lengths_m, dtype=np.float64).reshape(-1)
-    if L.shape[0] == 1:
-        L = np.full(n_ch, L[0])
-    if L.shape[0] != n_ch:
-        raise ValueError(
-            f"wire_lengths_m has {L.shape[0]} entries but image has {n_ch} "
-            f"channels (pass a scalar for uniform length or one value/channel)")
-    series_rms = (series_y + series_z * L).astype(np.float64)  # (n_ch,)
-
+    L = torch.as_tensor(wire_lengths_m, dtype=torch.float32, device=device).reshape(-1)
+    if L.numel() == 1:
+        L = L.expand(n_ch)
+    if L.numel() != n_ch:
+        raise ValueError(f"wire_lengths has {L.numel()} entries, expected {n_ch}")
+    series_rms = (series_y + series_z * L)[:, None]
     n_freq = n_ticks // 2 + 1
-    spec = _series_spectrum_shape(n_ticks, series_spectrum, sampling_rate_hz)
 
-    real = rng.standard_normal((n_ch, n_freq))
-    imag = rng.standard_normal((n_ch, n_freq))
+    real = torch.randn(n_ch, n_freq, generator=gen, device=device)
+    imag = torch.randn(n_ch, n_freq, generator=gen, device=device)
+    spec = _series_spectrum_torch(n_ticks, series_spectrum, sampling_rate_hz, device)
     if spec is not None:
-        real = real * spec[None, :]
-        imag = imag * spec[None, :]
-    cpx = real + 1j * imag
-    cpx[:, 0] = cpx[:, 0].real           # DC must be real
+        real = real * spec
+        imag = imag * spec
+    cpx = torch.complex(real, imag)
+    cpx[:, 0] = cpx[:, 0].real
     if n_ticks % 2 == 0:
-        cpx[:, -1] = cpx[:, -1].real     # Nyquist must be real (even n)
+        cpx[:, -1] = cpx[:, -1].real
+    shaped = torch.fft.irfft(cpx, n=n_ticks, dim=1)
+    cur = shaped.std(dim=1, unbiased=False, keepdim=True).clamp_min(1e-10)
+    shaped = shaped / cur * series_rms
 
-    shaped = np.fft.irfft(cpx, n=n_ticks, axis=1)
-    cur = np.maximum(np.std(shaped, axis=1, keepdims=True), 1e-10)
-    shaped = shaped / cur * series_rms[:, None]
-
-    white = rng.standard_normal((n_ch, n_ticks)) * white_x
-    return (shaped + white).astype(np.float32)
+    white = torch.randn(n_ch, n_ticks, generator=gen, device=device) * white_x
+    return (shaped + white).to(torch.float32)
 
 
-def _coherent_spectrum(n_ticks, corner_freq_hz, spectral_slope, sampling_rate_hz):
-    """A(f) = 1 / (1 + f/f_corner)^(slope/2), with A(0) = 0 (no DC)."""
-    freqs = np.fft.rfftfreq(n_ticks, d=1.0 / sampling_rate_hz)
+def _coherent_spectrum_torch(n_ticks, corner_freq_hz, spectral_slope,
+                             sampling_rate_hz, device):
+    """A(f) = 1/(1 + f/f_corner)^(slope/2), A(0) = 0 (no DC)."""
+    freqs = torch.fft.rfftfreq(n_ticks, d=1.0 / sampling_rate_hz, device=device)
     spec = 1.0 / (1.0 + freqs / corner_freq_hz) ** (spectral_slope / 2.0)
     spec[0] = 0.0
-    return spec.astype(np.float64)
+    return spec.to(torch.float32)
 
 
-def coherent_noise(n_channels, n_ticks, rng, *, group_size=DEFAULT_GROUP_SIZE,
-                   rms_adc=DEFAULT_COH_RMS_ADC,
-                   corner_freq_hz=DEFAULT_COH_CORNER_FREQ_HZ,
-                   spectral_slope=DEFAULT_COH_SLOPE, beta=DEFAULT_COH_BETA,
-                   sampling_rate_hz=DEFAULT_SAMPLING_RATE_HZ):
-    """Per-group shared waveform broadcast to channels, ``(n_channels, n_ticks)``.
-
-    Faithful numpy port of JAXTPC ``tools.coherent_noise.generate_group_waveforms``
-    + ``broadcast_to_wires``: one waveform per group with adjacent-group
-    anti-correlation (``w'(g) = w(g) - beta*(w(g-1)+w(g+1))``), then per-group RMS
-    renormalised to ``rms_adc`` **after** the coupling by the *measured* realized RMS
-    (JAXTPC 6998d81 — the coupling inflates variance, so analytic/Parseval norm of the
-    pre-coupling spectrum runs ~2% high at the default beta).
-    """
+def _coherent_torch(n_channels, n_ticks, *, gen, group_size, rms_adc,
+                    corner_freq_hz, spectral_slope, beta, sampling_rate_hz, device):
+    """Coherent noise (n_channels, n_ticks): all groups' shaped waveforms at once, adjacent-group
+    anti-correlation ``w - beta*(w_{g-1}+w_{g+1})``, the RMS set to ``rms_adc`` by the MEASURED RMS
+    after the coupling (JAXTPC 6998d81: the analytic pre-coupling norm runs ~2% high at the default
+    beta), broadcast by ``wire // group_size``."""
     n_groups = (n_channels + group_size - 1) // group_size
-    spec = _coherent_spectrum(n_ticks, corner_freq_hz, spectral_slope,
-                              sampling_rate_hz)
-    n_freq = len(spec)
+    spec = _coherent_spectrum_torch(n_ticks, corner_freq_hz, spectral_slope,
+                                    sampling_rate_hz, device)            # (n_freq,)
+    real = torch.randn(n_groups, spec.numel(), generator=gen, device=device) * spec
+    imag = torch.randn(n_groups, spec.numel(), generator=gen, device=device) * spec
+    imag[:, 0] = 0.0                                  # DC real (zero imag, alias-free)
+    if n_ticks % 2 == 0:
+        imag[:, -1] = 0.0                            # Nyquist real (even n)
+    base = torch.fft.irfft(torch.complex(real, imag), n=n_ticks, dim=1)  # (n_groups, n_ticks)
 
-    base = np.empty((n_groups, n_ticks), dtype=np.float32)
-    for g in range(n_groups):
-        real = rng.standard_normal(n_freq) * spec
-        imag = rng.standard_normal(n_freq) * spec
-        cpx = real + 1j * imag
-        cpx[0] = cpx[0].real
-        if n_ticks % 2 == 0:
-            cpx[-1] = cpx[-1].real
-        base[g] = np.fft.irfft(cpx, n=n_ticks)
+    z = base.new_zeros(1, n_ticks)
+    left = torch.cat([z, base[:-1]], dim=0)
+    right = torch.cat([base[1:], z], dim=0)
+    wav = base - beta * (left + right)
 
-    z = np.zeros((1, n_ticks), dtype=np.float32)
-    left = np.concatenate([z, base[:-1]], axis=0)
-    right = np.concatenate([base[1:], z], axis=0)
-    waveforms = base - beta * (left + right)
+    realized = wav.pow(2).mean().sqrt()
+    if float(realized) > 0:
+        wav = wav * (rms_adc / realized)
 
-    # normalize AFTER coupling, by the measured realized RMS (matches JAXTPC).
-    realized = float(np.sqrt(np.mean(waveforms.astype(np.float64) ** 2)))
-    if realized > 0:
-        waveforms = waveforms * (rms_adc / realized)
-
-    wire_to_group = np.arange(n_channels) // group_size
-    return waveforms[wire_to_group].astype(np.float32)
+    wire_to_group = torch.arange(n_channels, device=device) // group_size
+    return wav[wire_to_group].to(torch.float32)
 
 
-def generate_noise(shape, *, rng, wire_lengths_m=None, incoherent=True,
-                   coherent=False, enc=DEFAULT_ENC,
-                   series_spectrum=DEFAULT_SERIES_SPECTRUM,
-                   sampling_rate_hz=DEFAULT_SAMPLING_RATE_HZ,
-                   group_size=DEFAULT_GROUP_SIZE, coh_rms=DEFAULT_COH_RMS_ADC,
-                   coh_corner_freq_hz=DEFAULT_COH_CORNER_FREQ_HZ,
-                   coh_spectral_slope=DEFAULT_COH_SLOPE, beta=DEFAULT_COH_BETA):
-    """Return a dense ``(n_channels, n_ticks)`` noise array [ADC].
+def add_intrinsic_noise(grids, geom, *, seeds, enc=DEFAULT_ENC,
+                        coherent=True, incoherent=False,
+                        sampling_rate_hz=DEFAULT_SAMPLING_RATE_HZ,
+                        group_size=DEFAULT_GROUP_SIZE, coh_rms=DEFAULT_COH_RMS_ADC,
+                        coh_corner_freq_hz=DEFAULT_COH_CORNER_FREQ_HZ,
+                        coh_spectral_slope=DEFAULT_COH_SLOPE, beta=DEFAULT_COH_BETA,
+                        series_spectrum=DEFAULT_SERIES_SPECTRUM):
+    """Add fresh forward noise to per-plane dense grids in place; returns ``grids``.
 
-    Plain numpy (NOT jitted). Returns the **noise** — the caller adds it to the
-    signal::
+    ``grids`` : ``{plane_id: (B, W, T)}`` on-device. ``geom`` : registry with
+    ``n_wires``/``n_ticks`` (+ ``wire_lengths`` per plane when ``incoherent``).
+    ``seeds`` : ``(B,)`` per-event content-addressed seeds.
 
-        noisy = image + generate_noise(image.shape, rng=rng, coherent=True)
-
-    Returning the noise (rather than the noisy image) keeps generation decoupled
-    from application: it is easy to inspect/reuse/save the realization and robust
-    to the caller's dtype / in-place choices. The ``incoherent`` / ``coherent``
-    tags select the additive components; ``rng`` is an explicit
-    ``np.random.Generator`` (the caller owns reproducibility).
-
-    JAXTPC production output already carries incoherent noise, so the typical
-    load-time use is ``incoherent=False, coherent=True`` (add the component
-    JAXTPC omits by default); generate the full model only for noise-free input.
-    ``wire_lengths_m`` (scalar or per-channel, METERS) is required only when
-    ``incoherent=True``.
+    Each component draws from its own per-event torch Generator (seeded by ``seeds[b]``),
+    advanced across planes in canonical-id order.
     """
-    if len(shape) != 2:
-        raise ValueError(f"generate_noise expects a 2-D (n_channels, n_ticks) "
-                         f"shape, got {tuple(shape)}")
-    n_ch, n_ticks = int(shape[0]), int(shape[1])
-    noise = np.zeros((n_ch, n_ticks), dtype=np.float32)
-    if incoherent:
-        if wire_lengths_m is None:
-            raise ValueError("incoherent=True requires wire_lengths_m "
-                             "(scalar or per-channel, in meters)")
-        noise += incoherent_noise((n_ch, n_ticks), wire_lengths_m, rng, enc=enc,
-                                  series_spectrum=series_spectrum,
-                                  sampling_rate_hz=sampling_rate_hz)
+    if not grids:
+        return grids
+    dev = next(iter(grids.values())).device
+    B = next(iter(grids.values())).shape[0]
+    # sorted so the per-event cross-plane draw order is a deterministic function
+    # of the canonical plane id (not dict insertion / HDF5 enumeration order).
+    gids = sorted(grids.keys())
+
     if coherent:
-        noise += coherent_noise(n_ch, n_ticks, rng,
-                                group_size=group_size, rms_adc=coh_rms,
-                                corner_freq_hz=coh_corner_freq_hz,
-                                spectral_slope=coh_spectral_slope, beta=beta,
-                                sampling_rate_hz=sampling_rate_hz)
-    return noise
+        for b in range(B):
+            gen = torch.Generator(device=dev)
+            gen.manual_seed((int(seeds[b]) ^ _COH_SEED_SALT) & ((1 << 63) - 1))
+            for gid in gids:
+                _, W, T = grids[gid].shape
+                grids[gid][b] += _coherent_torch(
+                    W, T, gen=gen, group_size=group_size, rms_adc=coh_rms,
+                    corner_freq_hz=coh_corner_freq_hz, spectral_slope=coh_spectral_slope,
+                    beta=beta, sampling_rate_hz=sampling_rate_hz, device=dev)
+
+    if incoherent:
+        for b in range(B):
+            gen = torch.Generator(device=dev)
+            gen.manual_seed((int(seeds[b]) ^ _INCOH_SEED_SALT) & ((1 << 63) - 1))
+            for gid in gids:
+                _, W, T = grids[gid].shape
+                wl = geom[gid].get('wire_lengths')
+                if wl is None:
+                    raise ValueError(
+                        f"incoherent noise needs 'wire_lengths' for plane {gid} "
+                        "(configure wire_lengths_per_plane / the geometry registry)")
+                grids[gid][b] += _incoherent_torch(
+                    (W, T), wl, gen=gen, enc=enc, series_spectrum=series_spectrum,
+                    sampling_rate_hz=sampling_rate_hz, device=dev)
+    return grids
 
 
-def digitize(signal, pedestal, *, n_bits=12, adc_max=None, gain=1.0):
-    """Quantize a pedestal-subtracted ADC image to integer codes.
-
-    The production digitization step (mirrors JAXTPC ``electronics._digitize_signal``
-    and the doraemon ``make_noisy`` path): add the pedestal back, optionally
-    scale by ``gain``, round to the nearest integer, clip to the valid code range
-    ``[0, adc_max]``, then subtract the pedestal again so the result stays
-    pedestal-subtracted::
-
-        out = round(signal*gain + pedestal).clip(0, adc_max) - pedestal
-
-    ``adc_max`` defaults to ``(1 << n_bits) - 1`` (12-bit → 4095). Apply *after*
-    noise (``image + generate_noise(...)``), as the last forward step. Returns a
-    ``float32`` array, integer-valued, in ``[-pedestal, adc_max - pedestal]``.
+def digitize(grids, pedestal, n_bits=12, adc_max=None, gain=1.0):
+    """Quantize per-plane grids to ADC codes, pedestal-subtracted: ``round(g*gain + ped).clip(0,
+    adc_max) - ped`` (JAXTPC ``electronics._digitize_signal``). ``pedestal`` is a scalar or a
+    ``{plane_id: ped}`` dict. ``adc_max`` defaults to ``(1 << n_bits) - 1``.
     """
-    x = np.asarray(signal, dtype=np.float32)
     amax = float(adc_max) if adc_max is not None else float((1 << int(n_bits)) - 1)
-    raw = np.round(x * gain + pedestal)
-    return np.clip(raw, 0.0, amax).astype(np.float32) - pedestal
+    out = {}
+    for gid, g in grids.items():
+        ped = float(pedestal[gid]) if isinstance(pedestal, dict) else float(pedestal)
+        out[int(gid)] = torch.round(g * gain + ped).clamp(0.0, amax) - ped
+    return out

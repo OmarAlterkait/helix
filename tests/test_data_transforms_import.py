@@ -43,19 +43,16 @@ def test_module_has_no_relative_imports():
 
 
 def test_every_name_the_module_uses_is_imported():
-    """`hashlib` was used by _event_rng and not imported -- NameError on call."""
+    """`hashlib` was used by the per-event seed and not imported -- NameError on call."""
     a = T.AddNoise(geom=GEOM, modality="sensor", coherent=True, incoherent=True,
                    wire_lengths_m=2.33)
-    r = a._event_rng("ev0")
-    assert r.standard_normal(1).shape == (1,)
+    assert isinstance(a._event_seed("ev0"), int)
 
 
-def test_event_rng_is_deterministic_per_name():
+def test_event_seed_is_deterministic_per_name():
     a = T.AddNoise(geom=GEOM, modality="sensor", coherent=True, incoherent=True,
                    wire_lengths_m=2.33)
-    first = a._event_rng("ev0").standard_normal(4)
-    assert np.array_equal(first, a._event_rng("ev0").standard_normal(4))
-    assert not np.array_equal(first, a._event_rng("ev1").standard_normal(4))
+    assert a._event_seed("ev0") == a._event_seed("ev0") != a._event_seed("ev1")
 
 
 @pytest.mark.parametrize("name", ["AddNoise", "Digitize"])
