@@ -18,7 +18,7 @@ kept (3.3 M instead of ~35 k). :func:`threshold_bands_rows`:
     valid and ``sigma_scope="plane"`` HELIX's universal threshold).
 
 Torch on any device. Medians are :func:`helix.core.robust.q50` (np.median convention); the
-group scope uses the :class:`helix.tpc.coherent_gate_labels.ChannelGroups` table and a masked
+group scope uses the :class:`helix.tpc.coherent_gate.ChannelGroups` table and a masked
 median instead of a loop over labels.
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ def band_sigma_rows(c, valid, sigma_scope="plane", groups=None, any_valid=None, 
     if sigma_scope == "channel":
         return mad(c, dim=1)[:, None]
     if sigma_scope == "group":
-        from helix.tpc.coherent_gate_labels import ChannelGroups
+        from helix.tpc.coherent_gate import ChannelGroups
         g = groups if isinstance(groups, ChannelGroups) else ChannelGroups(
             np.where(valid.cpu().numpy(), np.asarray(groups), -1))
         T = g.torch(c.device)

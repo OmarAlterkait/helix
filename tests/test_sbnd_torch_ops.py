@@ -1,16 +1,11 @@
-"""The SBND additions' fast paths agree with their general forms, on CPU and (when available)
-CUDA (run by hand on turing: CI has no GPU): the labeled gate's contiguous kernel for complete
-groups vs its masked kernel; all planes' hysteresis grown at once vs one plane at a time.
-
-Tolerance: float32 reduction order differs between the two gate kernels (~1e-4 ADC).
-"""
+"""Fast paths agree with their general forms, on CPU and (when available) CUDA (run by hand on
+turing: CI has no GPU): all planes' hysteresis grown at once vs one plane at a time."""
 import numpy as np
 import pytest
 import pywt
 
 torch = pytest.importorskip("torch")
 
-from helix.tpc import coherent_gate_labels as cgl  # noqa: E402
 from helix.tpc import threshold_rows as tr  # noqa: E402
 
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
@@ -43,17 +38,6 @@ def _planes(seed=0, nt=512, rows=(96, 96, 64)):
 
 def _bands(img, wav="coif3", level=4):
     return [np.asarray(c, np.float32) for c in pywt.wavedec(img, wav, level=level, mode="periodization", axis=-1)]
-
-
-@pytest.mark.parametrize("dev", DEVICES)
-def test_label_gate_full_groups_fast_path(dev):
-    rng = np.random.default_rng(3)
-    b = rng.normal(0, 1, (256, 300)).astype(np.float32)
-    g = cgl.ChannelGroups(np.arange(256) // 64)
-    assert g.full
-    masked, _ = cgl.gate_band_labeled(_t(b, dev), g, npass=2, tau=0.05, return_parts=True)
-    fast = cgl.gate_band_labeled(_t(b, dev), g, npass=2, tau=0.05)
-    np.testing.assert_allclose(_np(fast), _np(masked), rtol=0, atol=1e-3)
 
 
 @pytest.mark.parametrize("dev", DEVICES)

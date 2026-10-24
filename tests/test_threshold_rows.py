@@ -79,8 +79,8 @@ def test_sim_chain_hysteresis_default():
     img = rng.normal(0, 2, (128, 2701)).astype(np.float32)
     img[40:60, 1000:1012] += 25
     nw = [[128, 128, 128]]
-    ch = TPCChain(sim_config(nw, {"coherent": {"method": "none"}}))
-    cu = TPCChain(sim_config(nw, {"coherent": {"method": "none"}, "threshold": {"floor": None}}))
+    ch = TPCChain(sim_config(nw, {"coherent": {"groups": None}}))
+    cu = TPCChain(sim_config(nw, {"coherent": {"groups": None}, "threshold": {"floor": None}}))
     assert ch.cfg["threshold"]["floor"] == 2.0
     ph = ch.process_images([img] * 3, tpc=0)[0]
     pu = cu.process_images([img] * 3, tpc=0)[0]

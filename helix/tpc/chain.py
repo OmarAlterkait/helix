@@ -7,9 +7,9 @@ One event, per TPC:
      plane median) or with a baseline step (median of the first vs the last
      ``step_ticks`` ticks differing by more than ``step_k`` rms);
   3. DWT (one basis for every plane: periodization, time padded to a multiple of 2^level);
-  4. coherent removal: the labeled gate (:mod:`helix.tpc.coherent_gate_labels`) on
-     electronics groups, optionally across planes (SBND: front-end boards, which take
-     channels from two planes); or HELIX's contiguous-block gate; or none;
+  4. coherent removal (:mod:`helix.tpc.coherent_gate`) on the readout's electronics groups
+     (``coherent.groups``; null: none): SBND's front-end boards, across planes; the simulation's
+     64-wire blocks, per plane;
   5. threshold (:mod:`helix.tpc.threshold_rows`): sigma on live rows per plane and band;
      hysteresis: seeds at the universal threshold (``kappa``), grown through ``floor``
      sigma. The ``drop_finest`` finest detail bands are zeroed (HELIX's FM tokenizes A4,
@@ -34,7 +34,7 @@ import torch.nn.functional as F
 
 from helix.core import robust, wavelet
 from helix.core.robust import q50
-from helix.tpc import coherent_gate, coherent_gate_labels as cgl
+from helix.tpc import coherent_gate as cg
 from helix.tpc import threshold_rows as thr
 from helix.tpc.readout import load_readout
 
@@ -44,8 +44,8 @@ SBND_DEFAULT = {
     "status": {"method": "cuts", "dead_rms": 0.3, "noisy_factor": 4.0, "clip_k": 3.5, "step_k": 10.0, "step_ticks": 500},
     # HELIX's basis (coif3, level 4), so SBND coefficients tokenize with the FM's band set
     "dwt": {"wavelet": "coif3", "level": 4, "mode": "periodization"},
-    "coherent": {"method": "label_gate", "groups": "femb", "cross_plane": True, "kgate": 3.0, "ksig": 3.0,
-                 "npass": 2, "tau": None, "sigc_scope": "group", "group_size": 64},
+    "coherent": {"groups": "femb", "cross_plane": True, "kgate": 3.0, "ksig": 3.0, "npass": 2, "tau": None,
+                 "sigc_scope": "group"},
     "threshold": {"kappa": 1.0, "floor": 2.0, "sigma_scope": "plane",
                   "threshold_approx": True, "drop_finest": 1},
     # stored values rounded to a power-of-two step <= sigma / q of their (plane, band), sigma the
@@ -55,16 +55,16 @@ SBND_DEFAULT = {
 }
 
 # The simulation (JAXTPC sensor files): its wire layout as the readout (``sim_config``), pedestals
-# already subtracted by the reader, SBND's status cuts (they cut no simulated wire), HELIX's
-# contiguous-block gate (the coherent noise model's 64-wire groups; occupancy tolerance 0.05),
+# already subtracted by the reader, SBND's status cuts (they cut no simulated wire), the gate on the
+# noise model's 64-wire blocks per plane (one coherent scale per band; occupancy tolerance 0.05),
 # the same threshold and basis as SBND.
 SIM_BASE = {
     "readout": {"kind": "layout", "num_wires": [], "group_size": 64},
     "pedestal": {"method": "file", "clip_k": 3.5},
     "status": {"method": "cuts", "dead_rms": 0.3, "noisy_factor": 4.0, "clip_k": 3.5, "step_k": 10.0, "step_ticks": 500},
     "dwt": {"wavelet": "coif3", "level": 4, "mode": "periodization"},
-    "coherent": {"method": "block_gate", "groups": "block", "cross_plane": False, "kgate": 3.0, "ksig": 3.0,
-                 "npass": 2, "tau": 0.05, "sigc_scope": "group", "group_size": 64},
+    "coherent": {"groups": "block", "cross_plane": False, "kgate": 3.0, "ksig": 3.0, "npass": 2, "tau": 0.05,
+                 "sigc_scope": "global"},
     "threshold": {"kappa": 1.0, "floor": 2.0, "sigma_scope": "plane", "threshold_approx": True, "drop_finest": 1},
     "store": {"step_input": 16, "step_target": 32},
 }
@@ -80,7 +80,6 @@ def sim_config(num_wires, overrides=None):
 _CHOICES = {
     ("pedestal", "method"): ("file", "clipped_mean"),
     ("status", "method"): ("cuts", "none"),
-    ("coherent", "method"): ("label_gate", "block_gate", "none"),
     ("threshold", "sigma_scope"): ("plane", "channel", "group"),
     ("coherent", "sigc_scope"): ("global", "group"),
 }
@@ -273,17 +272,14 @@ class TPCChain:
         coh = cfg["coherent"]
         valid_np = [np.asarray(v.cpu() if hasattr(v, "cpu") else v) for v in valid]
         bands = [self._dwt(im, wav, lev) for im in imgs]
-        if coh["method"] != "none":
-            gkw = dict(kgate=coh["kgate"], ksig=coh["ksig"], npass=coh["npass"], tau=coh["tau"])
-            if coh["method"] == "label_gate":
-                gkw["sigc_scope"] = coh["sigc_scope"]
-                labels = [ro.labels(coh["groups"], r, v) for r, v in zip(rows_bp, valid_np)]
-                if coh["cross_plane"]:
-                    bands = cgl.coherent_gate_planes(bands, labels, **gkw)
-                else:
-                    bands = [cgl.coherent_gate_labeled(b, lab, **gkw) for b, lab in zip(bands, labels)]
+        if coh["groups"] is not None:
+            gkw = dict(kgate=coh["kgate"], ksig=coh["ksig"], npass=coh["npass"], tau=coh["tau"],
+                       sigc_scope=coh["sigc_scope"])
+            labels = [ro.labels(coh["groups"], r, v) for r, v in zip(rows_bp, valid_np)]
+            if coh["cross_plane"]:
+                bands = cg.coherent_gate_planes(bands, labels, **gkw)
             else:
-                bands = [coherent_gate.gate_bands(b, group_size=coh["group_size"], **gkw) for b in bands]
+                bands = [cg.coherent_gate_labeled(b, lab, **gkw) for b, lab in zip(bands, labels)]
         self._mark("dwt_gate")
         tc = cfg["threshold"]
         nd = int(tc["drop_finest"])

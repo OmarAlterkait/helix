@@ -1,40 +1,36 @@
-"""Coefficient-space coherent-noise gate on contiguous wire blocks (the qualified R2): the TPC
-chain's ``block_gate`` (:class:`helix.tpc.chain.TPCChain`, simulation). Torch, any device.
+"""The coherent-noise gate: the common mode of each electronics group, removed in coefficient space.
 
-Given the per-band DWT coefficients of a plane, it removes the common-mode coherent noise
-that is rank-1 within `group_size`-wire blocks, *without* an image round-trip (the
-DWT is linear, so the cleaned image's bands == band − gated block common-mode).
+Coherent noise follows the readout electronics: every channel of a group (an SBND front-end board,
+128 channels over three planes; a block of 64 contiguous wires in the simulation's noise model) carries
+the same waveform. The groups come from the readout (:meth:`helix.tpc.readout.ReadoutMap.labels`: one
+integer per row, -1 = row excluded, e.g. a dead channel), so a group may take rows from several planes
+(stack the planes' bands: :func:`coherent_gate_planes`). The DWT is linear, so the cleaned image's
+bands are the bands minus the gated common mode: no image round trip.
 
-Mechanism, per band, per `npass`:
-  1. robust per-(block, coeff-position) common mode M — a ksig-masked mean over the
-     wires of each block, excluding wires flagged as signal (so signal doesn't bias
-     the estimate);
-  2. coherent scale `sigc` = MAD of M over blocks;
-  3. gate: keep `|M| < kgate·sigc` (that is the coherent part → subtract), drop the
-     rest (large ⇒ real signal → protect);
-  4. subtract the gated common-mode from the band.
-Between passes, signal is (re)detected on the cleaned band and excluded from the
-next common-mode estimate — a purer estimate that removes more noise at no signal
-cost (the qualified 2-pass result).
+Per band, per pass:
+  1. the common mode M per (group, coefficient position): a ksig-clipped mean over the group's rows,
+     excluding rows flagged as signal (so signal does not bias it);
+  2. the coherent scale sigc: the MAD of M over the band (``sigc_scope="global"``) or per group
+     ("group": when groups' coherent levels differ, SBND boards up to ~4x);
+  3. the gate: subtract M where |M| < kgate sigc (coherent), keep it where larger (signal) - and with
+     ``tau``, subtract a large M too unless more than ``tau`` of the group's rows were flagged in pass 1.
+     Coherent noise is identical on every row of a group, so it cannot produce an outlier: an empty
+     mask is evidence that only coherent noise is there, and refusing M because it landed in the
+     coherent's own Gaussian tail leaves the whole component behind, one group wide. Occupancy comes
+     from pass 1: where pass 1 refused, the band still holds the coherent noise and pass 2 would flag
+     every row;
+  4. between passes, signal is re-detected on the cleaned band (> ksig MAD within the group) and
+     excluded from the next estimate.
 
-Qualified default: kgate=3.0, ksig=3.0, npass=2, group_size=64, A-parity `sigc`
-(`quantile(0.5)`). See research/r2_qualification/REPORT.md. Ported from
-`measure_coeffs.smart_gate_bands` (1-pass) + `r2_qualification/grid.py` (2-pass).
+Two things change gate decisions silently rather than failing: medians are np.median's (the AVERAGE
+of the two middles, :func:`helix.core.robust.masked_median`; torch.median takes the lower), and the
+signal exclusion in step 1. Float32 reductions depend on summation order, the comparisons on them
+are discrete and a group's decision covers all its rows, so one GPU generation builds a corpus.
 
-A corpus is architecture-specific: float32 reductions depend on summation order, the
-threshold comparisons on those floats are discrete, and one block decision is broadcast to
-all its wires, so one GPU generation builds a whole corpus.
-
-Two things must be exactly right, because both silently change gate decisions rather than
-failing:
-
-1. **np.median, not torch.median.** ``torch.median`` returns the LOWER of the two
-   middle values; :func:`helix.core.robust.q50` AVERAGES them, as ``np.quantile(..., 0.5)``
-   does. They differ by ~1e-4 relative on even-length inputs, which flips a handful of
-   gate decisions per event.
-2. **Signal exclusion.** The ``~smf`` term in the common-mode estimate excludes
-   wires already flagged as signal. Dropping it is nearly invisible on aggregate
-   metrics but degrades the 2-pass result it exists to produce.
+Bookkeeping, done once per channel map (:class:`ChannelGroups`): rows sorted by label into a padded
+(n_groups, g_max) index table and its validity mask; per band one gather to (n_groups, g_max, L),
+medians / MADs over each group's valid entries (one sort, empty slots +inf), one scatter. Excluded rows
+are returned unchanged. Torch, on the bands' device.
 """
 from __future__ import annotations
 
@@ -44,160 +40,175 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from helix.core.robust import mad, q50 as _q50
+from helix.core.robust import mad, masked_mad, masked_median
 
 _EPS = 1e-6
 
 
-def _block_common_mode(b: torch.Tensor, ksig: float, sigmask: torch.Tensor,
-                       group_size: int, return_occ: bool = False):
-    """Per-(block, position) robust common mode M, shape (n_blocks, Lb).
+class ChannelGroups:
+    """Row bookkeeping for integer group labels (-1 = excluded), built once.
 
-    ``return_occ`` also returns ``1 - nuf/block_size``, the fraction of the
-    block's wires the k-sigma test rejected — already computed as the mean's
-    denominator. Uses each block's REAL width so the partial trailing block is
-    judged on the same scale.
-    """
-    W, Lb = b.shape
-    ngf = W // group_size
-    Ms, Os = [], []
-    if ngf > 0:
-        bf = b[:ngf * group_size].reshape(ngf, group_size, Lb)
-        smf = sigmask[:ngf * group_size].reshape(ngf, group_size, Lb)
-        med = _q50(bf, dim=1)                                   # (ngf, Lb)
-        resid = bf - med[:, None]
-        sg = mad(resid.reshape(ngf, -1), 1, _EPS)                # (ngf,)
-        uf = (resid.abs() <= ksig * sg[:, None, None]) & (~smf)
-        nuf = uf.sum(1)
-        mean = (bf * uf).sum(1) / torch.clamp_min(nuf, 1)
-        Ms.append(torch.where(nuf > 0, mean, med))
-        if return_occ:
-            Os.append(1.0 - nuf.to(b.dtype) / float(group_size))
-    rem = W - ngf * group_size
-    if rem > 0:
-        blk = b[ngf * group_size:]
-        smr = sigmask[ngf * group_size:]
-        med = _q50(blk, dim=0)
-        resid = blk - med
-        sg = mad(resid.reshape(-1), 0, _EPS)
-        uf = (resid.abs() <= ksig * sg) & (~smr)
-        nuf = uf.sum(0)
-        mean = (blk * uf).sum(0) / torch.clamp_min(nuf, 1)
-        Ms.append(torch.where(nuf > 0, mean, med)[None, :])
-        if return_occ:
-            Os.append((1.0 - nuf.to(b.dtype) / float(rem))[None, :])
-    M = torch.cat(Ms, dim=0)                                     # (n_blocks, Lb)
-    return (M, torch.cat(Os, dim=0)) if return_occ else M
+    Plain numpy; :meth:`torch` returns the same tables as tensors on a device (cached),
+    so a table built from the channel map is reused across events and backends."""
+
+    def __init__(self, labels):
+        labels = np.asarray(labels).astype(np.int64)
+        self.n_rows = len(labels)
+        valid_rows = np.where(labels >= 0)[0]
+        order = valid_rows[np.argsort(labels[valid_rows], kind="stable")]
+        self.labels_unique, counts = np.unique(labels[order], return_counts=True)
+        self.n_groups = len(counts)
+        self.size = counts
+        self.g_max = int(counts.max()) if len(counts) else 0
+        starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+        slot = np.arange(len(order)) - np.repeat(starts, counts)
+        gid = np.repeat(np.arange(self.n_groups), counts)
+        self.index = np.full((self.n_groups, self.g_max), -1, np.int64)
+        self.index[gid, slot] = order
+        self.valid = self.index >= 0
+        self.rows = order                                    # valid rows in group-major order
+        self._dev = {}
+
+    def torch(self, device):
+        """dict(index, valid, size, rows, flat_index, flat_rows) as tensors on ``device``."""
+        import torch
+        key = str(device)
+        if key not in self._dev:
+            t = lambda a: torch.as_tensor(a, device=device)  # noqa: E731
+            self._dev[key] = dict(index=t(np.where(self.valid, self.index, 0)), valid=t(self.valid),
+                                  size=t(self.size), rows=t(self.rows),
+                                  flat_valid=t(np.flatnonzero(self.valid)), dest=t(self.index[self.valid]))
+        return self._dev[key]
 
 
-def _detect_signal(cleaned_band: torch.Tensor, ksig: float, group_size: int) -> torch.Tensor:
-    """Boolean (W, Lb) mask of coeffs that stick out (> ksig·MAD) within their block."""
-    W, Lb = cleaned_band.shape
-    ngf = W // group_size
-    sm = torch.zeros_like(cleaned_band, dtype=torch.bool)
-    cf = cleaned_band.abs()
-    if ngf > 0:
-        cb = cf[:ngf * group_size].reshape(ngf, group_size, Lb)
-        csg = mad(cb.reshape(ngf, -1), 1, _EPS)                   # (ngf,)
-        sm[:ngf * group_size] = (cb > ksig * csg[:, None, None]).reshape(ngf * group_size, Lb)
-    rem = W - ngf * group_size
-    if rem > 0:
-        cr = cf[ngf * group_size:]
-        csg = mad(cr.reshape(-1), 0, _EPS)
-        sm[ngf * group_size:] = cr > ksig * csg
-    return sm
+def _groups(labels_or_groups):
+    return labels_or_groups if isinstance(labels_or_groups, ChannelGroups) else ChannelGroups(labels_or_groups)
 
 
-def _sigc(M: torch.Tensor, mode: str) -> torch.Tensor:
-    """Coherent scale: the MAD of M over the band (``sigc_mode`` 'median' and 'quantile' are the
-    same np.median arithmetic; it is not a chain config key)."""
+def _as_tensor(b):
+    if not isinstance(b, torch.Tensor):
+        b = torch.as_tensor(np.asarray(b, np.float32))
+    if b.dtype not in (torch.float32, torch.float64):
+        b = b.float()
+    return b
+
+
+def _masked_mad(x, v):
+    """Per group (dim 0): MAD sigma of all valid entries of x (G, g_max, L)."""
+    G = x.shape[0]
+    return masked_mad(x.reshape(G, -1), v.reshape(G, -1), 1, _EPS)
+
+
+def _block_common_mode(X, V, n, ksig, sm, return_occ=False):
+    med = torch.nan_to_num(masked_median(X, V.expand_as(X), dim=1))       # (G, L)
+    resid = X - med[:, None, :]
+    sg = _masked_mad(resid, V.expand_as(X))                                 # (G,)
+    uf = (resid.abs() <= ksig * sg[:, None, None]) & ~sm & V
+    nuf = uf.sum(1)
+    mean = (X * uf).sum(1) / torch.clamp_min(nuf, 1)
+    M = torch.where(nuf > 0, mean, med)
+    if return_occ:
+        return M, 1.0 - nuf.to(X.dtype) / n[:, None]
+    return M
+
+
+def _detect_signal(cleaned, V, ksig):
+    csg = _masked_mad(cleaned.abs(), V.expand_as(cleaned))
+    return (cleaned.abs() > ksig * csg[:, None, None]) & V
+
+
+def _sigc(M, scope="global"):
+    """Coherent scale: one for the band ("global") or per group ("group", shape (G, 1))."""
+    if scope == "group":
+        return mad(M, 1, _EPS)[:, None]
     return mad(M.reshape(-1), 0, _EPS)
 
 
-def gate_band(b: torch.Tensor, *, group_size: int, kgate, ksig: float,
-              npass: int, tau=None, sigc_mode: str = "quantile") -> torch.Tensor:
-    """Coherent-gate one band ``(W, Lb)`` → cleaned band.
+def gate_band_labeled(b, groups, *, kgate=3.0, ksig=3.0, npass=2, tau=None,
+                      sigc_scope="global", return_parts=False):
+    """Gate one band ``(W, L)`` with channel groups. See the module docstring.
 
-    ``tau`` adds the occupancy condition — refuse only when |M| is large AND more
-    than ``tau`` of the block's wires were flagged. ``None`` reproduces the legacy
-    magnitude-only rule bit-for-bit.
+    ``tau``: refuse (keep as signal) only when |M| is large AND more than ``tau`` of the
+    group's rows were flagged in pass 1; None: the magnitude test alone.
 
-    The rule the magnitude test alone gets wrong: coherent noise is identical on
-    every wire of a block, so it CANNOT produce an outlier. An empty mask is
-    therefore positive evidence that nothing but coherent noise is present and M
-    is the plain mean of all wires — refusing it because |M| landed in the
-    coherent's own Gaussian tail leaves the whole component behind, one block
-    wide, which is the leftover-coherent "blip" population.
-
-    Occupancy MUST come from pass 1. At a cell pass 1 refused, the cleaned band
-    still holds the full coherent, so ``_detect_signal`` flags every wire and
-    pass-2 occupancy is 1.0 by construction — the statistic destroys itself.
-    """
-    W = b.shape[0]
+    ``sigc_scope``: the coherent scale the magnitude test (refuse |M| >= kgate sigc)
+    compares with. "global" (HELIX): one for the band. "group": one per group, so each
+    group's common mode is judged against its own coherent level. Use "group" when the
+    groups' coherent amplitudes differ (SBND: boards differ up to ~4x). With a global
+    scale, noisy groups exceed kgate sigc often and only the occupancy rule (tau)
+    subtracts them - and tau also subtracts signals that are uniform across a group
+    (e.g. tracks at constant drift time on a single-plane board). "group" with
+    tau=None avoids both."""
+    groups = _groups(groups)
+    b = _as_tensor(b)
+    out = b.clone()
+    if groups.n_groups == 0:
+        return (out, None) if return_parts else out
+    T = groups.torch(b.device)
+    X = b[T["index"]]                                                        # (G, g_max, L)
     kg = list(kgate) if isinstance(kgate, (list, tuple, np.ndarray)) else [kgate] * npass
     if len(kg) > npass:
-        # Silently dropping trailing entries ships a DIFFERENT corpus than the
-        # provenance records: pipeline.py stamps removal_json with the kgate the
-        # caller passed, so --kgate 2.5,3.5 at npass=1 produced a k=2.5 corpus
-        # labelled [2.5, 3.5]. A per-pass sequence longer than the pass count is
-        # a config error, not something to truncate.
-        raise ValueError(
-            f"kgate has {len(kg)} per-pass entries but npass={npass}; "
-            f"the extra entries would be silently ignored and the recorded "
-            f"provenance would not describe the coefficients produced")
-    if len(kg) < npass:
-        kg = kg + [kg[-1]] * (npass - len(kg))
-    n_blocks = (W + group_size - 1) // group_size
-    idx = torch.clamp(torch.arange(W, device=b.device) // group_size, max=n_blocks - 1)
-    sm = torch.zeros_like(b, dtype=torch.bool)
-    cleaned = b
-    occ1 = None
+        raise ValueError(f"kgate has {len(kg)} per-pass entries but npass={npass}")
+    kg = kg + [kg[-1]] * (npass - len(kg))
+    V = T["valid"][:, :, None]
+    n = T["size"].to(b.dtype)
+    X = torch.where(V, X, torch.zeros((), dtype=b.dtype, device=b.device))
+    sm = torch.zeros(X.shape, dtype=torch.bool, device=b.device)
+    cleaned, occ1 = X, None
     for p in range(npass):
         if p == 0:
-            M, occ1 = _block_common_mode(b, ksig, sm, group_size, return_occ=True)
+            M, occ1 = _block_common_mode(X, V, n, ksig, sm, return_occ=True)
         else:
-            M = _block_common_mode(b, ksig, sm, group_size)
-        sc = _sigc(M, sigc_mode)
+            M = _block_common_mode(X, V, n, ksig, sm)
+        sc = _sigc(M, sigc_scope)
         refuse = M.abs() >= kg[p] * sc
         if tau is not None:
             refuse = refuse & (occ1 > tau)
-        Mc = torch.where(refuse, torch.zeros((), dtype=M.dtype, device=M.device), M)
-        cleaned = b - Mc[idx]
+        cleaned = X - torch.where(refuse, torch.zeros((), dtype=M.dtype, device=M.device), M)[:, None, :]
         if p + 1 < npass:
-            sm = _detect_signal(cleaned, ksig, group_size)
-    return cleaned
+            sm = _detect_signal(cleaned, V, ksig)
+    out[T["dest"]] = cleaned.reshape(-1, cleaned.shape[-1])[T["flat_valid"]]
+    if return_parts:
+        return out, dict(M=M, refuse=refuse, sigc=sc, X=X)
+    return out
 
 
-def gate_bands(
-    bands: Sequence[torch.Tensor],
-    *,
-    group_size: int = 64,
-    kgate=3.0,
-    ksig: float = 3.0,
-    npass: int = 2,
-    gate_approx: bool = True,
-    tau=None,
-    sigc_mode: str = "quantile",
-) -> list[torch.Tensor]:
-    """Coherent-remove a plane's DWT bands ``[cA, cD_L, …, cD_1]`` (list in, list out).
-
-    ``gate_approx=False`` leaves the approx band untouched. ``kgate`` may be a
-    scalar or a per-pass sequence. A non-finite band fails OPEN — returned
-    unchanged, whole-band — so a bad event never propagates corrupted coefficients.
-    """
+def coherent_gate_labeled(bands: Sequence, labels_or_groups, *, kgate=3.0, ksig=3.0, npass=2,
+                          gate_approx=True, tau=None, sigc_scope="global") -> list:
+    """Coherent-gate a plane's (or stacked planes') DWT bands ``[cA, cD_L, ..., cD_1]``
+    with channel groups. ``labels_or_groups``: per-row integer labels (-1 = excluded)
+    or a prebuilt :class:`ChannelGroups` (reuse it across events: it depends only on
+    the channel map). ``gate_approx=False`` leaves the approximation band untouched; a
+    non-finite band fails OPEN (returned unchanged), so a bad event never propagates
+    corrupted coefficients."""
+    groups = _groups(labels_or_groups)
+    bands = [_as_tensor(b) for b in bands]
+    finite = torch.stack([torch.isfinite(b).all() for b in bands]).tolist()        # one host sync
     out = []
     for i, b in enumerate(bands):
-        if not isinstance(b, torch.Tensor):
-            b = torch.as_tensor(np.asarray(b, np.float32))
-        if b.dtype not in (torch.float32, torch.float64):
-            b = b.float()
-        if not bool(torch.isfinite(b).all()):
-            warnings.warn(f"coherent_gate: non-finite band {i}; failing open (no removal)")
+        if not finite[i]:
+            warnings.warn(f"coherent_gate_labeled: non-finite band {i}; failing open (no removal)")
             out.append(b)
             continue
         if i == 0 and not gate_approx:
             out.append(b)
             continue
-        out.append(gate_band(b, group_size=group_size, kgate=kgate, ksig=ksig,
-                             npass=npass, tau=tau, sigc_mode=sigc_mode))
+        out.append(gate_band_labeled(b, groups, kgate=kgate, ksig=ksig, npass=npass, tau=tau,
+                                     sigc_scope=sigc_scope))
     return out
+
+
+def coherent_gate_planes(bands_by_plane: Sequence[Sequence], labels_by_plane, **kw):
+    """Cross-plane gate: groups (e.g. front-end boards) may take rows from several
+    planes. ``bands_by_plane``: one band list per plane (same number of bands and
+    band lengths, i.e. the same n_ticks and wavelet). ``labels_by_plane``: one label
+    array per plane, labels shared across planes (or ``groups=`` a prebuilt
+    :class:`ChannelGroups` over the stacked rows). Returns one band list per plane."""
+    n_rows = [len(bl[0]) for bl in bands_by_plane]
+    cuts = np.concatenate([[0], np.cumsum(n_rows)])
+    stacked = [torch.cat([_as_tensor(bl[i]) for bl in bands_by_plane]) for i in range(len(bands_by_plane[0]))]
+    groups = kw.pop("groups", None)
+    if groups is None:
+        groups = np.concatenate([np.asarray(l) for l in labels_by_plane])
+    g = coherent_gate_labeled(stacked, groups, **kw)
+    return [[gi[cuts[p]:cuts[p + 1]] for gi in g] for p in range(len(bands_by_plane))]

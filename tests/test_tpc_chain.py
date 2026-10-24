@@ -35,9 +35,9 @@ def test_config_defaults_overrides_and_digest():
 
 
 @pytest.mark.parametrize("overrides", [None, {"threshold": {"floor": None, "kappa": 1.1}},
-                                       {"coherent": {"method": "none"}, "threshold": {"floor": None}},
+                                       {"coherent": {"groups": None}, "threshold": {"floor": None}},
                                        {"coherent": {"cross_plane": False}, "threshold": {"drop_finest": 0}},
-                                       {"coherent": {"method": "block_gate", "tau": 0.05}}])
+                                       {"coherent": {"groups": "asic", "tau": 0.05, "sigc_scope": "global"}}])
 def test_chain_runs_and_excludes_dead_rows(overrides):
     adc, ped, present = _event()
     chain = ch.TPCChain(overrides)
