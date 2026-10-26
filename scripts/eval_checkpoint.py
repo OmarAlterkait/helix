@@ -13,7 +13,7 @@ logs come from, so a number from this script and a number from a training log ar
 produced by the same lines.
 
     python scripts/eval_checkpoint.py \
-        --config configs/pimm/coeff_fm_eval_probe.py \
+        --config configs/pimm/fm_eval.py \
         --options weight=/path/run/model/model_ema.pth save_path=/path/out
 """
 

@@ -14,7 +14,7 @@ detect:
 
 roots:
   HELIX_CORPUS_ROOT:   /sdf/data/neutrino/omara
-  HELIX_CORPUS:        /sdf/data/neutrino/omara/coeff_tpc_r1/run_0027575715
+  HELIX_CORPUS:        /sdf/data/neutrino/omara/coeff_tpc_r2/run_0027575715
   # One filesystem here, so there is no staged/durable split to record.
   HELIX_CORPUS_DURABLE: null
   # doraemon belongs to a DIFFERENT group. A handover target will not have read
@@ -26,9 +26,6 @@ roots:
   HELIX_PIMM_ROOT:     /sdf/group/neutrino/omara/pimm-fm
   HELIX_PIMM_DATA_SRC: /sdf/group/neutrino/omara/pimm-data/src
   HELIX_JAXTPC_ROOT:   /sdf/group/neutrino/omara/JAXTPC
-  # The PRE-TAU corpus generation, for m113 only. helix/data/identity.py refuses
-  # to mix it with r1; see docs/SCIENCE.md.
-  HELIX_LEGACY_CORPUS: /sdf/data/neutrino/omara/coeff_tpc/run_0027575715
   # Another user's home directory. Out of scope for the wire FM.
   HELIX_OPTICAL_DATA:  /sdf/home/y/youngsam/sw/dune/sim/goop/data/light_output.h5
 

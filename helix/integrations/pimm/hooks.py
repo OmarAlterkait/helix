@@ -235,6 +235,9 @@ class WeightEMA(HookBase):
         """
         import os
         import torch
+        if self.save_freq == "auto":
+            raise RuntimeError("WeightEMA: save_freq='auto' was never resolved; "
+                               "it needs train=dict(type='FMTrainer')")
         if comm.get_rank() != 0 or not getattr(self.trainer.cfg, "resume", False):
             return
         path = self._path()

@@ -107,7 +107,8 @@ class CoeffFMEvaluator(HookBase):
 
     def __init__(self, every_n_steps=0, max_batches=None, mask_seed=7,
                  grid_free=True, mask_mode="random", n_planes=1, mask_ratio=None):
-        self.every_n_steps = int(every_n_steps)
+        # "auto": FMTrainer fills it from the run's step count before training starts
+        self.every_n_steps = every_n_steps if every_n_steps == "auto" else int(every_n_steps)
         self.max_batches = max_batches
         self.mask_seed = int(mask_seed)
         # DEFAULT "random", and leave it there for any number meant to be
@@ -126,6 +127,11 @@ class CoeffFMEvaluator(HookBase):
         # loss (see _forward) — so this is free, not a second pass. Silently
         # inert unless the checkpoint carries the bin centroids.
         self.grid_free = bool(grid_free)
+
+    def before_train(self):
+        if self.every_n_steps == "auto":
+            raise RuntimeError("CoeffFMEvaluator: every_n_steps='auto' was never resolved; "
+                               "it needs train=dict(type='FMTrainer')")
 
     def after_step(self):
         if self.every_n_steps <= 0:

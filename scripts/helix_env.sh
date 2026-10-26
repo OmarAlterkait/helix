@@ -65,7 +65,7 @@ import shlex
 from helix import paths
 
 # Roots that resolve. A root the site declares as null is SKIPPED rather than
-# exported empty: an empty HELIX_LEGACY_CORPUS would satisfy `${VAR:-default}`
+# exported empty: an empty root would satisfy `${VAR:-default}`
 # in a downstream script and then fail as a path, which is worse than unset.
 for name in paths.ROOTS:
     value, _src = paths.resolve(name)
@@ -113,7 +113,7 @@ PY
 eval "$_helix_env_out"
 
 # Export the interpreter this script searched for, so the next script does not
-# repeat the search and -- more to the point -- does not skip it. submit_helix.sh
+# repeat the search and -- more to the point -- does not skip it. scripts/train.sh
 # defaulted to a bare `python3`, which on a Perlmutter LOGIN node is the 3.6 OS
 # interpreter: `pimm submit` died on `from __future__ import annotations` in
 # pimm/cli/main.py, three lines in, after this script had already printed its

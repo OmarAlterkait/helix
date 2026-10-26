@@ -37,17 +37,11 @@ import torch
 
 from helix.paths import archive as _archive, root as _root
 
-# Resolved, not hardcoded. The literal here was the PRE-TAU corpus
-# (coeff_tpc, not coeff_tpc_r1) -- a different DSP generation, whose
-# coefficients a grid derived from r1 does not describe. As an argparse default
-# that is the worst kind of wrong: it runs.
-#
-# Both are resolved LAZILY, inside main(), because a site may legitimately not
-# declare HELIX_LEGACY_CORPUS at all (NERSC does not) and importing this module
-# must not fail for a caller who passes --corpus explicitly.
+# Resolved lazily, inside main(): importing this module must not fail at a site that does
+# not declare the root, for a caller who passes --corpus explicitly.
 def _default_corpus():
     try:
-        return str(_root("HELIX_LEGACY_CORPUS"))
+        return str(_root("HELIX_CORPUS"))
     except Exception:
         return None
 
@@ -76,7 +70,7 @@ def main(argv=None):
     # cluster's filesystem.
     _corpus, _bins = _default_corpus(), _default_archive()
     ap.add_argument("--corpus", default=_corpus, required=_corpus is None,
-                    help="coeff corpus run dir (default: HELIX_LEGACY_CORPUS)")
+                    help="coeff corpus run dir (default: HELIX_CORPUS)")
     ap.add_argument("--bins-from", default=_bins, required=_bins is None,
                     help="converted checkpoint to take categorical bin edges from "
                          "(default: HELIX_ARCHIVE/fm_m113_artifact)")

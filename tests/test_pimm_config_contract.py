@@ -27,7 +27,7 @@ from _paths import PIMM_ROOT as PIMM                           # noqa: E402
 TRAIN_PY = os.path.join(PIMM, "pimm/engines/train.py")
 DEFAULTS_PY = os.path.join(PIMM, "pimm/engines/defaults.py")
 CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                      "configs", "pimm", "coeff_fm_encode.py")
+                      "configs", "pimm", "fm.py")
 
 pimm_src = pytest.mark.skipif(
     not os.path.exists(TRAIN_PY), reason=f"pimm source absent: {TRAIN_PY}")
@@ -63,7 +63,7 @@ def test_config_defines_everything_the_trainer_reads():
     have = _config_names(CONFIG)
     missing = sorted(required - have)
     assert not missing, (
-        f"configs/pimm/coeff_fm_encode.py is missing {missing}. pimm's Trainer "
+        f"configs/pimm/fm.py is missing {missing}. pimm's Trainer "
         f"reads these as self.cfg.<name>; a launch would fail on the first one "
         f"it touches. (If a name is newly derived by default_config_parser, add "
         f"it to DERIVED here.)")
@@ -87,21 +87,20 @@ def test_derived_fields_really_are_derived():
 
 
 def test_batch_size_is_one():
-    """The FM needs batch_size_per_gpu == 1 — it has no event separation, so a
-    rank holding two events would attend across them (MULTI_EVENT_BATCHING.md).
-
-    pimm's `batch_size` is the GLOBAL batch and `default_config_parser` asserts
-    `batch_size % world_size == 0`, so the requirement is
-    `batch_size = number of GPUs`. The committed config targets a single GPU;
-    a multi-GPU launch overrides it (`--options batch_size=<n_gpus>`), which is
-    exactly how the research trainer scaled."""
-    tree = ast.parse(pathlib.Path(CONFIG).read_text())
-    vals = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
-            for t in n.targets if isinstance(t, ast.Name)}
-    for key in ("batch_size", "batch_size_val", "batch_size_test"):
-        assert key in vals, f"config does not set {key}"
-        assert isinstance(vals[key], ast.Constant) and vals[key].value == 1, \
-            f"{key} must be 1 for the coefficient FM"
+    """The FM needs batch_size_per_gpu == 1: it has no event separation, so a rank holding
+    two events would attend across them (MULTI_EVENT_BATCHING.md). pimm's ``batch_size`` is
+    GLOBAL, so the base config sets it to the world size, and a variant to 1 or not at all."""
+    for path in sorted(pathlib.Path(CONFIG).parent.glob("fm*.py")):
+        tree = ast.parse(path.read_text())
+        vals = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name)}
+        for key in ("batch_size", "batch_size_val", "batch_size_test"):
+            v = vals.get(key)
+            if path.name == "fm.py":
+                assert v is not None, f"fm.py does not set {key}"
+            ok = v is None or (isinstance(v, ast.Constant) and v.value == 1) or (
+                isinstance(v, ast.Name) and v.id == "_WORLD")
+            assert ok, f"{path.name}: {key} must be the world size (one event per rank) or 1"
 
 
 def test_config_declares_the_custom_import():
@@ -225,7 +224,7 @@ def test_configs_bootstrap_helix_onto_sys_path():
     from pathlib import Path
 
     cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
-    found = sorted(cfg_dir.glob("coeff_fm_*.py"))
+    found = sorted(cfg_dir.glob("fm*.py"))
     assert found, "no pimm configs found"
     for path in found:
         src = path.read_text()
@@ -272,7 +271,7 @@ def test_configs_bootstrap_helix_onto_sys_path():
 @pimm_importable
 @pytest.mark.xfail(strict=False, reason=(
     "The CODE and this TEST disagree about intent, and the disagreement is "
-    "deliberate on the code's side. configs/pimm/coeff_fm_cooldown.py:57 says a "
+    "deliberate on the code's side. configs/pimm/fm_cooldown.py says a "
     "derived config does NOT get its own sys.path bootstrap -- 'a config that "
     "touches sys.path must also register HelixPathBootstrap so a RESUMED job can "
     "still import helix, and the hook belongs to the base' -- so it relies on "
@@ -296,7 +295,7 @@ def test_a_derived_config_inherits_a_working_bootstrap(tmp_path):
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    derived = [p for p in sorted((root / "configs" / "pimm").glob("coeff_fm_*.py"))
+    derived = [p for p in sorted((root / "configs" / "pimm").glob("fm*.py"))
                if "_base_" in p.read_text() and "_sys.path." not in p.read_text()]
     if not derived:
         pytest.skip("no _base_-derived configs")
@@ -330,7 +329,7 @@ def test_bootstrap_configs_also_register_the_rewrite_hook():
     from pathlib import Path
 
     cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
-    for path in sorted(cfg_dir.glob("coeff_fm_*.py")):
+    for path in sorted(cfg_dir.glob("fm*.py")):
         src = path.read_text()
         if "_sys.path." not in src:
             continue
@@ -428,7 +427,7 @@ def test_configs_leave_no_module_objects_in_the_namespace():
     cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
     checked = []
     missing = []
-    for path in sorted(cfg_dir.glob("coeff_fm_*.py")):
+    for path in sorted(cfg_dir.glob("fm*.py")):
         ns = {}
         try:
             exec(compile(path.read_text(), str(path), "exec"), ns)

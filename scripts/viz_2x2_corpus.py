@@ -147,10 +147,8 @@ def regenerate_planes(shard_path, run, ev, geom_path, npz):
 
 def main():
     ap = argparse.ArgumentParser()
-    # Was the PRE-TAU corpus as a literal default -- a different DSP generation
-    # whose coefficients an r1-derived grid does not describe.
-    ap.add_argument("--corpus", default=_opt_root("HELIX_LEGACY_CORPUS"),
-                    help="coeff corpus run dir (default: HELIX_LEGACY_CORPUS)")
+    ap.add_argument("--corpus", default=_opt_root("HELIX_CORPUS"),
+                    help="coeff corpus run dir (default: HELIX_CORPUS)")
     ap.add_argument("--dataset-name", default="sim_wire")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--event", type=int, default=0, help="POSITION within the shard")

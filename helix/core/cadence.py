@@ -1,5 +1,8 @@
 """How often to warm up, evaluate and checkpoint — derived, not written down.
 
+Applied at run time: a config writes ``"auto"`` and FMTrainer fills it from the run's own step
+count (``iters_per_epoch * epoch``), so no config carries a step count or a training-set size.
+
 WHY THIS IS A MODULE AND NOT THREE LINES IN A CONFIG
 ----------------------------------------------------
 It was three lines in a config. Then it was three lines in TWO configs, because
@@ -78,7 +81,7 @@ def warmup_steps(steps, d, d_base, base_steps=500):
     own acceptance test is that every run trains at least 5x its warmup.
     """
     w = round(base_steps * (float(d) / float(d_base)) ** 0.5)
-    return max(base_steps, min(w, max(1, steps // 5)))
+    return min(max(base_steps, w), max(1, steps // 5))
 
 
 def save_every(steps, ckpt_seconds=CKPT_SECONDS, step_seconds=STEP_SECONDS, overhead=0.02,
@@ -123,33 +126,3 @@ def eval_every(steps, eval_seconds=EVAL_SECONDS, step_seconds=STEP_SECONDS, over
     # the run reports no curve at all.
     ceiling = max(1, steps // MIN_EVALS)
     return min(max(floor, max(1, steps // target_count)), ceiling)
-
-
-def cadence(n_train_events, epochs, batch_size, d, d_base, *,
-            warmup_base_steps=500, step_seconds=STEP_SECONDS, overhead=0.02,
-            ckpt_seconds=CKPT_SECONDS, save_target_count=20,
-            eval_seconds=EVAL_SECONDS, eval_target_count=50):
-    """All three, plus the step budget they derive from.
-
-    Returns ``dict(STEPS, WARMUP, SAVE_EVERY, EVAL_EVERY)`` so a config can do
-
-        _c = cadence(N_TRAIN_EVENTS, epoch, batch_size, model["d"], model["d_base"])
-        STEPS, WARMUP = _c["STEPS"], _c["WARMUP"]
-
-    and there is exactly one place where the rule lives.
-
-    Keyword-only and explicit, not ``**kw``: a filtered ``**kw`` dropped a
-    misspelled name in silence, and one ``target_count`` reached the save
-    cadence but not the eval cadence -- one name, two behaviours.
-    """
-    steps = n_train_events * epochs // batch_size
-    return dict(
-        STEPS=steps,
-        WARMUP=warmup_steps(steps, d, d_base, base_steps=warmup_base_steps),
-        SAVE_EVERY=save_every(steps, ckpt_seconds=ckpt_seconds,
-                              step_seconds=step_seconds, overhead=overhead,
-                              target_count=save_target_count),
-        EVAL_EVERY=eval_every(steps, eval_seconds=eval_seconds,
-                              step_seconds=step_seconds, overhead=overhead,
-                              target_count=eval_target_count),
-    )

@@ -37,8 +37,8 @@ from, and whether it exists. It is the first thing to run on a new machine.
     ============================  ==========================================
     HELIX_CORPUS_ROOT             parent of the built coeff corpora
     HELIX_CORPUS                  ONE corpus: a run dir under the root.
-                                  r1 (tau=0.05), not the pre-tau vintage --
-                                  the gate rule the builder still produces.
+                                  of r2; the corpus is its parent dir
+                                  (_calib/RUNS.txt lists the runs).
     HELIX_SENSOR_ROOT             simulator output the corpus is built FROM
     HELIX_ARCHIVE                 bin tables, converted checkpoints
     HELIX_EXP                     where runs write (save_path, logs, exports)
@@ -46,7 +46,6 @@ from, and whether it exists. It is the first thing to run on a new machine.
     HELIX_PIMM_ROOT               a pimm checkout (the trainer)
     HELIX_PIMM_DATA_SRC           a pimm-data checkout's src/
     HELIX_JAXTPC_ROOT             JAXTPC checkout (noise spectrum, geometry)
-    HELIX_LEGACY_CORPUS           the pre-tau corpus, for m113 only
     HELIX_OPTICAL_DATA            the goop PMT light file
     HELIX_ROOT                    this checkout (DERIVED; override only to
                                   pin a resumed job to link 1's tree)
@@ -97,7 +96,6 @@ ROOTS: dict[str, str] = {
     "HELIX_PIMM_ROOT":     "pimm checkout",
     "HELIX_PIMM_DATA_SRC": "pimm-data src/",
     "HELIX_JAXTPC_ROOT":   "JAXTPC checkout",
-    "HELIX_LEGACY_CORPUS": "pre-tau corpus (m113 only)",
     "HELIX_OPTICAL_DATA":  "goop PMT light file",
 }
 
@@ -396,8 +394,7 @@ def scheduler(kind: str = "train", key: str | None = None) -> Any:
     These are NOT paths, which is why they were never in the roots table and
     ended up frozen into ``#SBATCH`` directives instead. ``#SBATCH`` genuinely
     cannot read shell variables, so the fix is to pass them as ``sbatch`` CLI
-    flags -- which is what ``scripts/chain_coeff_fm_train.sh`` already does for
-    ``--account``.
+    flags -- which is what ``scripts/train.sh`` and ``scripts/corpus.sh`` do.
 
     Each key is overridable by ``HELIX_SLURM_<KEY>``, applied to whichever kind
     is asked for: a one-off ``HELIX_SLURM_QOS=premium`` should not need to know

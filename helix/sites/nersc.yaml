@@ -23,8 +23,8 @@ roots:
   # $SCRATCH is purged on inactivity, so the durable copy stays on $CFS and is
   # named below rather than forgotten. Re-stage with scripts/stage_corpus.sh.
   HELIX_CORPUS_ROOT:   $SCRATCH
-  HELIX_CORPUS:        $SCRATCH/coeff_tpc_r1/run_0027575715
-  HELIX_CORPUS_DURABLE: $CFS/m5238/users/oalter/coeff_tpc_r1
+  HELIX_CORPUS:        $SCRATCH/coeff_tpc_r2/run_0027575715
+  HELIX_CORPUS_DURABLE: $CFS/m5238/users/oalter/coeff_tpc_r2
   # Unlike S3DF, the simulator output lives in OUR project directory rather than
   # another group's, so a corpus rebuild is possible here and was not there.
   HELIX_SENSOR_ROOT:   $CFS/m5238/users/oalter/wire_test_00_00_02/sensor
@@ -38,7 +38,6 @@ roots:
   # "not configured" rather than inheriting an S3DF path that cannot exist here
   # and then reporting it MISSING, which reads like breakage rather than absence.
   HELIX_JAXTPC_ROOT:   null
-  HELIX_LEGACY_CORPUS: null
   HELIX_OPTICAL_DATA:  null
 
 # Environment this site needs set for helix to work at all. Not paths, not

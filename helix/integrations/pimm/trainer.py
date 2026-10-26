@@ -215,7 +215,40 @@ class FMTrainer(Trainer):
         if ratios and "max_lr" in self.cfg.scheduler:
             self.cfg.scheduler.max_lr = expand_max_lr(
                 self.cfg.scheduler.max_lr, ratios)
+        self._resolve_cadence()
         return super().build_scheduler()
+
+    def _total_steps(self):
+        """The run's optimizer steps: pimm's own ``iters_per_epoch * epoch``."""
+        per_epoch = getattr(self, "_iters_per_epoch", None)
+        n = per_epoch() if callable(per_epoch) else len(self.train_loader)
+        return int(n) * int(self.cfg.epoch)
+
+    def _resolve_cadence(self):
+        """Fill every ``"auto"`` cadence from the run's actual step count (:mod:`helix.core.cadence`).
+
+        A config states intent (epochs, model width), never a step count: that follows from
+        the corpus, the split and the GPU count, which a config used to hard-code
+        (``N_TRAIN_EVENTS``). ``"auto"`` is accepted for the scheduler's ``warmup`` and, in
+        every hook, ``save_freq``, ``every_n_steps`` and ``evaluator_every_n_steps``; hooks
+        are patched as config and, if pimm has built them already, as objects.
+        """
+        from helix.core import cadence
+        steps = self._total_steps()
+        m = self.cfg.model
+        val = dict(save_freq=cadence.save_every(steps), every_n_steps=cadence.eval_every(steps),
+                   evaluator_every_n_steps=cadence.eval_every(steps))
+        sch = self.cfg.scheduler
+        if sch.get("warmup") == "auto":
+            sch.warmup = cadence.warmup_steps(steps, m.get("d", 128), m.get("d_base", 128))
+        for h in list(self.cfg.hooks) + list(getattr(self, "hooks", None) or []):
+            for k, v in val.items():
+                if isinstance(h, dict) and h.get(k) == "auto":
+                    h[k] = v
+                elif not isinstance(h, dict) and getattr(h, k, None) == "auto":
+                    setattr(h, k, v)
+        self.logger.info(f"cadence over {steps} steps: warmup {sch.get('warmup')}, "
+                         f"eval every {val['every_n_steps']}, save every {val['save_freq']}")
 
 
 @SCHEDULERS.register_module()
