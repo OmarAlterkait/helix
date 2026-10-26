@@ -13,9 +13,6 @@ weight = None                           # --options weight=...
 resume = False
 evaluate = True
 save_path = str(_root("HELIX_EXP") / "fm_eval")
-batch_size = 1
-batch_size_val = 1
-batch_size_test = 1
 data = dict(val=dict(split_role="probe"), test=dict(split_role="probe"))
 hooks = [
     dict(type="HelixPathBootstrap"),

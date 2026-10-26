@@ -309,13 +309,14 @@ def container(key: str | None = None) -> Any:
 
 
 def world_size(default: int = 4) -> int:
-    """The number of ranks this process is part of, from ``WORLD_SIZE``.
+    """The number of ranks this process is part of: ``WORLD_SIZE`` (torchrun), else
+    ``SLURM_NTASKS`` inside a job step (scripts/train.sh starts one task per GPU).
 
     An environment fact, which is why it lives here rather than in a config.
 
     It is load-bearing for the coefficient FM specifically: the model takes
     exactly ONE event per rank (it has no event separation, so two events in a
-    forward would attend across each other -- MULTI_EVENT_BATCHING.md), so the
+    forward would attend across each other -- docs/archive/MULTI_EVENT_BATCHING.md), so the
     global batch is *defined* as the rank count and
     ``helix.integrations.pimm.trainer`` raises when they disagree.
 
@@ -325,14 +326,12 @@ def world_size(default: int = 4) -> int:
     sweep over rank counts, so that hardcoding is the thing that makes the study
     an editing exercise.
 
-    torchrun -- which pimm's ``scripts/train.sh`` uses -- exports ``WORLD_SIZE``
-    before the config is read, so inside a job this is the true count. The
-    ``default`` applies only where it is absent: ``pimm submit`` preflight on a
-    login node, and a bare single-process config load. Getting it wrong there is
-    safe, because the trainer's guard fires with a named cause rather than
-    training something subtly different.
+    Both are set before the config is read, so inside a job this is the true
+    count. The ``default`` applies only outside one (a config loaded by hand).
+    Getting it wrong there is safe: the trainer's guard fires with a named cause
+    rather than training something subtly different.
     """
-    raw = os.environ.get("WORLD_SIZE")
+    raw = os.environ.get("WORLD_SIZE") or (os.environ.get("SLURM_NTASKS") if "SLURM_STEP_ID" in os.environ else None)
     if not raw:
         return default
     try:

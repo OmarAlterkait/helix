@@ -11,9 +11,9 @@ A run is four choices, and only these differ between configs:
 Nothing here is a step count. Warmup, eval and checkpoint cadence are ``"auto"``: FMTrainer
 derives them from the run's own step count (pimm's ``iters_per_epoch * epoch``, i.e. the
 split, the corpus and the GPU count) through :mod:`helix.core.cadence`. Anything else is a
-``--options`` override, e.g. ``--options model.plane_frac=0.25 save_path=...``.
+``key=value`` override after the config name, e.g. ``scripts/train.sh fm model.plane_frac=0.25``.
 
-    scripts/train.sh fm [--chain.jobs 8] [-- --options ...]
+    LINKS=8 scripts/train.sh fm [key=value ...]
 """
 
 # helix onto sys.path before custom_imports is read (pimm executes this file first). From

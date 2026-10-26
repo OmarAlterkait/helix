@@ -11,9 +11,6 @@ from helix.paths import root as _root                            # noqa: E402
 _base_ = ["./fm.py"]
 
 save_path = str(_root("HELIX_EXP") / "fm_smoke")
-batch_size = 1
-batch_size_val = 1
-batch_size_test = 1
 num_worker = 2
 epoch = 1
 model = dict(d=256, blocks=2, dec_blocks=1, heads=4, n_bins=32, compile_blocks=False,

@@ -39,8 +39,9 @@ if [ "$LINK" = 1 ]; then                 # inside a job
     || { echo "train.sh: the checkpoint resolver failed for $SAVE/model; not starting over" >&2; exit 2; }
   if [ -n "$WEIGHT" ]; then RESUME=(resume=True "weight=$WEIGHT"); echo "resuming from $WEIGHT"
   else RESUME=(resume=False); echo "starting $SAVE"; fi
-  exec "${RUN[@]}" python -m pimm.train --config-file "$CFG" --num-gpus "$GPUS" \
-    --options "save_path=$SAVE" "${RESUME[@]}" "$@"
+  # one task per GPU: pimm takes its ranks from Slurm's tasks (pimm.utils.comm.setup_distributed)
+  exec srun --kill-on-bad-exit=1 "${RUN[@]}" python -m pimm.train --config-file "$CFG" \
+    --num-gpus "$GPUS" --options "save_path=$SAVE" "${RESUME[@]}" "$@"
 fi
 
 # what this run is: the same NAME continues only the same config and options
@@ -55,7 +56,7 @@ echo "$WHAT" > "$SAVE/train.cmd"
 
 LOGS=${LOGS:-$SAVE/slurm}
 mkdir -p "$LOGS"
-SB=(--account="$HELIX_SLURM_TRAIN_ACCOUNT" --nodes=1 --ntasks=1 --cpus-per-task=$((8 * GPUS))
+SB=(--account="$HELIX_SLURM_TRAIN_ACCOUNT" --nodes=1 --ntasks-per-node="$GPUS" --cpus-per-task=8
     --time="${TIME:-24:00:00}" --job-name="$NAME" --output="$LOGS/%j.out" --requeue)
 [ -n "${HELIX_SLURM_TRAIN_QOS:-}" ] && SB+=(--qos="$HELIX_SLURM_TRAIN_QOS")
 [ -n "${HELIX_SLURM_TRAIN_CONSTRAINT:-}" ] && SB+=(--constraint="$HELIX_SLURM_TRAIN_CONSTRAINT")
