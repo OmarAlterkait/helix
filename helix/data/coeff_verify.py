@@ -14,9 +14,16 @@ shards. Every failure the build actually produced in practice is cross-file:
 None of these corrupt a file. Each one silently changes how much data the corpus
 contains, which no per-file audit and no training run will ever report.
 
+A whole corpus built by ``scripts/corpus.sh`` is also checked against its plan
+(``_calib/CHUNKS.txt``, :func:`helix.build.plan`): every planned shard exists with its planned
+number of events and nothing else is there, every optical shard holds its TPC shard's events,
+and every shard carries the corpus's one ``_calib/norm_sigma_global.npy``.
+
 Usage::
 
-    python -m pimm_data.coeff_verify <corpus_dir> --dataset-name sim_wire [--expect 1000]
+    python -m helix.data.coeff_verify <run_dir> --dataset-name sim_wire [--expect 1000]
+    python -m helix.data.coeff_verify <corpus_root>          every run, against _calib/CHUNKS.txt
+    python -m helix.data.coeff_verify compare A B [A2 B2 ...]   same content, byte for byte
 """
 
 from __future__ import annotations
@@ -238,27 +245,110 @@ def verify_corpus(data_root, dataset_name, *, split="", expect_events=None,
     return probs
 
 
-def main(argv=None):
-    import argparse
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("data_root")
-    ap.add_argument("--dataset-name", required=True)
-    ap.add_argument("--split", default="")
-    ap.add_argument("--expect", type=int, default=None,
-                    help="expected total event count across the corpus")
-    ap.add_argument("--modalities", nargs="*", default=["coeff", "coeff_clean"])
-    ap.add_argument("--source-root", default=None,
-                    help="the SENSOR tree the corpus was built from. Given, a "
-                         "file_index gap is judged against it: absent upstream "
-                         "is fine, present-but-unbuilt is still an error.")
-    a = ap.parse_args(argv)
-    probs = verify_corpus(a.data_root, a.dataset_name, split=a.split,
-                          expect_events=a.expect, modalities=tuple(a.modalities),
-                          source_root=a.source_root)
+# ------------------------------------------------------------------------------------- plan
+def read_plan(root):
+    """[(prefix, first, count, events_per_shard, shard_start, inputs)] of ``root/_calib/CHUNKS.txt``."""
+    out = []
+    for line in open(os.path.join(root, "_calib", "CHUNKS.txt")):
+        if line.strip():
+            p, first, count, eps, k, *inputs = line.split()
+            out.append((p, int(first), int(count), int(eps), int(k), inputs))
+    return out
+
+
+def _ident(f):
+    s = lambda x: x.decode() if isinstance(x, bytes) else str(x)       # noqa: E731
+    g = f["ident"]
+    return [(s(r), s(sf), int(e)) for r, sf, e in zip(g["run"][:], g["source_file"][:], g["event"][:])]
+
+
+def verify_plan(root):
+    """A corpus against its plan: problems (empty == complete). Then every run dir with
+    :func:`verify_corpus`."""
+    probs, want = [], {}
+    for prefix, _, count, eps, k, _ in read_plan(root):
+        for j in range(-(-count // eps)):
+            want.setdefault(prefix, {})[k + j] = min(eps, count - j * eps)
+    g = os.path.join(root, "_calib", "norm_sigma_global.npy")
+    norm = np.load(g) if os.path.exists(g) else None
+    for prefix, shards in sorted(want.items()):
+        found = {int(p.rsplit("_", 1)[1][:-3]) for kind in ("coeff", "optical")
+                 for p in glob.glob(f"{prefix}_{kind}_[0-9]*.h5")}
+        probs += [f"{prefix}: shard {k} is not in the plan" for k in sorted(found - set(shards))]
+        for k, n in sorted(shards.items()):
+            paths = {kind: f"{prefix}_{kind}_{k:04d}.h5" for kind in ("coeff", "optical")}
+            paths = {kind: q for kind, q in paths.items() if os.path.exists(q)}
+            if not paths:
+                probs.append(f"{prefix}: shard {k} missing")
+                continue
+            ids = {}
+            for kind, q in paths.items():
+                try:
+                    with h5py.File(q, "r") as f:
+                        if int(f["config"].attrs["n_events"]) != n:
+                            probs.append(f"{q}: {int(f['config'].attrs['n_events'])} events, planned {n}")
+                        ids[kind] = _ident(f)
+                        if kind == "coeff" and norm is not None and not np.array_equal(
+                                f["config/norm_sigma"][:], norm):
+                            probs.append(f"{q}: norm_sigma is not _calib/norm_sigma_global.npy")
+                except Exception as e:                          # unreadable or truncated
+                    probs.append(f"{q}: cannot read ({type(e).__name__}: {e})")
+            if len(ids) == 2 and ids["optical"] != ids["coeff"]:
+                probs.append(f"{paths['optical']}: events differ from its TPC shard")
+    for prefix in sorted({p for p in want if glob.glob(f"{p}_coeff_[0-9]*.h5")}):
+        d, name = os.path.split(prefix)
+        probs += [f"{os.path.basename(d)}: {p}" for p in verify_corpus(
+            d, name, modalities=("coeff", "coeff_clean") if glob.glob(f"{prefix}_coeff_clean_*.h5")
+            else ("coeff",))]
+    return probs
+
+
+# ------------------------------------------------------------------------------------- compare
+SKIP_ATTRS = {"provenance_json", "created", "created_utc", "elapsed_s", "host"}
+
+
+def compare(pa, pb):
+    """Differences between two shard files (empty: the same content): every dataset
+    byte-identical (variable-length strings by value), every attribute equal except the
+    build's provenance (commit, host, time)."""
+    def items(f):
+        out = {}
+        f.visititems(lambda k, v: out.__setitem__(k, v))
+        return out
+
+    def attrs(o):
+        return {k: v for k, v in o.attrs.items() if k not in SKIP_ATTRS}
+
+    def same(x, y):
+        if isinstance(x, np.ndarray) or isinstance(y, np.ndarray):
+            return np.asarray(x).shape == np.asarray(y).shape and np.asarray(x).tobytes() == np.asarray(y).tobytes()
+        return x == y
+
+    diffs = []
+    with h5py.File(pa, "r") as a, h5py.File(pb, "r") as b:
+        ia, ib = items(a), items(b)
+        diffs += [f"{k}: only in {'A' if k in ia else 'B'}" for k in sorted(set(ia) ^ set(ib))]
+        for k in sorted(set(ia) & set(ib)) + ["/"]:
+            oa, ob = (a, b) if k == "/" else (ia[k], ib[k])
+            if isinstance(oa, h5py.Dataset):
+                da, db = oa[()], ob[()]
+                if da.dtype.kind == "O":
+                    eq = oa.dtype == ob.dtype and da.shape == db.shape and list(da.ravel()) == list(db.ravel())
+                else:
+                    eq = oa.dtype == ob.dtype and da.tobytes() == db.tobytes()
+                if not eq:
+                    diffs.append(f"{k}: data differ")
+            ta, tb = attrs(oa), attrs(ob)
+            diffs += [f"{k}@{n}: attribute differs" for n in sorted(set(ta) | set(tb))
+                      if n not in ta or n not in tb or not same(ta[n], tb[n])]
+    return diffs
+
+
+def _report(probs):
     # "NOTE:" entries are observations that do not contradict anything -- they
     # are printed, but they do not fail the corpus. Everything else does.
-    notes = [p for p in probs if p.startswith("NOTE:")]
-    fatal = [p for p in probs if not p.startswith("NOTE:")]
+    notes = [p for p in probs if "NOTE:" in p]
+    fatal = [p for p in probs if "NOTE:" not in p]
     for n in notes:
         print(f"  ~ {n}")
     if fatal:
@@ -268,6 +358,38 @@ def main(argv=None):
         return 1
     print("corpus OK")
     return 0
+
+
+def main(argv=None):
+    import argparse
+    import sys
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "compare":
+        bad = 0
+        for pa, pb in zip(argv[1::2], argv[2::2]):
+            d = compare(pa, pb)
+            print(f"{'IDENTICAL' if not d else 'DIFFERENT'}  {pa}  vs  {pb}" + "".join(f"\n    {x}" for x in d[:20]))
+            bad += bool(d)
+        return 1 if bad else 0
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("data_root", help="a run dir (with --dataset-name), or a corpus root with _calib/CHUNKS.txt")
+    ap.add_argument("--dataset-name", default=None)
+    ap.add_argument("--split", default="")
+    ap.add_argument("--expect", type=int, default=None,
+                    help="expected total event count across the corpus")
+    ap.add_argument("--modalities", nargs="*", default=["coeff", "coeff_clean"])
+    ap.add_argument("--source-root", default=None,
+                    help="the SENSOR tree the corpus was built from. Given, a "
+                         "file_index gap is judged against it: absent upstream "
+                         "is fine, present-but-unbuilt is still an error.")
+    a = ap.parse_args(argv)
+    if a.dataset_name is None:
+        if not os.path.exists(os.path.join(a.data_root, "_calib", "CHUNKS.txt")):
+            ap.error("--dataset-name is required unless DATA_ROOT has _calib/CHUNKS.txt")
+        return _report(verify_plan(a.data_root))
+    return _report(verify_corpus(a.data_root, a.dataset_name, split=a.split,
+                                 expect_events=a.expect, modalities=tuple(a.modalities),
+                                 source_root=a.source_root))
 
 
 if __name__ == "__main__":
