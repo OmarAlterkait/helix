@@ -18,7 +18,7 @@ roots:
   # One filesystem here, so there is no staged/durable split to record.
   HELIX_CORPUS_DURABLE: null
   # doraemon belongs to a DIFFERENT group. A handover target will not have read
-  # access, which is why docs/INVENTORY.md calls the probe truth irreplaceable.
+  # access, which is why docs/archive/INVENTORY.md calls the probe truth irreplaceable.
   HELIX_SENSOR_ROOT:   /sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor
   HELIX_ARCHIVE:       /sdf/data/neutrino/omara/archive
   HELIX_EXP:           /sdf/data/neutrino/omara/exp/helix
@@ -54,7 +54,7 @@ scheduler:
     # A DIFFERENT account: authorisation is per partition, and mli:cider-ml does
     # not cover turing while mli:default does. The DSP is architecture-sensitive
     # (turing and A100 disagree on 0.016% of surviving coefficients), so the
-    # corpus is built on turing only -- see DECISIONS.md.
+    # corpus is built on turing only -- see docs/DECISIONS.md.
     account: mli:default
     partition: turing
     qos: preemptable

@@ -57,7 +57,7 @@ def _default_archive():
 
 # Per-cell keys the dense (fused / categorical) loss path needs. The sparse
 # cell/slot view is deliberately not carried: it indexes the per-event cell axis
-# and would need rebasing under any batching. See MULTI_EVENT_BATCHING.md.
+# and would need rebasing under any batching. See docs/archive/MULTI_EVENT_BATCHING.md.
 PER_CELL = ("inp", "occ", "valid", "tgt", "band_id", "plane_id", "t_phys",
             "wire_pos", "wirefeat")
 

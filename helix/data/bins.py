@@ -77,7 +77,7 @@ def reference_name() -> str:
 
     It exists because the name was previously retyped as a literal in five
     places -- the training and eval configs,
-    ``tests/test_bins.py`` and twice in ``docs/INVENTORY.md`` -- while
+    ``tests/test_bins.py`` and twice in ``docs/archive/INVENTORY.md`` -- while
     ``reference_bins.json`` already declared it and NOTHING read it. When the
     grid was re-derived and the JSON went to ``_v3``, every one of those five
     still said ``_v2``: the config then names a file that does not exist, or

@@ -12,10 +12,11 @@ the learned representation knows where charge is.
 | package | may import pimm-data / pimm | what it is |
 |---|---|---|
 | `helix.core` | **no** | wavelet transform, robust statistics, hysteresis, coeff IO, provenance |
-| `helix.tpc` | **no** | LArTPC physics: coherent gate, forward model (noise + digitize), geometry, corpus builder |
+| `helix.tpc` | **no** | LArTPC physics: TPC chain, coherent gate, forward model (noise + digitize), readouts, readers |
+| `helix.build` | **no** | the build pipeline (sources are `scripts/build_{sim,sbnd,goop}.py`) |
 | `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP |
 | `helix.probe` | no | the 3D deconvolution probe |
-| `helix.optical` | no | PMT light path — a SEPARATE pipeline, not part of the wire FM |
+| `helix.optical` | no | the optical codec — written beside the TPC shards, not yet fed to the FM |
 | `helix.data` | **pimm-data** | coeff corpus reader/dataset/verifier, registered transforms, identity guard |
 | `helix.integrations.pimm` | **pimm** | adapters into the training framework |
 
@@ -31,8 +32,10 @@ but `bins` and `identity` inside it must not, or a login node cannot load the
 training config.
 
 Only two directories import an external package. `helix/data/*` reaches
-pimm-data through 9 public symbols; `helix/integrations/pimm/*` reaches pimm
-through its registries. Nothing else imports either.
+pimm-data through a few public symbols (`ShardReaderBase`, `ShardEventDataset`,
+the registries, `Compose`); `helix/integrations/*` reaches pimm through its
+registries. Nothing else imports either (`helix.model.tokenize` defers its one
+registration import).
 
 ## Commands
 
@@ -41,16 +44,18 @@ in-image interpreter and binds are site facts declared in
 `helix/sites/<site>.yaml`; `scripts/helix_run.sh` reads them.
 
 ```bash
-python -m helix.paths              # FIRST: site, every root, its source, whether it exists
+source scripts/helix_env.sh && $HELIX_PYTHON -m helix.paths   # FIRST: site, roots, container, scheduler
 scripts/helix_run.sh python -m pytest tests -q
-scripts/helix_run.sh python scripts/build_coeff_corpus.py --shard ... --out ...
+scripts/helix_run.sh python scripts/build_sim.py --input RUN/sim_wire_sensor_0000.h5 --output OUT/RUN/sim_wire --device cuda
 ```
 
 `helix.paths` needs only os/pathlib/yaml, so it runs outside the container too —
 run it first, always. It picks the site from `HELIX_SITE` or auto-detects
 (`$NERSC_HOST`, `/sdf`). `source scripts/helix_env.sh` exports the same values
-into a shell, for `#SBATCH` and for pimm's launcher, neither of which can read
-them any other way.
+into a shell (roots, `HELIX_CONTAINER_*`, `HELIX_SLURM_<KIND>_*`), which is how
+`corpus.sh` and `train.sh` get their sbatch flags. On S3DF the system python3 is
+3.6 without PyYAML: `scripts/make_host_env.sh` builds `$SCRATCH/helix-host-venv`,
+which `helix_env.sh` finds by itself.
 
 `helix_run.sh` handles what used to be spelled out per call site:
 `PYTHONNOUSERSITE=1` (a bound home makes `~/.local` packages visible inside the
@@ -63,21 +68,20 @@ tests the baked copy, not your edits.
 
 **Two runtimes at NERSC, and the choice is not cosmetic.** podman-hpc is
 interactive and SINGLE-NODE: it does not inject NERSC's NCCL plugin at all, and
-measured 1.23 GiB/s across nodes against shifter's 4.9. shifter is the
-multi-node runtime and the one pimm's launcher drives. `helix_run.sh` picks
-podman-hpc when interactive; pass `HELIX_INTERACTIVE=0` to force shifter.
+measured 1.23 GiB/s across nodes against shifter's 4.9. shifter is the batch
+runtime. `helix_run.sh` picks podman-hpc when interactive; pass
+`HELIX_INTERACTIVE=0` to force shifter (`corpus.sh` and `train.sh` do).
 
 **Submitting does NOT happen in the container**, because sbatch is not in it.
-`scripts/make_launcher_env.sh` builds the small host-side environment pimm calls
-launcher-only — its dependency list minus pimm-data, plus helix's base install —
-and `scripts/submit_helix.sh` finds it with no flag. Two things keep that
-environment sufficient: `helix/data/__init__.py` resolves the reader and the
-dataset lazily, so reading the bin table does not pull torch, and pimm's launch
-preflight loads the training config with `import_custom_modules=False`. The
-second is a LOCAL change in the pimm checkout; a fresh clone needs it again.
+`scripts/corpus.sh` (corpus: plan, calibrate, build arrays) and `scripts/train.sh
+CONFIG [key=value ...]` (training: a chain of `LINKS` jobs, `--dependency=afterany`,
+each running `python -m pimm.train` in the container and resuming from the latest
+checkpoint) run on the host and need only the host Python above. pimm's own launch
+layer (`pimm submit`, launch recipes) is not used; helix needs only pimm's training
+engine.
 
-See `docs/RUNBOOK.md` for corpus → train → eval → probe, and
-`configs/launch/README.md` for getting a run onto the scheduler.
+See `docs/RUNBOOK.md` for host env → corpus → verify → train → eval → probe, and
+`docs/ARCHITECTURE.md` for the modules and the shard format.
 
 ## Structural patterns worth knowing
 
@@ -86,12 +90,22 @@ the GPU or the CPU; there is no numpy twin to keep in step. torch is still never
 imported at `import helix` time: corpus readers, the tokenizer and the optical
 decoder (`unhaar`) are numpy, and `helix.core.wavelet` imports torch when it runs.
 
-**Values are raw; normalisation is a sidecar.** The corpus stores unnormalised
-coefficients plus a `norm_sigma` table applied at tokenize — deliberately, so
-the corpus stays reversible and tokenization stays changeable.
+**Values are raw; normalisation is a table.** The corpus stores unnormalised
+coefficients plus a `norm_sigma` table (in every shard's `/config`) applied at
+tokenize — deliberately, so the corpus stays reversible and tokenization stays
+changeable.
+
+**Every shard says its format.** `/config` `format = "helix-coeff-2"` is written by
+`helix.core.coeff_io` and required by every reader; there are no legacy read paths.
+An unstamped corpus is migrated with `scripts/migrate_format.py` or rebuilt.
+
+**Configs state intent.** `configs/pimm/fm.py` plus `fm_cooldown`, `fm_eval`,
+`fm_smoke`; no config carries a step count (warmup and cadence are `"auto"`, filled
+by `FMTrainer` through `helix.core.cadence`). A variant is a `key=value` override,
+not a new file.
 
 **The corpus is compression; the tokenizer is interpretation.** Changing the
-wavelet, the gate or `tau` costs a 344 GB rebuild and a new `basis_digest`,
+wavelet, the gate or `tau` costs a full corpus rebuild (r2: 262 GB) and a new `basis_digest`,
 invalidating comparability with every existing checkpoint. Changing `n_bands`,
 cell geometry or masking costs a config change and a retrain. Vary
 interpretation freely; change compression only with a measured reason.
@@ -105,7 +119,8 @@ a `pimm export` directory was taught to `load_probe_model` and not to
 there fails. The split is by PURPOSE: RESUME state (`<save_path>/model/last/`,
 `iter_N.pth`) is pimm's and nothing here reads it; EVAL state is a weight set
 plus the operating point that makes its number reproducible. The one caller
-deliberately left alone is `hooks.py:234` — EMA resume, training hot path.
+deliberately left alone is the `torch.load` in `WeightEMA` (`helix/integrations/pimm/hooks.py`)
+— EMA resume, training hot path.
 
 **A `pimm export` cannot attribute itself; promote it.** `_sanitize_config`
 nulls `weight`, so an export cannot say whether it holds EMA or raw weights, and
@@ -123,7 +138,7 @@ planes are contiguous). For a second modality those four roles separate; see
 
 - **Provenance refuses a dirty tree.** Build a corpus from an uncommitted
   checkout and every shard records `git_dirty: True`; `coeff_verify` then
-  refuses it. This cost a 344 GB rebuild once.
+  refuses it. This cost a 344 GB (r1) rebuild once.
 - **`#SBATCH` directives cannot read shell variables**, so `--account`,
   `--output` and `--partition` are literal. That is why scheduler facts live in
   the site profile and reach `sbatch` as CLI flags (which override `#SBATCH`),
@@ -137,8 +152,8 @@ planes are contiguous). For a second modality those four roles separate; see
   means a test that merely LOADS configs must tell "absent at this site" apart
   from "broken" — catch `SiteError` and skip. Two tests already do.
 - **The global batch IS the rank count.** The FM takes one event per rank (no
-  event separation — `MULTI_EVENT_BATCHING.md`), and the trainer raises if
-  `batch_size != world_size`. It is derived from `WORLD_SIZE`, never written
+  event separation — `docs/archive/MULTI_EVENT_BATCHING.md`), and `FMTrainer`
+  raises unless `batch_size // world_size == 1`. It is derived from `WORLD_SIZE`, never written
   down; a literal is right at exactly one GPU count.
 - **GPFS does not support the locks HDF5 and uv take.** Every real-shard read at
   NERSC fails `OSError: [Errno 524] unable to lock file` without

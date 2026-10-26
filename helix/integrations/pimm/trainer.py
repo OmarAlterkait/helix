@@ -43,7 +43,7 @@ class FMTrainer(Trainer):
 
         It is easy to hit by accident, because the correct global value tracks
         the GPU count: ``batch_size = 4`` is right on 4 ranks and wrong on 1.
-        See MULTI_EVENT_BATCHING.md.
+        See docs/archive/MULTI_EVENT_BATCHING.md.
         """
         per_gpu = self.cfg.batch_size // comm.get_world_size()
         if per_gpu != 1:

@@ -75,7 +75,14 @@ for coif3 at any threshold; late single photons 450 vs >= 1230.
 
 ## Running
 
-* SBND: `python -m helix.tpc.sbnd_run --input RUN/*.h5 --output OUT/PREFIX --device cuda` —
-  TPC `PREFIX_coeff_NNNN.h5` + optical `PREFIX_optical_NNNN.h5`.
-* goop: `python -m helix.optical.goop_run --input light_output.h5 --output goop_optical.h5 --device cuda`
-  (truth photon counts per PMT in `truth/pe_counts`).
+Optical shards are written by the build pipeline (`helix/build.py`), next to the TPC shards:
+
+* SBND: `scripts/build_sbnd.py --input RUN/*.h5 --output OUT/RUN/sbnd --device cuda` —
+  TPC `sbnd_coeff_NNNN.h5` + optical `sbnd_optical_NNNN.h5` (`--no-optical`: TPC only).
+* goop: `scripts/build_goop.py --input light_output.h5 --output OUT/RUN/goop --device cuda` —
+  `goop_optical_NNNN.h5`, with goop's photon counts per PMT in `truth/pe_counts`.
+* A whole SBND corpus: `scripts/corpus.sh all sbnd OUT RUN_DIR...` (`docs/RUNBOOK.md` §3).
+  `corpus.sh` calibrates a TPC `norm_sigma` before building, so it does not serve an
+  optical-only source (goop) as is.
+
+Per-system overrides of the codec settings: `--optical-config` (json / yaml).

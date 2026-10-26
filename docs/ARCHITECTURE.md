@@ -1,400 +1,336 @@
 # Architecture
 
-Two packages, one boundary. This document says where the boundary is, why it is
-there, and which of the choices behind it were measured rather than assumed.
-
-Everything here was verified against the code on 2026-09-12 (helix 0.3.0,
-pimm-data 0.4.0). Where a number appears, the way it was measured is named.
+The modules, how data moves through them, and the on-disk formats. Why each piece
+is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.md`.
 
 ---
 
-## 1. The two packages
+## 1. Data flow
 
-**helix** — LArTPC signal processing, the coefficient corpus, the foundation
-model, and the 3D probe. Base install is `numpy`, `h5py`, `PyWavelets`, `scipy`.
-torch is an OPTIONAL extra: the signal processing (TPC chain, optical encoder) needs it; reading the
-corpus and tokenizing do not. `pimm-data` is the optional `[pimm]` extra.
+```
+  JAXTPC sensor files          SBND extracted files            goop light files
+  (HELIX_SENSOR_ROOT/run_*)    (sbnd_data/extracted/<run>)     (optical only)
+        |                              |                              |
+  scripts/build_sim.py          scripts/build_sbnd.py           scripts/build_goop.py
+  (noise model + digitize)      (TPC readout + PMT/X-ARAPUCA)
+        \______________________________|______________________________/
+                                       |
+                     helix.build: event loop, TPCChain, OpticalChain, ShardWriter
+                     scripts/corpus.sh: plan -> calibrate -> build, as Slurm arrays
+                                       v
+  corpus root  <run>/<dataset>_coeff_NNNN.h5        noisy coefficients (helix-coeff-2)
+               <run>/<dataset>_coeff_clean_NNNN.h5  clean target, values only (sim)
+               <run>/<dataset>_optical_NNNN.h5      optical streams (helix-optical-2)
+               _calib/  CHUNKS.txt RUNS.txt RUN_DIRS.txt norm_sigma_global.npy
+                                       |
+                     helix.data: CoeffTPCReader -> CoeffTPCDataset (+ AddNoise / Digitize)
+                     helix.model.tokenize.CoeffTokenize -> CoeffCollect
+                                       v
+                     pimm.train + helix.integrations.pimm (FMTrainer, hooks, evaluator)
+                                       |
+             RESUME state <save_path>/model/ (pimm's)     EVAL artifact (helix.model.artifact)
+                                       v
+                     helix.probe (scripts/dump_probe_truth.py, scripts/run_probe.py)
+```
 
-**pimm-data** — a generic data layer between sharded HDF5 detector output and
-PyTorch training loops, serving four detector families (jaxtpc, lucid, optical,
-coeff). Requires `torch>=2.5` and `hdf5plugin` UNCONDITIONALLY.
+---
 
-That asymmetry is the whole reason a boundary exists rather than one package.
+## 2. Packages and the boundary
 
-| | helix | pimm-data |
+| package | may import pimm-data / pimm | what it is |
 |---|---|---|
-| torch | optional extra | hard requirement |
-| PyWavelets | hard requirement | not a dependency |
-| scope | one detector's physics | any detector family |
+| `helix.core` | no | wavelet transform, robust statistics, hysteresis, coeff shard IO, provenance, training cadence |
+| `helix.tpc` | no | TPC chain, coherent gate, thresholding, noise model, readouts, readers |
+| `helix.optical` | no | optical codec, calibration, optical shards, tokens |
+| `helix.model` | no (`tokenize` defers one import) | the FM, tokenizer, masking, loss, muP, artifacts |
+| `helix.probe` | no | the 3D probe |
+| `helix.build` | no (sources may) | the build pipeline |
+| `helix.data` | pimm-data | corpus reader / dataset / verifier, registered transforms, bins, identity guard |
+| `helix.integrations.pimm` | pimm | registry adapters into pimm's trainer |
 
-### The invariant
+`helix.core` and `helix.tpc` never import `pimm_data`: the DSP must install with the
+base dependencies (numpy, h5py, PyWavelets, scipy, PyYAML) while pimm-data requires
+torch and hdf5plugin unconditionally. `tests/test_boundary.py` enforces it with
+import probes in clean subprocesses, a source scan, a per-submodule sweep, and a
+check that `helix.data.bins` / `helix.data.identity` stay light (`helix/data/__init__.py`
+resolves the reader and dataset lazily so they do). torch is optional at `import helix`
+time; the DSP modules import it when they run.
 
-    helix.core and helix.tpc must NEVER import pimm_data.
-    helix.data and helix.integrations may, and do.
-
-This is not style. It is what makes the two-container split possible (§4).
-`tests/test_boundary.py` enforces it; see §6 for why that test has three parts
-instead of one.
-
----
-
-## 2. helix, subpackage by subpackage
-
-| subpackage | modules | may import pimm_data | what it is |
-|---|---|---|---|
-| `helix.core` | 8 | **no** | wavelet transform, robust statistics, hysteresis, coefficient IO, provenance |
-| `helix.tpc` | 19 | **no** | LArTPC physics: coherent removal, the noise forward model, digitization, geometry, the corpus builder's plumbing |
-| `helix.model` | 9 | no (see below) | the foundation model: tokenizer, blocks, masking, loss, muP |
-| `helix.probe` | 8 | no | the 3D deconvolution probe |
-| `helix.optical` | 6 | no | PMT light path (separate from the wire path) |
-| `helix.data` | 6 | **yes** | corpus dataset/reader/verifier, the registered transforms, the identity guard |
-| `helix.integrations` | 9 | **yes, in submodules** | adapters into a training framework (pimm) |
-
-Two subtleties that matter and are easy to get wrong:
-
-**`helix.model` is clean, deliberately.** `tokenize.py` defers its one
-`pimm_data.transform` import into a function body. The tokenizer's protocol is
-duck-typed — a callable taking `data` and returning `data`, carrying a `scope`
-attribute — so registration is the consumer's one-liner rather than a dependency.
-
-**`helix.integrations`'s `__init__` is an empty namespace, also deliberately.**
-Its docstring states the rule: "each module in this package imports a
-THIRD-PARTY framework at module scope, so importing one is an explicit act by a
-consumer that already has that framework installed." So the PACKAGE imports
-clean and only its SUBMODULES are heavy. That is what keeps `import helix` free
-of torch, and `test_boundary.py` locks it in — an `__init__` that started
-re-exporting its submodules would break it silently.
+**Lockstep with pimm-data.** helix registers the forward-model transforms `AddNoise`
+and `Digitize`; pimm-data's registry raises `KeyError` on a duplicate, so a pimm-data
+from before the move cannot run with this helix. The pimm-data revision is named once,
+in `pyproject.toml` (`[tool.uv.sources]`); `container/install.sh` reads it from there and
+`tests/test_lockstep_pin.py` checks that no other build file names one.
 
 ---
 
-## 3. Where the forward model lives, and why
+## 3. The build pipeline (`helix/build.py`)
 
-The LArTPC forward model — intrinsic noise, coherent noise, ADC digitization —
-is helix's. Going-to-dense — scattering sparse rows into per-plane grids — is
-pimm-data's. The rule: *every detector family wants densify; only one wants this
-particular detector's physics.*
+`helix.build` holds no source. A source is a class in its own script that only reads;
+the script ends with `helix.build.main(Source)`, which gives it the command line
+documented in `helix/build.py`'s docstring. A source provides `Source(files, device,
+optical=True)`, `len()`, `systems` (optical systems; empty for TPC only), `dataset` (the
+shards' dataset name), `pattern` (its input files in a run directory),
+`events(indices, workers)` (per event: `ident`, the TPC input as `readout` or `planes`,
+optional `clean`, `optical`, `truth`), `shard_attrs()`, and for a TPC `chain_config()` /
+`bind()`, for optical `optical_chain()`; optionally `file_shard(path)`.
 
-| | lives in | |
-|---|---|---|
-| `densify`, `offset2batch` | pimm-data | generic scatter, any family |
-| `dense_ops_jax.densify_plane_jax` | pimm-data | still densification, despite the filename |
-| `Densify` transform | pimm-data | |
-| `noise.py` | **helix** | LArTPC physics |
-| `add_intrinsic_noise`, `digitize` | **helix** | |
-| `AddNoise`, `Digitize` transforms | **helix** (`helix/data/transforms.py`) | |
-| `configs/jaxtpc/sensor_dense_gpu.py` | **helix** | a recipe applying helix physics to jaxtpc shards |
+| script | `dataset` | input | TPC | optical | clean target |
+|---|---|---|---|---|---|
+| `scripts/build_sim.py` | `sim_wire` | `*_sensor_*.h5` (one run per dir) | planes, noised and digitized on the device (`helix.tpc.noise`, seeded per event) | none | yes |
+| `scripts/build_sbnd.py` | `sbnd` | `*.h5` (extracted SBND) | readout (adc, pedestal, present) | `pmt`, `xarapuca` | no |
+| `scripts/build_goop.py` | `goop` | `*.h5` (goop light) | none | `goop` (+ `truth/pe_counts`) | no |
 
-### Why the transforms are in `helix.data`, not `helix.tpc`
+Shared after the read: per `--events-per-shard` events, shard k (`--shard-start` + 0,
+1, ...) is written as `PREFIX_coeff_k.h5`, `PREFIX_coeff_clean_k.h5` and
+`PREFIX_optical_k.h5` (k as 4 digits). Each file is written as `.part`, audited
+(`helix.core.coeff_io.audit_shard` for coeff shards) and renamed whole, so a file with its
+final name is complete; `--skip-complete` makes a task whose shards all exist do nothing.
+`norm_sigma` is `--norm-sigma TABLE` (one table for the corpus) or else each shard's own;
+`--calibrate TABLE` writes the table of the selected events and no shards.
 
-Measured, not assumed: **importing `pimm_data.transform` to reach
-`@TRANSFORMS.register_module` pulls 36 pimm_data modules and torch.**
-`helix.tpc` today imports with neither.
-
-So the split is: kernels in `helix.tpc`, registered wrappers in `helix.data`.
-A registered transform is inherently a pimm-data object; a noise kernel is not.
-
-### This move is LOCKSTEP
-
-`pimm_data/_registry.py:171` raises `KeyError` on duplicate registration
-(verified by direct test). Therefore:
-
-* old pimm-data + new helix → both register `AddNoise` → **KeyError**
-* new pimm-data + old helix → nobody registers it → **missing transform**
-
-No environment may straddle it. Both containers must be rebuilt together.
-This is why `pimm-fm`'s lock had to be repointed: it pinned pimm-data at
-`aea39aff`, 27 commits behind as of pimm-data 0.4.0, a revision that still defines `AddNoise`.
+`plan()` (`build_X.py plan OUT RUN_DIR...`) lists a corpus's tasks, one line each,
+`PREFIX FIRST COUNT EVENTS_PER_SHARD SHARD_START INPUT...`: one task per input file when
+the source defines `file_shard` (sim: shard number = file number), else every
+`--events-per-task` events of a run. `scripts/corpus.sh` writes the plan to
+`_calib/CHUNKS.txt`, calibrates one `norm_sigma` table per run and their mean
+(`_calib/norm_sigma_global.npy`), then submits arrays over the plan on the site's
+corpus scheduler. One GPU type per corpus: the site pins the corpus partition.
 
 ---
 
-## 4. The container
+## 4. The TPC chain (`helix/tpc`)
 
-**One recipe, `container/install.sh`, with two packaging front-ends.** It does
-corpus building AND training.
+`helix.tpc.chain.TPCChain` is one chain for simulation and data, torch on one device:
 
-| | |
+1. pedestal (from the input, or a clipped mean per channel);
+2. channel status: dead, noisy or baseline-step rows are excluded (zeroed, flagged invalid);
+3. DWT: coif3, level 4, periodization, time padded to a multiple of 2^level (`helix.core.wavelet`);
+4. coherent removal (`helix.tpc.coherent_gate`) on the readout's channel groups;
+5. threshold (`helix.tpc.threshold_rows`): sigma per plane and band on live rows,
+   hysteresis seeds at the universal threshold (`kappa`), grown through `floor` sigma; the
+   finest band (D1) is dropped; stored values rounded to a power-of-two step <= sigma / q
+   (`store.step_input` 16, `store.step_target` 32; `helix.tpc.chain_coeff.quantize`).
+
+`process_event(adc, ped, present)` takes a readout (SBND); `process_planes({gid: image})`
+takes plane images (simulation). `helix.tpc.chain_coeff` turns the result into a
+`CoeffEvent` and evaluates the clean target at the noisy support (`clean_coeff_event`).
+Configuration is a nested dict merged and validated by `make_config`; `SBND_DEFAULT` and
+`SIM_BASE` (via `sim_config(num_wires)`) are the two bases.
+
+**The coherent gate** works on integer group labels from the readout
+(`helix.tpc.readout.ReadoutMap.labels`; -1 = excluded row). Per band and pass: the common
+mode per (group, position) is a clipped mean over non-signal rows; its scale `sigc` is a
+MAD over the band (`sigc_scope: global`) or per group (`group`); the mode is subtracted
+where `|M| < kgate * sigc`, and with `tau` also where it is larger unless more than `tau`
+of the group's rows were flagged as signal in pass 1; signal is re-detected between passes.
+
+    coherent: {groups, cross_plane, kgate, ksig, npass, tau, sigc_scope}
+
+| | groups | cross_plane | kgate / ksig / npass | tau | sigc_scope |
+|---|---|---|---|---|---|
+| SBND (`SBND_DEFAULT`) | `femb`: front-end boards, 128 channels across planes | true | 3 / 3 / 2 | none | group |
+| simulation (`SIM_BASE`) | `block`: the noise model's 64-wire blocks (`readout.group_size`) | false | 3 / 3 / 2 | 0.05 | global |
+
+`groups: null` disables removal. Float32 reductions depend on summation order and a
+group's decision covers all its rows, so one GPU generation builds a corpus.
+
+**The noise model** (`helix.tpc.noise`, torch): incoherent ENC
+`sqrt(white^2 + (y + z L)^2)` with the measured MicroBooNE series spectrum by default
+(`DEFAULT_ENC = (0.90, 0.79, 0.22)`), plus one coherent waveform per group of 64
+contiguous wires (adjacent groups anti-correlated by `beta`, renormalised to
+`rms_adc` 2.5), then `digitize`. The same functions build the simulation corpus
+(`scripts/build_sim.py`) and add fresh noise at load time (`helix.data.transforms.AddNoise`,
+`Digitize`; recipe `configs/jaxtpc/sensor_dense_gpu.py`). Realisations come from
+per-event torch generators: reproducible on one device type, statistically (not
+bit-) equal to JAXTPC's numpy; `tests/_noise_reference.py` is the numpy port the tests
+compare against.
+
+Readers: `helix.tpc.io` reads JAXTPC sensor files (`sensor_layout`, `read_sensor_*`);
+`helix.tpc.io_sbnd.SBNDEvents` decodes extracted SBND files in worker processes.
+
+---
+
+## 5. The optical codec (`helix/optical`)
+
+One codec for every light system (`helix.optical.codec.OpticalChain`, `OpticalSpec`),
+described by the system's measured single-photon response: deconvolution to photon
+amplitudes, then the integer Haar transform of the raw samples with coarse sums always
+kept and differences kept where the light (or the departure from it) reaches threshold.
+Decoding (`unhaar`) is the exact inverse of what was stored. Method, settings, response
+fitting (`helix.optical.calibrate`) and validation (`helix.optical.validate`): `docs/OPTICAL.md`.
+
+---
+
+## 6. Shard formats
+
+### Coefficient shards: `helix-coeff-2` (`helix/core/coeff_io.py`)
+
+`write_coeff_shard` / `read_coeff_event` / `audit_shard` are the schema of record. One
+modality per file, flat columnar (shard-wide arrays plus an event offset index, no
+per-event groups):
+
+```
+/config   attrs: format = "helix-coeff-2", n_events, dataset_name, file_index,
+                 global_event_offset, readout_type = "wire",
+                 wavelet, dwt_level, dwt_mode, n_ticks_raw, pad, sigma_norm,
+                 basis_digest, removal_json, threshold_json, has_coords,
+                 noise_json, provenance_json
+          datasets: band_lengths (n_bands,) int32   padded band lengths
+                    gids (G,) int32                 the plane set; row order of every per-plane table
+                    n_wires (G,) int32
+                    norm_sigma (G, n_bands) float32 the corpus normalisation table
+/coord    band uint8, plane_gid int32, wire int32, tau int32   (M,)   absent when has_coords = false
+          event_offset int64 (n_events + 1,)      event i = rows off[i]:off[i+1]
+          coord_digest uint64 (n_events,)          blake2b of the event's four coordinate columns
+          sigma_threshold float32 (n_events, G, n_bands)   the event's threshold sigma
+          wire_valid uint8 (n_events, G, ceil(max n_wires / 8))   packed; absent = all valid
+/value    float32 (M,)                             raw coefficients (quantized to value_step)
+/ident    run str, source_file str, event int64 (n_events,)  [noise_seed int64 for simulation]
+```
+
+* **format** is written by every writer and required by every reader
+  (`require_format` in `coeff_io`, `CoeffTPCReader`, `CoeffTPCDataset`, `audit_shard`).
+  A shard without it is refused with a pointer to `scripts/migrate_format.py`.
+* **basis_digest** hashes the basis (wavelet, level, mode, n_ticks_raw, pad,
+  band_lengths, removal, threshold, sigma_norm) and is checked against those attributes
+  on read; `band_lengths` is validated against the basis.
+* **Clean target** (`*_coeff_clean_*`): evaluated at the noisy support, written values
+  only (`has_coords = false`). It joins the noisy shard by `/ident` and row for row within
+  an event; `coord_digest` in both shards must agree or the read raises.
+  Consequence: the pair measures fidelity on what was kept, never recall of what was
+  dropped.
+* **Values are raw.** Normalisation `asinh(value / norm_sigma[row_of(gid), band])` is
+  applied at tokenize; rows follow the POSITION of a gid in `gids`, not its value.
+  `sigma_threshold` (per event, defines the kept set) and `norm_sigma` (per corpus,
+  normalises) are different tables.
+* **provenance_json** records the code (`version`, `git`, `git_dirty`) and, for
+  simulation, the geometry and spectrum files with their sha256 and the seed formula;
+  `noise_json` records how the input was noised.
+* Compression is gzip with the byte shuffle; the layout, not the filter, is the contract.
+
+### Optical shards: `helix-optical-2` (`helix/optical/shard.py`)
+
+`/config` (format, modality = "optical", n_events), `/ident` (run, source_file, event,
+subrun, time), and per system `/optical/<system>`: the codec spec, per-waveform channel,
+time, length and counts, and exact integer streams (region runs, delta-coded coarse sums,
+keep bits, stored differences), plus per-event channel noise. Joins its TPC shard on
+(run, source_file, event). `read_optical` / `read_event` read it,
+`helix.optical.tokens.shard_tokens` tokenizes it.
+
+### The corpus root
+
+    <root>/<run>/<dataset>_{coeff,coeff_clean,optical}_NNNN.h5
+    <root>/_calib/CHUNKS.txt        the plan (helix.build.plan)
+    <root>/_calib/RUNS.txt          run directory names, one per line (training reads this)
+    <root>/_calib/RUN_DIRS.txt      the input run directories
+    <root>/_calib/<run>.npy         per-run norm_sigma; norm_sigma_global.npy their mean
+    <root>/<run>/holdout.json       the split, from scripts/write_holdout.py
+
+`python -m helix.data.coeff_verify` checks a run directory (`--dataset-name`) for
+cross-shard problems (pairs, gaps, duplicates, mixed code or basis), or a whole corpus
+against `_calib/CHUNKS.txt` (every planned shard present with its planned events and
+nothing else, optical shards holding their TPC shard's events, one global
+`norm_sigma`), or compares shard files byte for byte (`compare A B ...`, provenance
+attributes excepted).
+
+---
+
+## 7. Reading the corpus (`helix/data`)
+
+* `CoeffTPCReader` (`coeff_reader.py`): one shard family (`modality` `coeff` or
+  `coeff_clean`), standalone h5py on pimm-data's `ShardReaderBase`; shards of another
+  format are recorded and refused.
+* `CoeffTPCDataset` (`coeff_dataset.py`, pimm-data registry): noisy rows plus the joined
+  clean target, the shard tables in `sample['coeff']['_meta']`, and the identity-hash
+  split (`holdout`, `split_role`: blake2b(run/source_file) + event, so independent of the
+  build).
+* `transforms.py`: `AddNoise`, `Digitize` (load-time forward model, per event or per
+  collated batch).
+* `bins.py`: the categorical bin grid; the production grid is named in
+  `helix/data/data/reference_bins.json` (currently `coeff_bins_r2_run0027575715`).
+* `identity.py`: `corpus_runs()` reads `_calib/RUNS.txt`; `check_corpus_matches`
+  refuses a checkpoint whose recorded `basis_digest` differs from the corpus being read.
+
+---
+
+## 8. The model (`helix/model`)
+
+* `tokenize.CoeffTokenize`: coefficient rows -> cells of `pw x pt = 16 x 8` slots
+  (`n_slot` 128) over the bands A4, D4, D3, D2, values normalised by `norm_sigma`.
+* `fm.FMModel` / `build_fm`: encoder blocks, cross-attention decoder, a categorical head
+  over the bin grid (`n_bins`), muP (`mup.py`), RoPE over time and wire (`layers.py`).
+  Masking (`mask.py`): `random` cells by default, whole planes with probability
+  `plane_frac`. `plane_id` serves as FiLM index, RoPE axis, masking group and plane
+  identity at once.
+* The FM has no event separation: one event per rank, and `FMTrainer` refuses any other
+  per-GPU batch.
+* `artifact.py` is the only reader of EVAL state: `detect` / `inspect` / `load` / `build`
+  over every checkpoint shape in circulation (`tests/test_artifact_formats.py` is the
+  matrix). RESUME state (`<save_path>/model/`) is pimm's and helix does not read it.
+  `scripts/export_artifact.py` promotes a `pimm export` into an artifact recording the
+  weight set, the corpus `basis_digest` and the helix commit.
+
+---
+
+## 9. pimm integration (`helix/integrations/pimm`)
+
+helix uses pimm's training engine only (`python -m pimm.train`), not its launch layer.
+A config pulls in `custom_imports = dict(imports=["helix.integrations.pimm"])`, which
+registers:
+
+| registry | names |
 |---|---|
-| `container/helix-train.def` | apptainer. Builds anywhere with a checkout and nothing else — clusters have apptainer and no docker, so this is the portable path. |
-| `container/Dockerfile` | what CI builds and publishes to `ghcr.io/omaralterkait/helix`, so a site can pull a tested image instead of spending eleven minutes rebuilding one. |
-| `container/Dockerfile.nersc` | the same recipe on the `pimm-nersc` base, published as a Docker v2 manifest because Shifter and podman-hpc cannot consume OCI. |
+| TRANSFORMS | `CoeffTokenize`, `CoeffCollect` |
+| DATASETS | `CoeffTPCDataset` (wraps `helix.data.CoeffTPCDataset`, runs pimm's transforms) |
+| MODELS | `Coeff-FM` |
+| TRAINERS | `FMTrainer`: muP parameter groups, per-group peak LR, the batch check, `"auto"` cadence |
+| SCHEDULERS | `WSDStableLR`, `WSDCooldownLR` |
+| HOOKS | `HelixPathBootstrap`, `WeightEMA`, `FiniteGuard`, `CoeffFMEvaluator` |
 
-Both front-ends call the same script, which is why they cannot drift, and that
-script reads the pimm-data revision out of `pyproject.toml` rather than carrying
-its own — collapsing what used to be three pin sites in helix to one.
+`_compat` patches pimm at import (e.g. RNG restore to CPU). **Cadence is derived at run
+time:** a config writes `warmup="auto"`, `save_freq="auto"`, `every_n_steps="auto"`;
+`FMTrainer._resolve_cadence` fills them from pimm's `iters_per_epoch * epoch` through
+`helix.core.cadence` (`warmup_steps`, `eval_every`, `save_every`).
 
-The image is a *pulled* artifact rather than a hand-built one, and WHICH image —
-and which runtime consumes it — is declared per site under `container:` in
-`helix/sites/<site>.yaml`, not by a `HELIX_IMAGE` path. A `.sif` path cannot
-describe a registry reference, which is what NERSC needs; the third front-end
-above exists because Shifter and podman-hpc cannot consume OCI manifests.
+`configs/pimm/fm.py` is the whole run: corpus = `HELIX_CORPUS`'s parent with its
+`_calib/RUNS.txt`, the reference bin grid, the m113 architecture (d 512, 12 + 4 blocks, 8
+heads, K = 128), AdamW + `WSDStableLR`, batch = world size. Variants override only what
+differs: `fm_cooldown.py` (warm start from `$HELIX_EXP/fm/model/last`, first 3 runs, one
+epoch, `WSDCooldownLR`), `fm_eval.py` (probe split, evaluator only), `fm_smoke.py` (a
+small model, 32 events, one GPU). Anything else is a `key=value` override.
 
-This section used to say the two-container split was correct and not friction.
-That was wrong, and the way it was wrong is worth recording, because the
-reasoning looked sound.
+---
 
-The split was real but it was an artifact of using two other people's images:
+## 10. Sites
 
-| | `develop.sif` | `pimm-latest.sif` |
+`helix/paths.py` resolves every external root from the environment or the site profile
+`helix/sites/<site>.yaml` (`HELIX_SITE`, or detected: `/sdf` for S3DF, `$NERSC_HOST` for
+NERSC). A root the site does not declare is `null` and asking for it raises. The profile
+also holds the container (`runtime`, `image`, `python`, `binds`, NERSC's interactive
+runtime) and scheduler facts per job kind (`train`, `corpus`).
+
+* `scripts/helix_env.sh` (sourced) exports the roots as `HELIX_*`, the container as
+  `HELIX_CONTAINER_*` and the scheduler as `HELIX_SLURM_<KIND>_*`, using a host Python
+  with PyYAML (`HELIX_PYTHON`, else `$SCRATCH/helix-host-venv` from
+  `scripts/make_host_env.sh`, else a system python).
+* `scripts/helix_run.sh CMD...` runs a command in the site's container (apptainer,
+  shifter, podman-hpc or none), rewriting a leading `python` to the in-image interpreter,
+  binding both checkouts, forwarding `HELIX_*`, the site's env and `HELIX_FORWARD_ENV`,
+  with `PYTHONNOUSERSITE=1` and `PYTHONPATH=pimm:helix`. podman-hpc (NERSC, interactive)
+  is chosen on a TTY; `HELIX_INTERACTIVE=0` forces the batch runtime.
+* `scripts/corpus.sh` and `scripts/train.sh` submit with `sbatch` from the host, with
+  the site's account / partition / QOS / constraint / extra flags.
+
+| | S3DF (`s3df.yaml`) | NERSC (`nersc.yaml`) |
 |---|---|---|
-| jax | 0.5.3 | absent |
-| torch | 2.5.1+cu121 | 2.10.0+cu126 |
-| pywt | 1.8.0 | **absent** |
-| pimm_data | **absent** | **0.3.0 — stale** |
-| hdf5plugin | **absent** | present |
+| container | apptainer, `/sdf/data/neutrino/omara/images/helix-train.sif` | shifter `ghcr.io/omaralterkait/helix-nersc:jax-cuda12`; podman-hpc interactive |
+| train | `mli:cider-ml`, ampere, QOS normal | `m5238_g`, constraint gpu, QOS preempt |
+| corpus | `mli:default`, turing, QOS preemptable, `--requeue` | `m5238_g`, constraint gpu, QOS shared |
 
-Neither could run the whole workflow, so the split looked structural. Three
-things were actually wrong:
-
-1. **`pimm-latest.sif` baked pimm_data 0.3.0, which still REGISTERS AddNoise and
-   Digitize.** helix registers both now, so the lockstep conflict of §3 was live
-   inside the training image. It is also the reason
-   `configs/pimm/coeff_fm_train.py` carries an elaborate `sys.path.insert(1)`
-   dance whose comment says the checkout "has to WIN over site-packages, not
-   merely be present" — a workaround for a broken image, living in a config.
-
-2. **`develop.sif` has no pimm_data at all**, and the corpus builder needs it
-   (`scripts/build_coeff_corpus.py` imports `densify` from `pimm_data`). It only
-   ever appeared to work because of an editable `.pth` in ONE developer's home
-   (`__editable__.pimm_data-0.1.0.pth` -> that person's checkout), which the
-   container picks up because `-B /sdf` remounts home. A colleague gets nothing.
-   Test results measured that way were partly an artifact of whose shell ran them.
-
-3. **`develop.sif` has no hdf5plugin**, so reading real doraemon shards failed
-   with an HDF5 filter error.
-
-The corrected image fixes all three. It is built FROM `pimm-latest.sif` to keep
-the CUDA work worth keeping — torch 2.10+cu126 and the prebuilt
-torch_scatter / torch_sparse / spconv / flash-attn wheels that cannot be compiled
-on a login node with no CUDA toolkit — and then:
-
-* uninstalls pimm_data 0.3.0 and installs the current one (replaced, not
-  shadowed, so which copy wins cannot depend on `sys.path` order)
-* adds PyWavelets, helix's only dependency the base image lacked
-* adds pytest, because the first thing anyone does with a new environment is ask
-  whether it works
-* no jax: helix's DSP is torch. Images built before jax was removed still carry it, unused.
-
-**pimm and helix are NOT installed in the image.** They are the code under
-development and arrive by bind mount / PYTHONPATH, so editing either does not
-require a rebuild. Only dependencies are baked.
-
-The `%post` ends with an assertion that fails the BUILD if pimm_data is stale,
-has lost `Densify`, or still registers `AddNoise`/`Digitize` — so a lockstep
-violation cannot ship in an image again.
-
-Verified in that image with user site-packages disabled, so no home directory can
-help: **both suites green; ~40 helix tests skip unless pimm is on the path.**
-
-### Getting the image
-
-Pull the one CI built and tested, by **digest**:
-
-    apptainer pull helix-train.sif docker://ghcr.io/omaralterkait/helix@sha256:<digest>
-
-Pin the digest, not the tag. A tag is a mutable alias, and this image is half of
-a lockstep pair — "whatever a tag points at today" is the ambiguity that
-once produced three differently-named `.sif` files, the canonical one built from
-a local path source with CPU jax while every default pointed at it. Each build
-prints its digest.
-
-Or build it, which is the path for a site that cannot reach GHCR:
-
-    APPTAINER_TMPDIR=$LSCRATCH apptainer build --fakeroot \
-      helix-train.sif container/helix-train.def
-
-Three traps `container/install.sh` already handles, all found the hard way:
-
-* uv installs by hardlinking from its cache, and in the build sandbox those links
-  do not materialise — a cached package "installs" in 99 ms and then imports as
-  `ModuleNotFoundError: No module named 'pywt.version'`. The FIRST build passes
-  (nothing cached yet) and the REBUILD fails. `UV_LINK_MODE=copy` fixes it.
-* An earlier fix set `UV_NO_CACHE=1`, which was reaching for the right thing the
-  wrong way: it made uv re-extract into `TMPDIR` on every invocation and the build
-  died partway through the largest package. The cache now lives INSIDE the
-  sandbox (`UV_CACHE_DIR=/tmp/uvcache`), so every build starts with an empty one.
-* `TMPDIR` is inherited from whoever runs the build and usually does not exist
-  inside an apptainer `%post` sandbox, so uv's interpreter probe vanishes and it
-  dies with `No module named 'python.get_interpreter_info'` — which reads like a
-  broken interpreter and is nothing of the kind. It is pinned.
-
-Rebuild whenever helix's pimm-data pin moves: the image is part of the lockstep
-pair, and `install.sh` reads that pin from `pyproject.toml`.
-
-## 5. Data flow, end to end
-
-```
-  doraemon sensor shards  (HDF5, raw wire ADC)
-            |
-            |  helix.tpc: coherent gate -> DWT -> threshold
-            |  scripts/build_coeff_corpus.py
-            v
-  coefficient corpus      (HDF5 shards: value + coord/{band,plane_gid,wire,tau}
-                           + ident/{event,run,source_file,noise_seed}
-                           + config attrs incl. basis_digest, removal_json)
-            |
-            |  helix.data: reader -> dataset -> CoeffTokenize
-            |  pimm training loop via helix.integrations.pimm
-            v
-  foundation model        (masked autoencoding over wavelet coefficients)
-            |
-            |  RESUME state stays with pimm: <save_path>/model/last/ (DCP),
-            |  iter_N.pth, model_ema.pth. helix reads NONE of it.
-            |
-            |  pimm export  -> weights + resolved config
-            |  scripts/export_artifact.py -> eval artifact
-            v
-  eval artifact           (weights.safetensors + artifact.json: architecture,
-                           operating point, corpus basis_digest, helix commit,
-                           which weight set, weights digest)
-            |
-            v
-  3D probe / evaluators   (helix.probe)
-```
-
-Each stage stamps provenance, and the next stage checks it. `helix/data/identity.py`
-compares a checkpoint's recorded `basis_digest` against the corpus actually
-being read: it REFUSES on mismatch and WARNS when a corpus is unstamped.
-`corpus_identity()` returns `removal_json` and `sigma_norm` too, and the refusal
-message prints them, but `basis_digest` is the only field COMPARED — its
-docstring says it is "the one field worth carrying". That guard is why the retired 540 GB
-`fm_cache_tpc` could never have been used again — it carried no stamps at all.
-
-### One owner for "what is a checkpoint"
-
-A run leaves two kinds of file and they are not interchangeable. RESUME state is
-weights plus optimizer, scheduler, RNG, sampler and step; it exists so training
-continues bit-identically, it is pimm's, and nothing in helix reads it. EVAL
-state is one weight set plus everything needed to make a number reproducible and
-attributable; that is helix's, and `helix/model/artifact.py` is the only thing
-that reads it.
-
-That module exists because the alternative was measured: eight checkpoint shapes
-were in circulation and eight independent `torch.load` sites read them, each
-knowing a subset. A `pimm export` directory was taught to `load_probe_model` and
-not to `patch_config_from_checkpoint`, so probing a pimm-trained model died on
-`IsADirectoryError` — a failure no test could have caught, because nothing named
-the set of formats. `tests/test_artifact_formats.py` now does: every shape either
-reads with an operating point that survives the round trip, or is refused by a
-message naming the remedy, and a ninth shape added without a row there fails.
-
-The promotion step is not ceremony. `pimm export` writes a portable directory but
-cannot say WHICH weight set it holds — `_sanitize_config` nulls the only key that
-could record it, and the exported file is always named `model.safetensors`
-whatever it came from — nor which corpus the weights trained on, nor which helix
-commit defined their tokenizer. All three change the number. Every probe row
-written before the artifact existed carries `weights_are_ema: null`.
-
-Two shapes were retired rather than carried: `converted` and `research` existed
-only for `m113`, kept alive by a converter run exactly once. m113 was promoted to
-an artifact — verified tensor-for-tensor first — and the converter deleted. Both
-shapes are still DETECTED, because the blobs remain on disk and "unrecognised
-checkpoint shape" would be a false thing to tell someone who found one.
-
----
-
-## 6. Why the boundary test has three parts
-
-`tests/test_boundary.py` looks redundant and is not. Each part covers a hole the
-others leave, and each was mutation-tested by actually adding
-`import pimm_data` to `helix/tpc/noise.py` and confirming a failure.
-
-1. **Package-level import probes.** `helix`, `helix.core`, `helix.tpc`,
-   `helix.model.tokenize`, `helix.integrations` must each import in a clean
-   subprocess with pimm_data and torch absent.
-
-2. **A source scan.** A grep alone false-positives: `helix/tpc/dense_ops.py`,
-   `geometry.py`, `io.py` and `noise.py` all NAME pimm_data in comments, and
-   `tokenize.py` documents a registration example. This part proves the files
-   that mention it do not import it.
-
-3. **A per-submodule sweep.** The necessary one. `import helix.tpc` executes
-   only its `__init__` — `noise`, `dense_ops` and `geometry` are NOT among its
-   imports, so part 1 cannot see a violation in any of those files. Part 3
-   imports each submodule alone, and catches violations *transitively*: the
-   mutation in `noise.py` also failed `dense_ops`, which imports it.
-
-Only `pimm_data` is forbidden in part 3. torch is not — the DSP modules
-(`helix.core.robust`, `helix.tpc.coherent_gate`, `dense_ops`, ...) import it at
-module scope by design and are declared optional extras. The invariant this file
-defends is about pimm-data, not about weight of imports.
-
----
-
-## 7. Paths
-
-`helix/paths.py` is the single resolution point for every external path. Each is
-an environment variable with an S3DF default, and the defaults are "where these
-live on the machine helix was developed on; they are defaults, not truths."
-
-`python -m helix.paths` reports every root, whether it came from the environment
-or the default, and whether it exists. That is the first command to run in a new
-environment.
-
-`repo()` locates the checkout from `__file__`, never from a name — so a renamed
-or relocated checkout still finds itself.
-
-Two things paths.py deliberately does NOT cover:
-
-* **`#SBATCH` directives.** They cannot read shell variables, so `--account`,
-  `--output` and `--partition` in `scripts/submit_coeff_fm_train.sh` stay
-  literal. They are overridable through the environment instead — `ACCOUNT`,
-  `QOS`, `EXCLUDE`, `LOGDIR` — which `chain_coeff_fm_train.sh` forwards to every
-  link; the script header says so with an example.
-* **`pimm-fm/configs/helix`.** Needed only by pimm's `train.sh`, which resolves
-  `-c helix/<cfg>` under its OWN `configs/` with no absolute-path option. The
-  surviving launcher does not use `train.sh`: `scripts/submit_coeff_fm_train.sh`
-  calls `python -m pimm.train --config-file <abs path>`, so no link is required
-  and none is created. (`launch/coeff_fm_train.sbatch` needed one and managed it;
-  it was retired with the rest of that launcher.)
-
----
-
-## 8. Open items
-
-**`cubic_wireplane_geometry.json` is duplicated.** Both repos ship a
-byte-identical 153 KB copy (`md5 06f18b9c646303b8c21c2ffad8919f91`) and a
-`load_plane_registry` each. pimm-data's `Densify` genuinely needs a plane
-registry — `n_wires`/`n_ticks`/`pedestal` — to size each plane's grid, and
-helix's DSP needs the same file.
-
-Arguments for leaving it: the file is an *exported artifact* from JAXTPC
-(`scripts/export_plane_geometry.py`), authored by neither repo; in both, the
-bundled copy is only a fallback (`_resolve` takes any path); and the two
-`canonical_plane_id` functions are genuinely different — helix's is wire-only,
-pimm-data's also handles `volume_N_Pixel`, which is why
-`test_canonical_plane_id_stable` did not move across the boundary.
-
-The argument against: it is the same mirror pattern that `test_forward_mirror.py`
-was written to police, and that test was deleted when its subject stopped being
-mirrored. A duplicated data file drifts as silently as duplicated code.
-
-Not resolved here because it is a design call, not a packaging fix. If it is
-resolved, the likely shape is: the detector description belongs to whoever owns
-the detector (helix), and pimm-data's `Densify` receives `geom=` from the caller
-rather than shipping its own copy.
-
-**`plane_id` carries four meanings at once.** In `helix.model` it is
-simultaneously the FiLM conditioning index, the RoPE projection axis, the
-masking group, and the plane's identity. One modality made that free; a second
-separates them — an optical corpus would condition on PMT, group for masking by
-module or side, and position on time alone.
-
-What is NOT a problem, and is worth stating because it looks like one:
-`make_mask` selects whole planes via the per-token label `B["plane_id"]`, not by
-token position. Nothing assumes a plane's tokens are contiguous, and no
-reshape-by-plane exists. The token set is already order-free — a flat set plus a
-grouping label — so whole-plane masking imposes no ordering or access constraint
-on a future multi-modal model. The work a second modality needs is splitting the
-four roles into declared axes (`band` -> FiLM, `group_id` -> masking, `pos` ->
-RoPE, `cond` -> conditioning), not restructuring the token layout.
-
-Deliberately not done yet: `helix.optical` has no corpus, tokenizer or noise
-model, so any registry or base-class split designed now would be fitted to one
-real modality and one imagined one. Build optical's DSP first and let it fail
-against the TPC-shaped schema in a specific way; split at the seam it reveals.
-
-**The `pimm-fm` pin is a path source.** `{ path = "../pimm-data", editable = true }`
-works because the two checkouts are siblings. At handover, once pimm-data is
-pushed, it flips back to a git source WITH an explicit `rev` — the original had
-no `rev`, so `uv lock` silently followed the default branch and the lock file was
-the only record of what got resolved.
+The container: `container/install.sh` is the one recipe, run by `container/helix-train.def`
+(apptainer), `container/Dockerfile` (CI, `ghcr.io/omaralterkait/helix`) and
+`container/Dockerfile.nersc` (Docker v2 manifest for shifter / podman-hpc). It installs
+dependencies only, with pimm-data at the revision `pyproject.toml` pins; helix and pimm
+arrive by bind mount and `PYTHONPATH`, so editing either needs no rebuild. Rebuild the
+image when the pimm-data pin moves.

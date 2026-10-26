@@ -41,7 +41,7 @@ DEFAULT_GROUP_SIZE = 64
 #: naming a spectrum, got flat noise, and trained a foundation model on it. The
 #: measured spectrum concentrates power in 10-490 kHz and has NONE above 500 kHz,
 #: so white misplaces noise across every wavelet band (see helix's
-#: MULTI_EVENT_BATCHING.md sibling note in the corpus design docs).
+#: docs/archive/MULTI_EVENT_BATCHING.md sibling note in the corpus design docs).
 #:
 #: Pass ``series_spectrum=None`` for white — still available, but now an explicit
 #: choice rather than what you get by saying nothing.

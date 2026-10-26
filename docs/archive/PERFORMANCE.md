@@ -801,7 +801,7 @@ It holds occupancy fixed at its source event's 7.30 coefficients per cell, so it
 says nothing about the cells-vs-coefficients table above; that is what the corpus
 events are for.
 
-`tools/profile/p24_figure.py` draws `docs/img/fig_step_cost.png`; `tools/profile/p25_dist.py`
+`tools/profile/p24_figure.py` drew `docs/img/fig_step_cost.png` (now `docs/archive/img/`); `tools/profile/p25_dist.py`
 produces the distribution.
 
 ### 24 real events, 27.6k to 39.3k cells (93k to 515k coefficients)

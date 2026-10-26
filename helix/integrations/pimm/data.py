@@ -49,7 +49,7 @@ class CoeffCollect:
     ``if "offset" in input_dict: input_dict["coord"].shape[0]`` — an offset
     without a ``coord`` raises KeyError *after* the forward. The FM has no
     ``coord`` and, having no event separation, requires ``batch_size=1`` anyway
-    (see MULTI_EVENT_BATCHING.md).
+    (see docs/archive/MULTI_EVENT_BATCHING.md).
     """
 
     scope = "sample"
@@ -110,7 +110,7 @@ class CoeffTPCDataset(Dataset):
 
     **batch_size must be 1.** The FM has no event separation — attention runs
     over whatever tokens it receives — so a larger batch silently trains a model
-    whose tokens attend across unrelated events. See ``MULTI_EVENT_BATCHING.md``.
+    whose tokens attend across unrelated events. See ``docs/archive/MULTI_EVENT_BATCHING.md``.
     """
 
     def __init__(self, data_root, split="", dataset_name="coeff_tpc",

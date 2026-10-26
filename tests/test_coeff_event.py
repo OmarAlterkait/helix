@@ -1,6 +1,6 @@
 """Round-trip identity for the coeff codec — the acceptance gate for the corpus.
 
-Two levels (COEFF_CORPUS_DESIGN.md §7):
+Two levels (docs/archive/COEFF_CORPUS_DESIGN.md §7):
   1. codec bit-identity:  read_coeff_event(write_coeff_shard([ce])) == ce  (float32)
   2. decode completeness: reconstruct(read(write(ce))) == reconstruct(ce)  (image-level)
 plus provenance: band_lengths drift fails loudly.

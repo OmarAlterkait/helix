@@ -49,7 +49,7 @@ from helix.model.mask import make_mask
 #
 # pad_mask excludes each attention group's padding (copies of its last token)
 # from the keys. Off reproduces the original model exactly; on is a numerics
-# change, so it is a per-run choice (docs/REVIEW_FIELD.md section 1.1).
+# change, so it is a per-run choice (docs/archive/REVIEW_FIELD.md section 1.1).
 #
 # compile_blocks runs the serial model's block functions through torch.compile
 # (dynamic shapes): ~1.2x steady-state for ~5 minutes' compilation per job, so

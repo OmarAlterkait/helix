@@ -1,106 +1,70 @@
-# Deferred work
+# Open work
 
-Standing decisions (what was chosen and the measurement behind it) are in
-`DECISIONS.md`. This file is what is NOT done.
+What is not done, with enough context to pick up cold. Standing decisions are in
+`docs/DECISIONS.md`; the longer records cited here are in `docs/archive/`.
 
+## Corpus and format
 
-Things consciously left undone, with enough context to pick up cold. Ordered by
-what blocks what, not by size.
+* **The bin grid's recorded corpus digest.** The format migration of r2 rewrote
+  `removal_json` and hence `basis_digest` in every shard. `helix/data/data/reference_bins.json`
+  records r2's `basis_digest` from before the migration (it was committed first); if they
+  now differ, `helix.data.bins` reports `basis-mismatch` for r2 until the grid's record is
+  re-recorded (`scripts/derive_coeff_bins.py --verify`).
+* **Optical tokens are not fed to the model.** `helix.optical.tokens` produces 128-slot
+  tokens; the model, the dataset and the corpus scripts are TPC-only.
+* **The geometry file is duplicated** with pimm-data
+  (`helix/tpc/data/cubic_wireplane_geometry.json`; pimm-data's `Densify` ships its own).
+  The likely resolution: helix owns the detector description and passes `geom=` to
+  `Densify`.
 
-Larger records get their own file: `MULTI_EVENT_BATCHING.md` (why the FM is one
-event per forward), `NOISE_BANDS.md` (what the noise model does to each band, and
-why m113 is out-of-distribution here).
+## Model and evaluation
 
-**Running anything.** ONE container now — see `CLAUDE.md` and
-`docs/ARCHITECTURE.md` §4. The two-container instructions that were here named
-`develop.sif` and `pimm-latest.sif` and were both wrong: one had no pimm-data at
-all, the other baked a pimm-data predating the boundary move.
+From `docs/archive/NEXT.md`; each is stated as measured / proposed / to test there.
 
-GPU accounts: `neutrino:default@ampere` carries ONLY the `preemptable` QOS, and
-preemption here CANCELS rather than requeues, so anything longer than the
-preemption window cannot finish on it. Use an account that has `normal`
-(`neutrino:cider-nu`, `mli:cider-ml`, `mli:nu-ml-dev`) and pass `--qos=normal`;
-`sacctmgr -n show assoc user=$USER format=Account,Partition,QOS` lists yours.
+* **CRPS, per-slot NLL and PIT in `CoeffFMEvaluator`.** `var_expl` is at its Bayes limit
+  (the read-back is a posterior mean) and the probe cannot resolve effects below ~0.013,
+  so nothing in the code can measure an objective-side change. The open outer bins are
+  stored as +-1e18, which a CRPS integral must not trust.
+* **RoPE bandwidth.** With an axis disabled, `helix.model.layers.rope_tables` leaves that
+  half of every head unrotated (its docstring calls this a known defect, kept because
+  changing it changes the model), so the result behind
+  `rope_split=False` is confounded. A full-width single-axis path, then re-run
+  `wire_rope=0` / `rope_split=True` against it.
+* **Tokenizer cell geometry.** ~32k tokens per event at 6.87% slot occupancy; try
+  `pw x pt = 32 x 16` (`n_slot` 512) at equal wall clock. A config change and a retrain,
+  not a corpus rebuild.
+* **Multi-event batching.** The FM has no event separation, so one event per rank;
+  `docs/archive/MULTI_EVENT_BATCHING.md` has the design and its acceptance criterion.
+* **pimm's `MAEEvaluator` does not fit**: it passes `return_pred=` to the model's forward,
+  which `FMModel.forward` does not accept, and reads metric names the model does not
+  emit. `tests/test_pimm_step_contract.py` pins both; when it fails, delete the test and
+  this note.
 
----
+## Code hygiene
 
-## 1. Retire the research bundle — DONE (from the REPO)
+* **Citations of a retired research tree.** Docstrings in `helix/model/mask.py`,
+  `helix/model/tokenize.py`, `scripts/feats_rank.py`, `scripts/viz_2x2_corpus.py` and
+  some tests cite `research/...` paths that a new reader does not have. Quote the fact
+  inline or drop the citation.
+* **Stale comments** name retired pieces: the `pimm submit` launch layer
+  (`scripts/helix_env.sh` header and line ~121, `helix/paths.py` ~330,
+  `helix/data/__init__.py` ~29, `configs/pimm/fm.py`'s usage line), the old
+  `coeff_io` note that pimm-data implements the layout, and documents now under
+  `docs/archive/` cited at their old paths (`MULTI_EVENT_BATCHING.md`,
+  `COEFF_CORPUS_DESIGN.md`, `docs/REVIEW_FIELD.md`, `docs/INVENTORY.md`, `TESTING.md`,
+  `DECISIONS.md`). Fix them with the next code change in each file.
 
-`git ls-files research` returns nothing: the 13-module bundle and the DSP
-golden that `research/goldens/capture.py` anchored are out of the tree
-(f825057). The directory still exists on the machine helix was developed on,
-gitignored, which is why the citations below still resolve for one reader and
-nobody else.
+## Upstream
 
-What is NOT done: ~15 docstrings across `helix/model/mask.py`, `tokenize.py`,
-`helix/tpc/coherent_gate*.py` and four scripts cite `research/...` paths for
-provenance. They are historical references, not imports — nothing breaks — but
-they point at a directory a handover target does not have. Quote the fact
-inline, or drop the citation.
+* **pimm `engines/train.py::run_step`** reads `input_dict["coord"]` whenever an `offset`
+  is present, so a batch with an offset and no coord raises after the forward. helix does
+  not hit it (`CoeffCollect` emits no offset; a test asserts it). One line; report it to
+  pimm's author.
 
-## 3. Probes and eval — the 3D probe is DONE
+## NERSC
 
-`scripts/run_probe.py` + `scripts/dump_probe_truth.py` are the two stages, and
-`scripts/export_artifact.py` promotes a run into a scoreable, attributable
-artifact. Measured on the handover validation run: trained +0.8403 against
-random +0.1161, geo +0.1514, raw +0.0616.
-
-Still missing: charge closure and per-band variance explained as EVALUATORS
-inside a run, rather than as scripts after it. pimm has
-`EventProbeSuiteEvaluator` and `hooks/eval/pretrain/probes/` to build them into.
-
-## 4. A real pretraining run — DONE, cooldown included
-
-112,677 steps via a chain of links on the 8-run corpus; eval `var_expl 0.6844`
-against production's 0.7030.
-
-The cooldown finished too. Both arms reached `iter_14260.pth` of 14,264 steps:
-
-    exp/helix/coeff-fm-cooldown-r1-8run/model/iter_14260.pth
-    exp/helix/coeff-fm-cooldown-r1-8run-plane25/model/iter_14260.pth
-
-(An earlier version of this entry said the chain "exhausted at step 6,417 with
-all three links preempted". That was the state at one moment during the run and
-was never re-checked against disk; a newcomer reading it would have re-run a
-finished cooldown.)
-
-## 5. Corpus scale — DONE
-
-All 8 runs built: 790 shards, 344 GB, ~158k events (train 150,239 / val 4,641 /
-probe 3,111). The bins were NOT re-derived — see DECISIONS.md for why, and for
-the yardstick that would overturn it.
-
-## 6. The jax backend — RETIRED
-
-Removed: helix's DSP is torch. (`scripts/build_coeff_corpus.py`
-always imports `pimm_data`; the reader/dataset layer is pimm-data's.)
-
-## 7. Housekeeping
-
-* ~~`tests/test_coeff_dataset.py` pins the cross-repo golden to
-  `helix-consolidate`~~ — FIXED: it reads `HELIX_ROOT`, defaulting to
-  a git worktree of it.
-* ~~Version split: `pyproject.toml` 0.1.0 vs `helix/__init__.py` 0.2.0~~ — FIXED (0362328): pyproject reads the module via `[tool.setuptools.dynamic]`.
-* ~~The 10 back-compat flat shims~~ — REMOVED, along with the 6 import-broken
-  scripts that were their only non-test users.
-
-## 8. The pimm branch this trains against
-
-`coeff-fm` of `DeepLearnPhysics/pimm-private`, which `HELIX_PIMM_ROOT` points
-at. It is four commits off main and all four are the pimm-data dependency pin;
-there is no helix-specific pimm code.
-
-`eval-contract` on the same repo is 26 commits of Evaluator-contract work for
-pimm's OWN evaluators (SemSeg, RingPanoptic, MAE, EventProbeSuite...). helix
-uses none of them -- `CoeffFMEvaluator` subclasses `HookBase` and the production
-config enables exactly one evaluator, ours. That branch is not part of this
-work and nothing here depends on it landing.
-
-
-## 9. Courtesy report to pimm's author
-
-`engines/train.py::run_step` does
-`if "offset" in input_dict: input_dict["coord"].shape[0]` — a batch with an
-offset and no coord raises KeyError AFTER the forward. The sibling accounting at
-line ~454 is guarded; this is not. One line. We do not hit it (`CoeffCollect`
-emits no offset, asserted by a test), but it affects any non-point-cloud model.
+The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, container
+(shifter; podman-hpc interactive) and scheduler. Still to do there: copy or rebuild r2
+and its `_calib/`, the bin grid and the archive under the NERSC roots; run the suite
+(section 2 of the runbook) and `jobs/regress.sh`'s equivalent on NERSC GPUs, which build
+a different corpus from turing's (one GPU type per corpus).

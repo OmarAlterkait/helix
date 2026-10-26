@@ -88,7 +88,7 @@ def test_derived_fields_really_are_derived():
 
 def test_batch_size_is_one():
     """The FM needs batch_size_per_gpu == 1: it has no event separation, so a rank holding
-    two events would attend across them (MULTI_EVENT_BATCHING.md). pimm's ``batch_size`` is
+    two events would attend across them (docs/archive/MULTI_EVENT_BATCHING.md). pimm's ``batch_size`` is
     GLOBAL, so the base config sets it to the world size, and a variant to 1 or not at all."""
     for path in sorted(pathlib.Path(CONFIG).parent.glob("fm*.py")):
         tree = ast.parse(path.read_text())

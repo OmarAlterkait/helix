@@ -1,623 +1,309 @@
 # Runbook
 
-The commands that actually work, in the order you need them. Every path resolves
-through `helix/paths.py`, so the environment variables named here are the only
-things that change between machines.
-
-Everything below runs in ONE image, and nothing below names it:
-
-    PY="scripts/helix_run.sh python"
-
-The runtime, image, in-image interpreter and binds are site facts declared in
-`helix/sites/<site>.yaml`. `helix_run.sh` reads them, so the same command works
-under apptainer at S3DF and shifter or podman-hpc at NERSC.
-
-See `docs/ARCHITECTURE.md` §4 for what is in the image and how to rebuild it.
+Procedures as commands. Run them from the helix checkout. Every path, the container
+and the scheduler come from `helix/sites/<site>.yaml` (`docs/ARCHITECTURE.md` §10);
+the S3DF values are given where a command needs them. Work heavier than a quick check
+goes to Slurm: `corpus.sh` and `train.sh` submit their own jobs; for the rest an
+`sbatch --wrap` form is shown.
 
 ---
 
-## 0. First: does this environment work?
+## 1. Host environment
 
-    python -m helix.paths
+The submitting host needs a Python >= 3.8 with PyYAML (to read the site profile) and
+`sbatch`; jobs run in the container.
 
-Prints the selected site, every root, where its value came from, and whether it
-exists -- plus the container and scheduler facts. **Run this before anything
-else in a new environment.** It imports only os/pathlib/yaml, so it works
-outside the container.
+    scripts/make_host_env.sh               # once: $SCRATCH/helix-host-venv (HELIX_HOST_VENV, PYTHON override)
+    source scripts/helix_env.sh            # exports HELIX_*, HELIX_CONTAINER_*, HELIX_SLURM_*, HELIX_PYTHON
+    $HELIX_PYTHON -m helix.paths           # site, each root and its source, container, scheduler
 
-The site comes from `HELIX_SITE`, or is auto-detected. There are no fallback
-paths: a root this site does not declare reports `not set` rather than pointing
-at another machine's layout, and asking for it raises rather than returning
-something that cannot exist here.
+`helix_env.sh` finds the venv without being told (it tries `HELIX_PYTHON`, the venv,
+then system pythons). Any `HELIX_*` set in the environment wins over the profile, e.g.
+`HELIX_CORPUS=<root>/<run>` to point training at another corpus. `HELIX_SITE` selects the
+profile; set it in batch jobs.
 
-Then the suites, which need no data:
+Run a command in the container:
 
-    cd <your helix checkout>     && $PY -m pytest tests -q
-    cd <your pimm-data checkout> && $PY -m pytest -q
-
-**Test counts are deliberately not quoted.** They depend on whether pimm is
-importable -- ~40 tests are `@pimm_importable` and SKIP without it -- and
-quoting a number turns every change into a documentation edit. Three commits in
-one session existed only to bump one, and four documents still disagreed
-afterwards. What matters is the SHAPE of the skips, and that you ran it with
-pimm on the path and the data roots resolving, so the ~40 pimm tests and the
-~13 real-corpus tests actually execute. Both gaps hid real failures: seven in
-the pimm gap once, and a 370x DSP accuracy bug in the data gap. `HELIX_REQUIRE_PIMM=1`
-and `HELIX_REQUIRE_DATA=1` turn each silent skip into an error -- see TESTING.md.
-
-If you see fewer passes and more skips, something optional is missing and the
-skip reasons say which (`pytest -q -rs`). If you see a COLLECTION ERROR, the
-environment is wrong, not the code.
-
-### The one environment rule
-
-helix and pimm-data must move together. The forward-model transforms
-(`AddNoise`, `Digitize`) are registered by helix now and were registered by
-pimm-data before; `pimm_data/_registry.py` raises `KeyError` on a duplicate. So:
-
-**rebuild the image whenever pimm-data changes.** The build asserts this and
-will fail rather than produce a mismatched image.
+    scripts/helix_run.sh python -m helix.paths
+    HELIX_FORWARD_ENV="CUDA_LAUNCH_BLOCKING" scripts/helix_run.sh python ...   # forward extra variables
 
 ---
 
-## 0b. Smoke the whole path with NO data
+## 2. Tests
 
-Before your own simulation exists, `pimm_data.testing.make_jaxtpc_sample` writes
-a schema-conformant JAXTPC v3 dataset you can drive the whole pipeline with.
-This is the check to run first on a new cluster: it exercises the code, the
-container and the plumbing without a byte of production data.
+    scripts/helix_run.sh python -m pytest tests -q            # a few minutes; or on a CPU node:
+    sbatch --account=mli:cider-ml --partition=milano --cpus-per-task=8 --mem=32G --time=01:00:00 \
+        --wrap="$HELIX_ROOT/scripts/helix_run.sh python -m pytest -q -p no:cacheprovider tests"
 
-    $PY -c "from pimm_data.testing import make_jaxtpc_sample; \
-             make_jaxtpc_sample('$W/sim', dataset_name='sim_wire', \
-                                n_events=200, readout_type='wire')"
+(`SBND-data-helix/jobs/tests.sh` is the same job with `HELIX_SRC=<checkout>`.)
 
-    $PY scripts/build_coeff_corpus.py --shard $W/sim/sensor/sim_wire_sensor_0000.h5 \
-        --out $W/corpus/run_synth --dataset-name sim_wire --mode serial
-    $PY -m helix.data.coeff_verify $W/corpus/run_synth --dataset-name sim_wire
-    $PY scripts/write_holdout.py --corpus $W/corpus/run_synth --dataset-name sim_wire \
-        --train 0.6 --val 0.2 --probe 0.2
-    $PY scripts/derive_coeff_bins.py --corpus $W/corpus/run_synth \
-        --dataset-name sim_wire --out $W/bins.pt --events 100 --K 128
-    $PY scripts/smoke_train_fm.py --corpus $W/corpus/run_synth \
-        --bins-from $W/bins.pt --events 4 --steps 8
+Read the skips, not the count. Tests needing pimm skip unless pimm is importable
+(`helix_run.sh` puts `HELIX_PIMM_ROOT` on `PYTHONPATH`); tests needing real data skip
+unless the site's data roots resolve; CUDA tests skip without a GPU; the JAXTPC
+reconciliation tests need `HELIX_JAXTPC_ROOT`. For a run that is meant to show that
+everything works, turn silent skips into errors:
 
-All five pass on a 100-event synthetic corpus (verified from clean clones,
-2026-09-17). `coeff_verify` prints `corpus OK`; `smoke_train_fm` prints a
-DECREASING loss from about ln(128) = 4.85, which is where an untrained
-categorical head starts.
+    HELIX_REQUIRE_PIMM=1 HELIX_REQUIRE_DATA=1 scripts/helix_run.sh python -m pytest tests -q -rs
 
-Two things to know, both real:
+A collection error means the environment is wrong, not the code. `helix_run.sh` sets
+`PYTHONNOUSERSITE=1`, so packages under `~/.local` cannot leak into a run.
 
-* **The default holdout fractions do not work at this scale.** 95/3/2 is tuned
-  for 158k events; the split is a hash of event identity, so a 2% part over 100
-  events can legitimately select ZERO and `write_holdout` refuses. That refusal
-  is correct -- pass smoke fractions as above.
-* **`dump_probe_truth` cannot run on synthetic input, by design.** The fixture
-  is schema-conformant, not physics-conformant: its `hits`/`step` are random
-  draws with no relationship to the `sensor` waveforms it ships beside. So the
-  pixel->cell join does not correspond, and the coverage guard says so --
-  "band-0 charge-weighted coverage 0.673 < 0.9 ... a mismatched event scores
-  ~0.37, a good one ~0.999". That is the guard doing its job. The probe stages
-  need real simulation; everything before them does not.
+**Testing a pimm-data change.** The container installs pimm-data, so a plain pytest
+tests the installed copy. Put the working tree first:
+
+    HELIX_FORWARD_ENV=PYTHONPATH PYTHONPATH=<pimm-data>/src scripts/helix_run.sh python -m pytest -q
+    ... python -c "import pimm_data; print(pimm_data.__file__)"     # check which copy ran
+
+`tests/test_cross_repo_duplication.py` needs the same `PYTHONPATH` to see your edits.
+helix itself is not installed in the image, so its suite always tests the checkout.
+
+**Clean room** (before a handover): fresh clones of helix, pimm-data and pimm, nothing
+else reachable:
+
+    HELIX_ROOT=$CR/helix HELIX_PIMM_ROOT=$CR/pimm HELIX_FORWARD_ENV=PYTHONPATH \
+      PYTHONPATH=$CR/pimm-data/src HELIX_REQUIRE_PIMM=1 HELIX_REQUIRE_DATA=1 \
+      $CR/helix/scripts/helix_run.sh python -m pytest tests -q
 
 ---
 
-## 1. Build a coefficient corpus
+## 3. Build a corpus
 
-Input: doraemon sensor shards (`HELIX_SENSOR_ROOT`).
-Output: sharded HDF5 under `HELIX_CORPUS_ROOT/<run>/`.
+    scripts/corpus.sh plan      SOURCE OUT RUN_DIR...   # OUT/_calib/CHUNKS.txt, RUNS.txt, RUN_DIRS.txt
+    scripts/corpus.sh calibrate SOURCE OUT              # one job: norm_sigma per run, mean -> norm_sigma_global.npy
+    scripts/corpus.sh build     SOURCE OUT              # job arrays over CHUNKS.txt
+    scripts/corpus.sh all       SOURCE OUT RUN_DIR...   # the three, build after calibration (afterok)
 
-### The order, which is not optional
+`SOURCE` is `sim`, `sbnd` or the path of a build script ending in `helix.build.main`.
+(goop is optical only and has no `norm_sigma` to calibrate; build it with
+`scripts/build_goop.py` directly.) Examples (S3DF):
 
-Six steps, and the first two cannot be swapped. `norm_sigma` is frozen BEFORE any
-shard is written, because `CoeffTPCReader` refuses to open a corpus whose shards
-disagree on it — so it must be computed once, from a sample of every run, and
-then handed to every build job. Building first and calibrating after produces a
-corpus that cannot be opened.
+    scripts/corpus.sh all sim  $HELIX_CORPUS_ROOT/coeff_tpc_new $HELIX_SENSOR_ROOT/run_*
+    scripts/corpus.sh all sbnd /sdf/data/neutrino/omara/sbnd_data/coeff_sbnd_new \
+        /sdf/data/neutrino/omara/sbnd_data/extracted/0182*
 
-| # | step | command | produces |
-|---|---|---|---|
-| 0 | name the runs | write `<corpus root>/_calib/RUNS.txt` **by hand** | the run list |
-| 1 | freeze `norm_sigma` | `scripts/calibrate_norm_sigma.sh [events_per_run]` | `_calib/norm_sigma_global.npy` |
-| 2 | build | 8 × `RUN_INDEX=$i sbatch scripts/submit_coeff_corpus.sh` | the shards |
-| 3 | verify | `$PY -m helix.data.coeff_verify <run dir> --dataset-name sim_wire` | pass/fail |
-| 4 | write the split | `$PY scripts/write_holdout.py --corpus <run dir>` | `holdout.json` |
-| 5 | derive the grid | `$PY scripts/derive_coeff_bins.py --corpus <run dir> --out bins.pt` | `bins.pt` |
+Environment: `EVENTS_PER_TASK` (500; sim: one sensor file per task), `EVENTS_PER_SHARD`
+(sim 200, else 100), `CAL_EVENTS` (100 per run), `CONFIG` (chain overrides, json or
+yaml), `CONC` (16 tasks at once per array), `ARRAY_MAX` (100), `LOGS` (`OUT/_logs`).
+A task writes `PREFIX.summary_NNNN.json` beside its shards.
 
-**Step 0 is a real step.** `_calib/RUNS.txt` is one run name per line and nothing
-generates it. Both phase 1 and phase 2 abort without it, and phase 2's message
-says "run phase 1 first" — which is misleading, because phase 1 needs it too.
+* **Order.** Every shard embeds the one global `norm_sigma`, so calibration finishes
+  before the build; `build` refuses to start without `_calib/norm_sigma_global.npy`
+  unless a calibration job is pending in the same `all`.
+* **Resume.** Rerun `scripts/corpus.sh build SOURCE OUT`. Shards appear only when
+  complete (`.part` then rename) and each task runs with `--skip-complete`, so only
+  missing shards are rebuilt. At S3DF preempted tasks are also requeued (`--requeue`).
+* **One GPU type per corpus.** turing and A100 disagree on 0.016% of kept coefficients;
+  the site pins `scheduler.corpus.partition` (S3DF: turing, account `mli:default`).
+* **A clean tree.** Every shard records the helix commit and dirty flag; `coeff_verify`
+  rejects a corpus built from a dirty tree or from more than one commit. Do not edit the
+  checkout while a build runs.
+* **Upstream gaps are not failures.** `run_0027670361` has 90 of 100 sensor files
+  (missing 51-56, 94-97); the plan only lists files that exist.
+* `CONFIG` must be the same for `calibrate` and `build` (the table depends on the gate).
 
-**`KGATE` must match between steps 1 and 2.** The frozen table is calibrated at a
-particular gate, and `submit_coeff_corpus.sh` defaults `KGATE` to empty, meaning
-the simulation chain's 3.0 (`helix.tpc.chain.SIM_BASE`). Calibrating at one gate and building at another
-mis-normalises the whole corpus with nothing to say so.
+One shard by hand (a GPU node), to check the chain:
 
-**Each corpus root carries its OWN `_calib`.** `norm_sigma` is computed from the
-GATED coefficients, so the r1 and pre-tau generations have genuinely different
-tables. Borrowing one root's `_calib` for another silently mis-normalises
-everything built under it.
+    scripts/helix_run.sh python scripts/build_sim.py --input RUN/sim_wire_sensor_0000.h5 \
+        --output OUT/RUN/sim_wire --device cuda --count 200 --events-per-shard 200
+    scripts/helix_run.sh python scripts/build_sbnd.py --input RUN/*.h5 --output OUT/RUN/sbnd \
+        --device cuda --count 100
 
-**Step 4 is a free check on the whole rebuild.** The split is keyed on
-`blake2b(run/source_file) + event` — the SIMULATION event's identity — so it is
-independent of basis, noise model, shard size and shard order. A corpus rebuilt
-with a different gate or wavelet gets the *same* split. So
-`write_holdout.py --compare <production holdout.json>` reproducing byte for byte
-is evidence the rebuild preserved event identity end to end. Use it; it costs
-nothing.
-
-**Step 5 checks itself.** A plain derive compares its result against the grid
-declared in `helix/data/data/reference_bins.json` and says whether it matches the
-one the released models were trained against. See "The norm_sigma table and the
-bin grid" below.
-
-    # Phase 2 is EIGHT submissions, not one: this cluster's MaxArraySize is 100,
-    # so an 0-799 array is rejected outright. RUN_INDEX picks the run.
-    for i in 0 1 2 3 4 5 6 7; do
-      RUN_INDEX=$i sbatch --account=<facility>:<repo> \
-        --export=ALL,RUN_INDEX,SRC_ROOT=<sensor shards>,OUT_ROOT=<corpus parent> \
-        scripts/submit_coeff_corpus.sh
-    done
-
-**The account is not the same as the training job's.** Accounts are authorised
-per partition. The corpus build pins `--partition=turing` (the DSP is
-architecture-sensitive — the same shard gives 58,411,720 surviving coefficients
-on a 2080 Ti and 58,421,269 on an A100, and a corpus built across both is
-incoherent), and on S3DF `mli:cider-ml` does NOT cover turing while `mli:default`
-does. Training runs on ampere, where `mli:cider-ml` is correct.
-`sacctmgr -n show assoc user=$USER format=Account,Partition` lists yours.
-
-**Some tasks may report a missing source file, and that is normal.** The array is
-0-99 but the simulator does not guarantee 100 contiguous files — `run_0027670361`
-is missing indices 51-56 and 94-97, so it yields 180 shards and 17,999 events,
-in production too. Those tasks skip with a message and exit 0. A task that FAILS
-is a real failure.
-
-That is the production path: a Slurm job array, one GPU per task (10.6 ms/plane),
-`turing` partition.
-
-Single-shard, interactively, to check the chain end to end:
-
-    $PY scripts/build_coeff_corpus.py --help
-
-The builder is a BUILD-TIME composer: it is the one place that imports both
-helix and pimm-data. The read path never does.
-
-**Counting events.** Do NOT sum each shard's `n_events`: the builder writes
-TWO coeff shards per source file, so that double-counts. Count distinct
-`(ident/source_file, ident/event)` pairs — 19,999 per run, 157,991 over the 8
-runs, matching the split in `configs/pimm/coeff_fm_train_8run.py`.
-
-**What a corpus records.** Every shard carries `basis_digest`, `removal_json`
-(including `tau`), `sigma_norm`, `noise_json`, `provenance_json`, and
-`ident/{event,run,source_file,noise_seed}`. This is not decoration — the next two
-stages check it, and a corpus without it cannot be used (§5).
-
-**Verify before using:**
-
-    $PY -m helix.data.coeff_verify <corpus dir> --dataset-name sim_wire
-
-(`verify_corpus(data_root, dataset_name, *, split=...)` takes the dataset name
-as a required second argument; calling it with the directory alone is a
-TypeError.)
-
-It fails a corpus that records no builder, that mixes helix versions across
-shards, or that was built from a dirty working tree.
-
-### The norm_sigma table and the bin grid
-
-Both are TRAINING-SET STATISTICS and both must come from the corpus you will
-actually train on. They sit at OPPOSITE ends of the build, which is the thing to
-get right:
-
-    # BEFORE the build — frozen, then handed to every build job (step 1)
-    scripts/calibrate_norm_sigma.sh          # one table the whole corpus shares
-
-    # AFTER the build — derived from the finished shards (step 5)
-    $PY scripts/derive_coeff_bins.py --corpus <run dir> --out bins.pt
-
-`norm_sigma` is an INPUT to the shards and is recorded in every one of them;
-the bin grid is computed FROM them. Reversing that is the mistake the order
-table above exists to prevent.
-
-The bins shipped with `m113` were derived from an old cache built with a
-different (white) noise model. Do not reuse bins across corpus generations —
-and note that a derive now tells you whether the grid it produced is the one the
-released models were trained against, so a mistake here is reported rather than
-inherited.
-
-`derive_coeff_bins.py` also takes `--like <bins.pt>` to reuse the parameters an
-existing grid records, and `--verify <bins.pt>` to rederive and compare without
-writing. The derivation is importable as `helix.data.bins` if you need it from
-code.
+All options: `helix/build.py`'s docstring (`--first`, `--spread`, `--shard-start`,
+`--norm-sigma`, `--calibrate`, `--config`, `--optical-config`, `--no-optical`, `--workers`,
+`--deflate`, `--events-log`, `--profile`, `--skip-complete`).
 
 ---
 
-## 2. Train
+## 4. Verify a corpus
 
-### On a site whose scheduler is reached through `pimm submit` (NERSC)
+    scripts/helix_run.sh python -m helix.data.coeff_verify OUT                       # every run, against _calib/CHUNKS.txt
+    scripts/helix_run.sh python -m helix.data.coeff_verify OUT/RUN --dataset-name sim_wire \
+        [--expect N] [--modalities coeff coeff_clean] [--source-root SENSOR_RUN_DIR]
+    scripts/helix_run.sh python -m helix.data.coeff_verify compare A.h5 B.h5 [A2.h5 B2.h5 ...]
 
-    scripts/make_launcher_env.sh                                   # ONCE per machine
-    scripts/submit_helix.sh --recipe configs/launch/nersc-preempt.yaml
+Prints `corpus OK` or the problems (exit 1). The whole-corpus check reads every
+shard's metadata: for a full corpus submit it (`sbatch ... --wrap="$HELIX_ROOT/scripts/helix_run.sh
+python -m helix.data.coeff_verify OUT"`). `--source-root` tells an upstream gap (source
+absent: fine) from a failed task (source present: error). `compare` ignores only
+provenance attributes (commit, host, time).
 
-The strategies are `configs/launch/*.yaml` and their trade-offs are written in
-each file; `--dry-run` prints the rendered sbatch script without submitting, and
-is the cheapest way to check that a change did what you meant.
-
-**Why there is a separate environment for submitting.** `pimm submit` calls
-sbatch, which does not exist inside the container, so it runs on the login node
--- where the container's interpreter is not available either. pimm documents
-this case and calls it the launcher-only environment: YAML, Tyro and Submitit,
-"cannot import the full model stack". `make_launcher_env.sh` builds exactly that
-on scratch, reading the dependency list out of pimm's own `pyproject.toml` so it
-cannot go stale, minus pimm-data. `submit_helix.sh` finds it with no flag.
-
-Two things had to change for that to be true, and both are the same shape --
-something cheap made expensive by where it was spelled:
-
-* `helix/data/__init__.py` imported the reader and the dataset eagerly, so
-  reading the bin table (numpy) or the corpus run list (h5py) pulled torch and
-  pimm-data with them. Both names are lazy now; `tests/test_boundary.py` pins it.
-* pimm's launch preflight loads the training config to check batch-size
-  divisibility, and ran its `custom_imports` to do it. It reads three integers,
-  so it now loads with `import_custom_modules=False`. **This is a local change in
-  the pimm checkout** (`pimm/launch/config.py`) -- if you re-clone pimm, expect
-  submission to fail with `No module named 'torch'` until it is reapplied.
-
-Also local to the pimm checkout: `configs/coeff_fm/train_8run.py`, a pointer at
-helix's real config. `train.sh`'s `-c` resolves only beneath pimm's own
-`configs/`, so an absolute path from another repository cannot be passed. The
-pointer takes helix's location from `$HELIX_ROOT`, which `helix_env.sh` exports.
-
-### On S3DF
-
-ONE launcher. `launch/` was the predecessor and is retired -- `scripts/` ran
-every current result (the 8-run's 16 links, 8run_plane's 12, and both cooldowns)
-and carries the config-fingerprint resume guard, the QOS knob and the helix code
-snapshot.
-
-    scripts/chain_coeff_fm_train.sh <N> [config]           # a chain of links
-    sbatch --export=ALL,CFG=<config> scripts/submit_coeff_fm_train.sh   # one link
-
-Default config is `configs/pimm/coeff_fm_train_8run.py`. Knobs are environment
-variables, not `#SBATCH` edits: `CFG`, `ACCOUNT`, `QOS`, `EXCLUDE`, `LOGDIR`.
-
-**Every run snapshots helix into `<save_path>/helix-code/`.** `provenance.json`
-records the commit and the dirty flag, and that was not enough: the 8-run's
-eleven links all recorded commit `87248d88` on branch `extraction`, and that
-hash resolves in no repository today -- the 2026-09-14 consolidation rewrote
-every commit, so the recorded identity ceased to exist. A hash is a pointer into
-a history someone may rewrite; a copy is not. (pimm's `train.sh` has always
-snapshotted ITS code into `<save_path>/code`; helix, which defines the model and
-the tokenizer, had no equivalent until now.)
-
-**Why a chain and not `--requeue`.** This cluster runs `PreemptMode=CANCEL`
-(QoS preemptable = "within,cancel"), so a preempted job is CANCELLED and never
-returns to the queue, whatever `--requeue` says. This was confirmed the hard
-way: a run reached epoch 11/25 (step 51,170, 3h20m) and simply vanished. Each
-chain link starts when the previous one ENDS for any reason
-(`--dependency=afterany`) and carries `ALLOW_RESUME=1`. `--requeue` is kept
-because it still covers node failure, which IS requeued.
-
-**Resume works**, which is what makes the chain safe: pimm's loader put the saved
-RNG state on the GPU and `torch.set_rng_state` rejects a CUDA tensor, so
-`resume=True` used to die before step 1.
-`helix.integrations.pimm._patch_rng_restore_to_cpu` moves it back. An eviction
-now costs at most `SAVE_EVERY=238` steps.
-
-**`checkpoint_format=legacy` is not a preference.** pimm defaults a multi-GPU run
-to DCP, whose save planner calls `dist.gather_object` on the default process
-group, which pimm initialises NCCL-only. NCCL has no gather: the first save died
-with "NCCL Error 1: unhandled cuda error" and every rank hung until the 600 s
-watchdog fired.
-
-The wrapper REFUSES to start if `EXP_DIR/model` already holds a checkpoint on a
-first attempt — otherwise a reused `RUN_NAME` silently continues someone else's
-model. Set `ALLOW_RESUME=1` deliberately.
-
-Configs live in `configs/pimm/` and are reached as `-c helix/<name>`; the
-launcher creates the link into pimm's `configs/` from the checkout it is running
-(see `docs/ARCHITECTURE.md` §7).
+**Count events** as distinct `(ident/source_file, ident/event)`, not by summing
+`n_events` (noisy and clean shards both carry them).
 
 ---
 
-## 3. Evaluate a checkpoint
+## 5. Split and bin grid
 
-### Two kinds of checkpoint. Read this once; it saves an afternoon.
+    scripts/helix_run.sh python scripts/write_holdout.py --corpus OUT/RUN [--compare OTHER/holdout.json]
+    scripts/helix_run.sh python scripts/derive_coeff_bins.py --corpus OUT/RUN --out bins.pt
+    scripts/helix_run.sh python scripts/derive_coeff_bins.py --verify $HELIX_ARCHIVE/coeff_bins_r2_run0027575715.pt \
+        --corpus OUT/RUN
 
-A run leaves behind files that look interchangeable and are not.
+`write_holdout.py` writes `OUT/RUN/holdout.json` (default fractions 0.95 / 0.03 / 0.02;
+pass e.g. `--train 0.6 --val 0.2 --probe 0.2` on a small corpus, where a 2% part can be
+empty and the script refuses). The split hashes the simulation event's identity, so a
+rebuilt corpus reproduces it; `--compare` checks that.
 
-| | RESUME state | EVAL state |
-|---|---|---|
-| what | `<save_path>/model/last/`, `iter_N.pth`, `model_ema.pth` | a `pimm export` dir, a helix eval artifact |
-| holds | weights **+ optimizer, scheduler, RNG, sampler, step** | one weight set + architecture + operating point |
-| for | continuing training bit-identically | producing a number that is reproducible and attributable |
-| owner | pimm's. Nothing in helix reads it. | helix's |
-
-Pointing an eval tool at resume state is the single most common way to waste a
-GPU hour here. It no longer fails obscurely — `helix.model.artifact` recognises
-each shape by name and the error says what to run — but the fix is always the
-same, and it is two steps, not one:
-
-    # 1. bundle the weights with the architecture and tokenizer they trained with
-    pimm export --run-dir <save_path> model_ema.pth /tmp/exp
-
-    # 2. promote it, so it can say WHICH weights, WHICH corpus, WHICH code
-    $PY scripts/export_artifact.py /tmp/exp --weights ema \
-        --corpus <corpus> -o <run>/artifact
-
-Step 2 is not ceremony. pimm's `_sanitize_config` nulls the `weight` key on
-every export, and the exported file is always named `model.safetensors`
-whatever it was exported from — so an export cannot say whether it holds the
-EMA or the raw weights, and every probe row written before this carries
-`weights_are_ema: null`. On a flat-LR WSD run the raw weights sit at full LR
-noise for the whole stable phase, which is the entire reason the EMA exists, so
-comparing an unattributed arm against an EMA arm compares two noisy draws
-rather than two models. `--weights` is required and unguessable on purpose: you
-are asserting what you just exported, once, while you still know.
-
-An artifact is a directory of two files — `weights.safetensors` and
-`artifact.json` — and it is portable by construction: nothing in it names a
-path that has to exist.
-
-    $PY scripts/eval_checkpoint.py --config configs/pimm/coeff_fm_eval_probe.py \
-        --options weight=<run>/model/model_ema.pth save_path=<out>
-
-Scores a FROZEN checkpoint. This exists because `CoeffFMEvaluator` hooks
-`after_step`/`after_epoch` only, so every trainer-driven route to a number takes
-an optimizer step first and reports weights that have already moved. Comparing
-two checkpoints that way scores something near the artifact rather than the
-artifact.
+The bin grid is derived after the build from finished shards; `norm_sigma` before it.
+The production grid is named in `helix/data/data/reference_bins.json`
+(`coeff_bins_r2_run0027575715`, read from `HELIX_ARCHIVE`); a derive reports whether its
+result matches it. `--like bins.pt` reuses the parameters a grid records.
 
 ---
 
-## 4. The 3D probe
+## 6. Train
 
-Two stages. Stage 1 is expensive and reusable; stage 2 is cheap and per-checkpoint.
+    scripts/train.sh CONFIG [key=value ...]
 
-    # Stage 1 -- per-pixel truth for a held-out split, written beside the corpus
-    $PY scripts/dump_probe_truth.py --corpus <dir> --source $HELIX_SENSOR_ROOT
+`CONFIG` is a name in `configs/pimm/` or a path. Each of `LINKS` jobs (default 1) runs
+`python -m pimm.train --config-file CONFIG` in the container as `GPUS` Slurm tasks (`srun`;
+pimm takes each rank from its task), starting
+when the previous one ends (`--dependency=afterany`), resuming from the run's latest
+complete checkpoint (`resume=True weight=<it>`) or starting the run if there is none.
+The run lives in `$HELIX_EXP/NAME` (`NAME` defaults to the config name; logs in
+`$HELIX_EXP/NAME/slurm`). The same `NAME` with a different config or options is refused.
 
-    # Stage 2 -- EXPORT the run. Not optional, and easy to get wrong.
-    #
-    # run_probe refuses a raw pimm checkpoint: model_ema.pth holds weights and
-    # nothing else, so neither the architecture nor the tokenizer is recoverable
-    # from it, and scoring a model on a tokenizer it never trained with gives a
-    # plausible WRONG number (cell_t alone moves 94% of cells).
-    #
-    # The run directory already has both beside the weights -- config.py carries
-    # n_slot/n_band/n_plane/d/blocks/heads and cell_t -- so `pimm export` bundles
-    # them into a portable directory. Nothing needs inventing.
-    pimm export --run-dir <save_path> model_ema.pth <export_dir>
+Environment: `LINKS` (1), `NAME`, `GPUS` (4, one node), `TIME` (24:00:00), `MEM`
+(50G per GPU where the site asks for memory), `LOGS`. Scheduler facts:
+`scheduler.train` (S3DF: `mli:cider-ml`, ampere, QOS normal).
 
-    # Stage 3 -- PROMOTE the export into an eval artifact.
-    #
-    # An export is portable but cannot describe itself in three ways that each
-    # change the number. `_sanitize_config` nulls `weight`, so nothing records
-    # WHICH weight set it holds -- every probe row so far carries
-    # weights_are_ema=null, and an EMA arm and a raw arm compare in silence.
-    # Nothing records the CORPUS the weights trained on, so a coeff_tpc model
-    # scored against coeff_tpc_r1 produces a plausible number. And nothing
-    # records the helix commit that defined the tokenizer.
-    #
-    # --weights is required and unguessable on purpose: you are asserting what
-    # you just exported, once, at the moment you know it.
-    $PY scripts/export_artifact.py <export_dir> --weights ema \
-        --corpus <dir> -o <artifact_dir>
+    LINKS=8 scripts/train.sh fm                        # the stable phase over HELIX_CORPUS's corpus
+    scripts/train.sh fm model.plane_frac=0.25          # any other variant: key=value (pimm --options)
+    NAME=fm_pf25 scripts/train.sh fm model.plane_frac=0.25   # ... as its own run
+    scripts/train.sh fm_cooldown                       # WSD cooldown from $HELIX_EXP/fm/model/last
+    GPUS=1 scripts/train.sh fm_smoke                   # wiring check: small model, 32 events
 
-    # Stage 4 -- probe the artifact (an export dir still works; it just cannot
-    # attribute itself, and run_probe will say so)
-    $PY scripts/run_probe.py --checkpoint <artifact_dir> --corpus <dir> \
-        --tag <name> --out probe_results.jsonl \
-        --cache-dir $SCRATCH/probe_cache
+* **The corpus** is `HELIX_CORPUS`'s parent, with its runs from `_calib/RUNS.txt`
+  (S3DF default: `coeff_tpc_r2`). `HELIX_CORPUS=<root>/<run> scripts/train.sh fm` trains
+  on another; the variable reaches the jobs.
+* **No step counts.** Warmup and the eval / checkpoint / EMA-save cadence are `"auto"`
+  and resolved by `FMTrainer` from `iters_per_epoch * epoch`; the log line `cadence over
+  N steps: ...` shows them. Change the length with `epoch=`.
+* **Batch = GPUs.** `batch_size` is the world size (one event per rank:
+  `helix.paths.world_size()`, Slurm's task count inside a job), in every config.
+* **Cooldown** is a separate short run warm-started with `weight=` (never `resume=`): it
+  anneals over its own steps on the first 3 runs for one epoch. It reads the stable run at
+  `$HELIX_EXP/fm`; for another stable run pass `weight=$HELIX_EXP/<name>/model/last`.
+* **Preemption** costs at most one checkpoint interval: the next link resumes. S3DF
+  cancels preempted jobs, NERSC requeues them; `afterany` continues either way.
+* fm_smoke reads its bins from `$HELIX_ARCHIVE/coeff_bins_K32_smoke.pt`.
 
-`--cache-dir` makes the extraction loop resumable: 2.5M patches over 388 events,
-**12m28s measured** (job 38395161, from the cache chunk mtimes), which a
-preemption used to discard before a single probe was fitted. Chunks are keyed by a hash of
-everything that changes the features (both weight digests, layer, tokenizer,
-corpus, truth, and the storage precision), so a stale cache cannot be read by
-mistake. The cost is disk: **44 GB measured** for the 388-event split (2,503,852
-patches at feature dim 2048), less than the naive
-`n_patch x feat_dim x 3 arms x 4 B` because the `raw` arm is narrower than the
-two feature arms.
-
-Either `$SCRATCH` (the documented home for large temporary data, 100 GB, so
-44 GB fits but not comfortably) or a directory beside the run (more room, and
-what the validation used). Reload of the full 44 GB takes a few minutes and is
-CPU-bound, not I/O-bound — measured on job 38444314 at 98% CPU — so placement is
-a space decision, not a speed one. Delete the cache once the number is in.
-
-`--cache-dir` also resumes the FITS, and that is the bigger half by far.
-Measured on the same run: `geo` 36 min, `trained` 58 min, and `random` had run
-past 1h20m when it was preempted. A row is written only once all four finish -- so a job that hits its time limit three arms in used to
-lose all three. Each arm is now persisted the moment it completes, keyed by the
-fit parameters (`folds`/`epochs`/`seeds`/`random_seed`) rather than by the
-feature hash, so changing a fit parameter refits while still reusing the
-extraction that cost the GPU hour. Budget four hours for a 388-event probe with
-both probe types, or expect to resume once.
-
-Full precision is the default, and it was earned. At float16 a resumed run
-reproduced three arms exactly but moved `raw` from +0.0044 to +0.0045 -- 1e-4,
-some 20x under the probe's own seed-to-seed sigma of 0.0021, and still wrong,
-because it made `cache_resumed_events` a field that moves the number. Verified
-end to end: a resumed run now reproduces all four arms, their per-group std and
-their stop epochs identically. `--cache-half` halves the disk at that measured
-cost, keyed apart so the two caches can never be read as one another's.
-
-The two resumes compose, and both have now been exercised by a real preemption
-rather than by a test. Job 38395161 was preempted on ampere at 1:47 having banked
-the extraction and two fitted arms; resubmitting the identical script reported
-
-    cache .../probe_cache/1391900325c983a6: 388 packs, resuming at event 388
-    cache: 2 arm(s) already fitted, reusing
-      [mlp] geo      fisher_r=+0.1514 (cached)
-      [mlp] trained  fisher_r=+0.8403 (cached)
-
-and restarted at the third arm. Its predecessor 38360259, with none of this, hit
-its 4h wall one arm in and produced nothing at all.
-
-`--requeue` is NOT the mechanism and is not worth setting: 38395161 had it and
-did not come back, because preemption here cancels rather than requeues.
-Resubmit by hand; the cache is what makes that cheap.
-
-`--cell-t` matters and run_probe will refuse rather than guess. An eval artifact
-always carries its tokenizer, so you will not need the flag for one; a bare
-`pimm export` carries `cell_t` only if the run's config stated it, and for
-anything that does not you must pass the value the run trained with
-(`grep cell_t <run>/config.py`). The old
-fallback silently chose `centroid` where every helix config trains
-`grid_center`, and they differ on 94% of cells.
-
-Stage 1 depends on the corpus only for WHICH events to dump, never for their
-content, so the artifact survives a corpus rebuild.
-
-Stage 1 reads compressed doraemon `hits`/`step` shards and needs `hdf5plugin` —
-present in the image. Without it h5py raises "can't open directory
-/usr/local/hdf5/lib/plugin".
-
-Other analyses:
-
-    scripts/feats_rank.py       # per-layer feature rank (RankMe)
-    scripts/probe_xattn.py      # decoder cross-attention maps
-    scripts/viz_mask_recon.py   # masked reconstructions
-    scripts/plot_train_progress.py
+Plot progress: `scripts/helix_run.sh python scripts/plot_train_progress.py label=$HELIX_EXP/fm --out fig.png`.
 
 ---
 
-## 5. The guard that will stop you
+## 7. Evaluate
 
-`helix/data/identity.py` compares a checkpoint's recorded corpus identity
-(`basis_digest`, `removal_json`, `sigma_norm`) against the corpus being read. It
-**refuses** on mismatch and **warns** when a corpus is unstamped.
+Score a checkpoint without an optimizer step (`CoeffFMEvaluator` otherwise runs only
+after a step), on the probe split of `fm_eval.py` (S3DF scheduler facts):
 
-This is not paranoia. `coeff_tpc` and `coeff_tpc_r1` share a run name and differ
-only in the coherent gate (r1 records `tau=0.05`) — same wavelet, bands, gids,
-sigma_norm, noise model, different surviving coefficients. Each corpus is
-internally consistent, so a reader pointed at the wrong one is perfectly happy
-and the failure is a plausible NUMBER, not an error.
+    sbatch --account=$HELIX_SLURM_TRAIN_ACCOUNT --partition=$HELIX_SLURM_TRAIN_PARTITION \
+        --qos=$HELIX_SLURM_TRAIN_QOS --gpus=1 --cpus-per-task=8 --mem=50G --time=02:00:00 \
+        --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python scripts/eval_checkpoint.py \
+                --config configs/pimm/fm_eval.py \
+                --options weight=$HELIX_EXP/fm_cooldown/model/model_ema.pth save_path=$HELIX_EXP/fm_eval \
+                --out $HELIX_EXP/fm_eval/scores.jsonl"
 
-If the guard refuses, do not work around it. Find the corpus the checkpoint was
-trained on.
+`eval_checkpoint.py` refuses a checkpoint trained on a different corpus
+(`basis_digest`; `--allow-corpus-mismatch` overrides).
 
-### The other guard: did the run do what its label says?
+**Eval artifacts.** RESUME state (`<save_path>/model/`) is pimm's. For anything that
+must be attributable (the probe), export and promote:
 
-`identity.py` protects the corpus. Nothing protected the *parameters*, and a
-campaign of 66 runs accumulated three kinds of quiet damage: a directory called
-`steps_b8` that trained at B=16's learning rate, 13 runs that trained with 0
-dataloader workers per GPU, and jobs whose batch script exited 0 while an `srun`
-inside it had failed.
+    pimm export --run-dir $HELIX_EXP/fm model_ema.pth <export_dir>
+    scripts/helix_run.sh python scripts/export_artifact.py <export_dir> --weights ema \
+        --corpus <corpus run dir> -o <artifact_dir>
 
-```bash
-scripts/audit_runs.py <runs_dir> [<runs_dir> ...]   # each holds one save_path per run
-```
+`--weights` (ema or raw) is required: an export cannot say which weight set it holds.
 
-It reads what each run recorded about itself -- `resolved_config.json`,
-`run_metadata.json`, `provenance.json` -- and joins the `SLURM_JOB_ID` in
-provenance to `sacct`. Run it before trusting a plot. Two things to know:
+**3D probe**, two stages: truth once per corpus split, then the probe per checkpoint
+(GPU; budget hours, `--cache-dir` makes both extraction and fits resumable):
 
-* **`sacct` is the authority on whether a run failed**, not the log and not the
-  wrapper's exit code. `DerivedExitCode` is the highest exit code of any job
-  step, so it reports a failed `srun` even when the batch script around it
-  exited 0. It is per JOB, though, and one job here produced up to nine runs --
-  so treat a nonzero value as "inspect this job", not "discard this run".
-  `srun --job-name=<tag>` makes the step rows self-describing and the
-  attribution automatic; the harness does not pass it yet.
-* **0 workers/GPU does not invalidate a loss curve.** pimm derives the per-rank
-  seed as `seed + rank * num_worker_per_gpu`, so at 0 every rank starts from the
-  same RNG state -- but the mask draw advances by a per-event amount and the
-  streams decorrelate within a step or two. What it *does* invalidate is a step
-  TIME: in-process loading measured ~44% slower. Those runs are sound as loss
-  and unusable as throughput.
+    scripts/helix_run.sh python scripts/dump_probe_truth.py --corpus <run dir> \
+        --source $(dirname $HELIX_SENSOR_ROOT)          # the simulation root holding hits/ and step/
+    scripts/helix_run.sh python scripts/run_probe.py --checkpoint <artifact_dir> --corpus <run dir> \
+        --tag <name> --out probe_results.jsonl --cache-dir $SCRATCH/probe_cache
 
-Corpora currently on disk:
+Stage 1 needs real simulation (the `hits` / `step` truth) and the probe split's
+`holdout.json`. Other analyses: `scripts/feats_rank.py`, `scripts/viz_mask_recon.py`,
+`scripts/viz_2x2_corpus.py`.
 
-| corpus | gate | use |
-|---|---|---|
-| `coeff_tpc_r1` (8 runs, 157,991 events, 345 GB) | `tau=0.05` | **current** |
-| `coeff_tpc` | pre-tau | `m113` only (`HELIX_LEGACY_CORPUS`) |
+**The identity guard.** `helix.data.identity` refuses a checkpoint whose recorded
+`basis_digest` differs from the corpus being read. Do not work around it; find the
+corpus the checkpoint trained on.
 
 ---
 
-## 6. Where things are
+## 8. Migrate a corpus built before the format stamp
 
-Ask, rather than read a table that can only be right about one machine:
+Readers require `/config` `format = "helix-coeff-2"`. A corpus built before the stamp
+is migrated in place, metadata only (r2 and SBND v1 have been: their old attributes are in
+each root's `_calib/format1_attrs.json`, and v1's run directories are now `018251`, ...):
 
-    python -m helix.paths
+    scripts/helix_run.sh python scripts/migrate_format.py SOURCE ROOT RUN_DIR... [--events-per-task 500] [--dry-run]
+
+`RUN_DIR...` are the input runs the corpus was built from, in its order; each corpus run
+directory must be named for one of them (`<run>` or `run<run>`). Per coeff and
+coeff_clean shard it stamps `format`, rewrites `removal_json` and `basis_digest` to what
+the current chain records (the gate's readout-groups schema), drops `mode` / `backend`
+from `noise_json`, and refuses if any other basis field differs (that corpus needs a
+rebuild). Before writing it saves every shard's old attributes to
+`_calib/format1_attrs.json` and an existing `CHUNKS.txt` to `CHUNKS.txt.format1`;
+afterwards it renames `run<run>` directories to `<run>` and writes the plan files as
+`corpus.sh plan` would. Stamped shards are skipped, so a rerun finishes an interrupted
+migration.
+
+It touches every shard, so submit it (S3DF; the CPU suffices). As it was run for r2 and v1:
+
+    R=/sdf/data/neutrino/omara/coeff_tpc_r2
+    IN=$(for d in $R/run_*; do echo $HELIX_SENSOR_ROOT/${d##*/}; done)
+    sbatch --account=mli:cider-ml --partition=milano --cpus-per-task=4 --mem=16G --time=04:00:00 \
+        --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/migrate_format.py sim $R $(echo $IN) --dry-run"
+    # read the log, then the same without --dry-run, then
+    #   scripts/helix_run.sh python -m helix.data.coeff_verify $R
+
+    R=/sdf/data/neutrino/omara/sbnd_data/coeff_sbnd_v1           # (before the rename: run dirs run018251, ...)
+    IN=$(for d in $R/run*; do echo /sdf/data/neutrino/omara/sbnd_data/extracted/${d##*/run}; done)
+    # ... migrate_format.py sbnd $R $IN, as above
+
+Older corpora (pre-tau `coeff_tpc`, r1) differ beyond the gate and are not readable.
+
+---
+
+## 9. Regression check
+
+`SBND-data-helix/jobs/regress.sh` rebuilds, with a given checkout on a 2080 Ti (the corpora's
+GPU type), one SBND shard (TPC + optical, 100 events of run 018251) and one simulation shard
+(noisy + clean, 200 events of `run_0027575715`), and compares them byte for byte through
+`coeff_verify compare`: the SBND shard with `coeff_sbnd_v1/018251` itself, the simulation
+shard with the reference build in
+`/sdf/data/neutrino/omara/sbnd_data/SBND-data-helix/work/regress/reference/sim` (r2's own
+coefficients predate the board-grouped gate).
+
+    HELIX_SRC=$HELIX_ROOT sbatch /sdf/group/neutrino/omara/SBND-data-helix/jobs/regress.sh
+    # log: /sdf/data/neutrino/omara/sbnd_data/SBND-data-helix/work/logs/regress-<job>.out,
+    # ending REGRESS_IDENTICAL or REGRESS_DIFFERENT
+
+Run it after any change meant to be output-neutral.
+
+---
+
+## 10. Where things are
+
+    $HELIX_PYTHON -m helix.paths
 
 | what | root |
 |---|---|
 | corpora | `HELIX_CORPUS_ROOT` |
-| ONE corpus (a run dir) | `HELIX_CORPUS` |
+| the training corpus (one run dir of it) | `HELIX_CORPUS` |
 | run outputs | `HELIX_EXP` |
-| bin tables, converted checkpoints | `HELIX_ARCHIVE` |
-| simulator shards the corpus is built from | `HELIX_SENSOR_ROOT` |
-| the container | `container:` in the site profile, NOT a root |
+| bin tables, artifacts | `HELIX_ARCHIVE` |
+| simulation sensor files | `HELIX_SENSOR_ROOT` |
+| pimm checkout | `HELIX_PIMM_ROOT` |
+| the container | `container:` in the site profile |
 
-That last row is the one that used to be wrong in a way that mattered.
-`HELIX_IMAGE` was a root typed as a filesystem path to a `.sif`, which cannot
-describe a site whose image is a registry reference — so it reported MISSING
-while the image was fine, and the scripts feeding it to `apptainer exec` had
-nowhere to learn that apptainer is not installed there.
-
-Two per-site notes that do not generalise: at S3DF nothing large belongs on
-`/sdf/group` (a 10 TB quota that was at 100% until 742 GB of dead cache was
-cleared), and the retired research checkpoints live under
-`<HELIX_ARCHIVE>/fm_research_ckpts/` (413 files, 165 GB) with retirement
-backups beside them. At NERSC `$SCRATCH` is purged on inactivity, so nothing
-durable — including a pulled image — should live there alone.
-
-### Diagnostic scripts
-
-Not part of any pipeline; each answers one question that has already been asked
-the expensive way at least once.
-
-| script | question | needs GPUs |
+| corpus | where (S3DF) | |
 |---|---|---|
-| `scripts/audit_runs.py` | did these runs do what their labels say? | no |
-| `scripts/probe_largest_events.py` | does the corpus's WORST event actually fit? | yes |
-| `scripts/measure_noise_scale.py` | what batch size stops paying (`B_simple`)? | yes |
-
-`probe_largest_events.py` runs the five largest events instead of fitting memory
-against event size: extrapolating a fit applied a 2.77x max/mean ratio to an
-already-large sampled event and overstated the answer by ~40%.
-
-`measure_noise_scale.py` reports the SGD-derived `B_simple`, which is known to
-UNDERSTATE the critical batch size for Adam. Read it as a floor, and prefer a
-measured `S(B)` curve where one exists.
-
-### The old research checkpoints
-
-The 394 checkpoints other than `m113` are NOT self-contained and mostly cannot be
-evaluated. The research trainer kept bin edges in a separate `tier1_bins.pt`
-named only on the command line, and nothing in the checkpoint records which one;
-the edges are training-set statistics and are not recoverable from the weights.
-
-There is no way back any more, and that is deliberate. `tools/convert_fm_ckpt.py`
-inferred architecture from the tensors and inlined the bins; it was run exactly
-once, on `m113`, and has been retired. m113 is now
-`archive/fm_m113_artifact` — a self-describing eval artifact carrying the
-weights, the operating point, the pre-tau `basis_digest`, and the converter's
-whole provenance record (the research checkpoint, its train config, its bins
-file, the research-side name for its `cell_t`).
-
-`archive/fm_m113_converted.pt` is still on disk as lineage but nothing reads it;
-pointing a tool at it prints where the artifact is. For the other 394
-checkpoints you would need the matching bins file, and for most it no longer
-exists — the converter is in git history if that ever changes, but re-exporting
-a run beats reviving it.
-
-**If the m113 artifact is ever lost**, it cannot be rebuilt from `main`: the
-reader that understands a converted blob was retired. The recipe is a detached
-worktree at `eb216b7` — the last commit that could read one — plus the two
-lineage hunks from `922aa52` (`_tok_extra` in `helix/model/artifact.py`, and
-`source_provenance` in `scripts/export_artifact.py`), which is the combination
-that never existed as a single commit. The artifact's own `provenance.note`
-says this too, and its `provenance.helix.git_dirty` is `true` for exactly that
-reason — the tree that built it was not a clean commit, and recording that
-honestly is worth more than a tidy field.
-
-Check it is intact without loading a single tensor:
-
-    $PY -c "from helix.model.artifact import inspect; \
-             p = inspect('$HELIX_ARCHIVE/fm_m113_artifact').provenance; \
-             print(p['weights_digest'])"    # 7d795cc3ab49f90a79f98927647028b5
+| simulation r2 | `/sdf/data/neutrino/omara/coeff_tpc_r2` | production; the bin grid's corpus |
+| SBND v1 | `/sdf/data/neutrino/omara/sbnd_data/coeff_sbnd_v1` | production |
+| `coeff_tpc` (pre-tau), `coeff_tpc_r1` | | retired, not readable |

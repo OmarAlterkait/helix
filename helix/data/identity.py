@@ -94,9 +94,9 @@ def corpus_runs(corpus_root=None) -> list[str]:
     file: ``scripts/corpus.sh`` writes and reads ``$OUT/_calib/RUNS.txt``. So the corpus
     ships its own manifest and the training configs ignored it.
 
-    That matters more than ordinary duplication because ``RUNS.txt`` is not
-    derived -- ``docs/RUNBOOK.md`` calls it "step zero and hand-written", and
-    both build phases abort without it. It is the closest thing the corpus has
+    That matters more than ordinary duplication because ``RUNS.txt`` is the
+    corpus's own list of its runs (``scripts/corpus.sh plan`` writes it from the
+    run directories it was given), and both build phases read it. It is the closest thing the corpus has
     to a declaration of what it contains, and a copy that carries a different
     subset would train happily on whatever the literal named.
 

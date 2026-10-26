@@ -2,7 +2,7 @@
 
 Pure numpy, zero learnable parameters: this is DATA shaping, and it lives in helix
 because the *logic* belongs with the model's representation, while the transform
-that runs it in a DataLoader worker is pimm's (see COEFF_CORPUS_DESIGN.md §1).
+that runs it in a DataLoader worker is pimm's (see docs/archive/COEFF_CORPUS_DESIGN.md §1).
 
 The corpus stores RAW coefficients plus a per-``(plane, band)`` table
 ``norm_sigma``; the model consumes ``arcsinh(value / sigma)``. That split is what
