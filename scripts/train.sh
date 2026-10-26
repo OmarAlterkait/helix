@@ -1,31 +1,40 @@
 #!/bin/bash
-# Submit a helix training run through `pimm submit`, with every site fact
-# injected from helix.paths.
+# Train: one helix pimm config through `pimm submit`, on this site's scheduler, in its container.
 #
-#   scripts/submit_helix.sh --recipe configs/launch/nersc-preempt.yaml
-#   scripts/submit_helix.sh --recipe configs/launch/nersc-premium.yaml \
-#       --resources.qos premium --dry-run
+#   scripts/train.sh CONFIG [pimm submit flags...]
+#   scripts/train.sh fm --chain.jobs 8                          the stable phase, 8 chained links
+#   scripts/train.sh fm_cooldown
+#   scripts/train.sh fm_smoke --resources.nproc-per-node 1 --resources.mem 48G
+#   scripts/train.sh fm --dry-run                               render the job, submit nothing
 #
-# Anything after the flags this script sets is passed straight to `pimm submit`,
-# so --dry-run, --chain.jobs, --run.name and the rest work as documented.
+# CONFIG is a name under configs/pimm/ (fm, fm_cooldown, fm_eval, fm_smoke) or a path. The
+# recipe is configs/launch/<site>.yaml (RECIPE= or --recipe for another, e.g. nersc-premium);
+# every flag after CONFIG goes to `pimm submit` (--run.name, --chain.jobs, --resources.*, and
+# `--train.weight` / `--options` style overrides are pimm's).
 #
-# WHAT THIS EXISTS TO DO, and why it is not just an alias.
+# A chain is pimm's: each link resumes from the last checkpoint. It is submitit's
+# timeout/requeue, so it relies on the job not being CANCELLED by preemption: at S3DF (whose
+# preemptable QOS cancels) the site profile trains on a non-preemptable QOS; at NERSC
+# (PreemptMode=REQUEUE) the preempt QOS is fine.
 #
-# pimm's launch YAML cannot read the environment. `format_string`
-# (pimm/launch/config.py) resolves {placeholders} against the launch config only
-# and hard-exits on an unknown key; `env:` values are shlex.quote'd at render
-# time (local.py), so a literal $VAR is exported as the characters `$VAR`. The
-# CLI is therefore the ONLY seam that accepts a computed value -- and every value
-# below is computed from helix/sites/<site>.yaml rather than written down twice.
-#
-# Without this, the three recipes each carried
-#   paths.exp_root: /global/cfs/cdirs/m5238/users/oalter/exp/helix
-#   env.PYTHONPATH: /global/homes/o/oalter/nu/helix
-# which put one value in four places and hardcoded one user's home directory into
-# the repository.
+# Every site fact (pimm site, image, interpreter, account, QOS, partition, roots) comes from
+# helix/sites/<site>.yaml through helix.paths and is passed as a flag, because pimm's launch
+# YAML cannot read the environment: `format_string` (pimm/launch/config.py) resolves
+# {placeholders} against the launch config only, and `env:` values are shlex.quote'd. The
+# submitting host runs pimm from a small venv (scripts/make_launcher_env.sh): sbatch is not in
+# the container, and the full model stack is not needed to submit.
 set -euo pipefail
 
 H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+CFG=${1:?usage: scripts/train.sh CONFIG [pimm submit flags...]}
+shift
+case "$CFG" in
+  */*|*.py) CFG=$(realpath "$CFG") ;;
+  *) CFG=$H/configs/pimm/$CFG.py ;;
+esac
+[ -f "$CFG" ] || { echo "train.sh: no config $CFG" >&2; exit 1; }
+_lv=${HELIX_LAUNCHER_VENV:-${SCRATCH:-/nonexistent}/helix-launcher-venv}
+[ -z "${HELIX_PYTHON:-}" ] && [ -x "$_lv/bin/python" ] && export HELIX_PYTHON=$_lv/bin/python
 # shellcheck source=/dev/null
 source "$H/scripts/helix_env.sh"
 
@@ -47,6 +56,7 @@ esac
 
 ARGS=(
   --site "$PIMM_SITE"
+  --train.config "$CFG"
   # repo_root drives the shifter bind, the `cd`, the slurm log directory, the
   # submitit folder and the watchdog state. UNSET it defaults to "." -- whatever
   # directory you happened to submit from -- which with shifter binds THAT at
@@ -95,8 +105,11 @@ export PYTHONPATH="$HELIX_PIMM_ROOT:$HELIX_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 # Absolute paths ARE honoured, which is what lets the recipes live in helix at
 # all, so the fix is to always pass one. Relative paths are taken from $PWD, or
 # from the helix checkout when that does not resolve, so both
-#   scripts/submit_helix.sh --recipe configs/launch/nersc-preempt.yaml
+#   scripts/train.sh fm --recipe configs/launch/nersc-premium.yaml
 # from anywhere and an explicit absolute path work.
+RECIPE=${RECIPE:-$H/configs/launch/${HELIX_SITE}.yaml}
+[ -f "$RECIPE" ] && ARGS+=(--recipe "$RECIPE")
+
 FIXED=()
 _want_recipe=0
 for a in "$@"; do
@@ -145,6 +158,6 @@ else
   PIMM_PY=${HELIX_PYTHON:-python3}
 fi
 unset _launcher_venv
-echo "submit_helix.sh: site=$HELIX_SITE pimm-site=$PIMM_SITE" >&2
-echo "                 exp_root=$HELIX_EXP repo_root=$HELIX_PIMM_ROOT" >&2
+echo "train.sh: $CFG  site=$HELIX_SITE pimm-site=$PIMM_SITE" >&2
+echo "          exp_root=$HELIX_EXP repo_root=$HELIX_PIMM_ROOT" >&2
 exec "$PIMM_PY" -m pimm.cli submit "${ARGS[@]}" "$@"

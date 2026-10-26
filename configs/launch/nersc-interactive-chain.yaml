@@ -1,6 +1,6 @@
 # A long run reached through many short interactive slots.
 #
-#   scripts/submit_helix.sh --recipe configs/launch/nersc-interactive-chain.yaml \
+#   scripts/train.sh fm --recipe configs/launch/nersc-interactive-chain.yaml \
 #       --resources.qos interactive --interactive
 #
 # A DIFFERENT mechanism from nersc-preempt.yaml. `--interactive` with

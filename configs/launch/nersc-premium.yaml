@@ -1,6 +1,6 @@
 # Premium: highest priority, no time_min floor, few jobs at a time.
 #
-#   scripts/submit_helix.sh --recipe configs/launch/nersc-premium.yaml \
+#   scripts/train.sh fm --recipe configs/launch/nersc-premium.yaml \
 #       --resources.qos premium
 #
 # Measured: gpu_premium priority 73440 against gpu_regular's 67679, MaxJobsPU 5,

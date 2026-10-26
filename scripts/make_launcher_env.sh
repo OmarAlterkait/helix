@@ -109,7 +109,7 @@ cat <<EOF
 
 Use it:
   HELIX_PIMM_PYTHON=$VENV/bin/python \\
-    scripts/submit_helix.sh --recipe configs/launch/nersc-preempt.yaml
+    scripts/train.sh fm
 
-or leave HELIX_PIMM_PYTHON unset -- submit_helix.sh looks here by default.
+or leave HELIX_PIMM_PYTHON unset -- scripts/train.sh looks here by default.
 EOF

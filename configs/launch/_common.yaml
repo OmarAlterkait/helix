@@ -1,7 +1,7 @@
 # Shared shape for every helix launch recipe.
 #
 # It carries NO absolute path, NO account and NO image. Those are site facts, and
-# helix/sites/<site>.yaml is where site facts live; scripts/submit_helix.sh reads
+# helix/sites/<site>.yaml is where site facts live; scripts/train.sh reads
 # them through helix.paths and injects them as CLI flags. An earlier version of
 # these recipes wrote `/global/cfs/cdirs/m5238/users/oalter/exp/helix` into three
 # files, which put one value in four places (three recipes plus the roots table)
@@ -13,18 +13,8 @@
 # shlex.quote'd at render time (local.py), so a literal $VAR is exported as the
 # five characters `$VAR`. The CLI is the one seam that takes a computed value.
 #
-# `site:` below is DOCUMENTATION of what these expect. It does not take effect:
-# `pimm submit` defaults site to "s3df" (pimm/cli/submit.py) and load_config takes
-# `site or recipe.get("site")`, so the CLI value always wins and the recipe's key
-# is never reached. Omitting --site renders an s3df job with no shifter wrapper
-# and no warning. submit_helix.sh always passes it.
-site: nersc-container
-
-train:
-  # Resolved inside the PIMM checkout, not here: train.sh's -c resolves only
-  # beneath its own configs/. configs/coeff_fm/train_8run.py is a thin pointer
-  # that computes its _base_ from $HELIX_ROOT.
-  config: coeff_fm/train_8run
+# The pimm site (s3df-container, nersc-container, ...) and the training config are not here
+# either: scripts/train.sh passes both.
 
 # Shell, evaluated INSIDE the job, immediately before train.sh. This is the only
 # part of a launch config that can read the environment: setup lines are joined
