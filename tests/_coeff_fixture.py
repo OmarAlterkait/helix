@@ -120,6 +120,7 @@ def write_coeff_shard(path, events, *, band_lengths, gids, n_wires, basis_attrs,
 
     with h5py.File(path, "w") as f:
         cfg = f.create_group("config")
+        cfg.attrs["format"] = "helix-coeff-2"
         cfg.attrs["n_events"] = len(events)
         cfg.attrs["dataset_name"] = dataset_name
         cfg.attrs["file_index"] = file_index

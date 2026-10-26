@@ -6,9 +6,9 @@ production `CoeffShardWriter`/`CoeffTPCReader` implement the *same* documented
 layout independently (standalone h5py, no helix import) — kept in sync by a
 cross-repo golden.
 
-Layout (one modality per file, flat columnar — see COEFF_CORPUS_DESIGN.md §3):
+Layout (one modality per file, flat columnar — see docs/archive/COEFF_CORPUS_DESIGN.md §3):
 
-    /config   attrs: n_events, dataset_name, file_index, global_event_offset,
+    /config   attrs: format ("helix-coeff-2"), n_events, dataset_name, file_index, global_event_offset,
                      readout_type, wavelet, dwt_level, dwt_mode, n_ticks_raw, pad,
                      sigma_norm, basis_digest, removal_json, threshold_json,
                      has_coords, noise_json
@@ -71,7 +71,27 @@ def _ds(grp, name, data, comp):
     grp.create_dataset(name, data=data, **kw)
 
 
+#: The on-disk format this module writes and the only one it reads. A shard without it predates
+#: the stamp (or the board-grouped gate's removal schema) and must be rebuilt or migrated
+#: (scripts/migrate_format.py).
+FORMAT = "helix-coeff-2"
+
+
+def shard_format(cfg):
+    v = cfg.attrs.get("format")
+    return v.decode() if isinstance(v, bytes) else (None if v is None else str(v))
+
+
+def require_format(cfg, where=""):
+    """Refuse a shard that is not :data:`FORMAT`."""
+    got = shard_format(cfg)
+    if got != FORMAT:
+        raise ValueError(f"{where or 'shard'}: format {got!r}, not {FORMAT!r}; rebuild it or migrate it "
+                         f"(scripts/migrate_format.py)")
+
+
 def _basis_from_config(cfg) -> BasisDescriptor:
+    require_format(cfg, cfg.file.filename)
     b = BasisDescriptor(
         wavelet=str(cfg.attrs["wavelet"]),
         level=int(cfg.attrs["dwt_level"]),
@@ -79,13 +99,13 @@ def _basis_from_config(cfg) -> BasisDescriptor:
         n_ticks_raw=int(cfg.attrs["n_ticks_raw"]),
         pad=int(cfg.attrs["pad"]),
         band_lengths=tuple(int(x) for x in cfg["band_lengths"][:]),
-        removal=json.loads(cfg.attrs.get("removal_json", "{}")),
-        threshold=json.loads(cfg.attrs.get("threshold_json", "{}")),
+        removal=json.loads(cfg.attrs["removal_json"]),
+        threshold=json.loads(cfg.attrs["threshold_json"]),
         sigma_norm=float(cfg.attrs["sigma_norm"]),
     )
     b.validate()                         # fail loudly if band_lengths drifted from the basis
-    stored = cfg.attrs.get("basis_digest")
-    if stored and str(stored) != b.digest():
+    stored = cfg.attrs["basis_digest"]
+    if str(stored) != b.digest():
         raise ValueError(
             f"basis_digest mismatch: /config says {stored!r} but the basis attrs "
             f"hash to {b.digest()!r} — the shard's declared identity disagrees with its basis.")
@@ -225,6 +245,7 @@ def write_coeff_shard(
 
     with h5py.File(path, "w") as f:
         cfg = f.create_group("config")
+        cfg.attrs["format"] = FORMAT
         cfg.attrs["n_events"] = len(events)
         cfg.attrs["dataset_name"] = dataset_name
         cfg.attrs["file_index"] = file_index
@@ -299,8 +320,8 @@ def read_coeff_event(path: str | Path, i: int, *,
         if i < 0 or i + 1 >= off.shape[0]:
             raise IndexError(f"event {i} out of range (n_events={off.shape[0]-1})")
         a, b = int(off[i]), int(off[i + 1])
-        has_coords = bool(cfg.attrs.get("has_coords", True))
-        dig = int(f["coord"]["coord_digest"][i]) if "coord_digest" in f["coord"] else None
+        has_coords = bool(cfg.attrs["has_coords"])
+        dig = int(f["coord"]["coord_digest"][i])
         d = dict(
             value=f["value"][a:b],
             gids=cfg["gids"][:], n_wires=cfg["n_wires"][:],
@@ -327,14 +348,6 @@ def read_coeff_event(path: str | Path, i: int, *,
                 f"coords_from has {src.n_coeff} rows but this values-only shard's event {i} "
                 f"has {d['value'].shape[0]} — the two shards are not co-supported.")
         src_dig = coord_digest(src.band, src.plane_gid, src.wire, src.tau)
-        if dig is None:
-            # A values-only shard has NO other way to prove its pairing, so a
-            # missing digest is unverifiable, not "fine". (Deliberately narrow: a
-            # has_coords=True shard is self-verifying, and pre-digest legacy
-            # shards of that kind exist on disk and must keep reading.)
-            raise ValueError(
-                f"{path} is values-only but carries no coord_digest — its pairing with "
-                f"{coords_from} cannot be verified. Rebuild it with a current writer.")
         if src_dig != dig:
             raise ValueError(
                 f"coord_digest mismatch on event {i}: this shard records {dig:#018x} but "
@@ -371,13 +384,15 @@ def audit_shard(path, *, strict=True):
         gids = cfg["gids"][:].astype(np.int64)
         nw = cfg["n_wires"][:].astype(np.int64)
         coord, val = f["coord"], f["value"][:]
-        has_coords = bool(cfg.attrs.get("has_coords", True))
+        has_coords = bool(cfg.attrs["has_coords"])
         off = coord["event_offset"][:]
         sig = coord["sigma_threshold"][:]
 
         def bad(name, cond, msg):
             if cond:
                 probs.append(f"{name}: {msg}")
+
+        bad("format", shard_format(cfg) != FORMAT, f"{shard_format(cfg)!r}, not {FORMAT!r}")
 
         # --- plane set: gid_rows/searchsorted and every per-plane table are
         # row-indexed by POSITION in gids, so duplicates make the mapping
@@ -439,6 +454,7 @@ def audit_shard(path, *, strict=True):
                     probs.append("wire: cannot range-check (plane_gid not covered by /config/gids)")
             # the stored digest must describe the coords actually present, or a
             # clean shard would be paired against a digest that means nothing
+            bad("coord_digest", "coord_digest" not in coord, "missing")
             if "coord_digest" in coord:
                 dg = coord["coord_digest"][:]
                 for i in range(min(n_ev, dg.shape[0])):

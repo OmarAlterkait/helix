@@ -12,7 +12,7 @@
   "corpus": {
     "run": "run_0027575715",
     "generation": "r2",
-    "basis_digest": "d5b76cdef5b11ce87dea68734467e754d3897f4962058e64d11fceef314c5199",
+    "basis_digest": "0dd4f3a223909fd7d8150f54854111ce6e7c89f030227a20113aabf2a27c9457",
     "_basis_digest_note": "Checkable BEFORE deriving, and catches the pre-tau/r1 confusion. It does NOT identify which run: basis_digest hashes the DSP recipe, so all eight r1 runs share it."
   },
   "digests": {
@@ -20,7 +20,7 @@
     "cent_asinh": "sha256:c23eff050b8932872ba7322817331bd358aed498bd992e39cdef3b07e388830c",
     "cent_ratio": "sha256:04b67ba0a7df771caf96c8f7ee9d05e9e85c6afd03d7d245fa244958788695c8"
   },
-  "_rerecord_note": "2026-10-26: derived for r2 with the r1 grid's parameters (S3DF, job 42010766). r2's inner edges sit a median 0.35/0.46/0.64/0.98 local bin widths (A4/D4/D3/D2; max 2.0) from r1 v2's, against 0.16 between r1 runs, so the r1 grid (coeff_bins_r1_tau05_run0027575715_v3, NERSC) does not describe r2. Models trained on r1's grid are not value-comparable with ones trained on this.",
+  "_rerecord_note": "2026-10-26: derived for r2 with the r1 grid's parameters (S3DF, job 42010766). r2's inner edges sit a median 0.35/0.46/0.64/0.98 local bin widths (A4/D4/D3/D2; max 2.0) from r1 v2's, against 0.16 between r1 runs, so the r1 grid (coeff_bins_r1_tau05_run0027575715_v3, NERSC) does not describe r2. Models trained on r1's grid are not value-comparable with ones trained on this. basis_digest is r2's after its migration to helix-coeff-2 (the gate's removal schema; the coefficients, and so this grid, are unchanged).",
   "shapes": {
     "edges": [
       4,

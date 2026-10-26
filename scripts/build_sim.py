@@ -113,7 +113,7 @@ class SimSource:
     def shard_attrs(self):
         """What the coeff shards record about the input beyond the chain: the noise and its inputs."""
         noise = dict(kind="colored", incoherent=True, coherent=True, group_size=self.group_size,
-                     spectrum=os.path.basename(self.npz), mode="serial", backend="torch")
+                     spectrum=os.path.basename(self.npz))
         prov = dict(geom=os.path.basename(self.geom_path), geom_sha256=_sha256(self.geom_path),
                     spectrum=os.path.basename(self.npz), spectrum_sha256=_sha256(self.npz),
                     seed_formula="blake2b(run/source_file/ev{n})")

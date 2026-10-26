@@ -295,11 +295,14 @@ def verify_plan(root):
                     probs.append(f"{q}: cannot read ({type(e).__name__}: {e})")
             if len(ids) == 2 and ids["optical"] != ids["coeff"]:
                 probs.append(f"{paths['optical']}: events differ from its TPC shard")
+    # each run on its own; a file_index gap is judged against the run's input (RUN_DIRS.txt)
+    rd = os.path.join(root, "_calib", "RUN_DIRS.txt")
+    inputs = {os.path.basename(x.rstrip("/")): x for x in open(rd).read().split()} if os.path.exists(rd) else {}
     for prefix in sorted({p for p in want if glob.glob(f"{p}_coeff_[0-9]*.h5")}):
         d, name = os.path.split(prefix)
         probs += [f"{os.path.basename(d)}: {p}" for p in verify_corpus(
             d, name, modalities=("coeff", "coeff_clean") if glob.glob(f"{prefix}_coeff_clean_*.h5")
-            else ("coeff",))]
+            else ("coeff",), source_root=inputs.get(os.path.basename(d)))]
     return probs
 
 

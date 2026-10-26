@@ -8,7 +8,7 @@ slice per event; ``plane_gid`` is a column. This is pimm-data's own offset idiom
 
 One modality per file (``{name}_coeff_*.h5`` noisy input, ``{name}_coeff_clean_*``
 the clean target), joined by identity — never mixed. The on-disk layout is the
-shared contract defined in helix ``COEFF_CORPUS_DESIGN.md`` §3; this reader
+shared contract defined in helix ``docs/archive/COEFF_CORPUS_DESIGN.md`` §3; this reader
 implements it with **standalone h5py** (no helix import at read time — no cycle),
 and is round-trip golden-tested against helix's reference codec.
 
@@ -32,9 +32,9 @@ import os
 import numpy as np
 import h5py
 
-from pimm_data import read_shard_meta, ShardReaderBase
+from pimm_data import ShardReaderBase
 
-from helix.core.coeff_io import coord_digest
+from helix.core.coeff_io import FORMAT, coord_digest, shard_format
 
 
 class CoeffTPCReader(ShardReaderBase):
@@ -64,6 +64,7 @@ class CoeffTPCReader(ShardReaderBase):
         self._meta_by_path = {}                 # h5_path -> its /config tables
         self._ident_by_path = {}                # h5_path -> raw (run, source_file, event)
         self._dup_ident = {}                    # h5_path -> (rows, unique) when not 1:1
+        self._bad_format = {}                   # h5_path -> its format when not FORMAT
         self._id2pos = {}                       # h5_path -> {physical event id: write-order position}
         self._init_shards()
         self._validate_shard_agreement()
@@ -94,6 +95,9 @@ class CoeffTPCReader(ShardReaderBase):
                 return a is None and b is None
             return np.array_equal(np.asarray(a), np.asarray(b))
 
+        for path, fmt in self._bad_format.items():
+            raise ValueError(f"{path}: format {fmt!r}, not {FORMAT!r}; rebuild it or migrate it "
+                             f"(scripts/migrate_format.py)")
         for path, (rows, uniq) in self._dup_ident.items():
             raise ValueError(
                 f"{path}: /ident does not uniquely identify its events — {rows} rows "
@@ -166,25 +170,23 @@ class CoeffTPCReader(ShardReaderBase):
         ids (in write order) so the cross-modality joint index aligns coeff↔coeff_clean
         by IDENTITY, not position. Also caches shared basis/geometry, and a
         physical-id→write-position map (event_offset is positional)."""
-        meta = read_shard_meta(h5_path)
         with h5py.File(h5_path, "r", libver="latest", swmr=True) as f:
             cfg = f["config"]
+            # Recorded, not raised, for the reason given at _dup_ident below.
+            if shard_format(cfg) != FORMAT:
+                self._bad_format[str(h5_path)] = shard_format(cfg)
+                return np.zeros(0, np.int64)
             bl = cfg["band_lengths"][:].astype(np.int32)
-            gids = cfg["gids"][:].astype(np.int32) if "gids" in cfg else None
-            n_wires = cfg["n_wires"][:].astype(np.int32) if "n_wires" in cfg else None
+            gids = cfg["gids"][:].astype(np.int32)
+            n_wires = cfg["n_wires"][:].astype(np.int32)
             ns = cfg["norm_sigma"][:].astype(np.float32) if "norm_sigma" in cfg else None
-            sn = float(cfg.attrs.get("sigma_norm", 1.0))
-            hc = bool(cfg.attrs.get("has_coords", True))
+            sn = float(cfg.attrs["sigma_norm"])
+            hc = bool(cfg.attrs["has_coords"])
             self._meta_by_path[str(h5_path)] = dict(
                 band_lengths=bl, gids=gids, n_wires=n_wires, norm_sigma=ns,
                 sigma_norm=sn, has_coords=hc,
-                # The DSP identity, as distinct from the geometry. Two corpora
-                # can share every table above and still be different signal:
-                # coeff_tpc and coeff_tpc_r1 have identical band_lengths, gids,
-                # n_wires, norm_sigma and sigma_norm, and differ only in the
-                # coherent-removal gate (r1 records removal_json tau=0.05, the
-                # older one records no removal_json at all) — which shows up
-                # here as different basis_digests, 8c4542.. vs 7f954a...
+                # The DSP identity, as distinct from the geometry: two corpora can
+                # share every table above and differ only in the coherent gate.
                 basis_digest=cfg.attrs.get("basis_digest"),
                 removal_json=cfg.attrs.get("removal_json"))
             if self.band_lengths is None:
@@ -193,31 +195,27 @@ class CoeffTPCReader(ShardReaderBase):
                 self.norm_sigma, self.sigma_norm = ns, sn
                 self.has_coords = hc
                 self._meta_source = str(h5_path)
-            if "ident" in f and "event" in f["ident"]:
-                ev = f["ident"]["event"][:].astype(np.int64)
-                src = (f["ident"]["source_file"][:]
-                       if "source_file" in f["ident"] else None)
-                rn = f["ident"]["run"][:] if "run" in f["ident"] else None
-                # Keep the RAW triple as well as the packed id. The packed id
-                # exists to align coeff<->coeff_clean and is deliberately lossy
-                # (a hash, once a corpus spans several runs); it cannot be turned
-                # back into a source file and event number. Anything that wants
-                # to join a coeff event to the simulation event it came from —
-                # a probe target, a truth label — needs the triple itself.
-                self._ident_by_path[str(h5_path)] = dict(
-                    run=_as_str_list(rn, len(ev)),
-                    source_file=_as_str_list(src, len(ev)),
-                    event=ev.copy())
-                ev = _identity_ids(src, ev, run=rn)
-                # Record, don't raise: _build_index wraps this call in a bare
-                # `except Exception` that downgrades any error to a log warning and
-                # serves the shard as EMPTY — so raising here would turn a
-                # detectable fault into a silently shorter dataset. Checked in
-                # _validate_shard_agreement, which runs outside that loop.
-                if len(np.unique(ev)) != ev.shape[0]:
-                    self._dup_ident[str(h5_path)] = (ev.shape[0], len(np.unique(ev)))
-            else:                                       # legacy shard without identity
-                ev = np.arange(int(meta["n_events"]), dtype=np.int64)
+            ev = f["ident"]["event"][:].astype(np.int64)
+            src = f["ident"]["source_file"][:]
+            rn = f["ident"]["run"][:]
+            # Keep the RAW triple as well as the packed id. The packed id
+            # exists to align coeff<->coeff_clean and is deliberately lossy
+            # (a hash, once a corpus spans several runs); it cannot be turned
+            # back into a source file and event number. Anything that wants
+            # to join a coeff event to the simulation event it came from —
+            # a probe target, a truth label — needs the triple itself.
+            self._ident_by_path[str(h5_path)] = dict(
+                run=_as_str_list(rn, len(ev)),
+                source_file=_as_str_list(src, len(ev)),
+                event=ev.copy())
+            ev = _identity_ids(src, ev, run=rn)
+            # Record, don't raise: _build_index wraps this call in a bare
+            # `except Exception` that downgrades any error to a log warning and
+            # serves the shard as EMPTY — so raising here would turn a
+            # detectable fault into a silently shorter dataset. Checked in
+            # _validate_shard_agreement, which runs outside that loop.
+            if len(np.unique(ev)) != ev.shape[0]:
+                self._dup_ident[str(h5_path)] = (ev.shape[0], len(np.unique(ev)))
         # keyed by path (not shard index) so it survives build_joint_index re-selection
         self._id2pos[str(h5_path)] = {int(e): i for i, e in enumerate(ev)}
         return np.asarray(ev, dtype=np.int64)
@@ -270,8 +268,7 @@ class CoeffTPCReader(ShardReaderBase):
         off = coord["event_offset"]
         a, b = int(off[ev]), int(off[ev + 1])
         out = {"value": f["value"][a:b].astype(np.float32)}
-        if "coord_digest" in coord:
-            out["_coord_digest"] = int(coord["coord_digest"][ev])
+        out["_coord_digest"] = int(coord["coord_digest"][ev])
         if "wire_valid" in coord:                    # packed (G, ceil(max n_wires / 8))
             out["_wire_valid"] = coord["wire_valid"][ev]
         ident = self._ident_by_path.get(path)

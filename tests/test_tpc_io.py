@@ -65,29 +65,6 @@ def _write_current(path, n_events=2, n_volumes=2, seed=0):
     return truth
 
 
-def _write_legacy(path, n_events=2, seed=1):
-    rng = np.random.default_rng(seed)
-    truth = {}
-    with h5py.File(path, "w") as f:
-        for e in range(n_events):
-            evt = f.create_group(f"event_{e}")           # legacy: unpadded keys
-            evt.attrs["num_time_steps"] = N_TICKS
-            for p in PLANES:
-                wire, time, values = _synth_plane(rng, N_WIRES[p])
-                g = evt.create_group(p)
-                g["wire"] = wire.astype(np.int32)
-                g["time"] = time.astype(np.int32)
-                g["values"] = (values + PEDESTAL[p]).astype(np.float32)
-                g.attrs["n_wires"] = N_WIRES[p]
-                g.attrs["pedestal"] = PEDESTAL[p]
-                dense = np.zeros((N_WIRES[p], N_TICKS), np.float32)
-                dense[wire, time] = values
-                truth[(e, p)] = dense
-    return truth
-
-
-# ── current schema ──────────────────────────────────────────────────────────
-
 def test_current_sensor_layout(tmp_path):
     path = tmp_path / "cur.h5"
     _write_current(path)
@@ -126,19 +103,6 @@ def test_pixel_file_rejected(tmp_path):
         f.create_group("event_000")
     with pytest.raises(ValueError, match="pixel"):
         sensor_layout(path)
-
-
-# ── legacy flat schema ──────────────────────────────────────────────────────
-
-def test_legacy_roundtrip(tmp_path):
-    path = tmp_path / "leg.h5"
-    truth = _write_legacy(path)
-    cfg = sensor_layout(path)
-    assert cfg.num_time_steps == N_TICKS
-    assert set(cfg.plane_labels) == set(PLANES)
-    planes = read_sensor_event(path, 0, cfg)
-    for label, img in planes.items():
-        np.testing.assert_array_equal(img, truth[(0, label)])
 
 
 def test_count_events(tmp_path):

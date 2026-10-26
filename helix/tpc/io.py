@@ -12,9 +12,7 @@ Reads the CURRENT JAXTPC sensor schema (doraemon productions, e.g.
         values                   uint16 digitized ADC (hdf5plugin-compressed)
         attrs: wire_start, time_start, pedestal, n_pixels
 
-Plane labels are ``volume_{V}_{P}`` (matching pimm-data's convention). The
-legacy flat schema (``event_N/<plane>/{wire,time,values}`` raw COO with
-``n_wires``/``pedestal`` attrs) is kept as a fallback branch. Readout geometry
+Plane labels are ``volume_{V}_{P}`` (matching pimm-data's convention). Readout geometry
 is read from the file itself — no external config needed; this module is the
 first consumer of ``/config/num_wires`` (pimm-data instead takes caller-supplied
 geometry). Wire readout only; pixel files (``delta_py``/``delta_pz``) are the
@@ -41,21 +39,18 @@ from helix.tpc.readout import canonical_plane_gid
 
 
 def _event_key(f: h5py.File, event_idx: int) -> str:
-    """Writers use ``event_{:03d}`` (minimum width); legacy files unpadded."""
-    for key in (f"event_{event_idx:03d}", f"event_{event_idx}"):
-        if key in f:
-            return key
-    raise KeyError(f"event {event_idx} not found (tried event_{event_idx:03d})")
+    """Writers use ``event_{:03d}`` (minimum width)."""
+    key = f"event_{event_idx:03d}"
+    if key not in f:
+        raise KeyError(f"event {event_idx} not found ({key})")
+    return key
 
 
 def _resolve_plane(evt: h5py.Group, plane_label: str):
-    """``'volume_0_U'`` → the nested group (current schema); flat label → direct."""
-    if plane_label in evt:
-        return evt[plane_label]
-    if plane_label.startswith("volume_"):
-        vol, plane = plane_label.rsplit("_", 1)
-        if vol in evt and plane in evt[vol]:
-            return evt[vol][plane]
+    """``'volume_0_U'`` → the nested group."""
+    vol, plane = plane_label.rsplit("_", 1)
+    if vol in evt and plane in evt[vol]:
+        return evt[vol][plane]
     raise KeyError(f"plane {plane_label!r} not found in {evt.name}")
 
 
@@ -103,11 +98,9 @@ _PLANE_INDEX = {"U": 0, "V": 1, "Y": 2}
 
 
 def _split_label(plane_label):
-    """``'volume_1_V'`` -> (1, 'V'); a flat legacy label ``'V'`` -> (0, 'V')."""
-    if plane_label.startswith("volume_"):
-        vol, plane = plane_label.rsplit("_", 1)
-        return int(vol.split("_")[1]), plane
-    return 0, plane_label.split("_")[-1]
+    """``'volume_1_V'`` -> (1, 'V')."""
+    vol, plane = plane_label.rsplit("_", 1)
+    return int(vol.split("_")[1]), plane
 
 
 def _num_wires_grid(labels, n_wires):
@@ -127,10 +120,9 @@ def _num_wires_grid(labels, n_wires):
 def sensor_layout(path: str | Path) -> SensorLayout:
     """Read a sensor HDF5 file's :class:`SensorLayout`.
 
-    Current schema: ``/config`` attrs + tables; plane labels discovered from
-    the first event's ``volume_V/P`` nesting. Legacy flat schema: labels =
-    event-level groups, pedestal from plane attrs. ``num_wires`` comes from
-    ``/config/num_wires`` when present, otherwise from the first event's planes.
+    ``/config`` attrs + tables; plane labels discovered from the first event's
+    ``volume_V/P`` nesting. ``num_wires`` comes from ``/config/num_wires`` when
+    present, otherwise from the first event's planes.
     """
     num_wires = None
     with h5py.File(path, "r") as f:
@@ -139,31 +131,25 @@ def sensor_layout(path: str | Path) -> SensorLayout:
             raise ValueError(f"No events found in {path}")
         evt = f[evt_keys[0]]
 
-        if "config" in f:                              # ── current schema ──
-            cfg = f["config"]
-            if str(cfg.attrs.get("readout_type", "wire")) != "wire":
-                raise ValueError(
-                    "helix.tpc reads wire readout only; pixel files are the "
-                    "point-cloud path — load them via pimm-data.")
-            num_time_steps = int(cfg.attrs.get("num_time_steps", 4321))
-            plane_labels, pedestals = [], {}
-            ped_tab = cfg["pedestals"][:] if "pedestals" in cfg else None
-            for vol_key in sorted(k for k in evt.keys() if k.startswith("volume_")):
-                planes = sorted(evt[vol_key].keys())
-                for col, p in enumerate(planes):
-                    plane_labels.append(f"{vol_key}_{p}")
-                    if ped_tab is not None:
-                        v = int(vol_key.split("_")[1])
-                        pedestals[p] = int(ped_tab[v, col])   # per plane TYPE
-            if "num_wires" in cfg:
-                num_wires = np.asarray(cfg["num_wires"][:], np.int32)
-        else:                                          # ── legacy flat schema ──
-            plane_labels = [k for k in evt.keys() if isinstance(evt[k], h5py.Group)]
-            num_time_steps = int(evt.attrs.get("num_time_steps", 2701))
-            pedestals = {}
-            for label in plane_labels:
-                pt = label.split("_")[-1] if "_" in label else label
-                pedestals[pt] = int(evt[label].attrs.get("pedestal", 0))
+        if "config" not in f:
+            raise ValueError(f"{path}: no /config, so not a JAXTPC production sensor file")
+        cfg = f["config"]
+        if str(cfg.attrs.get("readout_type", "wire")) != "wire":
+            raise ValueError(
+                "helix.tpc reads wire readout only; pixel files are the "
+                "point-cloud path — load them via pimm-data.")
+        num_time_steps = int(cfg.attrs.get("num_time_steps", 4321))
+        plane_labels, pedestals = [], {}
+        ped_tab = cfg["pedestals"][:] if "pedestals" in cfg else None
+        for vol_key in sorted(k for k in evt.keys() if k.startswith("volume_")):
+            planes = sorted(evt[vol_key].keys())
+            for col, p in enumerate(planes):
+                plane_labels.append(f"{vol_key}_{p}")
+                if ped_tab is not None:
+                    v = int(vol_key.split("_")[1])
+                    pedestals[p] = int(ped_tab[v, col])   # per plane TYPE
+        if "num_wires" in cfg:
+            num_wires = np.asarray(cfg["num_wires"][:], np.int32)
         first = int(evt_keys[0].split("_", 1)[1])
 
     if num_wires is None:                              # derive from the first event
@@ -213,34 +199,24 @@ def read_sensor_plane_coo(path, event_idx, plane_label, num_time_steps=None,
             z = np.zeros(0, dtype=np.int32)
             return z, z.copy(), np.zeros(0, dtype=np.float32), nw, nt
 
-        if "delta_wire" in grp:                        # ── current schema ──
-            wire = np.cumsum(grp["delta_wire"][:], dtype=np.int32)
-            wire += int(grp.attrs["wire_start"])
-            time = np.cumsum(grp["delta_time"][:], dtype=np.int32)
-            time += int(grp.attrs["time_start"])
-            raw = grp["values"][:]
-            values = raw.astype(np.float32)
-            ped = int(grp.attrs.get("pedestal", pedestal))
-            if raw.dtype == np.uint16:                 # digitized → subtract pedestal
-                values -= ped
-            if num_time_steps is None:
-                num_time_steps = int(f["config"].attrs["num_time_steps"]) \
-                    if "config" in f else int(time.max(initial=0)) + 1
-            n_wires = None
-            if "config" in f and "num_wires" in f["config"]:
-                v, col = _plane_column(evt, plane_label)
-                n_wires = int(f["config"]["num_wires"][v, col])
-            if n_wires is None or n_wires <= int(wire.max(initial=0)):
-                n_wires = int(wire.max(initial=0)) + 1
-            return wire, time, values, n_wires, int(num_time_steps)
-
-        # ── legacy flat schema ──
-        wire = grp["wire"][:].astype(np.int32)
-        time = grp["time"][:].astype(np.int32)
-        values = grp["values"][:].astype(np.float32) - pedestal
-        n_wires = int(grp.attrs.get("n_wires", wire.max(initial=0) + 1))
-        nt = 2701 if num_time_steps is None else int(num_time_steps)
-    return wire, time, values, n_wires, nt
+        wire = np.cumsum(grp["delta_wire"][:], dtype=np.int32)
+        wire += int(grp.attrs["wire_start"])
+        time = np.cumsum(grp["delta_time"][:], dtype=np.int32)
+        time += int(grp.attrs["time_start"])
+        raw = grp["values"][:]
+        values = raw.astype(np.float32)
+        ped = int(grp.attrs.get("pedestal", pedestal))
+        if raw.dtype == np.uint16:                     # digitized → subtract pedestal
+            values -= ped
+        if num_time_steps is None:
+            num_time_steps = int(f["config"].attrs["num_time_steps"])
+        n_wires = None
+        if "num_wires" in f["config"]:
+            v, col = _plane_column(evt, plane_label)
+            n_wires = int(f["config"]["num_wires"][v, col])
+        if n_wires is None or n_wires <= int(wire.max(initial=0)):
+            n_wires = int(wire.max(initial=0)) + 1
+        return wire, time, values, n_wires, int(num_time_steps)
 
 
 def read_sensor_event_coo(path, event_idx, layout: SensorLayout):
@@ -252,8 +228,6 @@ def read_sensor_event_coo(path, event_idx, layout: SensorLayout):
         for k in evt.keys():
             if k.startswith("volume_") and isinstance(evt[k], h5py.Group):
                 available.update(f"{k}_{p}" for p in evt[k].keys())
-            elif isinstance(evt[k], h5py.Group):
-                available.add(k)
     for label in layout.plane_labels:
         if label in available:
             out[label] = read_sensor_plane_coo(path, event_idx, label,
@@ -264,52 +238,12 @@ def read_sensor_event_coo(path, event_idx, layout: SensorLayout):
 
 def read_sensor_plane(path, event_idx, plane_label, num_time_steps=None,
                       pedestal=0) -> np.ndarray:
-    """Read one plane → (n_wires, n_ticks) float32 pedestal-subtracted image.
-
-    Dispatches on the on-disk encoding: delta-encoded sparse COO (current
-    schema; pedestal taken from the plane's own attr) vs raw COO (legacy;
-    ``pedestal`` argument applies)."""
-    with h5py.File(path, "r") as f:
-        evt = f[_event_key(f, event_idx)]
-        grp = _resolve_plane(evt, plane_label)
-
-        if len(grp.keys()) == 0:                       # ── empty: no charge ──
-            nw, nt = _empty_plane_shape(f, evt, plane_label, num_time_steps)
-            return np.zeros((nw, nt), dtype=np.float32)
-
-        if "delta_wire" in grp:                        # ── current schema ──
-            wire = np.cumsum(grp["delta_wire"][:], dtype=np.int32)
-            wire += int(grp.attrs["wire_start"])
-            time = np.cumsum(grp["delta_time"][:], dtype=np.int32)
-            time += int(grp.attrs["time_start"])
-            raw = grp["values"][:]
-            values = raw.astype(np.float32)
-            ped = int(grp.attrs.get("pedestal", pedestal))
-            if raw.dtype == np.uint16:                 # digitized → subtract pedestal
-                values -= ped
-            if num_time_steps is None:
-                num_time_steps = int(f["config"].attrs["num_time_steps"]) \
-                    if "config" in f else int(time.max(initial=0)) + 1
-            n_wires = None
-            if "config" in f and "num_wires" in f["config"]:
-                v, col = _plane_column(evt, plane_label)
-                n_wires = int(f["config"]["num_wires"][v, col])
-            if n_wires is None or n_wires <= int(wire.max(initial=0)):
-                n_wires = int(wire.max(initial=0)) + 1
-            image = np.zeros((n_wires, num_time_steps), dtype=np.float32)
-            image[wire, time] = values                 # pedestal already subtracted
-            return image
-
-        # ── legacy flat schema ──
-        wire = grp["wire"][:]
-        time = grp["time"][:]
-        values = grp["values"][:].astype(np.float32)
-        n_wires = int(grp.attrs.get("n_wires", wire.max(initial=0) + 1))
-        if num_time_steps is None:
-            num_time_steps = 2701
-    image = np.full((n_wires, num_time_steps), float(pedestal), dtype=np.float32)
+    """Read one plane → (n_wires, n_ticks) float32 pedestal-subtracted image
+    (:func:`read_sensor_plane_coo`, scattered)."""
+    wire, time, values, n_wires, n_ticks = read_sensor_plane_coo(path, event_idx, plane_label,
+                                                                 num_time_steps, pedestal)
+    image = np.zeros((n_wires, n_ticks), dtype=np.float32)
     image[wire, time] = values
-    image -= pedestal
     return image
 
 
@@ -321,8 +255,6 @@ def read_sensor_event(path, event_idx, layout: SensorLayout) -> dict[str, np.nda
         for k in evt.keys():
             if k.startswith("volume_") and isinstance(evt[k], h5py.Group):
                 available.update(f"{k}_{p}" for p in evt[k].keys())
-            elif isinstance(evt[k], h5py.Group):
-                available.add(k)
     for label in layout.plane_labels:
         if label in available:
             planes[label] = read_sensor_plane(path, event_idx, label,

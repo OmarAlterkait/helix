@@ -38,7 +38,6 @@ import numpy as np
 from pimm_data.builder import DATASETS
 from pimm_data import ShardEventDataset
 
-from helix.core.coeff_io import coord_digest
 import logging
 
 from helix.data.coeff_reader import CoeffTPCReader
@@ -168,9 +167,6 @@ class CoeffTPCDataset(ShardEventDataset):
         """
         import hashlib
         t = self._ident_at(idx)
-        if t is None:                           # legacy shard with no /ident
-            file_idx, event_num = self._canonical_reader.locate(idx)
-            return (0, file_idx, event_num)
         h = hashlib.blake2b(f"{t['run']}/{t['source_file']}".encode(),
                             digest_size=8).digest()
         return (int.from_bytes(h, 'big') >> 1, t['event'])   # >>1 keeps it positive
@@ -180,9 +176,7 @@ class CoeffTPCDataset(ShardEventDataset):
         r = self._canonical_reader
         file_idx, event_num = r.locate(idx)
         path = str(r.h5_files[file_idx])
-        ident = r._ident_by_path.get(path)
-        if ident is None:
-            return None
+        ident = r._ident_by_path[path]
         pos = r._id2pos[path][int(event_num)]
         return dict(run=ident['run'][pos], source_file=ident['source_file'][pos],
                     event=int(ident['event'][pos]))
@@ -200,9 +194,7 @@ class CoeffTPCDataset(ShardEventDataset):
             # Straight from the reader's index — NOT get_data(), which loads the
             # event's full coefficient arrays. Resolving 20k identities that way
             # meant 20k complete event reads for data that is already in memory.
-            t = self._ident_at(self.data_list[i])
-            if t is not None:
-                out.append(t)
+            out.append(self._ident_at(self.data_list[i]))
         return out
 
     def event_sizes(self):
@@ -267,19 +259,7 @@ class CoeffTPCDataset(ShardEventDataset):
             raise ValueError(
                 f"event {idx}: clean has {raw_clean['value'].shape[0]} rows, noisy has "
                 f"{raw_noisy['value'].shape[0]} — the shards are not co-supported.")
-        want = raw_clean.get('_coord_digest')
-        if want is None:
-            # values-only + no digest = unverifiable pairing. Narrow on purpose:
-            # this fires only for has_coords=False shards, so pre-digest legacy
-            # shards (which carry their own coords) keep reading.
-            raise ValueError(
-                f"event {idx}: the coeff_clean shard is values-only but carries no "
-                f"coord_digest — its pairing with 'coeff' cannot be verified. "
-                f"Rebuild it with a current writer.")
-        got = raw_noisy.get('_coord_digest')
-        if got is None:
-            got = coord_digest(raw_noisy['band'], raw_noisy['plane_gid'],
-                               raw_noisy['wire'], raw_noisy['tau'])
+        want, got = raw_clean['_coord_digest'], raw_noisy['_coord_digest']
         if int(got) != int(want):
             raise ValueError(
                 f"event {idx}: coord_digest mismatch (clean {int(want):#018x} vs noisy "
