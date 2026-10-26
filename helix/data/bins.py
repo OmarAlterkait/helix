@@ -76,7 +76,7 @@ def reference_name() -> str:
     so this is what a config should build that filename from.
 
     It exists because the name was previously retyped as a literal in five
-    places -- ``configs/pimm/coeff_fm_train.py``, ``coeff_fm_eval_probe.py``,
+    places -- the training and eval configs,
     ``tests/test_bins.py`` and twice in ``docs/INVENTORY.md`` -- while
     ``reference_bins.json`` already declared it and NOTHING read it. When the
     grid was re-derived and the JSON went to ``_v3``, every one of those five

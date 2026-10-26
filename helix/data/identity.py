@@ -89,8 +89,8 @@ def corpus_runs(corpus_root=None) -> list[str]:
     of ``_calib/``), defaulting to ``HELIX_CORPUS``'s parent.
 
     Why this exists. The eight run ids were retyped as a literal list in
-    ``configs/pimm/coeff_fm_train_8run.py`` and again (the first three) in
-    ``coeff_fm_cooldown.py``, while the BUILD side already reads them from a
+    the eight-run training config and again (the first three) in
+    its cooldown, while the BUILD side already reads them from a
     file: ``scripts/corpus.sh`` writes and reads ``$OUT/_calib/RUNS.txt``. So the corpus
     ships its own manifest and the training configs ignored it.
 

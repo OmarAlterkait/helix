@@ -139,7 +139,7 @@ def test_the_training_hook_actually_calls_the_guard():
 def test_write_holdout_exists_and_is_wired():
     """The split must be materialisable, not only computable.
 
-    configs/pimm/coeff_fm_train.py says the split is "Resolved once and written
+    the training config said the split is "Resolved once and written
     to holdout.json beside the corpus" -- and nothing wrote it.
     CoeffTPCDataset.holdout_manifest() computed it, dump_probe_truth.py and
     run_probe.py READ the file, and no code put it there. Result: the probe could

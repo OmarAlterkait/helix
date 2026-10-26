@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Write ``<corpus>/holdout.json`` — the split, materialised.
 
-WHY THIS EXISTS. configs/pimm/coeff_fm_train.py says the split is "Resolved once
+WHY THIS EXISTS. the training config said the split is "Resolved once
 and written to holdout.json beside the corpus", and the reason it gives is right:
 "reproducible is not the same as auditable, and a probe holdout that exists only
 as code cannot be inspected, diffed or cited."

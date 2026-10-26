@@ -311,7 +311,7 @@ class WSDCooldownLR(_LambdaLR):
     ``Trainer.build_scheduler`` overwrites unconditionally with
     ``_iters_per_epoch() * cfg.epoch`` (pimm train.py:733). So the same config
     yields a 476-step warmup at 118,975 total steps, **17.7** at 4,425, and
-    **6.0** at 1,500 — the two incidents recorded in coeff_fm_train.py. WSDStableLR
+    **6.0** at 1,500 — the two incidents recorded in the earlier training config. WSDStableLR
     takes warmup in absolute steps and is immune to that rescale, which is the
     whole reason it exists.
 

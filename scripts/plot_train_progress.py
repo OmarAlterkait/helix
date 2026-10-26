@@ -185,7 +185,7 @@ def main():
     # target variance, which is grid-free and is the better thing to port.
     #
     # The learning-rate panel is gone: WSD's stable phase is flat by
-    # construction (see the scheduler note in coeff_fm_train.py), so it can only
+    # construction (see the scheduler note in helix.integrations.pimm.trainer), so it can only
     # ever confirm the config. Total loss is gone too — it is bce + val exactly,
     # so it adds no axis the two component panels do not already carry.
     nulls = {}

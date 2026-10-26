@@ -1,7 +1,7 @@
 """The shipped pimm config must define everything pimm's Trainer reads.
 
 A config is only discovered to be incomplete when a launch crashes, usually
-after the data has loaded. The first version of `configs/pimm/coeff_fm_encode.py`
+after the data has loaded. The first version of the pimm config
 defined 8 of the 24 fields the Trainer touches — no `hooks`, no `optimizer`, no
 `scheduler`, no `epoch` — and nothing said so, because a config is just a Python
 file that executes fine.
@@ -433,21 +433,19 @@ def test_configs_leave_no_module_objects_in_the_namespace():
             exec(compile(path.read_text(), str(path), "exec"), ns)
         except (FileNotFoundError, _SiteError, SystemExit) as e:
             # Some configs resolve a checkpoint or a bin table AT MODULE SCOPE, so
-            # executing them needs that data present. coeff_fm_encode.py reaches
-            # for the m113 artifact under HELIX_ARCHIVE, which exists on the
-            # machine helix was developed on and nowhere else -- a CI runner, or
-            # any fresh site, has none of it.
+            # executing them needs that data present (the corpus's run list, the
+            # bin table under HELIX_ARCHIVE) -- a CI runner, or any fresh site,
+            # has none of it.
             #
             # SiteError is the same situation said a different way: a site profile
             # may declare a root as null ("this site does not have that"), and
             # helix.paths.root() then refuses rather than handing back another
-            # site's literal. coeff_fm_encode.py needs HELIX_LEGACY_CORPUS, which
-            # is the pre-tau corpus and exists only where it was built. Refusing
+            # site's literal. Refusing
             # is correct for RUNNING the config; it says nothing about whether the
             # config leaks module objects, which is what is under test here.
             #
             # SystemExit is the third spelling of the same thing, and the one a
-            # CI runner hits FIRST: every coeff_fm config refuses to execute
+            # CI runner hits FIRST: every fm config refuses to execute
             # without HELIX_ROOT, because it cannot self-locate (pimm executes a
             # temp copy, so __file__ is the copy) and a wrong checkout is a
             # correctness bug rather than an inconvenience. With no site and no

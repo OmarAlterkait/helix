@@ -1,163 +1,78 @@
 #!/bin/bash
-# Train: one helix pimm config through `pimm submit`, on this site's scheduler, in its container.
+# Train: a helix pimm config (configs/pimm/CONFIG.py, or a path) as a chain of jobs on this site's
+# scheduler (helix/sites/<site>.yaml, scheduler.train), each running pimm's trainer in the site's
+# container (scripts/helix_run.sh):
 #
-#   scripts/train.sh CONFIG [pimm submit flags...]
-#   scripts/train.sh fm --chain.jobs 8                          the stable phase, 8 chained links
+#   scripts/train.sh fm                                one link
+#   LINKS=8 scripts/train.sh fm                        eight, each starting when the last one ends
 #   scripts/train.sh fm_cooldown
-#   scripts/train.sh fm_smoke --resources.nproc-per-node 1 --resources.mem 48G
-#   scripts/train.sh fm --dry-run                               render the job, submit nothing
+#   GPUS=1 scripts/train.sh fm_smoke epoch=2           anything after CONFIG is a pimm --options key=value
 #
-# CONFIG is a name under configs/pimm/ (fm, fm_cooldown, fm_eval, fm_smoke) or a path. The
-# recipe is configs/launch/<site>.yaml (RECIPE= or --recipe for another, e.g. nersc-premium);
-# every flag after CONFIG goes to `pimm submit` (--run.name, --chain.jobs, --resources.*, and
-# `--train.weight` / `--options` style overrides are pimm's).
+# A run lives in $HELIX_EXP/NAME (NAME=CONFIG by default). Each link resumes from the run's latest
+# complete checkpoint, or starts the run when there is none, so a link that is preempted, times out
+# or fails costs at most one checkpoint interval and the next one carries on: the chain uses
+# --dependency=afterany, which continues whether the scheduler requeues a preempted job (NERSC) or
+# cancels it (S3DF). Submitting a config again under the same NAME continues that run; with
+# different options it is refused (another NAME starts another run).
 #
-# A chain is pimm's: each link resumes from the last checkpoint. It is submitit's
-# timeout/requeue, so it relies on the job not being CANCELLED by preemption: at S3DF (whose
-# preemptable QOS cancels) the site profile trains on a non-preemptable QOS; at NERSC
-# (PreemptMode=REQUEUE) the preempt QOS is fine.
-#
-# Every site fact (pimm site, image, interpreter, account, QOS, partition, roots) comes from
-# helix/sites/<site>.yaml through helix.paths and is passed as a flag, because pimm's launch
-# YAML cannot read the environment: `format_string` (pimm/launch/config.py) resolves
-# {placeholders} against the launch config only, and `env:` values are shlex.quote'd. The
-# submitting host runs pimm from a small venv (scripts/make_launcher_env.sh): sbatch is not in
-# the container, and the full model stack is not needed to submit.
+# Environment: LINKS (1), NAME, GPUS (4, one node), TIME (24:00:00), MEM (50G per GPU, where the
+# site allocates by partition), LOGS ($HELIX_EXP/NAME/slurm).
 set -euo pipefail
-
 H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-CFG=${1:?usage: scripts/train.sh CONFIG [pimm submit flags...]}
+source "$H/scripts/helix_env.sh"
+if [ "${1:-}" = link ]; then LINK=1; shift; else LINK=0; fi
+CFG=${1:?usage: scripts/train.sh CONFIG [key=value ...]}
 shift
 case "$CFG" in
   */*|*.py) CFG=$(realpath "$CFG") ;;
   *) CFG=$H/configs/pimm/$CFG.py ;;
 esac
 [ -f "$CFG" ] || { echo "train.sh: no config $CFG" >&2; exit 1; }
-_lv=${HELIX_LAUNCHER_VENV:-${SCRATCH:-/nonexistent}/helix-launcher-venv}
-[ -z "${HELIX_PYTHON:-}" ] && [ -x "$_lv/bin/python" ] && export HELIX_PYTHON=$_lv/bin/python
-# shellcheck source=/dev/null
-source "$H/scripts/helix_env.sh"
+NAME=${NAME:-$(basename "$CFG" .py)}
+GPUS=${GPUS:-4}
+SAVE=$HELIX_EXP/$NAME
+RUN=("$H/scripts/helix_run.sh")
+export HELIX_INTERACTIVE=0 HDF5_USE_FILE_LOCKING=FALSE HELIX_FORWARD_ENV="HDF5_USE_FILE_LOCKING"
 
-: "${HELIX_PIMM_ROOT:?helix.paths did not resolve HELIX_PIMM_ROOT; run python -m helix.paths}"
-: "${HELIX_EXP:?helix.paths did not resolve HELIX_EXP; run python -m helix.paths}"
-
-# --site is NOT optional and must be explicit. `pimm submit` defaults it to
-# "s3df" (pimm/cli/submit.py) and load_config takes `site or recipe.get("site")`,
-# so the CLI value always wins and a recipe's own `site:` key is unreachable.
-# Omitting it renders an s3df job -- singularity, wrong account -- with no
-# warning at all. Derived from the site profile's container runtime so that
-# "which pimm site profile matches this helix site" is answered in one place.
-case "${HELIX_CONTAINER_RUNTIME:-}" in
-  shifter|podman-hpc) PIMM_SITE=${HELIX_PIMM_SITE:-nersc-container} ;;
-  apptainer|singularity) PIMM_SITE=${HELIX_PIMM_SITE:-s3df-container} ;;
-  none) PIMM_SITE=${HELIX_PIMM_SITE:-${HELIX_SITE:-local}} ;;
-  *) PIMM_SITE=${HELIX_PIMM_SITE:?cannot map container runtime to a pimm site; set HELIX_PIMM_SITE} ;;
-esac
-
-ARGS=(
-  --site "$PIMM_SITE"
-  --train.config "$CFG"
-  # repo_root drives the shifter bind, the `cd`, the slurm log directory, the
-  # submitit folder and the watchdog state. UNSET it defaults to "." -- whatever
-  # directory you happened to submit from -- which with shifter binds THAT at
-  # /opt/pimm/src and then runs /opt/pimm/src/scripts/train.sh. Submit from the
-  # helix checkout and the job dies inside the allocation, because helix has no
-  # scripts/train.sh. It also scatters slurm_logs/ into whichever repo you were
-  # standing in, and helix's .gitignore does not cover that.
-  --paths.repo-root "$HELIX_PIMM_ROOT"
-  # exp_root defaults to {repo_root}/exp, i.e. INSIDE the pimm checkout, and
-  # train.sh then passes --options save_path=$EXP_DIR which OVERRIDES the
-  # save_path helix's config computed from helix.paths. helix has been bitten by
-  # the equivalent before: "a relative one wrote a run INTO the repo and four
-  # files were committed".
-  --paths.exp-root "$HELIX_EXP"
-)
-
-# The image, from the site profile. pimm's nersc-container.yaml names ITS OWN
-# base image (pimm-nersc), which has no helix, no PyWavelets and a pimm-data on
-# the wrong side of the forward-model boundary -- so this override is not a
-# preference, it is the difference between running helix and not.
-[ -n "${HELIX_CONTAINER_IMAGE:-}" ] && ARGS+=(--container.image "$HELIX_CONTAINER_IMAGE")
-[ -n "${HELIX_CONTAINER_PYTHON:-}" ] && ARGS+=(--container.interpreter "$HELIX_CONTAINER_PYTHON")
-
-# Scheduler facts for the TRAIN job kind. A recipe may still override any of
-# these on the command line (later flags win), which is how the premium and
-# interactive strategies select a non-default queue.
-[ -n "${HELIX_SLURM_TRAIN_ACCOUNT:-}" ]    && ARGS+=(--resources.account "$HELIX_SLURM_TRAIN_ACCOUNT")
-[ -n "${HELIX_SLURM_TRAIN_QOS:-}" ]        && ARGS+=(--resources.qos "$HELIX_SLURM_TRAIN_QOS")
-[ -n "${HELIX_SLURM_TRAIN_CONSTRAINT:-}" ] && ARGS+=(--resources.constraint "$HELIX_SLURM_TRAIN_CONSTRAINT")
-[ -n "${HELIX_SLURM_TRAIN_PARTITION:-}" ]  && ARGS+=(--resources.partition "$HELIX_SLURM_TRAIN_PARTITION")
-# pimm spells this `gpu_directive` and accepts gres | gpus-per-node.
-[ -n "${HELIX_SLURM_TRAIN_GPUS_FLAG:-}" ] && \
-  [ "${HELIX_SLURM_TRAIN_GPUS_FLAG}" = "gpus-per-node" ] && \
-  ARGS+=(--resources.gpu-directive gpus-per-node)
-
-# pimm loads the training config on the SUBMITTING host during preflight
-# (config.py), and helix's config imports helix at module scope. So helix must be
-# importable here, not only in the job.
-export PYTHONPATH="$HELIX_PIMM_ROOT:$HELIX_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-
-# Make --recipe absolute. pimm's load_config does
-#   recipe_path = Path(recipe); if not is_absolute(): recipe_path = ROOT / recipe_path
-# where ROOT is PIMM's root -- so a relative recipe is looked for inside the pimm
-# checkout, not relative to where you typed it, and helix's recipes are never
-# found: "Missing launch config: <pimm>/configs/launch/nersc-preempt.yaml".
-# Absolute paths ARE honoured, which is what lets the recipes live in helix at
-# all, so the fix is to always pass one. Relative paths are taken from $PWD, or
-# from the helix checkout when that does not resolve, so both
-#   scripts/train.sh fm --recipe configs/launch/nersc-premium.yaml
-# from anywhere and an explicit absolute path work.
-RECIPE=${RECIPE:-$H/configs/launch/${HELIX_SITE}.yaml}
-[ -f "$RECIPE" ] && ARGS+=(--recipe "$RECIPE")
-
-FIXED=()
-_want_recipe=0
-for a in "$@"; do
-  if [ "$_want_recipe" = 1 ]; then
-    _want_recipe=0
-    if [ "${a#/}" = "$a" ]; then
-      if [ -f "$PWD/$a" ]; then a="$PWD/$a"; elif [ -f "$H/$a" ]; then a="$H/$a"; fi
-    fi
-    FIXED+=("$a"); continue
-  fi
-  case "$a" in
-    --recipe) _want_recipe=1; FIXED+=("$a") ;;
-    --recipe=*)
-      _r=${a#--recipe=}
-      if [ "${_r#/}" = "$_r" ]; then
-        if [ -f "$PWD/$_r" ]; then _r="$PWD/$_r"; elif [ -f "$H/$_r" ]; then _r="$H/$_r"; fi
-      fi
-      FIXED+=("--recipe=$_r") ;;
-    *) FIXED+=("$a") ;;
-  esac
-done
-set -- "${FIXED[@]}"
-
-# `python3` is NOT a safe default here: on a Perlmutter login node it is the 3.6
-# OS interpreter and `pimm submit` dies on pimm/cli/main.py line 3. helix_env.sh,
-# sourced above, has already searched for a >= 3.8 interpreter and exports it as
-# HELIX_PYTHON; use that. HELIX_PIMM_PYTHON still overrides, for the case where
-# pimm needs a DIFFERENT interpreter from the one that can read a site profile.
-#
-# This must be a HOST interpreter, not the container's: `pimm submit` calls
-# sbatch, which does not exist inside the image. It needs pimm importable, which
-# on this host the system python3.11 satisfies, and it loads the training config
-# during preflight -- so helix must be importable too, which the PYTHONPATH set
-# above arranges.
-#
-# The default walks three steps, cheapest first: an explicit override, then the
-# launcher venv scripts/make_launcher_env.sh builds (which is the only one of
-# the three guaranteed to have tyro and submitit), then the interpreter
-# helix_env.sh found.
-_launcher_venv=${HELIX_LAUNCHER_VENV:-${HELIX_SCRATCH:-/nonexistent}/helix-launcher-venv}
-if [ -n "${HELIX_PIMM_PYTHON:-}" ]; then
-  PIMM_PY=$HELIX_PIMM_PYTHON
-elif [ -x "$_launcher_venv/bin/python" ]; then
-  PIMM_PY=$_launcher_venv/bin/python
-else
-  PIMM_PY=${HELIX_PYTHON:-python3}
+if [ "$LINK" = 1 ]; then                 # inside a job
+  WEIGHT=$("${RUN[@]}" python -m pimm.utils.path latest-checkpoint "$SAVE/model") \
+    || { echo "train.sh: the checkpoint resolver failed for $SAVE/model; not starting over" >&2; exit 2; }
+  if [ -n "$WEIGHT" ]; then RESUME=(resume=True "weight=$WEIGHT"); echo "resuming from $WEIGHT"
+  else RESUME=(resume=False); echo "starting $SAVE"; fi
+  exec "${RUN[@]}" python -m pimm.train --config-file "$CFG" --num-gpus "$GPUS" \
+    --options "save_path=$SAVE" "${RESUME[@]}" "$@"
 fi
-unset _launcher_venv
-echo "train.sh: $CFG  site=$HELIX_SITE pimm-site=$PIMM_SITE" >&2
-echo "          exp_root=$HELIX_EXP repo_root=$HELIX_PIMM_ROOT" >&2
-exec "$PIMM_PY" -m pimm.cli submit "${ARGS[@]}" "$@"
+
+# what this run is: the same NAME continues only the same config and options
+mkdir -p "$SAVE"
+WHAT="$CFG $*"
+if [ -s "$SAVE/train.cmd" ] && [ "$(cat "$SAVE/train.cmd")" != "$WHAT" ]; then
+  echo "train.sh: $SAVE is a run of: $(cat "$SAVE/train.cmd")" >&2
+  echo "          not of:            $WHAT  (set NAME= for a new run)" >&2
+  exit 2
+fi
+echo "$WHAT" > "$SAVE/train.cmd"
+
+LOGS=${LOGS:-$SAVE/slurm}
+mkdir -p "$LOGS"
+SB=(--account="$HELIX_SLURM_TRAIN_ACCOUNT" --nodes=1 --ntasks=1 --cpus-per-task=$((8 * GPUS))
+    --time="${TIME:-24:00:00}" --job-name="$NAME" --output="$LOGS/%j.out" --requeue)
+[ -n "${HELIX_SLURM_TRAIN_QOS:-}" ] && SB+=(--qos="$HELIX_SLURM_TRAIN_QOS")
+[ -n "${HELIX_SLURM_TRAIN_CONSTRAINT:-}" ] && SB+=(--constraint="$HELIX_SLURM_TRAIN_CONSTRAINT")
+[ -n "${HELIX_SLURM_TRAIN_TIME_MIN:-}" ] && SB+=(--time-min="$HELIX_SLURM_TRAIN_TIME_MIN")
+if [ -n "${HELIX_SLURM_TRAIN_PARTITION:-}" ]; then      # S3DF: a partition, memory asked for
+  SB+=(--partition="$HELIX_SLURM_TRAIN_PARTITION" --mem="${MEM:-$((50 * GPUS))G}")
+fi
+if [ "${HELIX_SLURM_TRAIN_GPUS_FLAG:-gpus}" = gpus-per-node ]; then SB+=(--gpus-per-node="$GPUS")
+else SB+=(--gpus="$GPUS"); fi
+read -r -a EXTRA <<< "${HELIX_SLURM_TRAIN_EXTRA:-}"
+SB+=("${EXTRA[@]}")
+
+PREV=""
+for i in $(seq 1 "${LINKS:-1}"); do
+  JID=$(sbatch --parsable "${SB[@]}" ${PREV:+--dependency=afterany:$PREV} --export=ALL,NAME="$NAME",GPUS="$GPUS" \
+        --wrap="bash $H/scripts/train.sh link $(printf '%q ' "$CFG" "$@")")
+  echo "link $i: job $JID${PREV:+ (after $PREV)}"
+  PREV=$JID
+done
+echo "run: $SAVE   logs: $LOGS"

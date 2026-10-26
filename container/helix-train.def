@@ -12,7 +12,7 @@
 #      current helix double-registers and pimm_data/_registry.py raises KeyError.
 #      The boundary move is lockstep and this image was on the wrong side of it.
 #
-#      It is also why configs/pimm/coeff_fm_train.py carries an elaborate
+#      It is also why configs/pimm/fm.py carries an elaborate
 #      sys.path.insert(1) dance: the comment there says the checkout "has to WIN
 #      over site-packages, not merely be present". With the right version
 #      installed, that requirement disappears.

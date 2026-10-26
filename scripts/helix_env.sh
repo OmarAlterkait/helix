@@ -43,17 +43,20 @@ export HELIX_ROOT
 # So: search, and say so when nothing is suitable.
 _helix_env_pick_py() {
   local c
-  for c in "${HELIX_PYTHON:-}" python3 python3.13 python3.12 python3.11 \
-           python3.10 python3.9 python3.8 python; do
+  # helix.paths reads the site file with PyYAML, so a candidate must import it. The host
+  # venv (scripts/make_host_env.sh) is one; a login node's system python may not be.
+  for c in "${HELIX_PYTHON:-}" "${SCRATCH:-/nonexistent}/helix-host-venv/bin/python" \
+           python3 python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python; do
     [ -n "$c" ] || continue
     command -v "$c" >/dev/null 2>&1 || continue
-    "$c" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' \
+    "$c" -c 'import sys, yaml; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' \
       >/dev/null 2>&1 && { echo "$c"; return 0; }
   done
   return 1
 }
 _helix_env_py=$(_helix_env_pick_py) || {
-  echo "helix_env.sh: no Python >= 3.8 found. Tried HELIX_PYTHON, python3," >&2
+  echo "helix_env.sh: no Python >= 3.8 with PyYAML found. Tried HELIX_PYTHON, the host venv" >&2
+  echo "              (scripts/make_host_env.sh), python3," >&2
   echo "              python3.13..3.8, python. On NERSC compute nodes the bare" >&2
   echo "              python3 is 3.6; set HELIX_PYTHON to a real interpreter," >&2
   echo "              or run inside the container where /opt/pimm/.venv has one." >&2
