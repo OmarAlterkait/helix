@@ -1,15 +1,10 @@
 #!/usr/bin/env python
-"""Write ``<corpus>/holdout.json`` — the split, materialised.
+"""Write ``<corpus>/holdout.json`` — the split, written out for inspection.
 
-WHY THIS EXISTS. the training config said the split is "Resolved once
-and written to holdout.json beside the corpus", and the reason it gives is right:
-"reproducible is not the same as auditable, and a probe holdout that exists only
-as code cannot be inspected, diffed or cited."
-
-Nothing wrote it. `CoeffTPCDataset.holdout_manifest` computes it, and
-dump_probe_truth.py and run_probe.py READ the file, but no code put it there. The
-production corpus has one; a freshly built corpus never does, so the probe cannot
-run on any corpus built from scratch. Found by building one.
+The split is computed, not read: ``CoeffTPCDataset(holdout=...)`` derives it from each
+event's identity, and nothing in helix reads this file. It exists because reproducible
+is not the same as auditable: a split that exists only as code cannot be inspected,
+diffed or cited. ``CoeffTPCDataset.holdout_manifest`` computes what is written.
 
 The split is keyed on blake2b(run/source_file) + event -- the SIMULATION event's
 identity -- so it is independent of basis, noise model, shard size and shard

@@ -2,9 +2,8 @@
 
 The layer that turns helix's own on-disk format into training batches. It lives
 here, not in pimm-data, because the format is helix's: the writer
-(``helix.core.coeff_io``), the reader and the verifier are one artifact, and
-splitting them across repos is what let the codec drift into two copies held
-together by a cross-repo golden test.
+(``helix.core.coeff_io``), the reader and the verifier are one unit, and
+splitting them across repos lets the codec drift into two copies.
 
 INVARIANT: ``helix.core`` and ``helix.tpc`` never import ``pimm_data`` — that is
 what keeps the DSP path installable with numpy alone (pimm-data requires
@@ -19,20 +18,14 @@ WHY THE TWO NAMES BELOW ARE LAZY
 --------------------------------
 This package MAY import pimm_data. Not every module in it NEEDS to, and two do
 not: ``helix.data.bins`` (numpy) and ``helix.data.identity`` (h5py) are corpus
-metadata, readable anywhere the corpus is readable. Importing either used to
-pull ``torch`` and ``pimm_data`` anyway, because Python runs a package's
-``__init__`` before any submodule of it and this one imported the reader and the
-dataset eagerly.
+metadata, readable anywhere the corpus is readable. Python runs a package's
+``__init__`` before any submodule of it, so this one resolves the reader and the
+dataset lazily; importing them eagerly would pull ``torch`` and ``pimm_data``
+into every import of ``bins`` or ``identity``.
 
-That is not academic. pimm documents a launcher-only environment -- "Login nodes
-and remote submission hosts may need only YAML parsing, Tyro, and Submitit...
-It cannot import the full model stack" -- and `pimm submit` loads the training
-config on the submitting host to check batch-size divisibility. helix's config
-reads the bin table and the corpus run list at module scope, both from this
-package, so submission demanded the full training stack on a login node and
-failed with `No module named 'pimm_data'`. Same shape as the smoke-path failure
-that `load_bins needed nothing from pimm` fixed: a cheap thing made expensive by
-the package it is spelled inside.
+That matters because helix's training configs read the bin table and the corpus
+run list at module scope, both from this package: a host that only loads a config
+(a login node, a config test) must not need the training stack for it.
 
 Deferring costs nothing. Both names resolve on first attribute access, so
 ``from helix.data import CoeffTPCDataset`` still works unchanged, and

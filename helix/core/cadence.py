@@ -33,9 +33,8 @@ what each one is for. Over the eight-run corpus at 25 epochs:
 
 At B=512 that is 100 warmup steps at an 8x learning rate on a cold 12-block
 transformer, and a checkpoint every 50 steps -- about every 13 seconds, with all
-ranks barriered while rank 0 serially removes the previous one. The fractions
-were honest (they are m113's values expressed as fractions of its 1,010,000-step
-run) but a fraction of a batch-dependent quantity is not a cadence.
+ranks barriered while rank 0 serially removes the previous one. A fraction of a
+batch-dependent quantity is not a cadence.
 
 Each quantity below is derived from the thing that actually determines it, and
 none of them depends on batch size except through the step budget they are

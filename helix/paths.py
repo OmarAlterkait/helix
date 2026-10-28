@@ -258,14 +258,9 @@ def root(name: str) -> Path:
 def repo() -> Path:
     """This checkout, located from THIS file -- never from a name.
 
-    Three helix checkouts have existed side by side (`helix`, `helix-consolidate`,
-    a worktree), and hardcoding one is not a portability problem but a
-    CORRECTNESS one: the old corpus builder recorded that an old default
-    of `helix-consolidate` was inserted at ``sys.path[0]``, so running the builder
-    from any other checkout silently used that tree's code -- "32 commits behind,
-    missing the MAD median fix, the packaged noise spectrum, the m113 anchoring
-    and the whole pimm integration" -- and produced corpora with stale DSP and no
-    error.
+    Several helix checkouts and worktrees exist side by side, and hardcoding one is
+    not a portability problem but a CORRECTNESS one: a builder that imports another
+    checkout's code produces corpora with that tree's DSP and no error.
 
     ``HELIX_ROOT`` still overrides, for the resume case where a job must re-enter
     the checkout link 1 used rather than wherever the code happens to be read

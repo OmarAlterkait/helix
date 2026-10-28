@@ -159,7 +159,7 @@ def resolve_tokenizer(data, tokenizer):
 @SCHEDULERS.register_module()
 class WarmupCosineLR(_LambdaLR):
     """Linear warmup over ``warmup`` steps, then a cosine from 1 to ``floor`` at ``total_steps``
-    (pimm injects it: ``iters_per_epoch * epoch``). The denoiser's schedule (docs/DENOISE.md:
+    (pimm injects it: ``iters_per_epoch * epoch``). The denoiser's schedule (docs/archive/DENOISE.md:
     1,000 warmup steps at d768, floor 0.02); ``warmup="auto"`` is resolved by FMTrainer. A
     LambdaLR, so each param group keeps its own LR (muP's ratios, the head's own LR)."""
 

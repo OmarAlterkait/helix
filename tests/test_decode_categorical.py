@@ -1,15 +1,14 @@
 """The categorical head's read-back: centroids, decode, and the space it lives in.
 
-These pin the fix for a bug that shipped: `viz_mask_recon.py` fed a posterior
-mean over *arcsinh-space* bin centres into `_rows_from_grid`, which applies
-`sinh(v) * sigma` -- i.e. the GAUSSIAN head's inverse applied to a CATEGORICAL
-head. Because `sinh(E[t]) != E[sinh t]` and the posterior spans many bins, it
-read back 68% of the charge (0.674 against the reference's 0.918).
+These pin the read-back against one bug: feeding a posterior mean over
+*arcsinh-space* bin centres into `sinh(v) * sigma` -- an inverse for a Gaussian
+head applied to a CATEGORICAL one. Because `sinh(E[t]) != E[sinh t]` and the
+posterior spans many bins, that reads back 68% of the charge (0.674 against
+0.918).
 
-The reference never does this: `fm/train.py:125`, `fm/e7_cat_eval.py:47` and
-`fm/viz_cat.py:25` all read back as `sum_k p_k * centroid_k` where the centroid
-table is measured in LINEAR space. So the estimator is an expectation of sinh,
-never a sinh of an expectation.
+The correct read-back is `sum_k p_k * centroid_k`, with the centroid table
+measured in LINEAR space: an expectation of sinh, never a sinh of an
+expectation.
 
 `test_jensen_gap_is_real` is the one that would have caught it: it asserts the
 two estimators genuinely differ on a spread posterior, so a future "simplification"

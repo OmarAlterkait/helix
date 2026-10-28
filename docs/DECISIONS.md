@@ -2,9 +2,9 @@
 
 Standing decisions live here; the measurements behind the older ones are in
 `docs/archive/SCIENCE.md`, and the shape of the code they apply to is in
-`docs/ARCHITECTURE.md`. The newest round is first (§0); the sections after it are
-older and name the corpora and scripts of their time (r1, the retired launchers);
-where a later entry supersedes one, it says so. Two documents referenced by older entries --
+`docs/ARCHITECTURE.md`. The newest round is first (the 2026-10 consolidation, then
+§0); the sections after them are older and name the corpora and scripts of their time
+(r1, the retired launchers); where a later entry supersedes one, it says so. Two documents referenced by older entries --
 `RESEARCH_EXTRACTION_MAP.md` (the research-tree extraction map) and
 `CONSOLIDATION_PLAN.md` -- described work that is now finished and were retired
 on 2026-09-12; they remain in git history and in
@@ -17,6 +17,120 @@ A decision without a measurement next to it is a preference, and several entries
 here started as preferences that the measurement then contradicted. Those are
 marked **RETRACTED** rather than deleted — knowing which way a question was
 answered wrongly is worth as much as the answer.
+
+---
+
+## The 2026-10 consolidation: noisy-only, one code path (2026-10-27 .. 28)
+
+origin/main's denoising research was merged into this line and then consolidated. The
+studies behind these entries are records only, all on the r1 corpus:
+`docs/archive/DENOISE.md`, `docs/archive/ENCODER_POOLING.md`, `docs/archive/SCIENCE.md`
+§§10-11 and `docs/archive/PERFORMANCE.md` §11.
+
+**Training is noisy-only.** The tokenizer's target is its own normalised input (`tgt`
+differs from `inp` only where `dead_frac` blanks the input); no training config, dataset
+default or training module reads `coeff_clean` (`tests/test_noisy_training.py` scans
+for it). *Why:* real detector data has no noise-free counterpart, so a recipe that needs
+the simulated clean target cannot be the recipe for data. It costs floor on simulation
+(SCIENCE §11: 0.45-0.61 at 1% FPR against 0.64-0.65 with clean targets; width recovers
+part of it); that is the price. Clean shards are a build option (`--keep-clean`, off by
+default), kept only to inspect the DSP. *Would overturn it:* nothing on the simulation
+side; a real-data target would.
+
+**The bin grid bins noisy coefficients, with one gap bin.** Uniform in asinh on each side
+of zero, with one bin spanning the sub-threshold gap; no target parameter, no clean
+mode, no legacy-table defaults. *Why:* noisy coefficients exist only beyond the
+~3.35-3.74 sigma threshold, so a single uniform grid leaves ~30-40% of its bins
+unreachable (SCIENCE §11). The reference is `coeff_bins_r2_run0027575715_noisy`
+(`helix/data/data/reference_bins.json`). **It is not derived yet:** its digests are
+`null`, `check_reference` reports `not-recorded`, and `tests/test_bins.py`'s three
+fingerprint tests fail until it is derived and its digests recorded (RUNBOOK §5).
+
+**One model, on varlen attention.** One `FMModel` (registered `Coeff-FM`) whose only
+attention path is the unpadded grouped (varlen) attention, with its CPU / fp32 per-group
+SDPA reference kept for tests and CPU evaluation; one categorical head; `build_fm` raises
+on an unknown key. *Why:* every option was a branch only one study exercised, and varlen +
+`fused_qk` was 6% faster per step and 0.005 better in cooled loss than the padded groups,
+which attended duplicated tokens (PERFORMANCE §11). *Consequence:* flash varlen attention
+needs sm80+, so training and evaluation run on `ampere` (A100) at S3DF, not `turing`
+(which still builds the corpora). Removed, with their verdicts:
+
+* the full-attention and padded paths, the serial / varlen switches: superseded by varlen
+  (PERFORMANCE §11);
+* the MSE / NLL heads (`nll`, `loss_fused`, `alpha` / `beta` / `varb`, the tokenizer's row
+  `target`) and `no_bce`: the categorical head is calibrated (PIT mean 0.512, std 0.289:
+  SCIENCE's header, `docs/archive/NEXT.md` §1) and no config used them;
+* `vis_frac` (visible tokens decoded): needs clean targets, and gave no floor change even
+  with them (SCIENCE §11);
+* encoder pooling (`band_pool`, `pool_skip`, `pool_sub`, `mask_cell`, location masks):
+  pooling costs the floor (0.09-0.13 at 1% FPR against plain pw8), and at pw16 the
+  location mask unit costs it (0.569 against 0.62-0.65) (ENCODER_POOLING §6);
+* block and `plane_any` masks, `plane_mode`: `plane_frac`, whole-plane masks mixed into
+  random ones per step, is the plane masking in use (SCIENCE §2);
+* `d_dec` (costs map_r: ENCODER_POOLING §6b), `n_sink`, `pad_mask`, `cond` / `adaln`,
+  `dec_mode`, FiLM subsets, `n_wirefeat`, `fm_names`, the centroid time coordinate and
+  `sigma_norm`: unused by any config, or superseded.
+
+Kept as switches until measured: `rope_split` (default False, as in every config) and
+`wire_rope`, for the RoPE re-test (TODO); `dec_frac` and `n_masks` until their arms are
+scored (ENCODER_POOLING §6 has `dec_frac` 1/3 only on the pooled encoder, where it hurt
+the floor); `dead_frac`.
+
+**The bf16-weights package is removed:** `bf16_params`, `fp32_stream`, `FlatAdamW`, the
+fp32 all-reduce hook and WeightEMA's FlatAdamW-master branch; with them `ddp_bf16_grads`,
+`bucket_by_size` and its sampler, the OneCycleLR `max_lr` expansion and
+`helix.integrations.pimm._compat`. The trainer is plain fused AdamW on fp32 weights under
+bf16 autocast. *Why:* bf16 weights were 11% faster but 0.010-0.015 worse in cooled loss
+(PERFORMANCE §11; `fp32_stream` was the arm meant to explain it); bucketing has nothing
+to sort at one event per rank; `_compat` patched pimm's legacy single-file checkpoint
+loader, and helix's split checkpoints restore RNG state through DCP instead.
+
+**The recipe is `nz_pw16`** (`configs/pimm/fm.py`): d768, 12 + 4 blocks, 12 heads (head
+dim 64), QK-norm, fused QK-norm + RoPE, K = 128, AdamW at LR 4.4e-3, the WSD stable phase
+plus a separate cooldown (`fm_cooldown.py`). *Why:* it is the recipe the noisy-only
+results were measured with (SCIENCE §11). *Caveat:* the LR was tuned at 29.2k steps on
+16 GPUs (one event each), and the LR optimum falls with run length, so a production-length
+run should confirm it (TODO). Supersedes the m113 architecture (d512) named in §0.
+
+**Truth is the `cells` modality, built separately from the corpus.**
+`scripts/build_truth.py --corpus <run dir>` writes `{name}_cells_<k>.h5` beside each
+coefficient shard (same events, same order, identity copied; format `helix-cells-2`,
+`helix/data/cells.py`): per 2-wire x 16-tick cell its charge, its split by track and its
+dominant hits group's share and position; per (plane, track) the charge centroid; per
+track the deposited energy. `CoeffTPCDataset(modalities=("coeff", "cells"))` joins it by
+identity; pretraining refuses any config or module that names it. *Why:* labels change
+more often than the corpus, and a corpus rebuild is the expensive step; every evaluation
+window and padding box lies on a cell edge, so the cell grid carries everything the
+denoiser label and the evaluation need (on run 0027575715 shard 0 it reproduces the
+pixel-level windows exactly). Size: ~197 MB per shard. It replaces the per-script truth
+dumps (`dump_probe_truth`, `dump_resolution_truth`, `build_denoise_truth`, ...).
+
+**One evaluation command.** `python -m helix.eval RUN --metrics recon,floor,uprobe,denoise
+--out FILE` scores a run from its pimm directory: `recon` (the training evaluator's
+metric code), `floor` (the detection floor on frozen features, trained and random-init
+arms, RankMe), `uprobe` (the along-wire probe on the same features and `fit_probe`),
+`denoise` (a denoiser on the floor's windows). *Why:* sixteen scripts (`eval_resolution`,
+`eval_checkpoint`, `eval_denoise`, `run_probe`, ...) each read the model and the truth
+their own way. `Q0` is defined once (`helix.data.cells.Q0`).
+
+**The denoiser trains on pimm, like the FM.** `configs/pimm/denoise.py` (`_base_` fm.py),
+launched by `scripts/train.sh denoise model.fm=<FM run>`: `Coeff-Denoise` = the encoder of
+the FM run (its architecture, its tokenizer and, with `pretrained=True`, its EMA weights;
+`pretrained=False` is the from-scratch baseline) plus `CellDecoder` with a presence
+logit. The default is M6d (`cond_charge=False`: detection and maps); `model.cond_charge=True`
+is M6dc (calorimetry). The split is fm.py's identity-hash holdout; the best checkpoint by
+validation loss is kept. *Why:* M6d is better or tied on detection, gated-map detection
+and localisation, M6dc better on energy (DENOISE, "Dense rerun ... M6d / M6dc"); one
+trainer, launcher and checkpoint format for both models instead of
+`scripts/train_denoise.py`'s own DDP loop and its `holdout.json` split.
+
+**Checkpoints load directly.** `helix.model.checkpoint.load_run` reads pimm's run directory
+(`resolved_config.json`, the WeightEMA sidecar, `model/last` or `model/model_best.pth`,
+`provenance.json`); nothing is exported. *Why:* the artifact layer (`artifact.py`,
+`export_artifact.py`, format detection, migrations, backfills) carried what the run
+directory already records. There is no compatibility with clean-target checkpoints or
+exported artifacts (m113 included): they trained on another target and grid, so their
+numbers are not comparable with today's anyway. Supersedes the artifact entries below.
 
 ---
 
@@ -70,6 +184,7 @@ what differs, and anything else is `key=value`. Warmup and eval / save cadence a
 counts copied between them; a fix applied to one was shadowed by another. The run's
 length now follows from the corpus, the split and the GPU count, which is what it
 depends on. `HELIX_LEGACY_CORPUS` and `resolve_cooldown_subsets.py` went with them.
+*Superseded in part* (2026-10 consolidation): the architecture is `nz_pw16`, not m113's.
 
 **An sbatch chain instead of `pimm submit`.** `scripts/train.sh CONFIG [key=value ...]`
 submits `LINKS` jobs chained `--dependency=afterany`; each runs `python -m pimm.train`
@@ -89,6 +204,9 @@ median 0.35 / 0.46 / 0.64 / 0.98 local bin widths (A4 / D4 / D3 / D2, max 2.0) f
 against 0.16 between r1 runs, so by the yardstick of the freeze decision below the r1
 grid does not describe r2. Models trained on r1's grid are not value-comparable with
 models trained on this one.
+*Superseded* (2026-10 consolidation): that grid binned clean coefficients. The reference
+is now the noisy grid `coeff_bins_r2_run0027575715_noisy`, same corpus and parameters, not
+yet derived.
 
 **Sites are profiles; the target is NERSC.** Paths, container and scheduler live in
 `helix/sites/<site>.yaml` and reach shell scripts through `scripts/helix_env.sh` and
@@ -154,7 +272,7 @@ so no centroid buffer is ever NaN. They used to be optional, so consumers asked
 `charge_closure` / `charge_bias` were absent from **every** eval log ever
 produced. Centroid args are keyword-only.
 
-`checkpoint.apply_bins` is the caller on the RESUME path (and in
+`checkpoint.apply_bins` is the caller on the RESUME path (and was in the retired
 `scripts/smoke_train_fm.py`), not the sole caller — several test files call
 `model.set_bins(edges)` directly. That distinction matters: the guarantee here comes from `set_bins`
 DERIVING any table it is not given, not from a single choke point upstream of it.
@@ -165,7 +283,8 @@ invariant to hold for free.
 read.** `cent_lin` also carried a real bias (planes pooled across 22%-different
 sigmas). `bin_cent_measured` was added *by this work* two commits after removing
 `cent_lin`, committing the same sin. Old checkpoints carrying either still load
-(`_STALE_BUFFERS`).
+(`_STALE_BUFFERS`). *Superseded* (2026-10 consolidation): `_STALE_BUFFERS` is gone with
+every other compatibility path; such checkpoints are not loaded.
 
 **Validation scores the whole val set.** Every rank evaluates its shard and the
 sums all-reduce. Previously rank 0 evaluated alone with a `DistributedSampler`
@@ -204,7 +323,8 @@ runs are one distribution — see above.
 concern: `_compat` (import-time pimm patches, must import first), `data`,
 `model`, `trainer`, `hooks` (what a run *writes*), `eval` (what a run
 *measures*). The module path is unchanged, so `imports=["helix.integrations.pimm"]`
-and every symbol import still work.
+and every symbol import still work. *Superseded in part* (2026-10 consolidation):
+`_compat` is removed.
 
 **Eval stays in helix**, against the extraction map's "EVAL is pimm's
 job". That line was written when eval meant downstream probes and baselines,
@@ -231,11 +351,15 @@ that lived elsewhere.
 removed: `edges` is `(n_band, K+1)` in every checkpoint on disk including m113,
 the frozen goldens and the trained run. Churning a persisted format for tidiness
 would break all three. Delete when the format next changes for a real reason.
+*Since* (2026-10 consolidation): m113 and the clean-target runs are no longer loaded,
+so the reason that remains is every noisy-only checkpoint written since.
 
 **Deriving centroids from edges** is unreachable for anything current (the v2
 sidecar measures both; live checkpoints carry both). Kept only for pre-fix blobs
 like m113, which has no measured `cent_ratio` and never will. (The research
 bundle has since retired; this is the remaining reason to keep the fallback.)
+*Superseded* (2026-10 consolidation): m113 is no longer loadable; the derivation
+remains as `set_bins`' behaviour for a table it is not given.
 
 ---
 
@@ -248,7 +372,8 @@ done. There is one launcher, `scripts/train.sh` (§0). The decisions are:
   and A100 disagree on 0.016% of surviving coefficients and are not
   bit-comparable. Run 1 was built entirely on turing.
 - **Training on `ampere`.** K=128 at full event size makes the logits ~2.4 GB for
-  one event before the backward doubles it.
+  one event before the backward doubles it, and the varlen attention needs sm80+
+  (evaluation too).
 - **Never edit the helix tree mid-build.** `coeff_verify` fails a corpus whose
   shards carry different `code.git`; it caught exactly this and 7 shards were
   rebuilt.

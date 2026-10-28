@@ -21,7 +21,8 @@ roots:
   # it stops being a detail.
   #
   # $SCRATCH is purged on inactivity, so the durable copy stays on $CFS and is
-  # named below rather than forgotten. Re-stage with scripts/stage_corpus.sh.
+  # named below rather than forgotten. Re-stage by copying it back:
+  # rsync -a $HELIX_CORPUS_DURABLE/ $SCRATCH/coeff_tpc_r2/
   HELIX_CORPUS_ROOT:   $SCRATCH
   HELIX_CORPUS:        $SCRATCH/coeff_tpc_r2/run_0027575715
   HELIX_CORPUS_DURABLE: $CFS/m5238/users/oalter/coeff_tpc_r2
@@ -120,8 +121,8 @@ scheduler:
     account: m5238_g
     constraint: gpu
     # NERSC runs PreemptMode=REQUEUE (scontrol show config), the OPPOSITE of
-    # S3DF's CANCEL. So a preempted job comes back and submitit's requeue chain
-    # works. GraceTime on preempt/gpu_preempt is 60s -- below pimm's default
+    # S3DF's CANCEL. So a preempted job comes back, and scripts/train.sh's
+    # afterany chain continues either way. GraceTime on preempt/gpu_preempt is 60s -- below pimm's default
     # signal_delay_s of 120 -- so a checkpoint has one minute to land.
     qos: preempt
     # `preempt` is REJECTED without this: "Job request does not match any

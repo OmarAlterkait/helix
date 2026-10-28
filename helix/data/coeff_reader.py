@@ -7,7 +7,7 @@ slice per event; ``plane_gid`` is a column. This is pimm-data's own offset idiom
 (cf. the optical second row-space) applied shard-wide.
 
 One modality per file (``{name}_coeff_*.h5`` noisy input, ``{name}_coeff_clean_*``
-the clean target), joined by identity — never mixed. The on-disk layout is the
+the noise-free values of a ``--keep-clean`` build), joined by identity — never mixed. The on-disk layout is the
 shared contract defined in helix ``docs/archive/COEFF_CORPUS_DESIGN.md`` §3; this reader
 implements it with **standalone h5py** (no helix import at read time — no cycle),
 and is round-trip golden-tested against helix's reference codec.
@@ -39,7 +39,7 @@ from helix.core.coeff_io import FORMAT, coord_digest, shard_format
 
 class CoeffTPCReader(ShardReaderBase):
     """Flat-columnar coeff-shard reader. ``modality`` selects the file family
-    (``'coeff'`` noisy / ``'coeff_clean'`` target)."""
+    (``'coeff'`` noisy / ``'coeff_clean'`` noise-free values)."""
 
     _MODALITY = "coeff"
 
@@ -234,12 +234,9 @@ class CoeffTPCReader(ShardReaderBase):
         int64 array per shard -- so the whole corpus is sized without touching a
         single coefficient. 150k events cost a few seconds and a few megabytes.
 
-        It exists for length bucketing (``helix.integrations.pimm.sampler``):
-        one event per rank plus a 2.75x spread in event size means a DDP step
-        costs the largest event in the batch, and knowing the sizes in advance is
-        what lets a step be made homogeneous. Anything else that needs to reason
-        about cost per event -- a memory estimate, a shard-balance check -- wants
-        the same table.
+        ``CoeffTPCDataset``'s ``max_event_size`` cap reads it; anything else that
+        reasons about cost per event -- a memory estimate, a shard-balance check --
+        wants the same table.
         """
         self._ensure_open()
         n = len(self)

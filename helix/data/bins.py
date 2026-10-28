@@ -16,7 +16,7 @@ The algorithm is unchanged from ``scripts/derive_coeff_bins.py``, which is now a
 thin CLI over this module. It must stay unchanged: altering it silently
 invalidates every checkpoint trained against an existing grid.
 
-Algorithm, matching research ``fm/tier1_setup_bins.py``:
+Algorithm:
 
 * work in ``tgt = arcsinh(coeff / sigma)`` of the NOISY coefficients — the space
   the head predicts in (training is noisy-only: real data has no clean counterpart)
@@ -69,20 +69,13 @@ def reference() -> dict[str, Any] | None:
 
 
 def reference_name() -> str:
-    """The canonical NAME of the production grid, e.g. ``..._v3``.
+    """The canonical NAME of the production grid, e.g. ``coeff_bins_r2_run0027575715_noisy``.
 
-    The ``.pt`` on disk is conventionally ``<name>.pt`` under ``HELIX_ARCHIVE``,
-    so this is what a config should build that filename from.
-
-    It exists because the name was previously retyped as a literal in five
-    places -- the training and eval configs,
-    ``tests/test_bins.py`` and twice in ``docs/archive/INVENTORY.md`` -- while
-    ``reference_bins.json`` already declared it and NOTHING read it. When the
-    grid was re-derived and the JSON went to ``_v3``, every one of those five
-    still said ``_v2``: the config then names a file that does not exist, or
-    worse, one that does and holds a grid derived from a different corpus.
-
-    A hardcoded filename is the same bug as a hardcoded path, one level down.
+    The ``.pt`` on disk is ``<name>.pt`` under ``HELIX_ARCHIVE``, so this is what a
+    config builds that filename from. The name is written once, in
+    ``reference_bins.json``: a literal retyped elsewhere goes stale when the grid is
+    re-derived, and then names a file that does not exist or, worse, one that holds
+    a grid derived from a different corpus.
     """
     ref = reference()
     if not ref or not ref.get("name"):

@@ -1,6 +1,6 @@
 """Build from JAXTPC sensor files (one run per directory): the planes are densified, noised (the
 colored incoherent + coherent model, :mod:`helix.tpc.noise`, seeded per event) and digitized on the
-device; the noise-free planes are the clean target. Chain: :func:`helix.tpc.chain.sim_config`.
+device; the noise-free planes are written only with ``--keep-clean``. Chain: :func:`helix.tpc.chain.sim_config`.
 
     python scripts/build_sim.py --input RUN/sim_wire_sensor_0000.h5 --output OUT/RUN/sim_wire --device cuda
     python scripts/build_sim.py plan OUT RUN_DIR...        one task per sensor file, shard = file number
@@ -31,7 +31,7 @@ def _sha256(path):
 
 
 class SimSource:
-    """JAXTPC sensor files of one run: noisy planes (on the device) and the clean target."""
+    """JAXTPC sensor files of one run: noisy planes (on the device) and the noise-free planes."""
 
     systems = ()
     dataset = "sim_wire"

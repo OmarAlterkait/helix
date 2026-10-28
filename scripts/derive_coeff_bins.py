@@ -3,8 +3,8 @@
 
 The algorithm and the reasoning behind it live in ``helix.data.bins``; this is
 the command line over it. The bins are TRAINING-SET STATISTICS, so they must come
-from the corpus a model will be trained on — the edges shipped with m113 were
-derived from the old cache, which used a different (white) noise model.
+from the corpus a model will be trained on: a grid from another corpus or noise
+model describes different values.
 
 Three modes::
 
@@ -43,7 +43,7 @@ def main(argv=None):
     ap.add_argument("--verify", help="rederive and compare against this .pt; writes nothing")
     ap.add_argument("--dataset-name", default=binlib.DEFAULTS["dataset_name"])
     ap.add_argument("--events", type=int, default=binlib.DEFAULTS["events"],
-                    help="events to pool (research used 120)")
+                    help="events to pool (the reference grid: 120)")
     ap.add_argument("--K", type=int, default=binlib.DEFAULTS["K"], help="bins per band")
     ap.add_argument("--n-bands", type=int, default=binlib.DEFAULTS["n_bands"],
                     help="bands the tokenizer keeps (D1 and beyond are dropped)")
@@ -53,9 +53,9 @@ def main(argv=None):
     # real hazard: those generations differ in which coefficients survive the
     # gate, so a grid from one does not describe the other. But a SYNTHETIC
     # corpus is a legitimately different generation and the caller knows it --
-    # docs/RUNBOOK.md 0b builds one from pimm_data.testing and derives a grid
-    # over it, and without an escape hatch that documented path cannot run at
-    # all. It is opt-in and it says what it did.
+    # the CI workflow (.github/workflows/docker.yml) builds one from
+    # pimm_data.testing and derives a grid over it, which needs this escape hatch.
+    # It is opt-in and it says what it did.
     ap.add_argument("--allow-foreign-basis", action="store_true",
                     help="derive from a corpus whose basis_digest is not the "
                          "packaged reference generation (synthetic corpora, or a "

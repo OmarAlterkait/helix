@@ -6,18 +6,19 @@ Guidance for Claude Code working in this repository.
 
 HELIX covers the whole path from raw LArTPC wire data to a trained foundation
 model: coherent-noise removal and wavelet sparsification, a coefficient corpus,
-a masked autoencoder over those coefficients, and a 3D probe that asks whether
-the learned representation knows where charge is.
+a masked autoencoder trained on the noisy coefficients alone, a supervised
+denoiser on its encoder, and an evaluation of both (detection floor, along-wire
+probe, denoising) against simulation truth on a fine cell grid.
 
 | package | may import pimm-data / pimm | what it is |
 |---|---|---|
 | `helix.core` | **no** | wavelet transform, robust statistics, hysteresis, coeff IO, provenance |
 | `helix.tpc` | **no** | LArTPC physics: TPC chain, coherent gate, forward model (noise + digitize), readouts, readers |
 | `helix.build` | **no** | the build pipeline (sources are `scripts/build_{sim,sbnd,goop}.py`) |
-| `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP |
+| `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP; the denoiser; reading a run |
 | `helix.eval` | no (events read through `helix.data`) | evaluating a run: `python -m helix.eval` (recon, floor, uprobe, denoise) |
 | `helix.optical` | no | the optical codec — written beside the TPC shards, not yet fed to the FM |
-| `helix.data` | **pimm-data** | coeff corpus reader/dataset/verifier, registered transforms, identity guard |
+| `helix.data` | **pimm-data** | coeff corpus reader/dataset/verifier, registered transforms, bin grid, `cells` truth, denoiser labels, identity guard |
 | `helix.integrations.pimm` | **pimm** | adapters into the training framework |
 
 ## The invariant
@@ -80,8 +81,10 @@ checkpoint) run on the host and need only the host Python above. pimm's own laun
 layer (`pimm submit`, launch recipes) is not used; helix needs only pimm's training
 engine.
 
-See `docs/RUNBOOK.md` for host env → corpus → verify → train → eval → probe, and
-`docs/ARCHITECTURE.md` for the modules and the shard format.
+See `docs/RUNBOOK.md` for host env → corpus → verify → truth → bin grid → pretrain →
+denoiser → evaluate (S3DF and NERSC), `docs/ARCHITECTURE.md` for the modules and the
+shard formats, and `docs/DECISIONS.md` for why. `docs/archive/` holds history and study
+records only; live docs describe the code as it is.
 
 ## Structural patterns worth knowing
 
@@ -127,6 +130,17 @@ planes are contiguous). For a second modality those four roles separate; see
 
 ## Traps that have cost real time
 
+- **Training is noisy-only.** No training config or module may name `coeff_clean`
+  or `cells` (simulation-only data that real detector data lacks);
+  `tests/test_noisy_training.py` scans for both strings. Clean shards exist only
+  with `--keep-clean`; `cells` is for the denoiser and evaluation.
+- **The bin grid is not derived yet.** `reference_bins.json` names
+  `coeff_bins_r2_run0027575715_noisy` with `digests: null`, so `tests/test_bins.py`'s
+  three fingerprint tests fail until it is derived and recorded (RUNBOOK §5). That is
+  the expected baseline, not a regression.
+- **Training and evaluation need sm80+.** The FM's only attention path is flash
+  varlen: `ampere` at S3DF, never `turing` (which builds corpora). On CPU the
+  per-group SDPA reference runs instead (tests).
 - **Provenance refuses a dirty tree.** Build a corpus from an uncommitted
   checkout and every shard records `git_dirty: True`; `coeff_verify` then
   refuses it. This cost a 344 GB (r1) rebuild once.

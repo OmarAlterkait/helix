@@ -133,8 +133,7 @@ def test_hooks_exclude_the_ones_that_do_not_fit():
 # ---- the from-scratch categorical path -------------------------------------
 
 def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
-    """Training from scratch with a categorical head is the ACTUAL plan (m113 is
-    out-of-distribution on this corpus), and it needs bin edges that no
+    """Training from scratch with a categorical head needs bin edges that no
     checkpoint supplies.
 
     The edges are training-set statistics, so the model cannot invent them. This

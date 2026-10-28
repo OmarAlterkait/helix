@@ -112,8 +112,8 @@ def corpus_runs(corpus_root=None) -> list[str]:
     manifest = _os.path.join(str(corpus_root), "_calib", "RUNS.txt")
     if not _os.path.isfile(manifest):
         raise FileNotFoundError(
-            f"no run manifest at {manifest}. _calib/RUNS.txt is hand-written and "
-            f"is step zero of a corpus build (docs/RUNBOOK.md §1); a corpus "
+            f"no run manifest at {manifest}. _calib/RUNS.txt is written by "
+            f"`scripts/corpus.sh plan` (docs/RUNBOOK.md §3); a corpus "
             f"without it is incomplete, not merely undocumented.")
     with open(manifest, "r", encoding="utf-8") as fh:
         runs = fh.read().split()

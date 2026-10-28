@@ -54,11 +54,11 @@ export = ["safetensors>=0.4"]
 # the `pimm` training framework itself (7 modules do), which is not declared
 # here because it is not on PyPI either and its version is pinned by pimm-fm's
 # uv.lock, not by helix. Installing this extra does NOT give you a working
-# training integration; use the container (docs/ARCHITECTURE.md section 4).
+# training integration; use the container (docs/ARCHITECTURE.md section 10).
 pimm = ["pimm-data>=0.4.0"]
 
-# The backend framework is optional: helix.core imports torch lazily, only when
-# the torch backend is selected. NumPy (base dep) is always available.
+# torch is optional at install: the DSP (helix.core.wavelet, the TPC chain, the optical
+# codec) imports it when it runs. NumPy (base dep) is always available.
 torch-cpu = ["torch>=2.0"]          # CPU wheels: pip install --index-url https://download.pytorch.org/whl/cpu
 cpu = ["torch>=2.0"]
 gpu = ["torch>=2.0"]

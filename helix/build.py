@@ -19,14 +19,14 @@ and ``scripts/corpus.sh`` runs a whole corpus of it on the site's scheduler. A s
 * ``source.events(indices, workers)`` yields per event a dict: ``ident`` (run, source_file, event,
   ...), the TPC input as ``readout`` (adc, pedestal, present: :meth:`TPCChain.process_event`) or
   ``planes`` ({gid: image}: :meth:`TPCChain.process_planes`), optionally ``clean`` (noise-free
-  planes: the clean target), ``optical`` ({system: waveforms}) and ``truth`` ({name: array});
+  planes, written with ``--keep-clean``), ``optical`` ({system: waveforms}) and ``truth`` ({name: array});
 * ``source.shard_attrs()``: dict(noise=, provenance=) the coeff shards record about the input;
 * for a TPC: ``chain_config(overrides)`` and ``bind(chain)``; for optical: ``optical_chain(overrides)``;
 * optionally ``file_shard(path)``: plan one task per input file, its shards numbered from it.
 
 Everything after the read is shared. Per ``--events-per-shard`` events, shard k
 (``--shard-start`` + 0, 1, ...): ``PREFIX_coeff_k.h5`` (:mod:`helix.core.coeff_io`; the dataset
-name is PREFIX's last component), ``PREFIX_coeff_clean_k.h5`` (with ``--keep-clean``, when the source gives a clean target),
+name is PREFIX's last component), ``PREFIX_coeff_clean_k.h5`` (with ``--keep-clean``, when the source gives noise-free planes),
 ``PREFIX_optical_k.h5`` (:mod:`helix.optical.shard`), joined on (run, source_file, event).
 ``norm_sigma`` is ``--norm-sigma`` (one table for a whole corpus) or else each shard's own;
 ``--calibrate TABLE`` writes the table of the selected events and no shards. A JSON summary

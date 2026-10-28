@@ -291,8 +291,7 @@ def test_eval_mask_mode_defaults_to_random_and_is_honoured():
 
     `random` is deliberate and load-bearing: with `plane_frac > 0` a
     mixed-mode eval would make val loss a 90/10 blend and stop being comparable
-    across runs, which is why research reported the plane-masked number as a
-    SEPARATE curve. The override exists to produce that separate number, so the
+    across runs; a plane-masked number is a SEPARATE curve. The override exists to produce that separate number, so the
     two things worth pinning are that the default did not move and that an
     override actually reaches `make_mask` (rather than being stored and
     ignored, which is how `WeightEMA(key=)` spent its whole life).

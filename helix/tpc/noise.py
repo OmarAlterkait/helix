@@ -36,12 +36,11 @@ DEFAULT_COH_BETA = 0.15
 DEFAULT_GROUP_SIZE = 64
 
 #: Sentinel for the MEASURED series spectrum shipped in ``data/``. It is the
-#: default because white was the wrong answer and was silently easy to get: the
-#: research pipeline called ``AddNoise(coherent=True, incoherent=True)`` without
-#: naming a spectrum, got flat noise, and trained a foundation model on it. The
-#: measured spectrum concentrates power in 10-490 kHz and has NONE above 500 kHz,
-#: so white misplaces noise across every wavelet band (see helix's
-#: docs/archive/MULTI_EVENT_BATCHING.md sibling note in the corpus design docs).
+#: default because white is the wrong answer and is silently easy to get:
+#: ``AddNoise(coherent=True, incoherent=True)`` without a spectrum would give flat
+#: noise. The measured spectrum concentrates power in 10-490 kHz and has NONE above
+#: 500 kHz, so white misplaces noise across every wavelet band
+#: (docs/archive/NOISE_BANDS.md).
 #:
 #: Pass ``series_spectrum=None`` for white — still available, but now an explicit
 #: choice rather than what you get by saying nothing.

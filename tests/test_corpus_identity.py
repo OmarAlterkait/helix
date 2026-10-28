@@ -2,9 +2,9 @@
 
 Each corpus is internally consistent -- CoeffTPCReader rejects shards that
 disagree with EACH OTHER -- so a reader pointed at the wrong corpus is perfectly
-satisfied. eval_checkpoint validated only that the split name exists, which every
-corpus satisfies. The failure mode was therefore a plausible number, not an
-error, and that is the hardest kind to notice.
+satisfied, and a split name exists in every corpus. The failure mode is
+therefore a plausible number, not an error, and that is the hardest kind to
+notice.
 
 The live instance: coeff_tpc and coeff_tpc_r1 share a run name and differ only in
 the coherent-removal gate (r1 records tau=0.05). Same wavelet, bands, gids,
@@ -91,11 +91,10 @@ def test_an_unstamped_run_warns_but_does_not_fail(tmp_path):
 def test_resuming_against_a_different_corpus_is_refused():
     """A run directory continued against a different corpus must REFUSE.
 
-    check_corpus_matches was wired into scripts/eval_checkpoint.py alone. The
-    training hook RECORDED corpus identity per link and never compared it, so a
-    resumed run could switch corpora silently -- which is the exact mismatch
-    identity.py exists to prevent, in the one place where it also costs GPU
-    days before anyone sees a number.
+    The training hook records corpus identity per link; without the comparison a
+    resumed run could switch corpora silently -- the exact mismatch identity.py
+    exists to prevent, in the one place where it also costs GPU days before
+    anyone sees a number.
     """
     r1 = dict(basis_digest="8c4542b6" + "0" * 56, removal_json='{"tau":0.05}',
               sigma_norm=2.6)
@@ -137,14 +136,11 @@ def test_the_training_hook_actually_calls_the_guard():
 
 
 def test_write_holdout_exists_and_is_wired():
-    """The split must be materialisable, not only computable.
+    """The split can be written out for inspection, not only computed.
 
-    the training config said the split is "Resolved once and written
-    to holdout.json beside the corpus" -- and nothing wrote it.
-    CoeffTPCDataset.holdout_manifest() computed it, dump_probe_truth.py and
-    run_probe.py READ the file, and no code put it there. Result: the probe could
-    not run on any corpus built from scratch, and in fact 7 of the 8 production
-    runs have no holdout.json either.
+    scripts/write_holdout.py writes holdout.json from
+    CoeffTPCDataset.holdout_manifest(), so the file is the dataset's own split
+    rather than a re-implementation of the identity hash. Nothing reads it.
     """
     import ast, os
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

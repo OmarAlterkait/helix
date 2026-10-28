@@ -185,11 +185,11 @@ jobs:
 
   # The step that actually proves a handover works: corpus -> verify -> holdout
   # -> bins -> train, on a synthetic dataset, with no production data at all.
-  # docs/RUNBOOK.md 0b is this procedure; keeping it in CI means the first thing
-  # a receiving site does is the thing that is continuously tested.
+  # It is docs/RUNBOOK.md §§3-6 at toy scale; keeping it in CI means the first
+  # thing a receiving site does is the thing that is continuously tested.
   #
   # The truth step is deliberately NOT here: the fixture has no simulation
-  # hits/step files. See 0b.
+  # hits/step files.
   smoke:
     needs: build
     if: needs.build.outputs.pushed == 'true'

@@ -1,4 +1,4 @@
-"""Triton kernels for the serial model's hot path. Imported lazily (only when a
+"""Triton kernels for the FM's hot path. Imported lazily (only when a
 model is built with ``fused_qk``), so neither CPU tests nor the login node need
 Triton.
 

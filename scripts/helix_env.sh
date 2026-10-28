@@ -11,11 +11,9 @@
 # because helix.paths checks the environment first.
 #
 # Why a shell script at all, when helix.paths already exists: `#SBATCH`
-# directives cannot read shell variables, pimm's launch YAML cannot read
-# environment variables (pimm/launch/config.py resolves {placeholders} against
-# the config, never os.environ), and pimm's scripts/train.sh reads EXP_ROOT from
-# the environment. All three need the values as env vars, in a shell, before
-# Python runs. This is the one place that conversion happens.
+# directives cannot read shell variables, and scripts/corpus.sh and
+# scripts/train.sh build their sbatch flags from these values in a shell, before
+# any Python runs. This is the one place that conversion happens.
 #
 # HELIX_SITE selects the profile; without it helix.paths auto-detects. Set it
 # explicitly in a batch job, where auto-detection is a guess made on a node.
@@ -116,12 +114,9 @@ PY
 eval "$_helix_env_out"
 
 # Export the interpreter this script searched for, so the next script does not
-# repeat the search and -- more to the point -- does not skip it. scripts/train.sh
-# defaulted to a bare `python3`, which on a Perlmutter LOGIN node is the 3.6 OS
-# interpreter: `pimm submit` died on `from __future__ import annotations` in
-# pimm/cli/main.py, three lines in, after this script had already printed its
-# banner and found a perfectly good 3.11. Finding an interpreter and then not
-# telling anyone is the bug.
+# repeat the search and -- more to the point -- does not skip it: a bare `python3`
+# on a Perlmutter LOGIN node is the 3.6 OS interpreter, which cannot run helix's
+# host-side Python.
 #
 # It is also the first candidate on a re-source, which is what makes the choice
 # stable across a session -- and it is re-validated there like any other, so a

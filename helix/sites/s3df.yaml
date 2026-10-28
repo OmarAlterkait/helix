@@ -18,7 +18,8 @@ roots:
   # One filesystem here, so there is no staged/durable split to record.
   HELIX_CORPUS_DURABLE: null
   # doraemon belongs to a DIFFERENT group. A handover target will not have read
-  # access, which is why docs/archive/INVENTORY.md calls the probe truth irreplaceable.
+  # access, so the simulation truth (hits / step, read by scripts/build_truth.py)
+  # cannot be rebuilt from there (docs/archive/INVENTORY.md).
   HELIX_SENSOR_ROOT:   /sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor
   HELIX_ARCHIVE:       /sdf/data/neutrino/omara/archive
   HELIX_EXP:           /sdf/data/neutrino/omara/exp/helix

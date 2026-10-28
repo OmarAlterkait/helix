@@ -142,9 +142,9 @@ def main():
                          "Runs with no entry get no reference line. Do NOT use "
                          "ln(K): uniform-over-128-bins is not a predictor "
                          "anything could achieve, and drawing it overstated the "
-                         "value head's gain by 1.42x. Research never used an "
-                         "entropy null at all — it reported var_expl against a "
-                         "measured per-band target variance.")
+                         "value head's gain by 1.42x. var_expl against a "
+                         "measured per-band target variance is the grid-free "
+                         "alternative.")
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
@@ -181,8 +181,8 @@ def main():
     #
     # Both nulls are CORPUS-dependent, so one shared line cannot serve two runs;
     # they come in per-run via --nulls and are drawn in each run's own colour.
-    # Research reported neither — it used var_expl against a measured per-band
-    # target variance, which is grid-free and is the better thing to port.
+    # var_expl against a measured per-band target variance needs neither and is
+    # grid-free.
     #
     # The learning-rate panel is gone: WSD's stable phase is flat by
     # construction (see the scheduler note in helix.integrations.pimm.trainer), so it can only

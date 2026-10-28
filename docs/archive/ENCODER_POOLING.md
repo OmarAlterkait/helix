@@ -1,5 +1,7 @@
 # Pooling inside the encoder
 
+> Study record of origin/main's code before the 2026-10 consolidation: the options it measures are removed, and every number in it is on the r1 corpus with clean targets (before cfc5345).
+
 Where an encoder hierarchy can save tokens in this data, what it must not break,
 and the arms that decide it. Companion to `docs/SCIENCE.md` §10 (patch size and
 resolution) and the literature reviews behind it (`$HELIX_SCRATCH/helix_work/litreview/`).

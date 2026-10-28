@@ -35,9 +35,8 @@ IN_PY=${HELIX_CONTAINER_PYTHON:-python3}
 BINDS=${HELIX_CONTAINER_BINDS:-}
 
 # pimm AND helix, in that order -- the same pair helix.paths.pythonpath() returns.
-# Setting only helix meant anything importing pimm (smoke_train_fm, the pimm
-# config contract, the trainer) died with "No module named 'pimm'" INSIDE the
-# container while working fine outside it.
+# Without pimm, anything importing it (the pimm config contract tests, the trainer)
+# dies with "No module named 'pimm'" INSIDE the container while working outside it.
 HPP="$HELIX_ROOT"
 [ -n "${HELIX_PIMM_ROOT:-}" ] && [ -d "${HELIX_PIMM_ROOT}" ] && HPP="$HELIX_PIMM_ROOT:$HELIX_ROOT"
 

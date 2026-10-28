@@ -164,10 +164,9 @@ def describe_checkout(root):
 def provenance():
     """Everything needed to answer "what produced this run directory?".
 
-    Nothing recorded this before, so for any existing checkpoint the answer is a
-    guess — which is how m113 ended up evaluable only by trying configurations
-    until one matched. The checkpoint records its own bin tables now; this
-    records the code around them.
+    Without it the answer is a guess, found by trying configurations until one
+    matches. The checkpoint records its own bin tables; this records the code
+    around them.
     """
     import os
     import platform

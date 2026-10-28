@@ -15,8 +15,9 @@ shards and emits a **nested** dict with a ``coeff`` part of per-coefficient rows
       'name': str, 'split': str,
     }
 
-Targets are separate joined modalities (``modalities=('coeff','coeff_clean')``):
-the clean target is its own ``coeff_clean`` shard family, aligned by identity.
+Other modalities join by identity: ``'coeff_clean'`` (``modalities=('coeff','coeff_clean')``)
+is the noise-free values of a ``--keep-clean`` build, its own shard family, read by no
+training config.
 ``'cells'`` (with ``'coeff'``) adds ``sample['cells']``: the simulation truth on the
 fine grid, one record per event (:mod:`helix.data.cells`), for downstream and
 evaluation configs only -- pretraining never opens it.

@@ -321,9 +321,9 @@ class WeightEMA(HookBase):
         round, and for a generic edge value the two do not sum back to ``v``. The
         error is a deterministic drift to a nearby fixed point, not a random walk
         — measured on a real table it reaches 1.9e-4 within 400 steps and settles
-        at 9.1e-4, i.e. 0.83% of a 0.11-wide bin, by ~4,000. That is what the
-        shipped EMA exports carry while the raw exports are exact, so the EMA and
-        raw weights of one run bin against slightly different schemes.
+        at 9.1e-4, i.e. 0.83% of a 0.11-wide bin, by ~4,000. The EMA weights would
+        carry that while the raw weights are exact, so the EMA and raw weights of
+        one run would bin against slightly different schemes.
 
         The +-1e18 open edges do NOT drift (their ulp swamps the increment), and
         edges at exactly-representable values do not either — which is why this

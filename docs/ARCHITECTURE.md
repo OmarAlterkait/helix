@@ -19,8 +19,9 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
                      scripts/corpus.sh: plan -> calibrate -> build, as Slurm arrays
                                        v
   corpus root  <run>/<dataset>_coeff_NNNN.h5        noisy coefficients (helix-coeff-2)
-               <run>/<dataset>_coeff_clean_NNNN.h5  clean target, values only (sim)
+               <run>/<dataset>_coeff_clean_NNNN.h5  clean values, sim, --keep-clean only
                <run>/<dataset>_optical_NNNN.h5      optical streams (helix-optical-2)
+               <run>/<dataset>_cells_NNNN.h5        sim truth (helix-cells-2), scripts/build_truth.py
                _calib/  CHUNKS.txt RUNS.txt RUN_DIRS.txt norm_sigma_global.npy
                                        |
                      helix.data: CoeffTPCReader -> CoeffTPCDataset (+ AddNoise / Digitize)
@@ -75,15 +76,16 @@ shards' dataset name), `pattern` (its input files in a run directory),
 optional `clean`, `optical`, `truth`), `shard_attrs()`, and for a TPC `chain_config()` /
 `bind()`, for optical `optical_chain()`; optionally `file_shard(path)`.
 
-| script | `dataset` | input | TPC | optical | clean target |
+| script | `dataset` | input | TPC | optical | clean values (`--keep-clean`) |
 |---|---|---|---|---|---|
 | `scripts/build_sim.py` | `sim_wire` | `*_sensor_*.h5` (one run per dir) | planes, noised and digitized on the device (`helix.tpc.noise`, seeded per event) | none | yes |
 | `scripts/build_sbnd.py` | `sbnd` | `*.h5` (extracted SBND) | readout (adc, pedestal, present) | `pmt`, `xarapuca` | no |
 | `scripts/build_goop.py` | `goop` | `*.h5` (goop light) | none | `goop` (+ `truth/pe_counts`) | no |
 
 Shared after the read: per `--events-per-shard` events, shard k (`--shard-start` + 0,
-1, ...) is written as `PREFIX_coeff_k.h5`, `PREFIX_coeff_clean_k.h5` and
-`PREFIX_optical_k.h5` (k as 4 digits). Each file is written as `.part`, audited
+1, ...) is written as `PREFIX_coeff_k.h5`, `PREFIX_optical_k.h5` and, with `--keep-clean`
+when the source has noise-free planes, `PREFIX_coeff_clean_k.h5` (k as 4 digits). Nothing
+trains on the clean shards; they exist to inspect the DSP. Each file is written as `.part`, audited
 (`helix.core.coeff_io.audit_shard` for coeff shards) and renamed whole, so a file with its
 final name is complete; `--skip-complete` makes a task whose shards all exist do nothing.
 `norm_sigma` is `--norm-sigma TABLE` (one table for the corpus) or else each shard's own;
@@ -195,8 +197,8 @@ per-event groups):
 * **basis_digest** hashes the basis (wavelet, level, mode, n_ticks_raw, pad,
   band_lengths, removal, threshold, sigma_norm) and is checked against those attributes
   on read; `band_lengths` is validated against the basis.
-* **Clean target** (`*_coeff_clean_*`): evaluated at the noisy support, written values
-  only (`has_coords = false`). It joins the noisy shard by `/ident` and row for row within
+* **Clean values** (`*_coeff_clean_*`, `--keep-clean` only; no training reads them):
+  evaluated at the noisy support, written values only (`has_coords = false`). It joins the noisy shard by `/ident` and row for row within
   an event; `coord_digest` in both shards must agree or the read raises.
   Consequence: the pair measures fidelity on what was kept, never recall of what was
   dropped.
@@ -218,14 +220,29 @@ keep bits, stored differences), plus per-event channel noise. Joins its TPC shar
 (run, source_file, event). `read_optical` / `read_event` read it,
 `helix.optical.tokens.shard_tokens` tokenizes it.
 
+### Truth shards: `helix-cells-2` (`helix/data/cells.py`)
+
+Simulation truth on the 2-wire x 16-tick cell grid, one `{name}_cells_<k>.h5` per coefficient
+shard (same events, same order, `/ident` copied), written by `scripts/build_truth.py` from the
+simulator's `hits` and `step` files, separately from the corpus build. Four per-event CSR
+tables: `/cells` (per cell: charge, the dominant hits group's share and (y, z)),
+`/cell_track` (the cells' charge split by track), `/plane_track` (per plane and track: the
+charge-weighted wire / tick centroid), `/tracks` (per track: deposited energy). Every
+evaluation window lies on cell edges, so the denoiser's label and the truth of every
+`helix.eval` metric (floor, uprobe, denoise) come from this alone. ~197 MB per shard of 200 events.
+
 ### The corpus root
 
-    <root>/<run>/<dataset>_{coeff,coeff_clean,optical}_NNNN.h5
+    <root>/<run>/<dataset>_{coeff,optical}_NNNN.h5   (+ coeff_clean with --keep-clean)
+    <root>/<run>/<dataset>_cells_NNNN.h5   the truth, scripts/build_truth.py
     <root>/_calib/CHUNKS.txt        the plan (helix.build.plan)
     <root>/_calib/RUNS.txt          run directory names, one per line (training reads this)
     <root>/_calib/RUN_DIRS.txt      the input run directories
     <root>/_calib/<run>.npy         per-run norm_sigma; norm_sigma_global.npy their mean
-    <root>/<run>/holdout.json       the split, from scripts/write_holdout.py
+
+The split is computed, not stored (`holdout=` on the dataset: below).
+`scripts/write_holdout.py` writes it out as `<run>/holdout.json` for inspection; nothing
+reads that file.
 
 `python -m helix.data.coeff_verify` checks a run directory (`--dataset-name`) for
 cross-shard problems (pairs, gaps, duplicates, mixed code or basis), or a whole corpus
@@ -241,14 +258,20 @@ attributes excepted).
 * `CoeffTPCReader` (`coeff_reader.py`): one shard family (`modality` `coeff` or
   `coeff_clean`), standalone h5py on pimm-data's `ShardReaderBase`; shards of another
   format are recorded and refused.
-* `CoeffTPCDataset` (`coeff_dataset.py`, pimm-data registry): noisy rows plus the joined
-  clean target, the shard tables in `sample['coeff']['_meta']`, and the identity-hash
-  split (`holdout`, `split_role`: blake2b(run/source_file) + event, so independent of the
-  build).
+* `CoeffTPCDataset` (`coeff_dataset.py`, pimm-data registry): `modalities` from `coeff`
+  (always), `coeff_clean` and `cells`, joined by identity; the shard tables in
+  `sample['coeff']['_meta']`; the identity-hash split (`holdout`, `split_role`:
+  blake2b(run/source_file) + event, so independent of the build). Training reads
+  `("coeff",)`, the denoiser `("coeff", "cells")`; `tests/test_noisy_training.py` keeps
+  `coeff_clean` and `cells` out of pretraining.
+* `cells.py`: the truth format and grid (above), `Q0`, and the cell-to-token join.
+* `denoise.py`: `DenoiseRows`, the denoiser's label sampling on the `cells` truth.
 * `transforms.py`: `AddNoise`, `Digitize` (load-time forward model, per event or per
   collated batch).
-* `bins.py`: the categorical bin grid; the production grid is named in
-  `helix/data/data/reference_bins.json` (currently `coeff_bins_r2_run0027575715`).
+* `bins.py`: the categorical bin grid over NOISY coefficients (uniform in asinh on each
+  side of zero, one bin over the sub-threshold gap); the production grid is named in
+  `helix/data/data/reference_bins.json` (`coeff_bins_r2_run0027575715_noisy`, not yet
+  derived: its digests are unrecorded).
 * `identity.py`: `corpus_runs()` reads `_calib/RUNS.txt`; `check_corpus_matches`
   refuses a checkpoint whose recorded `basis_digest` differs from the corpus being read.
 
@@ -257,9 +280,15 @@ attributes excepted).
 ## 8. The model (`helix/model`)
 
 * `tokenize.CoeffTokenize`: coefficient rows -> cells of `pw x pt = 16 x 8` slots
-  (`n_slot` 128) over the bands A4, D4, D3, D2, values normalised by `norm_sigma`.
-* `fm.FMModel` / `build_fm`: encoder blocks, cross-attention decoder, a categorical head
-  over the bin grid (`n_bins`), muP (`mup.py`), RoPE over time and wire (`layers.py`).
+  (`n_slot` 128) over the bands A4, D4, D3, D2, values normalised by `norm_sigma`. The
+  target is the normalised input itself (training is noisy-only); it differs from the
+  input only where `dead_frac` blanks it.
+* `fm.FMModel` / `build_fm` (strict: an unknown key raises): encoder blocks, cross-attention
+  decoder, a categorical head over the bin grid (`n_bins`), muP (`mup.py`), RoPE over time
+  and wire (`layers.py`). Attention is grouped along four token orders and runs unpadded
+  through flash varlen attention (`serial.py`), which needs sm80+ (A100); on CPU / fp32
+  the same groups run one SDPA each (tests, CPU evaluation). `fused_qk` is the Triton
+  QK-norm + RoPE kernel (`kernels.py`), with the unfused path taken off-GPU.
   Masking (`mask.py`): `random` cells by default, whole planes with probability
   `plane_frac`. `plane_id` serves as FiLM index, RoPE axis, masking group and plane
   identity at once.
@@ -300,15 +329,16 @@ registers:
 `helix.core.cadence` (`warmup_steps`, `eval_every`, `save_every`).
 
 `configs/pimm/fm.py` is the whole run: corpus = `HELIX_CORPUS`'s parent with its
-`_calib/RUNS.txt`, the reference bin grid, the m113 architecture (d 512, 12 + 4 blocks, 8
-heads, K = 128), AdamW + `WSDStableLR`, batch = world size. Variants override only what
+`_calib/RUNS.txt`, the reference bin grid, the `nz_pw16` recipe (d 768, 12 + 4 blocks, 12
+heads, QK-norm, fused QK-norm + RoPE, K = 128; fused AdamW at LR 4.4e-3) + `WSDStableLR`,
+batch = world size. Variants override only what
 differs: `fm_cooldown.py` (warm start from `$HELIX_EXP/fm/model/last`, first 3 runs, one
 epoch, `WSDCooldownLR`), `fm_smoke.py` (a
 small model, 32 events, one GPU). Anything else is a `key=value` override.
 
 `configs/pimm/denoise.py` (`_base_` fm.py) trains the denoiser through the same trainer and
 launcher: `Coeff-Denoise` on the FM run `model.fm` (default `$HELIX_EXP/fm`), the M6d recipe
-of docs/DENOISE.md as defaults (`model.cond_charge=True` is M6dc), the FM's identity-hash
+of docs/archive/DENOISE.md as defaults (`model.cond_charge=True` is M6dc), the FM's identity-hash
 holdout, `WarmupCosineLR`, `DenoiseEvaluator` (the training loss on the val split, fixed
 draws) and `model/model_best.pth` by validation loss. `data.train.n_events` trains on a fixed,
 nested subset of the train split (label efficiency).

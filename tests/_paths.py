@@ -1,15 +1,10 @@
 """External paths the suite validates against, in one place and overridable.
 
-Eight absolute ``/sdf`` paths were hardcoded across seven test files with no
-override. Two consequences, both quiet:
-
-* Three of them point at ``.../omara/helix/research/...`` — a DIFFERENT checkout
-  from this repo's own ``research/``. So deleting ``research/`` here would not
-  retire those tests; they would keep validating against an unversioned external
-  tree, and keep passing.
-* On any machine without these paths the tests skip, and a skip for "the data is
-  not here" looks exactly like a skip for "this machine has no GPU". Nothing
-  distinguishes a suite that checked nothing from one that checked everything.
+Hardcoded absolute paths spread over test files are quiet in two ways: a test
+can keep validating against an unversioned external tree without anyone
+noticing, and on a machine without the path it skips, and a skip for "the data is
+not here" looks exactly like a skip for "this machine has no GPU". Nothing
+distinguishes a suite that checked nothing from one that checked everything.
 
 pimm-data solved this with ``*_DATA_ROOT`` env vars plus a collection-time skip;
 this mirrors it. Defaults preserve today's behaviour exactly, so nothing changes

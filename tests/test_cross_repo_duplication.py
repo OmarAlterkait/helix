@@ -1,7 +1,7 @@
 """What helix and pimm-data duplicate, pinned so it cannot drift.
 
 Some duplication between the two packages is FORCED by the boundary: helix.core
-and helix.tpc must import with no pimm_data present (docs/ARCHITECTURE.md §1),
+and helix.tpc must import with no pimm_data present (docs/ARCHITECTURE.md §2),
 so they cannot import a shared helper, and pimm-data must run with no helix
 present. Where both genuinely need the same thing, both carry it.
 

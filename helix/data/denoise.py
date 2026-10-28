@@ -28,7 +28,7 @@ Query cells follow the evaluation's row recipe, plus what the floor's windows sc
 
 Cells no token covers are not queried: the model predicts zero there by construction, as the
 evaluation does. ``seed=None`` draws afresh at every access (training); an int fixes each event's
-draw by its name (validation). The defaults are the M6d / M6dc recipe (docs/DENOISE.md).
+draw by its name (validation). The defaults are the M6d / M6dc recipe (docs/archive/DENOISE.md).
 
 numpy only (no pimm-data): ``helix.integrations.pimm`` registers it by name, as it does
 ``CoeffTokenize``.
@@ -66,7 +66,7 @@ class DenoiseRows:
         # A cell counts as 'charged' -- for sampling (charged cells, cells near them, the
         # charge-free windows) and for the presence label -- only above this charge (e-).
         # The complete truth gives sub-electron diffusion tails to most cells near activity;
-        # with 0 they all become 'charged' (docs/DENOISE.md, "Complete-truth label"). The
+        # with 0 they all become 'charged' (docs/archive/DENOISE.md, "Complete-truth label"). The
         # regression target is unchanged: the cell's full charge, whatever the threshold.
         self.support_min_q = float(support_min_q)
         self.seed = seed

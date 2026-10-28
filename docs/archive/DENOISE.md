@@ -1,5 +1,7 @@
 # Denoising: noisy coefficients -> pre-response charge
 
+> Study record of origin/main's code before the 2026-10 consolidation: the scripts, modules and options it names are retired, and every number in it is on the r1 corpus (8 runs, 790 shards).
+
 The goal: a model that takes the noisy, sparsified wavelet coefficients of an
 event -- exactly what the foundation model sees -- and returns the charge that
 arrived at each wire before the detector response: denoised AND deconvolved.
