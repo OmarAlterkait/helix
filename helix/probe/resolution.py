@@ -7,7 +7,10 @@ the score moving. This module defines truth and metrics on a fixed fine grid --
 different tokenizers are scored on the same cells.
 
 Truth (per event, from the simulation's ``hits`` + ``step``; no tokenizer, no
-checkpoint):
+checkpoint). Everything below is decided on the fine grid, so it is computed
+from cell-level truth (:func:`cell_truth`; stored per corpus shard by
+``helix.data.cells``) plus one sub-cell quantity, each particle's pixel charge
+centroid per plane:
 
   map rows   fine cells to train/score a charge-map probe on: every cell with
              truth charge (capped), cells near signal, cells at random kept
@@ -57,7 +60,7 @@ ENERGY_BINS = (0.0, 0.1, 0.2, 0.5, 1.0, 1e9)            # MeV
 SEP_BINS = {"w": (4, 8, 16, 24), "t": (32, 64, 96)}       # wires / ticks
 
 __all__ = ["FW", "FT", "WW", "WT", "ENERGY_BINS", "SEP_BINS", "fkey", "unkey",
-           "window_cells", "event_truth", "auc", "window_stats", "scalars"]
+           "window_cells", "cell_truth", "event_truth", "event_truth_cells", "auc", "window_stats", "scalars"]
 
 
 def fkey(g, fw, ft):
@@ -149,22 +152,74 @@ def cell_inputs(keys, cell_key, band_lengths, cfg):
     return idx.astype(np.int64), aux.astype(np.float32)
 
 
-def event_truth(pix, coeff_cells, rng, cap_signal=3000, n_iso=60, n_pair=40, n_bg=60):
-    """Truth for one event.
+def cell_truth(g, w, t, q, trk):
+    """Per-pixel truth -> the cell-level truth :func:`event_truth_cells` scores on.
+
+    ``g`` (plane_gid), ``w``, ``t``, ``q`` and ``trk`` (any integer particle id
+    >= 0) per pixel sample. Returns
+
+      key, q                     every fine cell a sample falls in (sorted) and its
+                                 charge, summed in sample order (float64)
+      ct_cell, ct_track, ct_q    the cells' charge split by particle: row of ``key``,
+                                 ``trk`` value, charge; sorted by (cell, track)
+      pt_gid, pt_track,          per (plane, particle), sorted: its charge-weighted
+      pt_wire, pt_tick           PIXEL centroid (wire, tick)
+
+    Exact for the windows: every window and padding box :func:`event_truth_cells`
+    tests is aligned to the 2 x 16 grid, so which charge lies inside -- and whose --
+    is decided per cell. Only the particle centroid is finer than a cell (it places
+    windows, gates pair separation and sets the token-edge flag), so it is kept per
+    (plane, particle), not per pixel.
+    """
+    G, W, T = (np.asarray(x, np.int64) for x in (g, w, t))
+    Q, TRK = np.asarray(q, np.float64), np.asarray(trk, np.int64)
+    key, inv = np.unique(fkey(G, W // FW, T // FT), return_inverse=True)
+    tu, tinv = np.unique(TRK, return_inverse=True)
+    nt = max(len(tu), 1)
+    cu, cinv = np.unique(inv.astype(np.int64) * nt + tinv, return_inverse=True)
+    pu, pinv = np.unique(G * nt + tinv, return_inverse=True)
+    pq = np.bincount(pinv, weights=Q)
+    return dict(key=key, q=np.bincount(inv, weights=Q, minlength=len(key)),
+                ct_cell=cu // nt, ct_track=tu[cu % nt], ct_q=np.bincount(cinv, weights=Q),
+                pt_gid=pu // nt, pt_track=tu[pu % nt],
+                pt_wire=np.bincount(pinv, weights=Q * W) / np.maximum(pq, 1e-12),
+                pt_tick=np.bincount(pinv, weights=Q * T) / np.maximum(pq, 1e-12))
+
+
+def event_truth(pix, coeff_cells, rng, **kw):
+    """Truth for one event from per-pixel hits.
 
     ``pix``: dict of per-pixel arrays ``g`` (plane_gid), ``w``, ``t``, ``q`` and
-    ``trk`` (a global particle id), plus ``E``: {trk: deposited MeV}.
-    ``coeff_cells``: fine-cell keys of the event's kept coefficients (any band).
-    Returns the arrays a stage-1 evaluation needs: ``mrows``/``mq`` (map rows and
-    their truth charge), ``wkey``/``wq``/``wid`` (window cells, charge, window
-    index) and ``meta`` (one dict per window).
+    ``trk`` (a global particle id), plus ``E``: {trk: deposited MeV}. Reduced to
+    cells by :func:`cell_truth`, then scored by :func:`event_truth_cells`.
     """
-    G, W, T, Q, TRK = (np.asarray(pix[k]) for k in ("g", "w", "t", "q", "trk"))
-    E = pix["E"]
-    uk, inv = np.unique(fkey(G, W // FW, T // FT), return_inverse=True)
-    fq = np.bincount(inv, weights=Q)
+    return event_truth_cells(cell_truth(*(pix[k] for k in ("g", "w", "t", "q", "trk"))), coeff_cells, rng,
+                             E=pix["E"], **kw)
+
+
+def event_truth_cells(cells, coeff_cells, rng, E=None, cap_signal=3000, n_iso=60, n_pair=40, n_bg=60):
+    """Truth for one event from cell-level truth.
+
+    ``cells``: :func:`cell_truth`'s dict, or a ``helix.data.cells`` record (the same
+    names; tracks numbered by row, with ``trk_energy``). ``E``: {track: deposited
+    MeV}, by default ``trk_energy`` by row. ``coeff_cells``: fine-cell keys of the
+    event's kept coefficients (any band). Returns the arrays a stage-1 evaluation
+    needs: ``mrows``/``mq`` (map rows and their truth charge), ``wkey``/``wq``/``wid``
+    (window cells, charge, window index) and ``meta`` (one dict per window).
+    """
+    if E is None:
+        E = dict(enumerate(np.asarray(cells["trk_energy"], np.float64).tolist()))
+    uk = np.asarray(cells["key"], np.int64)
+    fq = np.asarray(cells["q"], np.float64)
     qmap = dict(zip(uk.tolist(), fq.tolist()))
     ck = np.unique(np.asarray(coeff_cells, np.int64))
+
+    # One row per (cell, particle), placed at the cell's origin. Every box below is
+    # grid-aligned (origins are multiples of FW / FT, paddings too), so a row is
+    # inside a box exactly when its pixels are.
+    G, cw_, ct_ = unkey(uk[np.asarray(cells["ct_cell"], np.int64)])
+    W, T = cw_ * FW, ct_ * FT
+    Q, TRK = np.asarray(cells["ct_q"], np.float64), np.asarray(cells["ct_track"], np.int64)
 
     # map rows: signal, near signal, random kept coefficients
     sig = uk[fq > 0]
@@ -177,11 +232,13 @@ def event_truth(pix, coeff_cells, rng, cap_signal=3000, n_iso=60, n_pair=40, n_b
     mrows = np.unique(np.concatenate([sig, near, coeff]))
     mq = np.array([qmap.get(x, 0.0) for x in mrows.tolist()])
 
-    # per (plane, particle): charge, charge centroid
+    # per (plane, particle): charge, and its pixel charge centroid (stored: finer than a cell)
     pu, pinv = np.unique((G.astype(np.int64) << 40) | TRK, return_inverse=True)
     pq = np.bincount(pinv, weights=Q)
-    pcw = np.bincount(pinv, weights=Q * W) / np.maximum(pq, 1e-12)
-    pct = np.bincount(pinv, weights=Q * T) / np.maximum(pq, 1e-12)
+    ptk = (np.asarray(cells["pt_gid"], np.int64) << 40) | np.asarray(cells["pt_track"], np.int64)
+    if not np.array_equal(ptk, pu):
+        raise ValueError("cell truth: the (plane, track) centroids do not cover the (plane, track) charge")
+    pcw, pct = np.asarray(cells["pt_wire"], np.float64), np.asarray(cells["pt_tick"], np.float64)
 
     # window queries are searchsorted slices returning pixel INDICES; an
     # event-sized mask per query saturates memory bandwidth across workers

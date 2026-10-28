@@ -67,7 +67,7 @@ MAY_IMPORT_PIMM_DATA = [
 
 #: Modules INSIDE the heavy package that must nonetheless import clean.
 #:
-#: ``helix.data`` may import pimm_data; these three do not need to, and the
+#: ``helix.data`` may import pimm_data; these do not need to, and the
 #: point of listing them is that Python makes it easy to lose that by accident.
 #: A package's ``__init__`` runs before any submodule of it, so an eager
 #: re-export in ``helix/data/__init__.py`` puts torch behind ``import
@@ -76,9 +76,9 @@ MAY_IMPORT_PIMM_DATA = [
 #: module scope while pimm's documented launcher environment has "only YAML
 #: parsing, Tyro, and Submitit".
 #:
-#: ``bins`` needs numpy and ``identity`` needs h5py -- both are base deps, so
+#: ``bins`` needs numpy, ``identity`` and ``cells`` h5py -- all base deps, so
 #: unlike the list above this one needs no importorskip.
-LIGHT_INSIDE_HEAVY = ["helix.data", "helix.data.bins", "helix.data.identity"]
+LIGHT_INSIDE_HEAVY = ["helix.data", "helix.data.bins", "helix.data.identity", "helix.data.cells"]
 
 # helix.integrations.pimm.hooks is deliberately in NEITHER list.
 #

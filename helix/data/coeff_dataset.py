@@ -17,6 +17,9 @@ shards and emits a **nested** dict with a ``coeff`` part of per-coefficient rows
 
 Targets are separate joined modalities (``modalities=('coeff','coeff_clean')``):
 the clean target is its own ``coeff_clean`` shard family, aligned by identity.
+``'cells'`` (with ``'coeff'``) adds ``sample['cells']``: the simulation truth on the
+fine grid, one record per event (:mod:`helix.data.cells`), for downstream and
+evaluation configs only -- pretraining never opens it.
 This dataset only yields ROWS — tokenization belongs to the model side and lives
 in ``helix.model.tokenize`` (:class:`helix.model.tokenize.CoeffTokenize`), which a recipe
 registers into :data:`pimm_data.TRANSFORMS`. The shard tables the tokenizer needs
@@ -40,7 +43,7 @@ from pimm_data import ShardEventDataset
 
 import logging
 
-from helix.data.coeff_reader import CoeffTPCReader
+from helix.data.coeff_reader import CellsReader, CoeffTPCReader
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ class CoeffTPCDataset(ShardEventDataset):
     """Flat-columnar wavelet-coefficient corpus (noisy ``coeff`` + optional
     joined ``coeff_clean`` target)."""
 
-    VALID_MODALITIES = ('coeff', 'coeff_clean')
+    VALID_MODALITIES = ('coeff', 'coeff_clean', 'cells')
 
     def __init__(
         self,
@@ -87,6 +90,7 @@ class CoeffTPCDataset(ShardEventDataset):
 
         self.coeff_reader = None
         self.coeff_clean_reader = None
+        self.cells_reader = None
         if 'coeff' in self._modalities:
             self.coeff_reader = CoeffTPCReader(
                 data_root=self._modality_root('coeff'), split=split,
@@ -95,6 +99,12 @@ class CoeffTPCDataset(ShardEventDataset):
             self.coeff_clean_reader = CoeffTPCReader(
                 data_root=self._modality_root('coeff_clean'), split=split,
                 dataset_name=dataset_name, modality='coeff_clean')
+        if 'cells' in self._modalities:
+            if 'coeff' not in self._modalities:
+                raise ValueError("modalities: 'cells' is checked against the coeff event's identity; "
+                                 "load it with 'coeff'")
+            self.cells_reader = CellsReader(
+                data_root=self._modality_root('cells'), split=split, dataset_name=dataset_name)
 
         # consumed by ShardEventDataset.get_data_list
         self._event_range = tuple(event_range) if event_range else None
@@ -240,6 +250,13 @@ class CoeffTPCDataset(ShardEventDataset):
             # a clean-only dataset still needs the shard tables for a tokenizer
             data['coeff_clean'] = self._build_coeff(
                 raw_clean, meta=None if raw_noisy is not None else self._shard_meta())
+        if self.cells_reader is not None:
+            cells = self.cells_reader.read_event(real_idx)
+            ident = cells.pop('_ident')
+            if ident != raw_noisy.get('_ident'):
+                raise ValueError(f"event {real_idx}: cells are for {ident}, the coeff event is "
+                                 f"{raw_noisy.get('_ident')} -- MISPAIRED coeff/cells shards.")
+            data['cells'] = cells
         return data
 
     def _inherit_coords(self, raw_clean, raw_noisy, idx):

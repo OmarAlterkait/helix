@@ -1,10 +1,12 @@
-"""Training never reads simulated clean data.
+"""Training never reads simulated clean data or simulation truth.
 
 Real detector data has no noise-free counterpart, so a recipe that trains on the
 simulated ``coeff_clean`` modality -- as a target, a bin grid, or a validation
-reference -- cannot be run on it. Simulation truth is for evaluation only. These
-checks pin that: no config loads the clean modality, no training module names
-it, the tokenizer's target is the noisy input, and the bin grid has no clean mode.
+reference -- cannot be run on it. The same holds for the ``cells`` modality, the
+simulation truth (helix/data/cells.py). Simulation truth is for downstream tasks and
+evaluation only. These checks pin that: no config loads either modality, no
+training module names them, the tokenizer's target is the noisy input, and the bin
+grid has no clean mode.
 """
 
 import io
@@ -29,6 +31,30 @@ def test_no_config_loads_the_clean_modality():
     hits = [str(p.relative_to(ROOT)) for p in sorted((ROOT / "configs").rglob("*.py"))
             if "coeff_clean" in _code_without_comments(p)]
     assert not hits, f"configs that load simulated clean data: {hits}"
+
+
+def _string_literals(path):
+    import ast
+    out = set()
+    for tok in pytok.generate_tokens(io.StringIO(path.read_text()).readline):
+        if tok.type == pytok.STRING:
+            try:
+                out.add(ast.literal_eval(tok.string))
+            except (ValueError, SyntaxError):          # f-strings
+                pass
+    return out
+
+
+#: Pretraining code: the configs and the modules that build and train the FM.
+def _pretraining_sources():
+    return sorted((ROOT / "configs").rglob("*.py")) + sorted((ROOT / "helix" / "model").glob("*.py")) + \
+        sorted((ROOT / "helix" / "integrations" / "pimm").glob("*.py"))
+
+
+def test_no_config_or_training_module_loads_the_truth_modality():
+    """``'cells'`` as a string is the modality name ("n_cells" and the like are not)."""
+    hits = [str(p.relative_to(ROOT)) for p in _pretraining_sources() if "cells" in _string_literals(p)]
+    assert not hits, f"pretraining code that names the simulation-truth modality: {hits}"
 
 
 def test_no_training_module_names_the_clean_modality():

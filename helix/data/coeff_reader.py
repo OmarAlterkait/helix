@@ -286,6 +286,48 @@ class CoeffTPCReader(ShardReaderBase):
         return out
 
 
+
+class CellsReader(ShardReaderBase):
+    """The simulation-truth family ``{name}_cells_<k>.h5`` (:mod:`helix.data.cells`), indexed
+    by the same identity as the coeff shards so the joint index pairs them event by event."""
+
+    _MODALITY = "cells"
+    _find_files = CoeffTPCReader._find_files            # digit-anchored glob
+
+    def __init__(self, data_root, split="", dataset_name="coeff_tpc"):
+        self.data_root, self.split, self.dataset_name = data_root, split, dataset_name
+        self._ident_by_path, self._id2pos, self._bad = {}, {}, {}
+        self._init_shards()
+        for path, why in self._bad.items():             # recorded, not raised: see _dup_ident above
+            raise ValueError(why)
+
+    def _index_for_shard(self, h5_path):
+        from helix.data.cells import read_ident, require_format
+        with h5py.File(h5_path, "r") as f:
+            try:
+                require_format(f["config"], str(h5_path))
+            except ValueError as e:
+                self._bad[str(h5_path)] = str(e)
+                return np.zeros(0, np.int64)
+            ident = read_ident(f)
+        self._ident_by_path[str(h5_path)] = ident
+        ev = _identity_ids(ident["source_file"], ident["event"], run=ident["run"])
+        self._id2pos[str(h5_path)] = {int(e): i for i, e in enumerate(ev)}
+        return np.asarray(ev, np.int64)
+
+    def read_event(self, idx):
+        """One event's record (:data:`helix.data.cells.SCHEMA` names) plus ``_ident``."""
+        from helix.data.cells import read_event
+        self._ensure_open()
+        file_idx, event_id = self.locate(idx)
+        path = str(self.h5_files[file_idx])
+        pos = self._id2pos[path][int(event_id)]
+        ident = self._ident_by_path[path]
+        out = read_event(self._h5data[file_idx], pos)
+        out["_ident"] = dict(run=ident["run"][pos], source_file=ident["source_file"][pos],
+                             event=int(ident["event"][pos]))
+        return out
+
 def _as_str_list(arr, n):
     """h5py string column -> list[str] (``None`` -> empty strings)."""
     if arr is None:
