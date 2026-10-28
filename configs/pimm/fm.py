@@ -87,20 +87,22 @@ model = dict(
     n_slot=128,                         # pw=16 * pt=8, fixed by the tokenizer
     n_band=4,                           # A4, D4, D3, D2 (D1 dropped)
     n_plane=6,
-    d=512,
+    d=768,
     blocks=12,
     dec_blocks=4,
-    heads=8,
+    heads=12,                           # head dim 64 (fused_qk needs it)
     n_bins=128,                         # K=128 needs Ampere: logits ~2.4 GB at a full event
     mup=True,
+    qk_norm=True,                       # without it the d768 stable phase went NaN
     d_base=128,
     rope_split=False,
     gp=1024,
     gd=2048,
     plane_frac=0.1,
     compile_blocks=True,
+    fused_qk=True,
 )
-optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95), fused=True)
+optimizer = dict(type="AdamW", lr=4.4e-3, weight_decay=0.05, betas=(0.9, 0.95), fused=True)
 scheduler = dict(type="WSDStableLR", warmup="auto")
 
 # ---------------------------------------------------------------------------- data
