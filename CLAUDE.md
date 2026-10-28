@@ -134,10 +134,6 @@ planes are contiguous). For a second modality those four roles separate; see
   or `cells` (simulation-only data that real detector data lacks);
   `tests/test_noisy_training.py` scans for both strings. Clean shards exist only
   with `--keep-clean`; `cells` is for the denoiser and evaluation.
-- **The bin grid is not derived yet.** `reference_bins.json` names
-  `coeff_bins_r2_run0027575715_noisy` with `digests: null`, so `tests/test_bins.py`'s
-  three fingerprint tests fail until it is derived and recorded (RUNBOOK §5). That is
-  the expected baseline, not a regression.
 - **Training and evaluation need sm80+.** The FM's only attention path is flash
   varlen: `ampere` at S3DF, never `turing` (which builds corpora). On CPU the
   per-group SDPA reference runs instead (tests).

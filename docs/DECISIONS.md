@@ -42,9 +42,8 @@ of zero, with one bin spanning the sub-threshold gap; no target parameter, no cl
 mode, no legacy-table defaults. *Why:* noisy coefficients exist only beyond the
 ~3.35-3.74 sigma threshold, so a single uniform grid leaves ~30-40% of its bins
 unreachable (SCIENCE §11). The reference is `coeff_bins_r2_run0027575715_noisy`
-(`helix/data/data/reference_bins.json`). **It is not derived yet:** its digests are
-`null`, `check_reference` reports `not-recorded`, and `tests/test_bins.py`'s three
-fingerprint tests fail until it is derived and its digests recorded (RUNBOOK §5).
+(`helix/data/data/reference_bins.json`), derived 2026-10-28 on milano from 120 events of
+r2's first run, K = 128, with no empty bin in any band.
 
 **One model, on varlen attention.** One `FMModel` (registered `Coeff-FM`) whose only
 attention path is the unpadded grouped (varlen) attention, with its CPU / fp32 per-group

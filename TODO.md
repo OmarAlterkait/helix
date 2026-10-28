@@ -6,13 +6,6 @@ in `docs/archive/`.
 
 ## Before the next production run
 
-* **Derive the noisy r2 bin grid and record its digests.** `helix/data/data/reference_bins.json`
-  names `coeff_bins_r2_run0027575715_noisy` with `digests: null`; every config reads
-  `$HELIX_ARCHIVE/<name>.pt`, which does not exist yet, and `tests/test_bins.py`'s three
-  fingerprint tests fail until the digests are recorded (RUNBOOK §5). While there, check
-  that the recorded `corpus.basis_digest` still matches r2: the format migration rewrote
-  `removal_json`, and hence `basis_digest`, in every shard; if `derive_coeff_bins.py`
-  reports `basis-mismatch`, re-record it.
 * **Build r2's cells truth.** `scripts/build_truth.py --corpus <run>` for every r2 run
   (~197 MB per shard). The denoiser and every `helix.eval` metric but `recon` need it.
 * **Confirm the LR at production length.** `nz_pw16`'s LR 4.4e-3 was tuned at 29.2k steps

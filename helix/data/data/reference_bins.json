@@ -15,7 +15,11 @@
     "basis_digest": "0dd4f3a223909fd7d8150f54854111ce6e7c89f030227a20113aabf2a27c9457",
     "_basis_digest_note": "Checkable BEFORE deriving, and catches the pre-tau/r1 confusion. It does NOT identify which run: basis_digest hashes the DSP recipe, so all eight r1 runs share it."
   },
-  "digests": null,
+  "digests": {
+    "edges": "sha256:6b00a3807079320c51914bfb985057700eef773ca62d3ab919d33872e083002c",
+    "cent_asinh": "sha256:fce52589cf64144a0fd4501f05d8dc14b2bfc32d0157d100b46633ef7c37c7f5",
+    "cent_ratio": "sha256:73ff03fce97bebc6caa0cd98c39c925cda30da7a9b80adb55c688bf7a3b5a85c"
+  },
   "shapes": {
     "edges": [
       4,
@@ -30,5 +34,5 @@
       128
     ]
   },
-  "_note": "Training is noisy-only, so the grid bins the NOISY coefficients (one bin spans the sub-threshold gap). Not yet derived for r2: scripts/derive_coeff_bins.py --corpus <r2>/run_0027575715 writes it, and its digests go here."
+  "_note": "Training is noisy-only, so the grid bins the NOISY coefficients (one bin spans the sub-threshold gap). Derived 2026-10-28 on S3DF milano (job 42288473) from r2 run_0027575715, 120 events, K=128: no empty bins in any band."
 }

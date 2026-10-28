@@ -150,8 +150,7 @@ The FM's categorical head bins the NOISY coefficients (uniform in asinh on each 
 zero, one bin over the sub-threshold gap). The production grid is named in
 `helix/data/data/reference_bins.json`: `coeff_bins_r2_run0027575715_noisy`, derived from r2's
 first run with K = 128 over 120 events, read by every config from
-`$HELIX_ARCHIVE/<name>.pt`. **It is not derived yet**: the file's `digests` are `null`, and
-`tests/test_bins.py`'s three fingerprint tests fail until they are recorded. To derive it
+`$HELIX_ARCHIVE/<name>.pt` (derived 2026-10-28; its digests are recorded). To derive a grid
 (CPU; milano is AMD, so numpy's results are the canonical ones, and the script disables
 AVX-512 itself elsewhere):
 
@@ -159,10 +158,9 @@ AVX-512 itself elsewhere):
         --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/derive_coeff_bins.py \
                 --corpus $HELIX_CORPUS --out $HELIX_ARCHIVE/coeff_bins_r2_run0027575715_noisy.pt"
 
-The log ends with `records no digests yet ... record these` and a JSON object of three
-digests (`edges`, `cent_asinh`, `cent_ratio`): paste it as the value of `"digests"` in
-`helix/data/data/reference_bins.json`, commit, and rerun the suite (the three fingerprint
-tests then pass). Any other site checks its copy of the corpus against the record instead
+For a new reference (a new name in the JSON, `digests: null`), the log ends with `records no
+digests yet ... record these` and a JSON object of three digests (`edges`, `cent_asinh`,
+`cent_ratio`): paste it as the value of `"digests"` and commit. Any other site checks its copy of the corpus against the record instead
 of copying the file:
 
     scripts/helix_run.sh python scripts/derive_coeff_bins.py \
