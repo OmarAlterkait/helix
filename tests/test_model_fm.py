@@ -1,38 +1,26 @@
-"""The packaged FM must be the research model, not a lookalike.
+"""The FM's construction and its pimm Trainer contract.
 
-``helix/model/`` was extracted from ``coeff_foundation_model/fm/model.py`` by
-line slice precisely so this is checkable: the parameter tree is untouched, so a
-research checkpoint loads ``strict=True`` and produces bit-identical outputs. An
-earlier hand-transcribed version of this extraction silently dropped ``n_bins``
-and ``losses_cat`` — which is exactly the failure mode these tests exist to
-catch, since the model still built and still trained.
-
-The parity test needs the research checkpoint and skips without it. The rest run
-anywhere.
+The arithmetic of the forward is pinned in tests/test_serial.py; this file pins
+what a caller relies on: ``model(batch)`` returns a loss dict, the head is
+categorical and refuses to run without its bin edges, the config is strict, and
+the masking policy mixes modes per step.
 """
-
-import os
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from helix.model import build_fm, FMModel, losses, losses_fused, losses_cat  # noqa: E402
+from helix.model import build_fm, FMModel                          # noqa: E402
 
 
 SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1, heads=4,
-             dec_mode="cross")      # SerialFMModel (the default) requires cross
+             n_bins=16)
 
 
 def make_batch(n_cells=32, n_slot=8, n_band=4, n_plane=6, seed=0):
-    """A batch with the same key contract helix.model.tokenize.to_fm() emits: the
-    dense (n_cells, n_slot) grid AND the sparse active-row view of it, since
-    losses() gathers rows while losses_fused()/losses_cat() read the grid."""
+    """A batch with the key contract helix.model.tokenize.to_fm() emits."""
     g = torch.Generator().manual_seed(seed)
     r = lambda *s: torch.rand(*s, generator=g)
-    occ = (r(n_cells, n_slot) < 0.3).float()
-    tgt = torch.randn(n_cells, n_slot, generator=g)
-    cell, slot = occ.nonzero(as_tuple=True)          # sparse view of the same tokens
     return dict(
         band_id=torch.randint(0, n_band, (n_cells,), generator=g),
         plane_id=torch.randint(0, n_plane, (n_cells,), generator=g),
@@ -40,36 +28,26 @@ def make_batch(n_cells=32, n_slot=8, n_band=4, n_plane=6, seed=0):
         wire_pos=r(n_cells) * 1900,
         wirefeat=r(n_cells, 1),
         inp=torch.randn(n_cells, n_slot, generator=g),
-        occ=occ,
+        occ=(r(n_cells, n_slot) < 0.3).float(),
         valid=(r(n_cells, n_slot) < 0.9),
-        tgt=tgt,
-        target=tgt[cell, slot],
-        cell=cell,
-        slot=slot,
+        tgt=torch.randn(n_cells, n_slot, generator=g),
         n_cells=n_cells,
     )
+
+
+def binned(model):
+    """``model`` with bin edges registered, as every forward requires."""
+    return model.set_bins(torch.linspace(-4, 4, model.n_bins + 1).repeat(SMALL["n_band"], 1))
 
 
 # --------------------------------------------------------------------------
 # the pimm Trainer contract
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("fused", [False, True])
-@pytest.mark.parametrize("head", ["l2", "nll", "cat"])
-def test_forward_returns_loss_dict(head, fused):
-    """pimm's Trainer calls ``model(batch)["loss"]`` — every head mode must
-    honour that, and the loss must carry grad."""
-    cfg = dict(SMALL, loss_fused=fused)
-    if head == "nll":
-        cfg["nll"] = True
-    elif head == "cat":
-        cfg["n_bins"] = 16
-    model = build_fm(cfg)
-    if head == "cat":
-        edges = torch.linspace(-4, 4, 17).repeat(cfg["n_band"], 1)
-        model.set_bins(edges)
-
-    out = model(make_batch(n_slot=cfg["n_slot"]))
+def test_forward_returns_loss_dict():
+    """pimm's Trainer calls ``model(batch)["loss"]``; the loss must carry grad."""
+    model = binned(build_fm(SMALL))
+    out = model(make_batch(n_slot=SMALL["n_slot"]))
     assert set(out) >= {"loss", "bce", "val", "masked_frac"}
     assert out["loss"].ndim == 0 and torch.isfinite(out["loss"])
     assert out["loss"].requires_grad
@@ -77,30 +55,30 @@ def test_forward_returns_loss_dict(head, fused):
     assert any(p.grad is not None for p in model.parameters())
 
 
-def test_cat_head_without_bins_is_refused():
-    """A categorical model whose edges were never registered must fail loudly,
-    not silently score against a garbage buffer."""
-    model = build_fm(dict(SMALL, n_bins=16))
+def test_forward_without_bins_is_refused():
+    """A model whose edges were never registered must fail loudly, not silently
+    score against a garbage buffer."""
+    model = build_fm(SMALL)
     with pytest.raises(AssertionError, match="set_bins"):
         model(make_batch(n_slot=SMALL["n_slot"]))
 
 
 def test_set_bins_rejects_wrong_k():
-    model = build_fm(dict(SMALL, n_bins=16))
+    model = build_fm(SMALL)
     with pytest.raises(AssertionError, match="n_bins"):
         model.set_bins(torch.linspace(-4, 4, 9).repeat(4, 1))    # K+1 = 9, not 17
 
 
-def test_val_head_width_tracks_head_mode():
-    """The three head modes are distinguished only by val_head width; the
-    converter infers the mode from it, so the mapping must hold."""
-    assert build_fm(SMALL).val_head.weight.shape[0] == SMALL["n_slot"]
-    assert build_fm(dict(SMALL, nll=True)).val_head.weight.shape[0] == 2 * SMALL["n_slot"]
-    assert build_fm(dict(SMALL, n_bins=16)).val_head.weight.shape[0] == 16 * SMALL["n_slot"]
+def test_the_head_is_categorical_and_needs_bins():
+    assert build_fm(SMALL).val_head.weight.shape[0] == SMALL["n_bins"] * SMALL["n_slot"]
+    with pytest.raises(ValueError, match="n_bins"):
+        build_fm(dict(SMALL, n_bins=0))
+    with pytest.raises(TypeError, match="n_bins"):
+        build_fm({k: v for k, v in SMALL.items() if k != "n_bins"})
 
 
 def test_explicit_mask_is_honoured():
-    model = build_fm(SMALL)
+    model = binned(build_fm(SMALL))
     B = make_batch(n_slot=SMALL["n_slot"])
     m = torch.zeros(B["n_cells"], dtype=torch.bool)
     m[:4] = True
@@ -108,68 +86,38 @@ def test_explicit_mask_is_honoured():
 
 
 def test_train_opts_are_not_constructor_params():
-    """Training policy must stay off the arch signature: the converter maps a
-    checkpoint's metadata onto constructor kwargs, so an arch kwarg that is
-    really a training knob would corrupt that mapping."""
+    """Training policy must stay off the arch signature: the constructor is the
+    architecture a checkpoint records, so a training knob there would corrupt
+    that record."""
     import inspect
     params = set(inspect.signature(FMModel.__init__).parameters)
-    assert not params & {"mask_mode", "mask_ratio", "loss_fused", "vis_w", "noisy"}
-    m = build_fm(dict(SMALL, mask_ratio=0.75, mask_mode="plane"))
-    assert (m.mask_ratio, m.mask_mode) == (0.75, "plane")
+    assert not params & {"mask_mode", "mask_ratio", "plane_frac", "dec_frac", "compile_blocks"}
+    m = build_fm(dict(SMALL, mask_ratio=0.6, mask_mode="plane"))
+    assert (m.mask_ratio, m.mask_mode) == (0.6, "plane")
 
 
-def test_build_fm_ignores_unknown_keys():
-    """build_fm() is handed whole checkpoint/config dicts; stray keys must not
-    raise."""
-    m = build_fm(dict(SMALL, some_trainer_key=1, another="x"))
-    assert m.d == SMALL["d"]
+def test_build_fm_refuses_unknown_keys():
+    """A key build_fm does not consume would otherwise do nothing, silently."""
+    with pytest.raises(TypeError, match="some_trainer_key"):
+        build_fm(dict(SMALL, some_trainer_key=1))
 
 
-# --------------------------------------------------------------------------
-# extraction fidelity — the whole point of the line-slice extraction
-# --------------------------------------------------------------------------
-
-def test_serial_rejects_self_decoder():
-    """SerialFMModel's decoder is grouped-cross attention; with dec_mode='self'
-    the research code dies with an AttributeError deep in attention. build_fm
-    must refuse it up front."""
-    with pytest.raises(ValueError, match="dec_mode='cross'"):
-        build_fm(dict(SMALL, dec_mode="self"), serial=True)
-    build_fm(dict(SMALL, dec_mode="self"), serial=False)      # fine unserialised
-
-
-@pytest.mark.parametrize("fused,missing,names", [
-    (False, ("cell", "slot", "target"), "losses"),
-    (True, ("tgt",), "losses_fused"),
-])
-def test_missing_batch_keys_name_themselves(fused, missing, names):
-    """A batch lacking what the configured objective reads must say which keys
-    and which objective — not raise a bare KeyError from inside the loss.
-
-    Parametrized over BOTH objectives rather than whichever is the default. It
-    previously covered only the sparse path via `build_fm(SMALL)`, with a comment
-    asserting that was the default — so when the default moved to fused (to match
-    research's `--fused 1`) this failed for a reason unrelated to the behaviour
-    it guards. The two objectives read different representations of the same
-    tokens, so each needs its own check.
-    """
-    model = build_fm(dict(SMALL), loss_fused=fused)
+def test_missing_batch_keys_name_themselves():
+    """A batch lacking what the objective reads must say which keys -- not raise
+    a bare KeyError from inside the loss."""
+    model = binned(build_fm(SMALL))
     B = make_batch(n_slot=SMALL["n_slot"])
-    for k in missing:
-        B.pop(k)
-    with pytest.raises(KeyError, match=names):
+    B.pop("tgt")
+    with pytest.raises(KeyError, match="tgt"):
         model(B)
 
 
 def test_plane_frac_mixes_modes_per_step():
     """`plane_frac` is a per-STEP mix, not a mode.
 
-    Research (mae_ddp.py:187) draws whole-plane masking with probability
-    plane_frac and mask_mode otherwise; m113 trained at 0.1. A run that only ever
-    masks randomly never has to reconstruct a plane it cannot see, so nothing
-    forces cross-plane triangulation — which is the whole reason the option
-    exists. The port dropped it, and because `mask_mode="plane"` exists it looked
-    like the capability was already there.
+    A run that only ever masks randomly never has to reconstruct a plane it
+    cannot see, so nothing forces cross-plane triangulation -- which is the
+    whole reason the option exists.
     """
     B = make_batch(n_slot=SMALL["n_slot"])
     gid = B["plane_id"]

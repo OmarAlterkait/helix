@@ -19,9 +19,6 @@ while ``from helix.model import FMModel`` still works.
 _LAZY = {
     "FMModel": "helix.model.fm",
     "build_fm": "helix.model.fm",
-    "SerialFMModel": "helix.model.serial",
-    "losses": "helix.model.loss",
-    "losses_fused": "helix.model.loss",
     "losses_cat": "helix.model.loss",
     "make_mask": "helix.model.mask",
 }

@@ -57,15 +57,7 @@ def sigma_for_rows(plane_gid, band, gids, norm_sigma):
 
 
 def normalize_values(value, plane_gid, band, gids, norm_sigma, *, eps=1e-6):
-    """``arcsinh(value / sigma)`` with the per-(plane, band) sigma.
-
-    There used to be a ``sigma_norm=`` here, its own docstring explaining that it
-    "does not affect the result": the old pipeline stored ``value * SIGMA/sigma``
-    and then took ``arcsinh(v / SIGMA)``, so SIGMA cancels. Storing RAW values
-    makes that cancellation explicit. No caller ever passed it and the body never
-    read it — an argument that is provenance for a cancellation is a comment, so
-    it is one now. The value itself still travels on disk, in ``/config``.
-    """
+    """``arcsinh(value / sigma)`` with the per-(plane, band) sigma."""
     sig = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), eps)
     return np.arcsinh(np.asarray(value, np.float32) / sig).astype(np.float32)
 
@@ -76,7 +68,7 @@ def denormalize_values(tok, plane_gid, band, gids, norm_sigma, *, eps=1e-6):
     return (np.sinh(np.asarray(tok, np.float32)) * sig).astype(np.float32)
 
 
-# ---- the patch tokenizer (port of research vit_tpc.assemble_tpc_band) ------
+# ---- the patch tokenizer ----------------------------------------------------
 
 from dataclasses import dataclass
 
@@ -85,11 +77,8 @@ from dataclasses import dataclass
 class PatchConfig:
     """Patch geometry + time-coordinate constants of the FM tokenizer.
 
-    The GEOMETRY defaults reproduce ``research/coeff_foundation_model/vit_tpc.py``
-    exactly: PW=16 wires x PT=8 band-ticks -> 128 slots, over the first 4 bands
-    (A4, D4, D3, D2 — the FM dropped D1). ``FM_PW``/``FM_PT`` env-var mutation of
-    module globals is replaced by explicit fields. ``cell_t`` deliberately has NO
-    default and so does not reproduce research's — see the field below.
+    PW=16 wires x PT=8 band-ticks -> 128 slots, over the first 4 bands (A4, D4,
+    D3, D2; D1 is dropped).
     """
     pw: int = 16
     pt: int = 8
@@ -97,68 +86,33 @@ class PatchConfig:
     lev: tuple = (4, 4, 3, 2)                         # DWT level per band
     delta: tuple = (-2.38, 0.62, 0.75, 0.50)          # per-band tick offset
     toff: tuple = (-17.4, 2.6, 5.5)                   # U,V,Y sensor->drift (pb_labels.TOFF)
-    # REQUIRED. No default, because every possible default is wrong for someone
-    # and the failure mode is SILENT.
-    #
-    #   'grid_center' — geometric centre of the patch's tick range. Depends only
-    #     on WHICH cell it is, never on its contents.
-    #   'centroid'    — amplitude-weighted mean of the cell's own surviving
-    #     coefficient times. DERIVED FROM THE CELL'S CONTENTS.
-    #
-    # That difference is not cosmetic under masking. `t_phys` is fed as RoPE
-    # position to the MASKED tokens (fm.py: `atm = at[tok_mask]`), and it is
-    # computed in the DataLoader transform, before masking. So under 'centroid' a
-    # masked cell's POSITION already encodes an amplitude-weighted summary of the
-    # contents the model is asked to predict — label leakage in the MAE objective.
-    # It also inflates the probe: sub-patch timing is exactly what cross-plane
-    # triangulation reads, so the research "3D probe 0.60 vs 0.42 for grid_center"
-    # is not safe to read as better REPRESENTATION.
-    #
-    # 'grid_center' is what every helix config trains, and it is right on the
-    # merits, not only for m113 comparability. 'centroid' is retained to
-    # reproduce research, and is a deletion candidate.
-    #
-    # It used to default to 'centroid' while every helix config overrode it to
-    # 'grid_center' — a default that was wrong for every real caller and right
-    # for none. It fired: the encode recipe built CoeffTokenize with no cfg=,
-    # got 'centroid', and fed a grid_center-trained model a time coordinate it
-    # had never seen on 94.06% of 30,976 cells (mean |delta| 19.5 ticks).
-    cell_t: str = None                                # REQUIRED: 'centroid' | 'grid_center'
-    sigma_norm: float = 2.6                           # research SIGMA; only the
-    # centroid weight sees it, and only through its 1e-6 floor (it cancels in the
-    # weighted mean). Kept so the weight matches vit_tpc bit for bit.
+    # The RoPE time coordinate: the geometric centre of the patch's tick range,
+    # which depends only on WHICH cell it is, never on its contents. `t_phys` is
+    # the masked tokens' RoPE position, computed before masking, so a coordinate
+    # derived from the cell's own coefficients (an amplitude-weighted centroid)
+    # would leak the prediction target into it. The only accepted value; the
+    # field remains because checkpoints record it in their operating point.
+    cell_t: str = "grid_center"
 
     @property
     def n_slot(self) -> int:
         return self.pw * self.pt
 
     def __post_init__(self):
-        if self.cell_t is None:
+        if self.cell_t != "grid_center":
             raise ValueError(
-                "cell_t is REQUIRED and has no default: pass 'grid_center' (what "
-                "every helix config trains, and the only content-independent "
-                "choice) or 'centroid' (research's, which leaks the target into "
-                "masked-token positions). A silent default here already fed a "
-                "trained model the wrong time coordinate on 94% of cells.")
-        if self.cell_t not in ("centroid", "grid_center"):
-            raise ValueError(
-                f"cell_t must be 'centroid' or 'grid_center', got {self.cell_t!r}")
-
+                f"cell_t must be 'grid_center' (the only time coordinate the "
+                f"tokenizer computes), got {self.cell_t!r}")
 
 
 def _require_cfg(cfg):
-    """No silent `PatchConfig()` fallback anywhere in this module.
-
-    `PatchConfig` has no `cell_t` default (see its field comment), so there is no
-    safe zero-argument config to fall back to. These call sites used to spell
-    `cfg = cfg or PatchConfig()`, which quietly chose 'centroid' — the leaking
-    mode — for any caller that forgot to pass one.
-    """
+    """No silent `PatchConfig()` fallback anywhere in this module: the patch
+    geometry must be the one the model was trained with, so the caller says
+    which."""
     if cfg is None:
         raise ValueError(
-            "cfg is REQUIRED: PatchConfig has no cell_t default, so there is no "
-            "safe PatchConfig() to fall back to. Pass the config the model was "
-            "trained with (helix configs train cell_t='grid_center').")
+            "cfg is REQUIRED: pass the PatchConfig the model was trained with "
+            "(a default geometry would silently mis-tokenize a pw/pt variant).")
     return cfg
 
 
@@ -232,8 +186,7 @@ def tick_of_tau(tau, plane_gid, band, cfg=None):
 
     The forward half of the tokenizer's time convention:
     ``(tau + delta[band]) * 2**lev[band] - toff[plane_gid % 3]``.
-    ``assemble`` uses it for both ``cell_t`` modes, and :func:`tau_of_tick`
-    inverts it.
+    :func:`tau_of_tick` inverts it.
     """
     cfg = _require_cfg(cfg)
     band = np.asarray(band, np.int64)
@@ -252,11 +205,10 @@ def tau_of_tick(tick, plane_gid, band, band_lengths, cfg=None):
 
     ``band_lengths`` is REQUIRED and comes from the shard's ``/config`` — it is a
     property of the CORPUS (it moves with ``n_ticks_raw`` and ``dwt_level``),
-    while ``cfg`` is a property of the CHECKPOINT. The research implementation
-    hard-coded ``LENS_T = [271, 271, 542, 1084]`` beside its own copies of
-    ``lev``/``delta``/``toff``; those agreed with the shipped corpus by luck. A
-    drifted copy makes a probe gather the WRONG cell's features, which does not
-    crash — it returns a number near the geometry null that looks like a result.
+    while ``cfg`` is a property of the CHECKPOINT. A hard-coded copy that drifts
+    from the corpus makes a probe gather the WRONG cell's features, which does
+    not crash — it returns a number near the geometry null that looks like a
+    result.
     """
     cfg = _require_cfg(cfg)
     band = np.asarray(band, np.int64)
@@ -291,12 +243,7 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
              norm_sigma, cfg=None, dead_frac=0.0, rng=None, wire_valid=None):
     """Coefficient rows -> per-band 2-D patch tokens (stateless, pure numpy).
 
-    Faithful port of ``vit_tpc.assemble_tpc_band``. The one substantive change is
-    normalisation: the old cache stored ``val = raw * SIGMA/sigma_tab`` and the
-    tokenizer took ``arcsinh(val/SIGMA)``, so SIGMA cancelled and the result was
-    ``arcsinh(raw/sigma_tab)``. The corpus now stores RAW values, so we compute
-    ``arcsinh(raw/norm_sigma)`` directly — identical output, one less place for a
-    baked-in constant to drift.
+    Values are normalised to ``arcsinh(raw / norm_sigma)`` per (plane, band).
 
     ``wire_valid`` (G, >= max n_wires) bool, rows in ``gids`` order: False marks an
     excluded channel (dead, noisy, not instrumented; real detectors). Its slots are
@@ -317,19 +264,9 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     band, plane_gid, wire, tau = band[keep], plane_gid[keep], wire[keep], tau[keep]
     value = value[keep]
 
-    # One sigma gather serves both the token value and the centroid weight. The
-    # weight must be the PRE-arcsinh ratio: vit_tpc weighted by |val| where its
-    # val was `raw * SIGMA/sigma` (the cache stored the scaled value and arcsinh'd
-    # it later), so weighting by the arcsinh'd token instead would compress large
-    # amplitudes and shift every centroid.
     sig_row = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), 1e-6)
     ratio = (np.asarray(value, np.float32) / sig_row).astype(np.float32)
     val = np.arcsinh(ratio).astype(np.float32)          # == normalize_values(...)
-    # The target IS the (normalised) input: real detector data has no noise-free
-    # counterpart, so masked prediction infers the hidden coefficients from context
-    # (Noise2Self). `tgt` differs from `inp` only where augmentation (dead_frac)
-    # blanked the input.
-    target = val
 
     wb, tb = wire // pw, tau // pt
     key = cell_key(plane_gid, band, wire, tau, cfg)
@@ -356,11 +293,15 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
             f"{cell.shape[0]} rows share a (plane_gid, band, wire, tau) with another "
             f"row, so they would be silently overwritten in the token grid.")
     inp[cell, slot] = val
-    tgt[cell, slot] = target
+    # The target IS the (normalised) input: real detector data has no noise-free
+    # counterpart, so masked prediction infers the hidden coefficients from context
+    # (Noise2Self). `tgt` differs from `inp` only where augmentation (dead_frac)
+    # blanked the input.
+    tgt[cell, slot] = val
 
     # valid slots: wire-in-block < plane n_wires, tick-in-block < band length.
     # n_wires is resolved through gid_rows, NOT n_wires[gid] — they coincide only
-    # for contiguous gids (the old code assumed that).
+    # for contiguous gids.
     nw = np.asarray(n_wires, np.int64)[gid_rows(cell_gid, gids)]
     Lb = bl[cell_band]
     wi = np.arange(pw)[None, :]
@@ -383,34 +324,16 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
         occ[ks] = False                               # killed -> not active input
         # targets/valid unchanged: the model must still predict a dead wire
 
-    # RoPE time coord, TOFF-corrected so planes share a zero. Two modes:
-    #
-    # 'grid_center' — geometric centre of the patch's tick range. Depends only on
-    #   WHICH cell it is, never on its contents. This replaced the original
-    #   survivor-MAX, which was band-width biased (coarse patches span 128 ticks
-    #   vs 32, so max pushed them ~100 ticks late), occupancy-dependent, and
-    #   zero-clamped negative A4 times.
-    # 'centroid'   — amplitude-weighted MEAN of the surviving coefficients' drift
-    #   times. Debiased survivor-max: it keeps the sub-patch timing that
-    #   cross-plane triangulation uses, without the band-width bias (the max was
-    #   the biased part, not the use of survivors). Measurably better — the
-    #   research probe scores 3D 0.60 vs 0.42 for grid-centre — and it is what the
-    #   production runs train on (fm/configs/cent_*.yaml set cellt: centroid).
+    # RoPE time coord: the centre of the patch's tick range (PatchConfig.cell_t),
+    # TOFF-corrected so planes share a zero.
     dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float32)
     toff = np.asarray(cfg.toff, np.float32)
-    if cfg.cell_t == "centroid":
-        tp = tick_of_tau(tau, plane_gid, band, cfg)   # shared with tau_of_tick
-        w = (np.float32(cfg.sigma_norm) * np.abs(ratio)).astype(np.float32) + 1e-6
-        ws = np.zeros(n_cells, np.float32); ts = np.zeros(n_cells, np.float32)
-        np.add.at(ws, cell, w); np.add.at(ts, cell, w * tp)
-        cell_t = (ts / np.maximum(ws, 1e-6)).astype(np.float32)
-    else:
-        center_tau = cell_tb.astype(np.float32) * pt + pt / 2.0
-        cell_t = ((center_tau + np.asarray(cfg.delta, np.float32)[cell_band]) * dec[cell_band]
-                  - toff[cell_gid % 3]).astype(np.float32)
+    center_tau = cell_tb.astype(np.float32) * pt + pt / 2.0
+    cell_t = ((center_tau + np.asarray(cfg.delta, np.float32)[cell_band]) * dec[cell_band]
+              - toff[cell_gid % 3]).astype(np.float32)
 
     return dict(
-        band=band, val=val, target=target, cell=cell.astype(np.int64),
+        band=band, val=val, cell=cell.astype(np.int64),
         slot=slot.astype(np.int64), n_cells=n_cells,
         occ=occ.astype(np.float32), inp=inp, tgt=tgt, valid=valid,
         dead=dead.astype(np.float32), cell_band=cell_band, cell_gid=cell_gid,
@@ -421,10 +344,9 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
         cell_key=uniq.astype(np.int64),
         cell_t=cell_t, cell_wire=(cell_wb * pw).astype(np.float32),
         # Integer block indices. cell_wire carries wb*pw already, but as float32
-        # for RoPE; cell_tb has no float twin at all, because `cell_t` is a
-        # physical time that in the default 'centroid' mode is a WEIGHTED MEAN
-        # and therefore not invertible. Without these two the token grid cannot
-        # be mapped back to (wire, tau) — see `detokenize`.
+        # for RoPE; cell_tb has no exact twin (`cell_t` is a float physical
+        # time). Without these two the token grid cannot be mapped back to
+        # (wire, tau) — see `detokenize`.
         cell_wb=cell_wb, cell_tb=cell_tb,
     )
 
@@ -438,15 +360,15 @@ def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *,
     ``space`` says what ``values`` holds, because the inverse differs:
 
       ``"asinh"``  the token, ``arcsinh(raw/sigma)`` -> ``sinh(v) * sigma``.
-                   Correct for ``inp``/``tgt`` and for the GAUSSIAN head's mu.
+                   Correct for ``inp``/``tgt``.
       ``"ratio"``  the dimensionless coefficient ``raw/sigma`` -> ``v * sigma``.
                    Correct for the CATEGORICAL head, whose read-back is
                    ``sum_k p_k * E[raw/sigma | bin k]`` and is ALREADY an
                    expectation of ``sinh``.
 
     Passing a categorical posterior mean with ``space="asinh"`` applies ``sinh``
-    to a mean over many bins, which is Jensen-biased ~31% low. That shipped once;
-    hence the explicit parameter rather than a convention.
+    to a mean over many bins, which is Jensen-biased ~31% low; hence the
+    explicit parameter rather than a convention.
 
     ``(cell, slot)`` is a bijection with ``(plane_gid, band, wire, tau)`` given
     the per-cell block indices, so this inverts the scatter exactly. What differs
@@ -508,7 +430,7 @@ def decode_prediction(occ_logit, values, tok, *, gids, norm_sigma,
     For a CATEGORICAL head, pass ``decode_categorical(...)`` output with
     ``space="ratio"``. Do NOT pass bin centres with the default ``space="asinh"``:
     that applies ``sinh`` to a posterior mean over many bins and reads back ~31%
-    of the charge. For a GAUSSIAN head, pass ``mu`` with ``space="asinh"``.
+    of the charge.
     """
     cfg = _require_cfg(cfg)
     occ = np.asarray(occ_logit) > threshold
@@ -529,8 +451,7 @@ def bin_centroids_ratio(edges, cent_ratio=None):
 
         E[sinh t | t in (a, b)] = (cosh b - cosh a) / (b - a)
 
-    which agrees with the measured table to ~0.3% and is the right thing for a
-    checkpoint exported before the centroids became persistent. The two OPEN
+    which agrees with the measured table to ~0.3%. The two OPEN
     outer edges (written as the +-1e18 sentinel) are closed by reflecting the
     neighbouring width; that under-reads the outermost bin by ~20-25% against the
     measured table, which is unavoidable without the table and is why the table
@@ -568,9 +489,8 @@ def _close_open_edges(edges):
     of a band's sum|centroid| (measured on the R1 corpus).
 
     Needs three finite interior edges to reflect from. With fewer (K < 3) there
-    is nothing to reflect and the old code raised IndexError at K=1 and returned
-    +-inf at K=2 — reachable, because the derivation runs whenever a measured
-    table is absent.
+    is nothing to reflect, so it raises — reachable, because the derivation runs
+    whenever a measured table is absent.
     """
     e = np.array(edges, dtype=np.float64, copy=True)
     BIG = 1e6                       # token space is arcsinh(); it stays single-digit
@@ -594,10 +514,9 @@ def decode_categorical(logits, cell_band, centroids, readout="mean"):
     ``logits`` is ``(n_cells, n_slot, K)``; ``centroids`` is ``(n_band, K)`` from
     :func:`bin_centroids_ratio`. Returns ``(n_cells, n_slot)``.
 
-    ``readout="mean"`` is ``sum_k p_k * centroid_k`` — the CHARGE-closing estimate,
-    and what the reference uses everywhere (``fm/train.py:125``,
-    ``fm/e7_cat_eval.py:47``, ``fm/viz_cat.py:25``). ``readout="mode"`` takes the
-    modal bin's centroid, which the reference reports for bright-pixel fidelity.
+    ``readout="mean"`` is ``sum_k p_k * centroid_k`` — the CHARGE-closing
+    estimate. ``readout="mode"`` takes the modal bin's centroid (bright-pixel
+    fidelity).
 
     Never apply ``sinh`` to the result: the centroids are already an expectation
     of ``sinh``, so ``sinh(mean)`` double-applies it and reads back ~31% of the
@@ -619,25 +538,23 @@ def decode_categorical(logits, cell_band, centroids, readout="mean"):
 
 # ---- model-side key contract ----------------------------------------------
 
-#: ``wire_pos`` normaliser used by the trained FM (research ``fm/data.py``). The
-#: value is the max wire count over the production wire planes, so it is
-#: derivable from a shard (``_meta['n_wires'].max()``) — but a model trained
-#: against 1969 must keep seeing 1969, or every FiLM wire feature shifts.
+#: ``wire_pos`` normaliser of the FM's wire feature. The value is the max wire
+#: count over the production wire planes, so it is derivable from a shard
+#: (``_meta['n_wires'].max()``) — but a model trained against 1969 must keep
+#: seeing 1969, or every FiLM wire feature shifts.
 NW_MAX = 1969.0
 
-#: ``assemble`` output name -> the name ``fm/model.py`` gathers from its batch.
+#: ``assemble`` output name -> the name the FM gathers from its batch.
 FM_RENAME = {"cell_band": "band_id", "cell_gid": "plane_id",
              "cell_t": "t_phys", "cell_wire": "wire_pos"}
 
 
 def to_fm(tok: dict, *, nw_max: float = NW_MAX) -> dict:
-    """Tokenizer output -> the key names ``fm/model.py`` consumes.
+    """Tokenizer output -> the key names the FM consumes.
 
-    The tokenizer mirrors ``vit_tpc.assemble_tpc_band``'s vocabulary
-    (``cell_*``); the model gathers ``band_id``/``plane_id``/``t_phys``/
-    ``wire_pos`` plus a ``wirefeat`` that exists in neither. The research
-    pipeline bridged that in ``fm/data.py::_to_fm``; without an equivalent,
-    ``FMModel.forward`` raises ``KeyError: 'band_id'`` on its first access.
+    ``assemble`` speaks in cells (``cell_*``); the model gathers
+    ``band_id``/``plane_id``/``t_phys``/``wire_pos`` plus a ``wirefeat`` derived
+    here.
 
     Pass ``nw_max=meta['n_wires'].max()`` to derive the normaliser from the
     corpus instead of the trained-model constant.
@@ -654,11 +571,10 @@ def to_fm(tok: dict, *, nw_max: float = NW_MAX) -> dict:
 def _name_hash(name: str) -> int:
     """Stable 32-bit digest of an event name.
 
-    This used to be ``hash(name) & 0xFFFFFFFF``. Python salts *string* hashing
-    per process (PYTHONHASHSEED), so the seed derived from it changed on every
-    fresh interpreter: a resumed run, a re-run, and each DDP rank all drew
-    different masks for the same event, while the code reads as though the seed
-    is a deterministic function of the event. blake2b is stable across processes,
+    Not ``hash(name)``: Python salts *string* hashing per process
+    (PYTHONHASHSEED), so a seed derived from it would change on every fresh
+    interpreter — a resumed run, a re-run, and each DDP rank would draw different
+    augmentations for the same event. blake2b is stable across processes,
     machines, and versions.
     """
     import hashlib
@@ -693,13 +609,12 @@ class CoeffTokenize:
     scope = "sample"
 
     def __init__(self, part="coeff", cfg=None, dead_frac=0.0, seed=None, gids=None,
-                 n_wires=None, band_lengths=None, norm_sigma=None, fm_names=True):
+                 n_wires=None, band_lengths=None, norm_sigma=None):
         cfg = _require_cfg(cfg)
         self.part = part
         self.cfg = cfg if isinstance(cfg, PatchConfig) else PatchConfig(**(cfg or {}))
         self.dead_frac = float(dead_frac)
         self.seed = seed
-        self.fm_names = bool(fm_names)
         self._override = dict(gids=gids, n_wires=n_wires,
                               band_lengths=band_lengths, norm_sigma=norm_sigma)
 
@@ -730,14 +645,13 @@ class CoeffTokenize:
             norm_sigma=m["norm_sigma"], cfg=self.cfg,
             dead_frac=self.dead_frac, rng=rng, wire_valid=m.get("wire_valid"))
         n_cells = tok.pop("n_cells")
-        # Emit the names fm/model.py gathers, not assemble()'s cell_* vocabulary.
-        # Without this the first batch dies on B["band_id"] (model.py:266), and
-        # `to_fm` sat unused. It must run HERE, before the terminal Collect —
-        # Collect selects by exact key name and (in its multi-part `parts=` form)
-        # prefixes to `<part>_<key>`, so it can neither rename nor be renamed
-        # after. The recipe must therefore use the single-part `Collect(part=...)`
-        # form, which leaves these keys unprefixed and matching the model.
-        out = to_fm(tok) if self.fm_names else dict(tok)
+        # Emit the names the model gathers, not assemble()'s cell_* vocabulary.
+        # It must run HERE, before the terminal Collect — Collect selects by
+        # exact key name and (in its multi-part `parts=` form) prefixes to
+        # `<part>_<key>`, so it can neither rename nor be renamed after. The
+        # recipe must therefore use the single-part `Collect(part=...)` form,
+        # which leaves these keys unprefixed and matching the model.
+        out = to_fm(tok)
         # n_cells stays OUT of the batch on purpose: post-collate it is exactly
         # `B["plane_id"].shape[0]` (the cell row-space length), and a python int
         # would not survive collate as a per-event value anyway.

@@ -76,9 +76,7 @@ def sample():
     from helix.model.tokenize import CoeffTokenize
 
     ds = CoeffTPCDataset(data_root=CORPUS, dataset_name="sim_wire", transform=None)
-    # cell_t is explicit: PatchConfig has no default, and grid_center is what
-    # every helix config trains.
-    tok = CoeffTokenize(part="coeff", cfg=dict(cell_t="grid_center"))(ds.get_data(0))
+    tok = CoeffTokenize(part="coeff", cfg=dict())(ds.get_data(0))
     # CoeffCollect without importing helix.integrations.pimm (which needs pimm):
     # exercise the same logic the registered transform applies.
     out = {k: torch.from_numpy(np.ascontiguousarray(v))
@@ -140,7 +138,7 @@ def test_full_pimm_step_path(pimm_collate, pimm_to_device, sample):
     torch.manual_seed(0)
     n_slot = sample["inp"].shape[1]
     model = build_fm(dict(n_slot=n_slot, n_band=4, n_plane=6, d=64, blocks=2,
-                          dec_blocks=1, heads=4, dec_mode="cross", n_bins=16))
+                          dec_blocks=1, heads=4, n_bins=16))
     model.set_bins(torch.linspace(-4, 4, 17).repeat(4, 1))
 
     batch = pimm_to_device(pimm_collate([sample]), torch.device("cpu"))
@@ -164,7 +162,7 @@ def test_n_cells_is_derived_not_collated(pimm_collate, sample):
     assert "n_cells" not in out
     from helix.model import build_fm
     m = build_fm(dict(n_slot=sample["inp"].shape[1], n_band=4, n_plane=6, d=32,
-                      blocks=1, dec_blocks=1, heads=4, dec_mode="cross"))
+                      blocks=1, dec_blocks=1, heads=4, n_bins=16))
     B = dict(out)
     B.setdefault("n_cells", B["plane_id"].shape[0])
     assert isinstance(B["n_cells"], int)
@@ -211,8 +209,9 @@ def test_mae_evaluator_call_contract_is_documented():
 
 def build_small():
     from helix.model import build_fm
-    return build_fm(dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
-                         dec_blocks=1, heads=4, dec_mode="cross"))
+    m = build_fm(dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
+                      dec_blocks=1, heads=4, n_bins=16))
+    return m.set_bins(torch.linspace(-4, 4, 17).repeat(4, 1))
 
 
 def _tiny_batch(n_cells=16, n_slot=8):
@@ -220,11 +219,9 @@ def _tiny_batch(n_cells=16, n_slot=8):
     r = lambda *s: torch.rand(*s, generator=g)
     occ = (r(n_cells, n_slot) < 0.4).float()
     tgt = torch.randn(n_cells, n_slot, generator=g)
-    cell, slot = occ.nonzero(as_tuple=True)
     return dict(band_id=torch.randint(0, 4, (n_cells,), generator=g),
                 plane_id=torch.randint(0, 6, (n_cells,), generator=g),
                 t_phys=torch.randn(n_cells, generator=g) * 500,
                 wire_pos=r(n_cells) * 1900, wirefeat=r(n_cells, 1),
                 inp=torch.randn(n_cells, n_slot, generator=g), occ=occ,
-                valid=(r(n_cells, n_slot) < 0.9), tgt=tgt,
-                target=tgt[cell, slot], cell=cell, slot=slot, n_cells=n_cells)
+                valid=(r(n_cells, n_slot) < 0.9), tgt=tgt, n_cells=n_cells)

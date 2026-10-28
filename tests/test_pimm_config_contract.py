@@ -144,7 +144,7 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
     from helix.model import build_fm
 
     m = build_fm(dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
-                      dec_blocks=1, heads=4, dec_mode="cross", n_bins=16))
+                      dec_blocks=1, heads=4, n_bins=16))
     # The buffer EXISTS (persistent, so it rides in the state_dict and a
     # checkpoint no longer needs a sidecar) but is unset — NaN, which cannot be
     # mistaken for data. Absence was the old contract; the sentinel is the new
@@ -189,7 +189,7 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
 
     art = save(str(tmp_path / "art"), state_dict={},
                arch=dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
-                         dec_blocks=1, heads=4, dec_mode="cross", n_bins=16),
+                         dec_blocks=1, heads=4, n_bins=16),
                op=OperatingPoint(cell_t="grid_center", pw=16, pt=8, n_bands=4,
                                  bins=dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1))),
                weights="raw")

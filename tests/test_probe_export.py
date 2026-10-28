@@ -11,7 +11,7 @@ from helix.model.artifact import build, detect, load
 from helix.model.checkpoint import patch_config
 
 ARCH = dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1, dec_blocks=1,
-            heads=4, dec_mode="cross", n_bins=16)
+            heads=4, n_bins=16)
 
 
 def _export(tmp_path, model, safe=False, with_tokenizer=True, weight=None):

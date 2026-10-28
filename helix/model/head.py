@@ -1,11 +1,11 @@
 """The categorical objective, evaluated only where it has weight.
 
 ``val_head`` is ``Linear(d, n_slot * n_bins)``, and ``losses_cat`` runs
-``cross_entropy`` over its whole ``(n_cells, n_slot, n_bins)`` output. At
-``vis_w == 0`` only masked rows enter the objective, and the value term weights
-only their occupied, valid slots — **4.2 % of the grid** on the production
-corpus. The rest was computed, upcast to fp32, saved for backward and multiplied
-by zero: 4.8 GiB at a 32k-cell event, half the step's peak memory.
+``cross_entropy`` over its whole ``(n_cells, n_slot, n_bins)`` output. Only
+masked rows enter the objective, and the value term weights only their occupied,
+valid slots — **4.2 % of the grid** on the production corpus. Over the whole
+grid the rest is computed, upcast to fp32, saved for backward and multiplied by
+zero: 4.8 GiB at a 32k-cell event, half the step's peak memory.
 
 This computes the same sums over the same pairs: group the active pairs by slot,
 pad each group to the largest, and do one ``baddbmm`` plus one
@@ -18,23 +18,16 @@ import torch.nn.functional as F
 from helix.model.loss import bucketize_bins
 
 
-def cat_head_sparse(model, feat, B, rows, w=None, no_bce=None):
+def cat_head_sparse(model, feat, B, rows, w=None):
     """-> (occupancy BCE, value CE) over the masked rows ``rows`` of the batch,
-    whose decoded features are ``feat``; the sums ``losses_cat`` forms at
-    vis_w == 0.
+    whose decoded features are ``feat``; the sums ``losses_cat`` forms.
 
     ``w`` (per row) weights each row's terms in numerator and denominator alike
     -- a self-normalised estimate of the full-decode mean when rows were sampled
-    with probability 1/w. None is uniform and the original arithmetic.
-
-    ``no_bce`` (per row, bool) drops those rows from the occupancy term --
-    decoded visible rows, whose occupancy is observed -- and keeps them in the
-    value term."""
+    with probability 1/w (per-band ``dec_frac``). None is uniform."""
     NS, K = model.n_slot, model.n_bins
     valid, occ_t, tgt = B["valid"][rows], B["occ"][rows], B["tgt"][rows]
     vw = valid if w is None else valid * w[:, None]          # valid may be bool
-    if no_bce is not None:
-        vw = vw * (~no_bce)[:, None]
 
     occ = model.occ_head(feat) * model.readout_mult
     bce_e = F.binary_cross_entropy_with_logits(occ, occ_t, reduction="none")

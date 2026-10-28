@@ -24,7 +24,7 @@ from helix.model.artifact import (
 
 #: n_slot = pw * pt of the operating point below; export_artifact refuses otherwise.
 ARCH = dict(n_slot=128, n_band=4, n_plane=6, d=32, blocks=1, dec_blocks=1,
-            heads=4, dec_mode="cross", n_bins=16)
+            heads=4, n_bins=16)
 #: The operating point every readable fixture below encodes. Identical across
 #: formats on purpose: that is the property being tested.
 OP = OperatingPoint(cell_t="grid_center", pw=16, pt=8, n_bands=4)

@@ -174,14 +174,7 @@ def test_pixel_cells_agrees_with_assemble():
 
     This is the probe's join. If it drifts, the probe gathers the WRONG cell's
     features — which does not crash: it returns a number near the geometry null
-    that reads as a scientific result. The research implementation kept its own
-    copies of lev/delta/toff AND hard-coded LENS_T=[271,271,542,1084], a
-    per-CORPUS table; they agreed with the shipped corpus by luck.
-
-    Checked in both cell_t modes because m113 trained grid_center while the
-    PatchConfig default is centroid — cell IDENTITY is the same either way, and
-    that invariant is exactly what makes a per-pixel truth artifact reusable
-    across checkpoints.
+    that reads as a scientific result.
     """
     import numpy as np
     from helix.model.tokenize import (PatchConfig, cell_key, pixel_cells,
@@ -190,20 +183,19 @@ def test_pixel_cells_agrees_with_assemble():
     rng = np.random.default_rng(5)
     band_lengths = np.array([271, 271, 542, 1084], np.int64)
     n = 4000
-    for mode in ("centroid", "grid_center"):
-        cfg = PatchConfig(cell_t=mode)
-        gid = rng.integers(0, 6, n)
-        band = rng.integers(0, cfg.n_bands, n)
-        wire = rng.integers(0, 1969, n)
-        tau = np.array([rng.integers(0, band_lengths[b]) for b in band])
+    cfg = PatchConfig()
+    gid = rng.integers(0, 6, n)
+    band = rng.integers(0, cfg.n_bands, n)
+    wire = rng.integers(0, 1969, n)
+    tau = np.array([rng.integers(0, band_lengths[b]) for b in band])
 
-        tick = tick_of_tau(tau, gid, band, cfg)
-        np.testing.assert_array_equal(tau_of_tick(tick, gid, band, band_lengths, cfg), tau)
+    tick = tick_of_tau(tau, gid, band, cfg)
+    np.testing.assert_array_equal(tau_of_tick(tick, gid, band, band_lengths, cfg), tau)
 
-        cells = pixel_cells(gid, wire, tick, band_lengths, cfg)
-        assert cells.shape == (n, cfg.n_bands)
-        np.testing.assert_array_equal(cells[np.arange(n), band],
-                                      cell_key(gid, band, wire, tau, cfg))
+    cells = pixel_cells(gid, wire, tick, band_lengths, cfg)
+    assert cells.shape == (n, cfg.n_bands)
+    np.testing.assert_array_equal(cells[np.arange(n), band],
+                                  cell_key(gid, band, wire, tau, cfg))
 
 
 def test_tau_of_tick_clips_into_the_band():

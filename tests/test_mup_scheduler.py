@@ -21,7 +21,7 @@ from helix.model import build_fm  # noqa: E402
 from helix.model.mup import expand_max_lr, param_group_ratios  # noqa: E402
 
 ARCH = dict(n_slot=16, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1,
-            heads=4, dec_mode="cross", mup=True, d_base=32)
+            heads=4, mup=True, d_base=32, n_bins=16)
 LR, WD = 3e-4, 0.05
 
 

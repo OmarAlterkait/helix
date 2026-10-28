@@ -1,70 +1,17 @@
-"""Decoder-budget options: ``d_dec``, per-band ``dec_frac``, ``n_masks``.
+"""Decoder-budget options: per-band ``dec_frac``, ``n_masks``.
 
 Each changes what a training step spends, not what the model is evaluated on, so
-each test pins one of: the default builds exactly the original model; the option
-is training-only; the loss stays an estimate of the full objective; masks drawn
-for one step are complementary.
+each test pins one of: the option is training-only; the loss stays an estimate
+of the full objective; masks drawn for one step are complementary.
 """
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from helix.model import build_fm                                   # noqa: E402
 from helix.model.head import cat_head_sparse                        # noqa: E402
 from test_serial import SMALL, make_batch                           # noqa: E402
 from test_varlen import EXACT, _exact_mask, _model                  # noqa: E402
-
-
-def test_default_and_equal_d_dec_build_the_original_tree():
-    base = set(_model().state_dict())
-    assert "dec_embed.weight" not in base
-    assert set(_model(d_dec=SMALL["d"]).state_dict()) == base
-
-
-def test_d_dec_shapes_heads_and_refusals():
-    m = _model(d_dec=32)
-    assert m.dec_embed.weight.shape == (32, SMALL["d"])
-    assert m.dec[0].h == 2 and m.dec[0].hd == SMALL["d"] // SMALL["heads"]
-    assert m.val_head.in_features == 32 and m.dec_norm.normalized_shape == (32,)
-    with pytest.raises(ValueError):
-        _model(d_dec=24)                                   # not a multiple of the head dim
-    with pytest.raises(ValueError):
-        build_fm({**SMALL, "d_dec": 32, "serial": False, "dec_mode": "self"})
-
-
-@pytest.mark.parametrize("varlen", [False, True])
-def test_d_dec_trains_end_to_end(varlen):
-    m = _model(d_dec=32, varlen=varlen).train()
-    B = make_batch(**EXACT)
-    out = m(B)
-    assert torch.isfinite(out["loss"])
-    out["loss"].backward()
-    assert m.dec_embed.weight.grad is not None and m.enc[0].qkv.weight.grad.abs().sum() > 0
-    feat, rows = m.forward_feat(B, _exact_mask(EXACT["n_cells"]), masked_only=True)
-    assert feat.shape == (rows.numel(), 32)
-
-
-def test_d_dec_varlen_equals_padded_when_nothing_is_padded():
-    a, b = _model(d_dec=32), _model(d_dec=32, varlen=True)
-    b.load_state_dict(a.state_dict())
-    B, m = make_batch(**EXACT), _exact_mask(EXACT["n_cells"])
-    with torch.no_grad():
-        torch.testing.assert_close(b.forward_feat(B, m), a.forward_feat(B, m), rtol=1e-5, atol=1e-5)
-
-
-def test_d_dec_has_its_own_mup_multiplier():
-    m = _model(d_dec=32, mup=True, d_base=16)              # m = 4 encoder, 2 decoder
-    assert (m.m, m.m_dec, m.readout_mult) == (4.0, 2.0, 0.5)
-    cats = m._mup_categories()
-    assert cats["dec.0.q.weight"] == cats["dec_embed.weight"] == "hidden_dec"
-    assert cats["enc.0.qkv.weight"] == "hidden"
-    lrs = sorted(g["lr"] for g in m.param_groups(1.0, weight_decay=0.1))
-    assert lrs == [0.25, 0.5, 1.0, 1.0]
-    seen = [p for g in m.param_groups(1.0, weight_decay=0.1) for p in g["params"]]
-    assert len(seen) == len(list(m.parameters())) == len(set(map(id, seen)))
-    eq = _model(mup=True, d_base=16)                       # d_dec = d: no fourth group
-    assert len(eq.param_groups(1.0, weight_decay=0.1)) == 3
 
 
 def test_row_weight_two_equals_the_row_twice():
@@ -82,7 +29,7 @@ def test_row_weight_two_equals_the_row_twice():
 
 
 def test_per_band_dec_frac_keeps_full_bands_and_weights_the_rest():
-    m = _model(varlen=True).train()
+    m = _model().train()
     m.dec_frac = (1.0, 1.0, 0.5, 0.5)
     B = make_batch(n_cells=4000)
     mask = torch.arange(4000) % 4 != 0
@@ -117,7 +64,7 @@ def test_complementary_masks_are_disjoint_and_sized():
 
 
 def test_n_masks_averages_losses_in_training_only():
-    m = _model(varlen=True).train()
+    m = _model().train()
     m.n_masks = 2
     B = make_batch(**EXACT)
     out = m(B)
@@ -125,19 +72,3 @@ def test_n_masks_averages_losses_in_training_only():
     m.eval()
     with torch.no_grad():
         assert torch.isfinite(m(B)["loss"])                # eval: one mask, unchanged path
-
-
-def test_location_mask_hides_every_band_of_a_location_together():
-    from helix.model.mask import location_index
-    B = make_batch(n_cells=6000)
-    B["wire_pos"] = (B["wire_pos"] // 16) * 16              # block starts, as the tokenizer emits
-    B["n_cells"] = 6000
-    loc = location_index(B)
-    m = _model().train()
-    m.mask_mode = "location"
-    mask = m.make_mask(B)
-    for l in torch.unique(loc)[:200]:
-        v = mask[loc == l]
-        assert bool(v.all()) or not bool(v.any())
-    per_loc = torch.zeros(int(loc.max()) + 1).index_reduce_(0, loc, mask.float(), "amax", include_self=False)
-    assert 0.7 < per_loc.mean().item() < 0.8

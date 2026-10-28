@@ -1,10 +1,10 @@
-"""The serial model's forward must be the per-block formulation, bit for bit.
+"""The model's forward must be the per-block formulation, bit for bit.
 
-``helix.model.serial`` carries the residual stream in grouped, padded order and
-gathers once per block; the formulation it replaced gathered q, k and v into
-groups and scattered the output back inside every block. That formulation is
-kept HERE, as the reference, because "the same model, faster" is only a claim
-while something can still compute the old answer:
+``FMModel`` carries the residual stream in layout order and permutes once per
+block; the plain formulation gathers q, k and v into groups and scatters the
+output back inside every block. That formulation is kept HERE, as the
+reference, because "the same model, faster" is only a claim while something can
+still compute the plain answer:
 
 * the trunk reorders memory, not arithmetic, so ``torch.equal`` is the criterion;
 * the masked-only categorical objective sums the same pairs in a different
@@ -20,21 +20,17 @@ torch = pytest.importorskip("torch")
 F = torch.nn.functional
 
 from helix.model import build_fm                                   # noqa: E402
-from helix.model.fm import rope_angles                             # noqa: E402
-from helix.model.layers import apply_rope                          # noqa: E402
+from helix.model.layers import apply_rope_tables, rope_angles, rope_tables  # noqa: E402
 from helix.model.loss import losses_cat                            # noqa: E402
 
 
 SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=64, blocks=4, dec_blocks=2,
-             heads=4, dec_mode="cross", n_bins=16, gp=16, gd=32)
+             heads=4, n_bins=16, gp=16, gd=32)
 
 
 def make_batch(n_cells=96, n_slot=8, n_band=4, n_plane=6, seed=0):
     g = torch.Generator().manual_seed(seed)
     r = lambda *s: torch.rand(*s, generator=g)
-    occ = (r(n_cells, n_slot) < 0.3).float()
-    tgt = torch.randn(n_cells, n_slot, generator=g)
-    cell, slot = occ.nonzero(as_tuple=True)
     return dict(
         band_id=torch.randint(0, n_band, (n_cells,), generator=g),
         plane_id=torch.randint(0, n_plane, (n_cells,), generator=g),
@@ -42,11 +38,10 @@ def make_batch(n_cells=96, n_slot=8, n_band=4, n_plane=6, seed=0):
         wire_pos=r(n_cells) * 1900,
         wirefeat=r(n_cells, 1),
         inp=torch.randn(n_cells, n_slot, generator=g),
-        occ=occ,
+        occ=(r(n_cells, n_slot) < 0.3).float(),
         valid=(r(n_cells, n_slot) < 0.9),
-        tgt=tgt,
-        target=tgt[cell, slot],
-        cell=cell, slot=slot, n_cells=n_cells,
+        tgt=torch.randn(n_cells, n_slot, generator=g),
+        n_cells=n_cells,
     )
 
 
@@ -65,7 +60,7 @@ def _mask(n, every=4):
 # ------------------------------------------------ the reference formulation
 
 def _rope_ref(x, ang_t, ang_w):
-    """RoPE as the research tree wrote it: strided halves, per-call cos/sin."""
+    """RoPE written independently: strided halves, per-call cos/sin."""
     h2 = x.shape[-1] // 2
 
     def rot(v, ang):
@@ -78,51 +73,23 @@ def _rope_ref(x, ang_t, ang_w):
     return torch.cat([xt, xw], -1)
 
 
-def _grp(x, order, npad, nb, g):
-    T, h, hd = x.shape
-    b = x.new_empty(npad, h, hd); b[:T] = x[order]
-    if npad > T:
-        b[T:] = x[order[-1]]
-    return b.view(nb, g, h, hd).permute(0, 2, 1, 3)
+def _attn_groups(q, k, v, qgroups, kgroups):
+    """SDPA within each (query rows, key rows) group pair, in natural order."""
+    out = torch.empty_like(q)
+    for iq, ik in zip(qgroups, kgroups):
+        out[iq] = F.scaled_dot_product_attention(
+            q[iq].transpose(0, 1), k[ik].transpose(0, 1), v[ik].transpose(0, 1)).transpose(0, 1)
+    return out
 
 
-def _uniform_attn(q, k, v, order, g, pad_mask=False):
-    T, h, hd = q.shape; npad = ((T + g - 1) // g) * g; nb = npad // g
-    m = (torch.arange(npad) < T).view(nb, 1, 1, g) if pad_mask else None
-    o = F.scaled_dot_product_attention(*(_grp(t, order, npad, nb, g) for t in (q, k, v)),
-                                       attn_mask=m)
-    o = o.permute(0, 2, 1, 3).reshape(npad, h, hd)[:T]
-    out = o.new_empty(T, h, hd); out[order] = o; return out
+def _chunks(order, g):
+    """Consecutive g-token groups along ``order``, the last one shorter."""
+    return [order[i:i + g] for i in range(0, order.numel(), g)]
 
 
-def _grouped_cross(q, k, v, oq, ok, g, pad_mask=False):
-    Tq, h, hd = q.shape; Tk = k.shape[0]; nb = (max(Tq, Tk) + g - 1) // g
-    gq, gk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
-    m = (torch.arange(nb * gk) < Tk).view(nb, 1, 1, gk) if pad_mask else None
-    o = F.scaled_dot_product_attention(_grp(q, oq, nb * gq, nb, gq),
-                                       _grp(k, ok, nb * gk, nb, gk),
-                                       _grp(v, ok, nb * gk, nb, gk), attn_mask=m)
-    o = o.permute(0, 2, 1, 3).reshape(nb * gq, h, hd)[:Tq]
-    out = o.new_empty(Tq, h, hd); out[oq] = o; return out
-
-
-PAD = {"on": False}      # the reference's pad-masking switch (see the pad_mask test)
-
-
-def _mix(blk, x, ao, c):
-    if blk.adaln:
-        sa, ba, ga, sm, bm, gm = blk.ada(c).chunk(6, -1)
-        x = x + ga * ao
-        return x + gm * blk.mlp(blk.n2(x) * (1 + sm) + bm)
-    x = x + ao
-    return x + blk.mlp(blk.n2(x))
-
-
-def _pre(blk, x, c, norm):
-    if blk.adaln:
-        sa, ba = blk.ada(c).chunk(6, -1)[:2]
-        return norm(x) * (1 + sa) + ba
-    return norm(x)
+def _even(order, nb):
+    T = order.numel()
+    return [order[(i * T) // nb:((i + 1) * T) // nb] for i in range(nb)]
 
 
 def _qkn(blk, q, k):
@@ -133,24 +100,26 @@ def _qkn(blk, q, k):
     return blk.qn(q), blk.kn(k)
 
 
-def _self_ref(blk, x, at, aw, order, g, c):
+def _self_ref(blk, x, at, aw, order, g):
     T, d = x.shape
-    q, k, v = blk.qkv(_pre(blk, x, c, blk.n1)).chunk(3, -1)
+    q, k, v = blk.qkv(blk.n1(x)).chunk(3, -1)
     q, k = _qkn(blk, q.view(T, blk.h, blk.hd), k.view(T, blk.h, blk.hd))
-    q = _rope_ref(q, at, aw)
-    k = _rope_ref(k, at, aw)
-    o = _uniform_attn(q, k, v.view(T, blk.h, blk.hd), order, g, PAD["on"])
-    return _mix(blk, x, blk.proj(o.reshape(T, d)), c)
+    q, k = _rope_ref(q, at, aw), _rope_ref(k, at, aw)
+    grp = _chunks(order, g)
+    o = _attn_groups(q, k, v.view(T, blk.h, blk.hd), grp, grp)
+    x = x + blk.proj(o.reshape(T, d))
+    return x + blk.mlp(blk.n2(x))
 
 
-def _cross_ref(blk, q, kv, qat, qaw, kat, kaw, oq, okv, g, c):
+def _cross_ref(blk, q, kv, qat, qaw, kat, kaw, oq, okv, g):
     Tq, Tk = q.shape[0], kv.shape[0]
     k, v = blk.kv(blk.nk(kv)).chunk(2, -1)
-    qh, kh = _qkn(blk, blk.q(_pre(blk, q, c, blk.nq)).view(Tq, blk.h, blk.hd), k.view(Tk, blk.h, blk.hd))
-    qh = _rope_ref(qh, qat, qaw)
-    kh = _rope_ref(kh, kat, kaw)
-    o = _grouped_cross(qh, kh, v.view(Tk, blk.h, blk.hd), oq, okv, g, PAD["on"])
-    return _mix(blk, q, blk.proj(o.reshape(Tq, blk.h * blk.hd)), c)
+    qh, kh = _qkn(blk, blk.q(blk.nq(q)).view(Tq, blk.h, blk.hd), k.view(Tk, blk.h, blk.hd))
+    qh, kh = _rope_ref(qh, qat, qaw), _rope_ref(kh, kat, kaw)
+    nb = max(1, min((max(Tq, Tk) + g - 1) // g, Tq, Tk))
+    o = _attn_groups(qh, kh, v.view(Tk, blk.h, blk.hd), _even(oq, nb), _even(okv, nb))
+    q = q + blk.proj(o.reshape(Tq, blk.h * blk.hd))
+    return q + blk.mlp(blk.n2(q))
 
 
 def _sched(m, plane, t, wire):
@@ -158,16 +127,20 @@ def _sched(m, plane, t, wire):
     return [lay[i % len(lay)] for i in range(len(m.enc))]
 
 
-def _encode_ref(m, B, sel, layers=()):
+def _angles_ref(m, B, sel):
     hd = m.d // m.heads
     at = rope_angles(B["t_phys"][sel], hd, *m.lam_t)
-    aw = rope_angles(B["wire_pos"][sel], hd, *m.lam_w)
+    aw = rope_angles(B["wire_pos"][sel], hd, *m.lam_w) if m.wire_rope else None
+    return at, aw
+
+
+def _encode_ref(m, B, sel, layers=()):
+    at, aw = _angles_ref(m, B, sel)
     x = m._emb(B, None if isinstance(sel, slice) else sel)
-    c = m._cond(B)[sel] if m.cond == "adaln" else None
     out = {}
     for i, (blk, (o, g, uw)) in enumerate(
             zip(m.enc, _sched(m, B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel])), 1):
-        x = _self_ref(blk, x, at, aw if uw else None, o, g, c)
+        x = _self_ref(blk, x, at, aw if uw else None, o, g)
         if i in layers:
             out[i] = x
     return x, out
@@ -176,24 +149,17 @@ def _encode_ref(m, B, sel, layers=()):
 def _forward_feat_ref(m, B, tok_mask):
     vis = ~tok_mask
     vis_idx, mask_idx = vis.nonzero(as_tuple=True)[0], tok_mask.nonzero(as_tuple=True)[0]
-    hd = m.d // m.heads
-    at = rope_angles(B["t_phys"], hd, *m.lam_t)
-    aw = rope_angles(B["wire_pos"], hd, *m.lam_w)
+    at, aw = _angles_ref(m, B, slice(None))
+    sel = lambda a, i: None if a is None else a[i]
     xv, _ = _encode_ref(m, B, vis_idx)
-    c = m._cond(B) if m.cond == "adaln" else None
-    qm = m.mask_tok.expand(mask_idx.numel(), m.d)
-    if c is None:
-        if m.film is not None:
-            g_, b_ = m.film(B["band_id"][tok_mask], B["plane_id"][tok_mask], B["wirefeat"][tok_mask])
-            qm = g_ * qm + b_
-        qm = qm + m.band_emb(B["band_id"][tok_mask]) + m.plane_emb(B["plane_id"][tok_mask])
-    qm = qm.to(xv.dtype)
+    g_, b_ = m.film(B["band_id"][tok_mask], B["plane_id"][tok_mask], B["wirefeat"][tok_mask])
+    qm = g_ * m.mask_tok.expand(mask_idx.numel(), m.d) + b_
+    qm = qm + m.band_emb(B["band_id"][tok_mask]) + m.plane_emb(B["plane_id"][tok_mask])
     oq = torch.argsort(B["t_phys"][tok_mask].double())
     okv = torch.argsort(B["t_phys"][vis].double())
-    cm = c[tok_mask] if c is not None else None
     for blk in m.dec:
-        qm = _cross_ref(blk, qm, xv, at[tok_mask], aw[tok_mask], at[vis], aw[vis],
-                        oq, okv, m.gd, cm)
+        qm = _cross_ref(blk, qm, xv, at[tok_mask], sel(aw, tok_mask), at[vis], sel(aw, vis),
+                        oq, okv, m.gd)
     x = torch.zeros(B["inp"].shape[0], m.d, dtype=xv.dtype)
     return m.dec_norm(x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm))
 
@@ -201,20 +167,20 @@ def _forward_feat_ref(m, B, tok_mask):
 # ------------------------------------------------------------------ RoPE
 
 @pytest.mark.parametrize("wire", [True, False])
-def test_rope_is_the_research_formula_exactly(wire):
+def test_rope_tables_are_the_strided_formula_exactly(wire):
     g = torch.Generator().manual_seed(1)
     x = torch.randn(50, 4, 16, generator=g)
     at = rope_angles(torch.randn(50, generator=g) * 500, 16)
     aw = rope_angles(torch.rand(50, generator=g) * 1900, 16) if wire else None
-    assert torch.equal(apply_rope(x, at, aw), _rope_ref(x, at, aw))
+    assert torch.equal(apply_rope_tables(x, *rope_tables(at, aw)), _rope_ref(x, at, aw))
 
 
 # ----------------------------------------------------------------- trunk
 
 CASES = {
-    "film": {},
+    "default": {},
     "rope_split": dict(rope_split=True),
-    "adaln": dict(cond="adaln"),
+    "no_wire_rope": dict(wire_rope=False),
     "6_blocks_wrap": dict(blocks=6),       # layouts cycle: block 4 follows block 3
     "2_blocks": dict(blocks=2),            # fewer blocks than layouts
     "qk_norm": dict(qk_norm=True),
@@ -222,17 +188,19 @@ CASES = {
 
 
 @pytest.mark.parametrize("kw", CASES.values(), ids=CASES.keys())
-def test_forward_feat_is_bit_exact(kw):
-    B, m = make_batch(), _model(**kw)
+@pytest.mark.parametrize("n_cells", [96, 100])          # 100: groups of unequal size
+def test_forward_feat_is_bit_exact(kw, n_cells):
+    B, m = make_batch(n_cells=n_cells), _model(**kw)
     mask = _mask(B["n_cells"])
     with torch.no_grad():
         assert torch.equal(m.forward_feat(B, mask), _forward_feat_ref(m, B, mask))
 
 
 @pytest.mark.parametrize("kw", CASES.values(), ids=CASES.keys())
-def test_encode_layers_is_bit_exact(kw):
+@pytest.mark.parametrize("n_cells", [96, 100])
+def test_encode_layers_is_bit_exact(kw, n_cells):
     """The probe reads these: every layer, every token, no masking."""
-    B, m = make_batch(), _model(**kw)
+    B, m = make_batch(n_cells=n_cells), _model(**kw)
     layers = set(range(1, len(m.enc) + 1))
     with torch.no_grad():
         got = m.encode_layers(B, layers)
@@ -256,8 +224,8 @@ def test_masked_only_is_the_masked_rows():
 # ------------------------------------------------------------ objective
 
 def _dense(m, B, mask):
-    occ, val, _ = m.raw_heads(B, mask)
-    bce, v = losses_cat(occ, val, B, mask, m.bin_edges, vis_w=0.0)
+    occ, val = m.raw_heads(B, mask)
+    bce, v = losses_cat(occ, val, B, mask, m.bin_edges)
     return bce + v, bce, v
 
 
@@ -299,7 +267,7 @@ def test_fm_keys_names_every_option_build_fm_consumes():
     """The training entry point validates config keys against this set."""
     from helix.model.fm import fm_keys
     k = fm_keys()
-    assert {"compile_blocks", "gp", "gd", "rope_split", "serial", "d", "mask_ratio"} <= k
+    assert {"compile_blocks", "gp", "gd", "rope_split", "wire_rope", "d", "mask_ratio"} <= k
     assert not ({"self", "args", "kw", "fast_path"} & k)
 
 
@@ -325,11 +293,6 @@ def test_compile_blocks_selects_the_compiled_blocks():
     assert torch._dynamo.config.optimize_ddp is False
 
 
-def test_compile_blocks_on_the_full_attention_model_raises():
-    with pytest.raises(ValueError, match="compile_blocks"):
-        build_fm({**SMALL, "dec_mode": "self"}, serial=False, compile_blocks=True)
-
-
 def test_an_eval_rebuild_does_not_compile():
     """compile_blocks is how a run executed; a probe rebuilding it must not
     inherit minutes of compilation."""
@@ -338,37 +301,7 @@ def test_an_eval_rebuild_does_not_compile():
     assert build(art, device="cpu").compile_blocks is False
 
 
-# -------------------------------------------------------- pad_mask, sinks
-
-def test_pad_mask_matches_a_reference_that_masks_padding():
-    """pad_mask=True drops each group's padding keys (copies of its last token)."""
-    B, m = make_batch(n_cells=90), _model()          # 90 visible/masked counts leave pads
-    m.pad_mask = True
-    mask = _mask(B["n_cells"])
-    PAD["on"] = True
-    try:
-        with torch.no_grad():
-            got, ref = m.forward_feat(B, mask), _forward_feat_ref(m, B, mask)
-    finally:
-        PAD["on"] = False
-    assert torch.allclose(got, ref, atol=1e-6)
-    m.pad_mask = False
-    with torch.no_grad():
-        assert not torch.allclose(m.forward_feat(B, mask), got, atol=1e-6), \
-            "pad_mask changed nothing -- this batch has no padding to mask"
-
-
-def test_attention_sinks_train_and_are_off_by_default():
-    base = _model()
-    assert all(blk.n_sink == 0 for blk in base.enc)
-    m = _model(n_sink=2)
-    B = make_batch()
-    loss = m.train()(B, tok_mask=_mask(B["n_cells"]))["loss"]
-    loss.backward()
-    for blk in m.enc:
-        assert blk.sink_k.grad is not None and blk.sink_v.grad is not None
-    assert "n_sink" in __import__("helix.model.fm", fromlist=["fm_keys"]).fm_keys()
-
+# ------------------------------------------------------------ execution
 
 def test_activation_checkpointing_gives_the_same_gradients():
     B, m = make_batch(), _model()
@@ -388,9 +321,9 @@ def test_activation_checkpointing_gives_the_same_gradients():
 
 
 def test_qk_norm_is_off_by_default_and_bounds_the_logits():
-    """Off: no new parameters, so every existing checkpoint loads unchanged. On:
-    each head's query and key have unit RMS before RoPE, whatever the projection
-    bias -- which is the point, since the late qkv biases grew 7 -> 18 in 47k steps."""
+    """Off: no norm parameters. On: each head's query and key have unit RMS
+    before RoPE, whatever the projection bias -- which is the point, since the
+    late qkv biases grew 7 -> 18 in 47k steps."""
     base = _model()
     assert all(blk.qn is None for blk in list(base.enc) + list(base.dec))
     assert not any("qn." in n or "kn." in n for n, _ in base.named_parameters())
@@ -405,19 +338,17 @@ def test_qk_norm_is_off_by_default_and_bounds_the_logits():
     assert "qk_norm" in __import__("helix.model.fm", fromlist=["fm_keys"]).fm_keys()
 
 
-@pytest.mark.parametrize("pad", [0, 5])
-def test_permute_backward_matches_autograd(pad):
-    """The cheap backward (gather by the inverse, padding summed into its row) is
-    autograd's scatter-add, reordered: same gradient to rounding."""
+def test_permute_backward_matches_autograd():
+    """The cheap backward (gather by the inverse) is autograd's scatter-add for
+    a permutation: the same gradient."""
     from helix.model.serial import _permute
     g = torch.Generator().manual_seed(0)
-    T, n = 37, 41                                   # source has pad rows of its own
-    perm = torch.randperm(T, generator=g)
-    idx = torch.cat([perm, perm[-1:].repeat(pad)])
-    x1 = torch.randn(n, 8, generator=g, requires_grad=True)
+    T = 37
+    idx = torch.randperm(T, generator=g)
+    x1 = torch.randn(T, 8, generator=g, requires_grad=True)
     x2 = x1.detach().clone().requires_grad_(True)
-    w = torch.randn(T + pad, 8, generator=g)
+    w = torch.randn(T, 8, generator=g)
     (x1[idx] * w).sum().backward()
-    (_permute(x2, idx, T) * w).sum().backward()
-    assert torch.equal(x1[idx], _permute(x2.detach(), idx, T))
-    assert torch.allclose(x1.grad, x2.grad, atol=1e-6, rtol=1e-6)
+    (_permute(x2, idx) * w).sum().backward()
+    assert torch.equal(x1[idx], _permute(x2.detach(), idx))
+    assert torch.equal(x1.grad, x2.grad)

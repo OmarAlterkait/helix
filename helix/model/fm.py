@@ -1,75 +1,51 @@
 """The coefficient foundation model.
 
-``FMModel`` is extracted verbatim from the research tree
-(``coeff_foundation_model/fm/model.py`` lines 138-369) with exactly one
-documented edit: the research ``forward`` is renamed ``raw_heads``, and a new
-``forward`` implements the pimm Trainer contract (``model(batch) -> dict``
-with a ``loss`` key). The parameter tree is untouched, so research checkpoints
-load key-for-key — see ``tests/test_model_fm.py``.
+A masked autoencoder over patch tokens of sparse wavelet coefficients: the
+encoder runs on the visible tokens only, in grouped attention along four token
+orders (:mod:`helix.model.serial`); a CrossMAE decoder's masked queries
+cross-attend the encoded visible tokens in drift-time groups; a categorical head
+predicts each slot's occupancy and its value's bin. ``forward`` implements the
+pimm Trainer contract (``model(batch) -> dict`` with a ``loss`` key).
 """
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from helix.model.layers import (rope_angles, apply_rope, ResponseFiLM,
-                                Block, CrossBlock)
+from helix.model.layers import rope_angles, rope_tables, ResponseFiLM, Block, CrossBlock
 from helix.model.head import cat_head_sparse
-from helix.model.loss import losses, losses_fused, losses_cat
 from helix.model.mask import make_mask
+from helix.model.serial import _blocks, _ckpt, _cu_chunks, _cu_even, _inverse, _permute
 
 
-# Training-policy options: how to mask and which objective to apply. These are
-# deliberately NOT arguments of the extracted __init__ — they carry no
-# parameters, so keeping them off the verbatim signature keeps a checkpoint's
-# architecture metadata and the parameter tree in exact correspondence. They
-# are applied by build_fm() as instance attributes.
+# Training-policy options: how to mask, how a step executes. They carry no
+# parameters, so they are NOT arguments of __init__: the constructor signature is
+# the architecture, which keeps a checkpoint's architecture metadata and its
+# parameter tree in exact correspondence. build_fm() sets them as attributes.
 #
-# These track the research CLI defaults in mae_ddp.py. Two of them did NOT, under
-# a comment asserting that they did: mask_ratio was 0.5 against `--mask 0.75`,
-# and loss_fused was False against `--fused 1`. m113 trained at 0.75, so a helix
-# run masked 48% of tokens where research masked 72% — a different task, not a
-# different hyperparameter. `--fused` is MSE-benign (2.4e-7) but selects a
-# different logvar clamp for NLL heads, (-12, 8) fused vs (-8, 8) gathered:
-# measured 6379 vs 360 on one batch.
+# plane_frac mixes the two masking modes PER STEP: whole-plane masking with that
+# probability, mask_mode otherwise. It is NOT the same as mask_mode="plane",
+# which would mask planes every step.
 #
-# plane_frac mixes the two masking modes PER STEP (research mae_ddp.py:187):
-# whole-plane masking with that probability, mask_mode otherwise. It is NOT the
-# same as mask_mode="plane", which would mask planes every step. m113 trained at
-# 0.1; the default here is research's 0.0, so it must be asked for.
-# loss_fused stays FALSE as the library default even though research's CLI
-# default is --fused 1. It is not just a faster path: it requires a different set
-# of batch keys, and for an NLL head it selects the (-12, 8) logvar clamp instead
-# of (-8, 8) — measured 6379 vs 360 on one batch. A default that re-tasks every
-# existing consumer is the wrong place to express a per-run choice, so the
-# training recipe opts in explicitly instead.
+# act_ckpt recomputes each block's activations in the backward pass instead of
+# storing them: ~1.3x the step for a fraction of the activation memory, which is
+# what lets d > 1024 fit a 40 GB card.
 #
-# act_ckpt recomputes each serial block's activations in the backward pass
-# instead of storing them: ~1.3x the step for a fraction of the activation
-# memory, which is what lets d > 1024 fit a 40 GB card.
-#
-# pad_mask excludes each attention group's padding (copies of its last token)
-# from the keys. Off reproduces the original model exactly; on is a numerics
-# change, so it is a per-run choice (docs/archive/REVIEW_FIELD.md section 1.1).
-#
-# compile_blocks runs the serial model's block functions through torch.compile
-# (dynamic shapes): ~1.2x steady-state for ~5 minutes' compilation per job, so
-# the training config turns it on and everything else (tests, probes, smoke
-# runs) leaves it off.
+# compile_blocks runs the block functions through torch.compile (dynamic
+# shapes): ~1.2x steady-state for ~5 minutes' compilation per job, so the
+# training config turns it on and everything else (tests, probes, smoke runs)
+# leaves it off.
 #
 # fused_qk runs QK-norm + RoPE as one Triton kernel each way
 # (helix.model.kernels); the same arithmetic to ~1e-5, so it is an
-# implementation choice, not an architecture one. Needs varlen=True, qk_norm and
-# head dim 64.
+# implementation choice, not an architecture one. Needs qk_norm and head dim 64.
 #
 # bf16_params stores every PARAMETER in bfloat16 (buffers such as bin_edges stay
 # fp32). The fp32 master copy then lives in the optimizer (FlatAdamW, which
 # requires it), autocast stops re-casting each weight every forward, and the
 # residual stream follows the weights to bf16. A numerics change: per-run.
 #
-# fp32_stream keeps the residual stream fp32 when bf16_params is on (varlen
-# path). The d768 A/B put bf16_params+FlatAdamW 0.010 above the reference in
-# final val loss while varlen alone was 0.005 below it; this isolates whether
-# the stream's rounding is the cause.
+# fp32_stream keeps the residual stream fp32 when bf16_params is on. The d768
+# A/B put bf16_params+FlatAdamW 0.010 above the reference in final val loss
+# while varlen alone was 0.005 below it; this isolates whether the stream's
+# rounding is the cause.
 #
 # dec_frac < 1 decodes only that fraction of the masked tokens in TRAINING
 # (partial reconstruction, CrossMAE); evaluation decodes all of them, so val loss
@@ -83,84 +59,55 @@ from helix.model.mask import make_mask
 # -- more work per step where a step is fixed-cost bound. Random-mode masks are
 # COMPLEMENTARY (disjoint visible sets, as data2vec 2.0's multi-mask); a
 # plane-mode step draws its masks independently.
-#
-# mask_cell is the (wires, ticks) extent of a location for mask_mode="location".
-#
-# vis_frac > 0 also decodes that fraction of the VISIBLE tokens in training: they
-# join the decoder's queries (their own encoder output is among the keys) and get
-# the value loss against the target -- clean in simulation, so a noise-only slot
-# is taught "nothing here". No occupancy loss for them: it is observed. Without
-# it no token is ever trained to judge its own coefficients, which is what the
-# frozen probe asks of every token.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
-                   plane_frac=0.0, plane_mode="plane",
-                   loss_fused=False, vis_w=0.0, noisy=False,
-                   alpha=0.0, beta=0.0, varb=None, compile_blocks=False,
-                   pad_mask=False, act_ckpt=False, fused_qk=False,
-                   bf16_params=False, fp32_stream=False, dec_frac=1.0,
-                   n_masks=1, mask_cell=(16, 128), vis_frac=0.0)
+                   plane_frac=0.0, compile_blocks=False, act_ckpt=False,
+                   fused_qk=False, bf16_params=False, fp32_stream=False,
+                   dec_frac=1.0, n_masks=1)
 
 
 class FMModel(nn.Module):
-    def __init__(self, n_slot, n_band, n_plane, n_wirefeat=1, d=128, blocks=4,
-                 dec_blocks=2, heads=4, film=("band", "plane", "wire"), nll=False, ffn_mult=4,
-                 lam_t=(8.0, 4336.0), lam_w=(32.0, 2048.0), cond="film", dec_mode="self",
-                 mup=False, d_base=128, wire_rope=True, n_bins=0, n_sink=0,
-                 qk_norm=False, d_dec=None):
+    """``rope_split=True`` rotates by time AND wire on the plane-order layers but
+    by TIME ONLY on the drift-order ones (whose groups mix planes, and wire_pos
+    is a per-plane axis); False rotates by both everywhere. ``wire_rope=False``
+    rotates by time only, everywhere. ``gp`` / ``gd`` are the group sizes of the
+    plane-order and the drift-order layers (and the decoder)."""
+
+    def __init__(self, n_slot, n_band, n_plane, n_bins, d=128, blocks=4, dec_blocks=2,
+                 heads=4, ffn_mult=4, lam_t=(8.0, 4336.0), lam_w=(32.0, 2048.0),
+                 mup=False, d_base=128, wire_rope=True, qk_norm=False,
+                 rope_split=False, gp=1024, gd=2048):
         super().__init__()
-        # d_dec: decoder width, when it differs from the encoder's. The decoder
-        # then reads the encoder through one linear map (``dec_embed``, MAE's
-        # decoder_embed) applied to the visible features and to the mask queries
-        # alike, and runs at head dim 64 like the encoder. None = d, which
-        # builds exactly the original parameter tree.
-        dd = d if d_dec in (None, d) else int(d_dec)
-        if dd != d and (dd % (d // heads) or dec_mode != "cross"):
-            raise ValueError(f"d_dec={d_dec} needs dec_mode='cross' and a multiple of the "
-                             f"head dim {d // heads}")
-        self.d_dec = dd
-        self.d, self.n_slot, self.nll, self.cond, self.heads = d, n_slot, nll, cond, heads
+        if int(n_bins) <= 0:
+            raise ValueError(f"n_bins={n_bins}: the value head is categorical and needs >= 1 bin")
+        self.d, self.n_slot, self.heads, self.n_bins = d, n_slot, heads, int(n_bins)
         self.lam_t, self.lam_w = lam_t, lam_w     # per-axis RoPE wavelength band (time / wire)
         # wire_rope=False: RoPE on TIME ONLY. wire_pos is a PER-PLANE projection axis (non-metric
         # across planes), so relative wire rotation injects nonsense phase onto cross-plane
-        # attention pairs (the triangulation pairs). Wire identity still enters via FiLM. (audit bug 2)
+        # attention pairs (the triangulation pairs). Wire identity still enters via FiLM.
         self.wire_rope = wire_rope
-        self.n_bins = n_bins                      # >0 => categorical (discretized-bin) value head
-        if n_bins > 0:
-            # PERSISTENT. These are training-set statistics that inference is
-            # WRONG without — the BatchNorm running_mean/running_var case, not
-            # the causal-mask case. `persistent=False` is for tensors __init__
-            # can regenerate from its own arguments (rotary inv_freq, attention
-            # masks); bin edges cannot be regenerated from anything.
-            #
-            # They were non-persistent, so they vanished from every state_dict
-            # the trainer wrote and the edges survived only as a PATH STRING in
-            # a sidecar json. A checkpoint moved away from its experiment
-            # directory was then unusable, and the probe could not read anything
-            # we trained. 4 x 129 float32 = 2 kB; there is no cost argument.
-            #
-            # Allocated here so the shape exists before any load; set_bins fills
-            # it, and a state_dict load overwrites it.
-            # NaN, not zeros: "allocated but never set" must stay distinguishable
-            # from real edges. All-zero edges are not valid (they must increase),
-            # but zeros would still silently bucketise everything into one bin,
-            # trading a loud failure for a wrong number. NaN cannot be mistaken
-            # for data and `forward` checks it.
-            self.register_buffer("bin_edges",
-                                 torch.full((n_band, n_bins + 1), float("nan")))
-            # PERSISTENT, like the edges. `bin_cent_asinh` is the var_expl
-            # estimator (token space); `bin_cent_ratio` is E[coeff/sigma | bin],
-            # the charge read-back. `set_bins` DERIVES either one that is not
-            # supplied, so neither is ever NaN — an optional table is what let a
-            # guard silently disable the metrics that depend on it.
-            #
-            # `bin_cent_lin` is deliberately absent. It was E[raw ADC | bin]
-            # pooled across planes whose norm_sigma differ by 22%, which biases a
-            # Y-plane read-back 13% low and a U/V one 6% high — cancelling under a
-            # random mask and NOT under a plane mask. Nothing read it; it is
-            # removed rather than carried.
-            for _nm in ("bin_cent_asinh", "bin_cent_ratio"):
-                self.register_buffer(_nm, torch.full((n_band, n_bins), float("nan")))
-        self.dec_mode = dec_mode                  # "self" = full-attn decoder over all N; "cross" = CrossMAE (cheaper)
+        self.rope_split, self.gp, self.gd = rope_split, gp, gd
+        # PERSISTENT. These are training-set statistics that inference is
+        # WRONG without — the BatchNorm running_mean/running_var case, not
+        # the causal-mask case. `persistent=False` is for tensors __init__
+        # can regenerate from its own arguments (rotary inv_freq, attention
+        # masks); bin edges cannot be regenerated from anything, and a
+        # checkpoint must be usable away from its experiment directory.
+        #
+        # Allocated here so the shape exists before any load; set_bins fills
+        # it, and a state_dict load overwrites it.
+        # NaN, not zeros: "allocated but never set" must stay distinguishable
+        # from real edges. All-zero edges are not valid (they must increase),
+        # but zeros would still silently bucketise everything into one bin,
+        # trading a loud failure for a wrong number. NaN cannot be mistaken
+        # for data and `forward` checks it.
+        self.register_buffer("bin_edges",
+                             torch.full((n_band, n_bins + 1), float("nan")))
+        # PERSISTENT, like the edges. `bin_cent_asinh` is the var_expl
+        # estimator (token space); `bin_cent_ratio` is E[coeff/sigma | bin],
+        # the charge read-back. `set_bins` DERIVES either one that is not
+        # supplied, so neither is ever NaN.
+        for _nm in ("bin_cent_asinh", "bin_cent_ratio"):
+            self.register_buffer(_nm, torch.full((n_band, n_bins), float("nan")))
         # --- muP (Yang & Hu, Tensor Programs V, arXiv:2203.03466) ---
         # m = d/d_base is the width multiplier. Under muP the optimal Adam LR is
         # width-invariant: hidden init var and Adam LR are divided by m; readout
@@ -171,35 +118,20 @@ class FMModel(nn.Module):
         # width. HERE d_head is FIXED (=64; heads=d/64), so q.k over a fixed d_head is
         # already O(1) under the standard 1/sqrt(d_head) — that scaling is width-correct
         # and we keep it (forcing 1/d_head would just shrink logits ~8x, verified by the
-        # coord check). So the attention-scale change is a NO-OP for this fixed-head_dim
-        # model; we leave attn_scale=None (SDPA default 1/sqrt(head_dim)) in both paths.
+        # coord check). So attention keeps SDPA's default 1/sqrt(head_dim).
         self.mup, self.d_base = mup, d_base
         self.m = d / d_base if mup else 1.0
-        self.m_dec = dd / d_base if mup else 1.0  # the decoder's own width multiplier
-        self.readout_mult = 1.0 / self.m_dec     # output multiplier: the heads read the decoder
-        attn_scale = None                        # None => SDPA default 1/sqrt(head_dim); width-correct for fixed d_head
-        adaln = (cond == "adaln")
+        self.readout_mult = 1.0 / self.m         # output multiplier (1 if mup=False)
         self.embed = nn.Linear(2 * n_slot, d)
-        self.film = ResponseFiLM(d, n_band, n_plane, n_wirefeat, use=film) if (film and not adaln) else None
+        self.film = ResponseFiLM(d, n_band, n_plane)
         self.band_emb = nn.Embedding(n_band, d)              # learned identity (non-metric)
         self.plane_emb = nn.Embedding(n_plane, d)
-        self.cond_wire = nn.Sequential(nn.Linear(n_wirefeat, d), nn.SiLU()) if adaln else None
         self.mask_tok = nn.Parameter(torch.zeros(d))
-        self.enc = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale, n_sink, qk_norm)
-                                 for _ in range(blocks))
-        self.dec_embed = nn.Linear(d, dd) if dd != d else None
-        if dec_mode == "cross":
-            self.dec = nn.ModuleList(CrossBlock(dd, dd // (d // heads), ffn_mult, attn_scale, adaln, qk_norm)
-                                     for _ in range(dec_blocks))
-        else:
-            self.dec = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale, 0, qk_norm) for _ in range(dec_blocks))
-        if adaln and dd != d:
-            raise ValueError("d_dec != d with cond='adaln' is not implemented (the AdaLN "
-                             "conditioning vector is encoder-width)")
-        self.dec_norm = nn.LayerNorm(dd)
-        self.occ_head = nn.Linear(dd, n_slot)
-        _vout = n_slot * (n_bins if n_bins > 0 else (2 if nll else 1))  # cat: K/slot; nll: mu+logvar; else mu
-        self.val_head = nn.Linear(dd, _vout)
+        self.enc = nn.ModuleList(Block(d, heads, ffn_mult, qk_norm) for _ in range(blocks))
+        self.dec = nn.ModuleList(CrossBlock(d, heads, ffn_mult, qk_norm) for _ in range(dec_blocks))
+        self.dec_norm = nn.LayerNorm(d)
+        self.occ_head = nn.Linear(d, n_slot)
+        self.val_head = nn.Linear(d, n_slot * n_bins)        # K logits per slot
         if mup:
             self._mup_init()
 
@@ -211,46 +143,34 @@ class FMModel(nn.Module):
     def _mup_categories(self):
         """-> dict name->('input'|'hidden'|'output') for WEIGHT params (2-D).
         Biases / LayerNorm / 1-D params are always 'input' (LR const, no scaling)."""
-        hidden, hidden_dec, output = set(), set(), set()
-        for i, blk in enumerate(self.enc):
-            for nm in ("qkv", "proj", "mlp.0", "mlp.2", "ada", "q", "kv"):
-                hidden.add(f"enc.{i}.{nm}.weight")
-        # Decoder weights scale with the DECODER's width. At d_dec == d this is
-        # the same multiplier, so the category is merged back into "hidden".
-        dec = hidden if self.d_dec == self.d else hidden_dec
-        for i, blk in enumerate(self.dec):
-            for nm in ("qkv", "proj", "mlp.0", "mlp.2", "ada", "q", "kv"):
-                dec.add(f"dec.{i}.{nm}.weight")
-        if self.dec_embed is not None:
-            hidden_dec.add("dec_embed.weight")    # fan_in d, fan_out d_dec: both O(width)
-        names = dict(self.named_parameters())
-        hidden.update(n for n in ("pool_proj.weight", "pool_up.weight") if n in names)  # serial band_pool
-        output.update({"occ_head.weight", "val_head.weight"})
+        hidden = set()
+        for stack, blocks in (("enc", self.enc), ("dec", self.dec)):
+            for i in range(len(blocks)):
+                for nm in ("qkv", "proj", "mlp.0", "mlp.2", "q", "kv"):
+                    hidden.add(f"{stack}.{i}.{nm}.weight")
+        output = {"occ_head.weight", "val_head.weight"}
         cats = {}
         for n, p in self.named_parameters():
             if n in hidden:       cats[n] = "hidden"
-            elif n in hidden_dec: cats[n] = "hidden_dec"
             elif n in output:     cats[n] = "output"
-            else:                 cats[n] = "input"     # embed/emb/mask_tok/film/cond_wire/all biases/LN
+            else:                 cats[n] = "input"     # embed/emb/mask_tok/film/all biases/LN
         return cats
 
     def _mup_init(self):
         """Rescale hidden WEIGHT init so var = base_var / m (std /= sqrt(m)).
         Input/output init left at the framework default (= base param at m=1 => the
         mup=False path is reproduced exactly when d==d_base). Query/readout are NOT
-        zero-init'd here: the codebase already zero-inits FiLM/AdaLN, and a plain
-        (non-zero) readout is a valid muP choice as long as the 1/m multiplier is applied."""
+        zero-init'd here: FiLM is already zero-init'd, and a plain (non-zero)
+        readout is a valid muP choice as long as the 1/m multiplier is applied."""
         import math as _m
         cats = self._mup_categories()
         with torch.no_grad():
             for n, p in self.named_parameters():
                 if cats.get(n) == "hidden" and p.dim() == 2:
                     p.mul_(1.0 / _m.sqrt(self.m))       # var -> var / m
-                elif cats.get(n) == "hidden_dec" and p.dim() == 2:
-                    p.mul_(1.0 / _m.sqrt(self.m_dec))
 
     def param_groups(self, base_lr, weight_decay=None):
-        """AdamW param groups with muP per-category LR multipliers (call from train.py).
+        """AdamW param groups with muP per-category LR multipliers.
         HIDDEN: lr = base_lr / m. INPUT & OUTPUT (+ biases, LayerNorm): lr = base_lr.
         With mup=False, m==1 so every group gets base_lr (identical to a flat AdamW).
 
@@ -258,19 +178,18 @@ class FMModel(nn.Module):
         decoupled decay as lr*wd*p, so a hidden LR of base_lr/m would otherwise shrink
         effective decay by 1/m across width (a width-scaling confound -- up to ~6x weaker
         at d768). We set the hidden group's wd = weight_decay*m so effective decay
-        (lr*wd = base_lr*weight_decay) is width-invariant. weight_decay=None preserves the
-        LEGACY path (per-group wd unset -> optimizer's constructor default applies, LR-coupled);
-        used by callers that pass weight_decay to the AdamW constructor instead."""
+        (lr*wd = base_lr*weight_decay) is width-invariant. weight_decay=None leaves
+        per-group wd unset (the optimizer's constructor value applies, LR-coupled)."""
         cats = self._mup_categories()
         # NO-DECAY group (nanoGPT/timm standard): decay only 2-D weight matrices; exclude
-        # all 1-D params (biases, LayerNorm) and tokens from weight decay. Only splits when
-        # weight_decay is passed; the legacy (weight_decay=None) path stays 2 groups.
-        buckets = {"hidden": [], "hidden_dec": [], "decay": [], "nodecay": []}
+        # all 1-D params (biases, LayerNorm) and tokens from weight decay. The split
+        # takes effect only when weight_decay is passed.
+        buckets = {"hidden": [], "decay": [], "nodecay": []}
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
-            if cats.get(n) in ("hidden", "hidden_dec"):
-                buckets[cats[n]].append(p)                                      # muP-scaled 2-D weights
+            if cats.get(n) == "hidden":
+                buckets["hidden"].append(p)                                     # muP-scaled 2-D weights
             elif p.dim() >= 2:
                 buckets["decay"].append(p)                                      # other 2-D weights (heads, embed, film)
             else:
@@ -291,153 +210,179 @@ class FMModel(nn.Module):
             if weight_decay is not None:
                 g["weight_decay"] = weight_decay * self.m                       # decouple: lr*wd = base_lr*weight_decay
             groups.append(g)
-        if buckets["hidden_dec"]:                                               # only when d_dec != d
-            g = {"params": buckets["hidden_dec"], "lr": base_lr / self.m_dec}
-            if weight_decay is not None:
-                g["weight_decay"] = weight_decay * self.m_dec
-            groups.append(g)
         return groups
 
-    def _cond(self, B):                                          # AdaLN conditioning vector (per token)
-        return self.band_emb(B["band_id"]) + self.plane_emb(B["plane_id"]) + self.cond_wire(B["wirefeat"])
+    # ---- encoder / decoder -------------------------------------------------
+
+    def _fused(self):
+        """``fused_qk`` (a train option) after checking it can apply: the kernel
+        is QK-norm + RoPE at head dim 64."""
+        if not self.fused_qk:
+            return False
+        hd = self.d // self.heads
+        if not (self.enc[0].qn is not None and hd == 64):
+            raise ValueError(f"fused_qk needs qk_norm=True and head dim 64 "
+                             f"(got qk_norm={self.enc[0].qn is not None}, hd={hd})")
+        return True
+
+    def _layouts(self, plane, t, wire):
+        """The encoder's distinct (order, group size, wire RoPE on) layouts;
+        block i uses ``layouts[i % 4]``."""
+        bp = plane.double()
+        o_pt = torch.argsort(bp * 1e9 + t.double())
+        o_pw = torch.argsort(bp * 1e13 + wire.double() * 1e6 + t.double())
+        o_t = torch.argsort(t.double()); o_ts = torch.roll(o_t, self.gd // 2)
+        dw = not self.rope_split                                   # drift-layer wire RoPE: off if split
+        cell = [(o_pt, self.gp, True), (o_t, self.gd, dw), (o_pw, self.gp, True), (o_ts, self.gd, dw)]
+        return cell[:len(self.enc)]
+
+    def _emb(self, B, idx=None):
+        """Embedded tokens (rows ``idx`` of B, None = all), FiLM-conditioned on
+        (band, plane, wire) plus the additive band and plane identities."""
+        sel = slice(None) if idx is None else idx
+        band, plane = B["band_id"][sel], B["plane_id"][sel]
+        x = self.embed(torch.cat([B["inp"][sel], B["occ"][sel]], -1))
+        g, b = self.film(band, plane, B["wirefeat"][sel])
+        return g * x + b + self.band_emb(band) + self.plane_emb(plane)
+
+    def _angles(self, B):
+        """RoPE angles (time, wire) per token; wire is None when ``wire_rope`` is off."""
+        hd = self.d // self.heads
+        return (rope_angles(B["t_phys"], hd, *self.lam_t),
+                rope_angles(B["wire_pos"], hd, *self.lam_w) if self.wire_rope else None)
+
+    def _encode(self, B, idx, at, aw, layers=()):
+        """The encoder over rows ``idx`` of B (None = all) -> (x, {layer: x}),
+        both in natural order. ``at``/``aw`` are already those rows'. The stream
+        takes the weights' dtype, so with bf16 weights (``bf16_params``) the
+        residual stream is bf16 too -- unless ``fp32_stream``."""
+        sel = slice(None) if idx is None else idx
+        x = self._emb(B, idx).to(torch.float32 if self.fp32_stream else self.embed.weight.dtype)
+        T, dev = x.shape[0], x.device
+        lay = []
+        for o, g, uw in self._layouts(B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel]):
+            cos, sin = rope_tables(at[o], aw[o] if (uw and aw is not None) else None, x.dtype)
+            lay.append((o, _inverse(o), _cu_chunks(T, g, dev), min(g, T), cos, sin))
+        if not lay:
+            return x, {}
+        # layout j's rows, gathered from layout j-1's stream
+        step = [lay[j - 1][1][lay[j][0]] for j in range(len(lay))]
+        self_blk, fused = _ckpt(_blocks(self)[0], self), self._fused()
+        xp, out = _permute(x, lay[0][0]), {}
+        for i, blk in enumerate(self.enc):
+            j = i % len(lay)
+            if i:
+                xp = _permute(xp, step[j])
+            _, inv, cu, mx, cos, sin = lay[j]
+            xp = self_blk(blk, xp, cos, sin, cu, mx, fused)
+            if i + 1 in layers:
+                out[i + 1] = _permute(xp, inv)
+        return _permute(xp, inv), out
+
+    def _decode(self, qm, xv, qpos, kpos):
+        """The grouped-cross decoder with even time groups. ``qpos`` / ``kpos``
+        are (t_phys, ang_t, ang_w) of the queries / keys.
+
+        ``rope_split`` does not reach the decoder: it keeps the wire rotation,
+        since it needs the wire address to know which wire it reconstructs
+        (dropping it froze reconstruction, var_expl ~2%)."""
+        (qt, qat, qaw), (kt, kat, kaw) = qpos, kpos
+        Tq, Tk, dev = qm.shape[0], xv.shape[0], xv.device
+        oq = torch.argsort(qt.double()); okv = torch.argsort(kt.double())
+        nb = max(1, min((max(Tq, Tk) + self.gd - 1) // self.gd, Tq, Tk))
+        cuq, cuk = _cu_even(Tq, nb, dev), _cu_even(Tk, nb, dev)
+        mq, mk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
+        qcos, qsin = rope_tables(qat[oq], None if qaw is None else qaw[oq], qm.dtype)
+        kcos, ksin = rope_tables(kat[okv], None if kaw is None else kaw[okv], xv.dtype)
+        cross_blk, fused = _ckpt(_blocks(self)[1], self), self._fused()
+        qp, kvp = _permute(qm, oq), _permute(xv, okv)
+        for blk in self.dec:
+            qp = cross_blk(blk, qp, kvp, qcos, qsin, kcos, ksin, cuq, cuk, mq, mk, fused)
+        return _permute(qp, _inverse(oq))
 
     def encode(self, B):
-        """Per-token ENCODER representation with ALL tokens visible (no masking).
+        """Per-token encoder representation with ALL tokens visible (no masking).
         This is the frozen feature the deconvolution probe reads."""
-        band, plane = B["band_id"], B["plane_id"]
-        at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
-        aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w) if self.wire_rope else None
-        x = self.embed(torch.cat([B["inp"], B["occ"]], -1))
-        c = self._cond(B) if self.cond == "adaln" else None
-        if c is None:
-            if self.film is not None:
-                g, b = self.film(band, plane, B["wirefeat"]); x = g * x + b
-            x = x + self.band_emb(band) + self.plane_emb(plane)
-        for blk in self.enc:
-            x = blk(x, at, aw, c)
-        return x                                                  # (N, d)
+        at, aw = self._angles(B)
+        return self._encode(B, None, at, aw)[0]
 
     def encode_layers(self, B, layers):
         """Per-token features after each requested encoder block (1-based). {k: (N,d)}.
         For probing WHICH layer carries the best representation (MAE: often mid-encoder)."""
-        band, plane = B["band_id"], B["plane_id"]
-        at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
-        aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w) if self.wire_rope else None
-        x = self.embed(torch.cat([B["inp"], B["occ"]], -1))
-        c = self._cond(B) if self.cond == "adaln" else None
-        if c is None:
-            if self.film is not None:
-                g, b = self.film(band, plane, B["wirefeat"]); x = g * x + b
-            x = x + self.band_emb(band) + self.plane_emb(plane)
-        out = {}
-        for i, blk in enumerate(self.enc, 1):
-            x = blk(x, at, aw, c)
-            if i in layers:
-                out[i] = x
-        return out
+        at, aw = self._angles(B)
+        return self._encode(B, None, at, aw, layers)[1]
 
     def forward_feat(self, B, tok_mask, masked_only=False):
-        # --- conditioning is known for ALL tokens (band/plane/wire/pos are inputs,
-        #     not predicted), so it can be applied to visible AND masked positions ---
-        N = B["inp"].shape[0]
-        band, plane = B["band_id"], B["plane_id"]
-        at = rope_angles(B["t_phys"], self.d // self.heads, *self.lam_t)
-        aw = rope_angles(B["wire_pos"], self.d // self.heads, *self.lam_w) if self.wire_rope else None
-        adaln = (self.cond == "adaln")
-        c = self._cond(B) if adaln else None                     # AdaLN per-token conditioning
-        if self.film is not None:
-            g, b = self.film(band, plane, B["wirefeat"])
-        cond = None if adaln else (self.band_emb(band) + self.plane_emb(plane))  # additive (FiLM path)
+        """(N, d) decoded features: visible rows are the encoder's output, masked
+        rows the decoder's. ``masked_only`` -> (decoded rows, their indices), for
+        an objective that reads nothing else."""
+        at, aw = self._angles(B)
+        # ONE host sync (the visible count) instead of one per boolean-mask index
+        # below: a stable argsort of the mask lists visible rows then masked rows,
+        # each ascending -- the same rows, in the same order, as nonzero().
+        n_vis = int((~tok_mask).sum())
+        order = torch.argsort(tok_mask.to(torch.uint8), stable=True)
+        vis_idx, mask_idx = order[:n_vis], order[n_vis:]
+        if masked_only and self.training and isinstance(self.dec_frac, (tuple, list)):
+            # Per-band partial reconstruction: each masked row kept with its band's
+            # probability (dec_weights supplies the 1/p loss weights). The count is
+            # random, so this costs one host sync; always at least one row.
+            p = torch.as_tensor(self.dec_frac, dtype=torch.float32, device=order.device)
+            keep = torch.rand(mask_idx.numel(), device=order.device) < p[B["band_id"][mask_idx]]
+            keep[0] |= ~keep.any()
+            mask_idx = mask_idx[keep]
+        elif masked_only and self.training and self.dec_frac < 1.0:
+            # Partial reconstruction (CrossMAE): decode a random subset of the
+            # masked tokens. The encoder still sees only the visible ones, so its
+            # task is unchanged; the decoder -- a third of the step -- shrinks.
+            n_m = order.numel() - n_vis                          # host ints: no sync
+            keep = torch.randperm(n_m, device=order.device)[:max(1, round(n_m * self.dec_frac))]
+            mask_idx = mask_idx[keep.sort().values]
+        rows = lambda a, i: None if a is None else a[i]
+        atv, awv = at[vis_idx], rows(aw, vis_idx)
+        xv, _ = self._encode(B, vis_idx, atv, awv)
 
-        # --- ENCODER-DROP (true MAE): encoder runs on VISIBLE tokens only ---
-        vis = ~tok_mask
-        vis_idx = vis.nonzero(as_tuple=True)[0]
-        xv = self.embed(torch.cat([B["inp"][vis], B["occ"][vis]], -1))
-        if self.film is not None:
-            xv = g[vis] * xv + b[vis]
-        if cond is not None:
-            xv = xv + cond[vis]
-        atv, awv = at[vis], (aw[vis] if aw is not None else None)
-        cv = c[vis] if adaln else None
-        for blk in self.enc:
-            xv = blk(xv, atv, awv, cv)                            # attention over N_vis only
-
-        # --- CrossMAE decoder: only MASKED positions decoded, x-attending visible xv ---
-        if self.dec_mode == "cross":
-            mask_idx = tok_mask.nonzero(as_tuple=True)[0]
-            qm = self.mask_tok.expand(mask_idx.numel(), self.d)
-            if self.film is not None:
-                qm = g[tok_mask] * qm + b[tok_mask]
-            if cond is not None:
-                qm = qm + cond[tok_mask]                          # mask queries carry pos/response
-            qm = qm.to(xv.dtype)
-            if self.dec_embed is not None:
-                qm, xv = self.dec_embed(qm), self.dec_embed(xv)
-            atm, awm = at[tok_mask], (aw[tok_mask] if aw is not None else None)
-            cm = c[tok_mask] if adaln else None                   # AdaLN on the mask queries
-            for blk in self.dec:
-                qm = blk(qm, xv, atm, awm, atv, awv, cm)          # masked x-attend visible (full set, RoPE both sides)
-            x = torch.zeros(N, self.d_dec, dtype=xv.dtype, device=xv.device)
-            x = x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm)   # visible=encoder feats, masked=decoded
-            x = self.dec_norm(x)
-            return (x[mask_idx], mask_idx) if masked_only else x
-
-        # --- (default) full-self-attention decoder over ALL N tokens ---
-        xm = self.mask_tok.expand(N, self.d)
-        if self.film is not None:
-            xm = g * xm + b
-        if cond is not None:
-            xm = xm + cond                                        # mask tokens carry pos/response
-        x = xm.to(xv.dtype).index_copy(0, vis_idx, xv)           # overwrite visible w/ encoder out
-        for blk in self.dec:
-            x = blk(x, at, aw, c)                                 # decoder over full N
-        x = self.dec_norm(x)                                      # (N, d) per-cell features
+        # the mask queries carry the (known) position and response conditioning
+        band, plane = B["band_id"][mask_idx], B["plane_id"][mask_idx]
+        g, b = self.film(band, plane, B["wirefeat"][mask_idx])
+        qm = g * self.mask_tok.expand(mask_idx.numel(), self.d) + b
+        qm = (qm + self.band_emb(band) + self.plane_emb(plane)).to(xv.dtype)
+        qm = self._decode(qm, xv, (B["t_phys"][mask_idx], at[mask_idx], rows(aw, mask_idx)),
+                          (B["t_phys"][vis_idx], atv, awv))
         if masked_only:
-            mask_idx = tok_mask.nonzero(as_tuple=True)[0]
-            return x[mask_idx], mask_idx
-        return x
+            return self.dec_norm(qm), mask_idx
+        x = torch.zeros(B["inp"].shape[0], self.d, dtype=xv.dtype, device=xv.device)
+        return self.dec_norm(x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm))
 
     def raw_heads(self, B, tok_mask):
-        """Raw head outputs — the research ``forward`` verbatim, renamed so
-        ``forward`` can carry the pimm Trainer contract. (Not ``heads``:
-        ``self.heads`` is already the attention-head count.)"""
+        """Head outputs over the whole grid: (occupancy logits (n_cells, n_slot),
+        value logits (n_cells, n_slot, n_bins)). (Not ``heads``: ``self.heads``
+        is the attention-head count.)"""
         x = self.forward_feat(B, tok_mask)
         occ = self.occ_head(x) * self.readout_mult      # muP output multiplier (1/m; 1 if mup=False)
         val = self.val_head(x) * self.readout_mult
-        if self.n_bins > 0:
-            return occ, val.view(-1, self.n_slot, self.n_bins), None   # (occ, logits (n_cells,n_slot,K), None)
-        if self.nll:
-            val = val.view(-1, self.n_slot, 2)
-            return occ, val[..., 0], val[..., 1]            # logit, mu, logvar
-        return occ, val, None
+        return occ, val.view(-1, self.n_slot, self.n_bins)
 
-    # ---- pimm integration (the documented delta; parameter tree untouched) ---
+    # ---- objective -----------------------------------------------------------
 
     def set_bins(self, edges, *, cent_asinh=None, cent_ratio=None):
         """Register the categorical head's bin edges and centroid tables.
 
-        Required before ``forward`` when ``n_bins > 0``: ``losses_cat`` needs the
-        edges. They are training-set statistics the model cannot invent, so they
-        are PERSISTENT buffers and travel inside the state_dict — the research
-        trainer kept them in a sidecar the checkpoint never referenced, which is
-        the failure this closes.
+        Required before ``forward``: the objective needs the edges. They are
+        training-set statistics the model cannot invent, so they are PERSISTENT
+        buffers and travel inside the state_dict.
 
         Centroids are DERIVED from the edges when not supplied, so no centroid
-        buffer is ever NaN. That is the point: they used to be optional, and a
-        consumer then had to ask "are these present?" — three files asked, one
-        forgot, and the evaluator's charge metrics silently never ran. A measured
-        table (from ``derive_coeff_bins``) is strictly better, but its absence can
-        no longer disable anything.
+        buffer is ever NaN and no consumer has to ask whether they are present.
+        A measured table (from ``derive_coeff_bins``) is strictly better, but its
+        absence cannot disable anything.
 
-        The centroid arguments are KEYWORD-ONLY. Three call sites passed
-        ``set_bins(edges, cent_asinh, cent_lin)`` positionally; when the signature
-        grew a fourth table the third argument silently bound to the wrong one.
-        Keyword-only turns that into a TypeError.
+        The centroid arguments are KEYWORD-ONLY, so a table passed positionally
+        cannot silently bind to the wrong slot.
         """
         self._bins_checked = False
         from helix.model.tokenize import bin_centroids_asinh, bin_centroids_ratio
 
-        assert self.n_bins > 0, "set_bins() on a model built with n_bins=0"
         edges = torch.as_tensor(edges, dtype=self.bin_edges.dtype)
         assert edges.shape[1] == self.n_bins + 1, \
             f"edges {tuple(edges.shape)} inconsistent with n_bins={self.n_bins}"
@@ -459,65 +404,49 @@ class FMModel(nn.Module):
         """Draw a token mask for this batch under the model's configured policy.
 
         ``plane_frac`` mixes the two modes PER STEP: with that probability the
-        step masks whole planes (``plane_mode``, default ``"plane"``), otherwise
-        it uses ``mask_mode``. That mix is the point — a run that only ever masks
-        randomly never has to reconstruct a plane it cannot see, so nothing forces
-        cross-plane triangulation, and a run that only ever masks planes never
-        learns the within-plane task. m113 trained at 0.1 (research
-        mae_ddp.py:187), with ``plane_mode="plane_any"`` semantics — set that to
-        reproduce it, since ``"plane"`` punctures every volume and is a harder
-        task.
+        step masks whole planes (``"plane"``), otherwise it uses ``mask_mode``.
+        That mix is the point — a run that only ever masks randomly never has to
+        reconstruct a plane it cannot see, so nothing forces cross-plane
+        triangulation, and a run that only ever masks planes never learns the
+        within-plane task.
 
         An explicit ``mode=`` overrides the policy and skips the draw, so callers
         that want one specific mode (evaluation, tests) are unaffected.
         """
         m = self.mask_mode if mode is None else mode
         if mode is None and self.plane_frac > 0:
-            # Research draws this from numpy's global RNG. Using torch keeps the
-            # draw on the batch's device and honours `gen`, which is the same
-            # trade already made and documented for randperm in mask.py: the
-            # distribution is identical, the stream is not.
+            # torch, not numpy's global RNG: the draw stays on the batch's device
+            # and honours `gen`.
             dev = B["plane_id"].device
             r = (torch.rand((), generator=gen, device=dev)
                  if (gen is not None and gen.device.type == dev.type)
                  else torch.rand((), device=dev))
             if float(r) < self.plane_frac:
-                m = self.plane_mode
+                m = "plane"
         return make_mask(B, m,
                          self.mask_ratio if ratio is None else ratio,
-                         self.n_planes if n_planes is None else n_planes, gen=gen,
-                         cell=tuple(self.mask_cell))
+                         self.n_planes if n_planes is None else n_planes, gen=gen)
 
     def require_batch_keys(self, B):
         """Raise a named KeyError for anything the objective needs and lacks.
 
         A METHOD, not inline in ``forward``, because ``forward`` is not the only
-        entry point: the evaluator reproduces this branch from a single
-        ``raw_heads`` call (one forward instead of two) and so used to skip the
-        check entirely — a missing ``tgt`` surfaced as a bare KeyError from
-        inside ``losses_cat``, or from ``_acc_grid_free``, with no clue which
-        producer dropped it.
-
-        The two objectives read different representations of the same tokens:
-        ``losses`` gathers sparse rows, ``losses_cat``/``losses_fused`` read the
-        dense grid.
+        entry point: the evaluator reproduces the objective from a single
+        ``raw_heads`` call and must run the same check, so a missing ``tgt`` is
+        named instead of surfacing as a bare KeyError from inside the loss.
         """
-        need = ("occ", "valid", "inp")
-        need += ("tgt",) if (self.loss_fused or self.n_bins > 0) else \
-                ("cell", "slot", "target")
-        gone = [k for k in need if k not in B]
+        gone = [k for k in ("occ", "valid", "inp", "tgt") if k not in B]
         if gone:
             raise KeyError(
-                f"batch is missing {gone} required by "
-                f"{'losses_cat' if self.n_bins > 0 else 'losses_fused' if self.loss_fused else 'losses'}"
-                f"; helix.model.tokenize.to_fm() emits all of them")
+                f"batch is missing {gone} required by the categorical objective "
+                f"(losses_cat); "
+                f"helix.model.tokenize.to_fm() emits all of them")
 
     def forward(self, batch, tok_mask=None):
         """pimm Trainer contract: ``model(batch) -> dict`` carrying ``loss``.
 
-        The research entry point is ``raw_heads(B, tok_mask)``, which this
-        wraps: draw the mask (unless one is supplied), run the heads, then apply
-        whichever objective the head configuration implies."""
+        Draws the mask (unless one is supplied), decodes the masked rows and
+        applies the categorical objective to them."""
         B = dict(batch)
         B.setdefault("n_cells", B["plane_id"].shape[0])
         self.require_batch_keys(B)
@@ -537,7 +466,7 @@ class FMModel(nn.Module):
         rnd = (lambda *s: torch.rand(*s, generator=gen, device=dev)) if gen is not None \
             else (lambda *s: torch.rand(*s, device=dev))
         if self.plane_frac > 0 and float(rnd(())) < self.plane_frac:
-            return [self.make_mask(B, mode=self.plane_mode, gen=gen) for _ in range(k)]
+            return [self.make_mask(B, mode="plane", gen=gen) for _ in range(k)]
         v = 1.0 - self.mask_ratio
         if k * v > 1.0 + 1e-9:
             raise ValueError(f"n_masks={k} complementary masks need mask_ratio >= {1 - 1 / k:.3f}")
@@ -554,31 +483,17 @@ class FMModel(nn.Module):
         return 1.0 / p[B["band_id"][rows]]
 
     def _forward_one(self, B, m):
-        if self.n_bins > 0 and not getattr(self, "_bins_checked", False):
+        if not getattr(self, "_bins_checked", False):
             # once per model, not per step: `.all()` into `assert` is a host sync
             self._bins_checked = True
             assert torch.isfinite(self.bin_edges).all(), \
-                ("n_bins > 0 requires set_bins(edges) before forward() — the "
-                 "edges buffer is still unset (NaN). They are training-set "
-                 "statistics the model cannot invent.")
-        if self.n_bins > 0 and not self.vis_w:
-            # Only masked rows enter this objective, so only they are decoded,
-            # and the value head is evaluated only on the slots it weights.
-            feat, rows = self.forward_feat(B, m, masked_only=True)
-            obs = ~m[rows] if (self.training and self.vis_frac > 0) else None   # decoded visible rows
-            bce, vloss = cat_head_sparse(self, feat, B, rows, w=self.dec_weights(B, rows), no_bce=obs)
-            return {"loss": bce + vloss, "bce": bce.detach(), "val": vloss.detach(),
-                    "masked_frac": m.float().mean().detach()}
-        occ, val, logvar = self.raw_heads(B, m)
-        if self.n_bins > 0:
-            bce, vloss = losses_cat(occ, val, B, m, self.bin_edges, vis_w=self.vis_w)
-        elif self.loss_fused:
-            bce, vloss = losses_fused(occ, val, logvar, B, m, vis_w=self.vis_w,
-                                      noisy=self.noisy, alpha=self.alpha,
-                                      beta=self.beta, varb=self.varb)
-        else:
-            bce, vloss = losses(occ, val, logvar, B, m, vis_w=self.vis_w,
-                                noisy=self.noisy)
+                ("forward() requires set_bins(edges) first — the edges buffer is "
+                 "still unset (NaN). They are training-set statistics the model "
+                 "cannot invent.")
+        # Only masked rows enter the objective, so only they are decoded, and the
+        # value head is evaluated only on the slots it weights.
+        feat, rows = self.forward_feat(B, m, masked_only=True)
+        bce, vloss = cat_head_sparse(self, feat, B, rows, w=self.dec_weights(B, rows))
         return {"loss": bce + vloss, "bce": bce.detach(), "val": vloss.detach(),
                 "masked_frac": m.float().mean().detach()}
 
@@ -588,48 +503,23 @@ for _k, _v in _TRAIN_OPTS.items():       # class defaults; build_fm overrides pe
 
 
 def fm_keys():
-    """Every model-config key build_fm consumes: FMModel and SerialFMModel
-    constructor parameters, the train options, and ``serial``.
-
-    build_fm IGNORES anything else, deliberately -- it also rebuilds models from
-    checkpoint metadata, which carries fields that are not arguments. A training
-    config is different: every key in it is meant to do something, so the
-    training entry point checks against this set rather than ignoring.
-    """
+    """Every model-config key build_fm accepts: the FMModel constructor's
+    parameters and the train options."""
     import inspect
-    from helix.model.serial import SerialFMModel
-    return ((set(inspect.signature(FMModel.__init__).parameters)
-             | set(inspect.signature(SerialFMModel.__init__).parameters)
-             | set(_TRAIN_OPTS) | {"serial"}) - {"self", "args", "kw"})
+    return (set(inspect.signature(FMModel.__init__).parameters) | set(_TRAIN_OPTS)) - {"self"}
 
 
 def build_fm(cfg=None, **kw):
-    """Construct an FM from a plain config dict, ignoring unrelated keys.
-
-    Accepts a checkpoint's own metadata dict directly, which is how
-    an eval artifact rebuilds a trained model."""
-    import inspect
-    from helix.model.serial import SerialFMModel   # lazy: serial imports this module
-
+    """Construct an FM from a plain config dict (``kw`` overrides it). Every key
+    must be an FMModel parameter or a train option: one that is neither would
+    otherwise do nothing, silently."""
     opts = dict(cfg or {})
     opts.update(kw)
-    cls = SerialFMModel if opts.pop("serial", True) else FMModel
-    if cls is SerialFMModel and opts.get("dec_mode", "self") != "cross":
-        # SerialFMModel's decoder is grouped-CROSS attention: it reads
-        # blk.q/kv/nq/nk, which only a CrossBlock has. With dec_mode="self" the
-        # decoder is a plain Block and this dies as an AttributeError several
-        # frames into attention. Refuse up front instead.
-        raise ValueError(
-            f"serial=True requires dec_mode='cross' (got "
-            f"{opts.get('dec_mode', 'self')!r}); pass serial=False for the "
-            f"full-attention model")
+    unknown = sorted(set(opts) - fm_keys())
+    if unknown:
+        raise TypeError(f"unknown FM config key(s) {unknown}; known: {sorted(fm_keys())}")
     train = {k: opts.pop(k) for k in list(opts) if k in _TRAIN_OPTS}
-    if train.get("compile_blocks") and cls is not SerialFMModel:
-        raise ValueError("compile_blocks compiles the serial model's blocks; "
-                         "the full-attention model (serial=False) has none")
-    arch = set(inspect.signature(cls.__init__).parameters) | \
-        set(inspect.signature(FMModel.__init__).parameters)
-    model = cls(**{k: v for k, v in opts.items() if k in arch and k != "self"})
+    model = FMModel(**opts)
     for k, v in train.items():
         setattr(model, k, v)
     if model.bf16_params:

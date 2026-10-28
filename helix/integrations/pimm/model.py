@@ -36,24 +36,14 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
     Args:
         checkpoint (str | None): a helix eval artifact or a ``pimm export``
             directory — self-describing, carrying the architecture, the operating
-            point and (for a categorical head) the bin ``edges``. Its
+            point and the bin ``edges``. Its
             architecture is used; ``cfg`` overrides individual fields.
         weights (bool): restore the weights. ``False`` builds the same
             architecture freshly initialised.
         **cfg: architecture kwargs for ``helix.model.build_fm``.
     """
     from helix.model import build_fm
-    from helix.model.fm import fm_keys
     from helix.model.artifact import inspect, load
-
-    # Config keys only (checkpoint metadata may carry extras). build_fm ignores
-    # unknown keys, so an option this checkout lacks would silently do nothing.
-    unknown = sorted(set(cfg) - fm_keys())
-    if unknown:
-        raise TypeError(
-            f"model config key(s) {unknown} are not FM parameters or train "
-            f"options in this checkout ({__file__}); build_fm would drop them "
-            f"silently. Known: {sorted(fm_keys())}")
     from helix.model.checkpoint import apply_bins, load_state_dict
 
     art = None
@@ -71,23 +61,17 @@ def build_coeff_fm(checkpoint=None, weights=True, bins=None, **cfg):
     if isinstance(bins, str):
         bins = _load_bins(bins)
 
-    model = build_fm(cfg)
+    model = build_fm(cfg)              # raises on a key it does not know
     if art is not None and weights:
         load_state_dict(model, art.state_dict, bins=art.op.bins)
-    if getattr(model, "n_bins", 0) > 0:
-        if bins is None:
-            raise ValueError(
-                f"n_bins={model.n_bins} (categorical head) but no bin edges were "
-                f"supplied. They are TRAINING-SET STATISTICS, not learned "
-                f"parameters, so the model cannot invent them: pass "
-                f"bins='/path/to/bins.pt' in the model config, or a `checkpoint` "
-                f"that carries them. Derive fresh edges for a new corpus with "
-                f"scripts/derive_coeff_bins.py — the ones m113 shipped with came "
-                f"from a different noise model. (This used to name `research "
-                f"tier1_setup_bins.py`, a gitignored directory that exists on "
-                f"one machine: an error message must name something the reader "
-                f"has.)")
-        apply_bins(model, bins)
+    if bins is None:
+        raise ValueError(
+            "no bin edges were supplied. They are TRAINING-SET STATISTICS, not "
+            "learned parameters, so the model cannot invent them: pass "
+            "bins='/path/to/bins.pt' in the model config, or a `checkpoint` that "
+            "carries them. Derive fresh edges for a new corpus with "
+            "scripts/derive_coeff_bins.py.")
+    apply_bins(model, bins)
     return model
 
 

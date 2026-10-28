@@ -101,7 +101,7 @@ def main():
 
     corpus_root = a.corpus_root or str(root("HELIX_CORPUS").parent)
     runs = a.runs or sorted(r for r in os.listdir(corpus_root) if r.startswith("run_"))
-    overrides = dict(varlen=True, fused_qk=True, compile_blocks=True)
+    overrides = dict(fused_qk=True, compile_blocks=True)
     for kv in a.override:
         k, v = kv.split("=", 1)
         try:

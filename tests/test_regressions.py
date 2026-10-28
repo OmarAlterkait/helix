@@ -9,7 +9,6 @@ import re
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -117,73 +116,6 @@ def test_cell_key_agrees_with_assemble():
     np.testing.assert_array_equal(
         np.searchsorted(uniq, keys), tok["cell"])
 
-
-# --------------------------------------------------------------------------
-# The golden must be anchored at the operating point the weights were trained at
-# --------------------------------------------------------------------------
-
-def test_the_converted_m113_checkpoint_records_its_own_operating_point():
-    """`rope_split` and `cell_t` are not recoverable from the weights.
-
-    They lived only in the run's YAML, so both the model builder and the
-    tokenizer used to fall back to their own defaults -- `rope_split=True` and
-    `cell_t='centroid'` -- while m113 trained at `rope_split=0` and research's
-    `canonical` (= helix `grid_center`). Every eval of it was therefore taken at
-    a configuration it had never been trained at, and nothing said so.
-
-    This used to read tests/goldens_fm.json. That golden is retired, and the
-    checkpoint is the better home anyway: the operating point travels WITH the
-    weights it describes, so it cannot be separated from them by deleting a
-    fixture. Skips if the archived checkpoint is absent -- it is a data artifact,
-    not source.
-    """
-    torch = pytest.importorskip("torch")
-
-    from helix.paths import resolve
-
-    from helix.model.artifact import inspect
-
-    # resolve(), not archive(): archive() RAISES when HELIX_ARCHIVE is not
-    # configured, which happens before `exists()` can decline. A site that does
-    # not declare the root, and a site that declares it but has no artifact
-    # under it, are both "cannot check this here" and both want a skip.
-    _arch, _ = resolve("HELIX_ARCHIVE")
-    if _arch is None:
-        pytest.skip("HELIX_ARCHIVE is not configured at this site")
-    ckpt = _arch / "fm_m113_artifact"
-    if not ckpt.exists():
-        pytest.skip(f"m113 artifact absent: {ckpt}")
-    art = inspect(str(ckpt))                      # no weights: this is metadata
-    cfg, op, prov = art.arch, art.op, art.provenance
-
-    assert cfg.get("serial") is True
-    assert cfg.get("rope_split") is False, (
-        "m113 trained with rope_split=0; restoring it at build_fm's default "
-        "(True) rebuilds a model the checkpoint was never trained as")
-    assert (cfg.get("gp"), cfg.get("gd")) == (1024, 2048)
-
-    assert op.recorded, "artifact records no tokenizer geometry"
-    assert op.cell_t == "grid_center", (
-        "m113 trained with research cellt='canonical', which is helix "
-        "'grid_center'; PatchConfig has no default now, but a caller passing "
-        "'centroid' would feed it a time coordinate it never saw")
-    assert (op.pw, op.pt) == (16, 8)
-
-    # The pre-tau corpus. m113 predates the occupancy gate, so scoring it
-    # against coeff_tpc_r1 reads coefficients from a different DSP -- which no
-    # other layer treats as an error, since the shards load and a number comes
-    # out. This is the field that makes it detectable.
-    assert prov["corpus"]["basis_digest"].startswith("7f954a84")
-
-    # Carried across when the converter was retired: the research-side name for
-    # cell_t, and the research checkpoint these weights came from. Nothing else
-    # records either any more.
-    src = prov["source_provenance"]
-    assert src["tokenizer_extra"]["cellt_research"] == "canonical"
-    assert "ckpt_clean160cat_m113" in src["source"]
-    assert art.weights == "raw", (
-        "m113's converted blob took the 'model' key, not the EMA shadow; an "
-        "artifact that could not say which would let it be compared to an EMA arm")
 
 def test_version_is_single_sourced():
     """pyproject must not carry its own literal.

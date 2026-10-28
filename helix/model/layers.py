@@ -1,22 +1,21 @@
-"""Attention primitives for the coefficient FM — extracted verbatim from the
-research tree (``coeff_foundation_model/fm/model.py`` lines 21-137).
+"""Building blocks of the coefficient FM.
 
 Axial RoPE on (physical_time, wire), a FiLM conditioner on (band, plane, wire),
-and the self / cross attention blocks. No behavioural change from research.
+and the parameters of the self / cross attention blocks (their forward passes
+are in :mod:`helix.model.serial`).
 """
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def rope_angles(pos, dim, lam_min=2.0, lam_max=10000.0):
     """Axial RoPE angles with geometric wavelengths in [lam_min, lam_max]
     (n = dim//4 frequencies). Set lam_min ~ 2x the finest position spacing and
-    lam_max ~ the full coordinate span, PER AXIS. The old base=10000 spread
-    wavelengths over [6.3, 47000] on both axes -> wasted ~55% of the WIRE dims
-    (span 1904, spacing 16 -> useful band [32,1904]) and ~28% of the TIME dims
-    (span 4336)."""
+    lam_max ~ the full coordinate span, PER AXIS: a single base=10000 would
+    spread wavelengths over [6.3, 47000] on both axes and waste ~55% of the WIRE
+    dims (span 1904, spacing 16 -> useful band [32,1904]) and ~28% of the TIME
+    dims (span 4336)."""
     n = dim // 4
     k = torch.arange(n, device=pos.device).float() / max(n - 1, 1)
     inv = (2 * math.pi) / (lam_min * (lam_max / lam_min) ** k)
@@ -50,42 +49,32 @@ def apply_rope_tables(x, cos, sin):
     return torch.stack([a * cos - b * sin, b * cos + a * sin], -1).view(T, h, hd)
 
 
-def apply_rope(x, ang_t, ang_w):
-    """x: (T, H, hd). First half of hd rotated by time, second half by wire."""
-    return apply_rope_tables(x, *rope_tables(ang_t, ang_w))
-
-
 # ---- response conditioning -------------------------------------------------
 class ResponseFiLM(nn.Module):
-    """gamma,beta from [band_emb, plane_emb, MLP(wire features)]. Conditions the
+    """gamma,beta from [band_emb, plane_emb, MLP(wire feature)]. Conditions the
     token on the response chain (scale, plane-type bipolar/unipolar, wire geom)."""
 
-    def __init__(self, d, n_band, n_plane, n_wirefeat, de=32, use=("band", "plane", "wire")):
+    def __init__(self, d, n_band, n_plane, de=32):
         super().__init__()
-        self.use = set(use)
         self.band = nn.Embedding(n_band, de)
         self.plane = nn.Embedding(n_plane, de)
-        self.wire = nn.Sequential(nn.Linear(n_wirefeat, de), nn.GELU())
-        cin = de * len(self.use)
-        self.mlp = nn.Sequential(nn.Linear(cin, 2 * d))
+        self.wire = nn.Sequential(nn.Linear(1, de), nn.GELU())
+        self.mlp = nn.Sequential(nn.Linear(3 * de, 2 * d))
         nn.init.zeros_(self.mlp[-1].weight); nn.init.zeros_(self.mlp[-1].bias)  # start = identity
 
     def forward(self, band, plane, wirefeat):
-        parts = []
-        if "band" in self.use:  parts.append(self.band(band))
-        if "plane" in self.use: parts.append(self.plane(plane))
-        if "wire" in self.use:  parts.append(self.wire(wirefeat))
+        parts = [self.band(band), self.plane(plane), self.wire(wirefeat)]
         g, b = self.mlp(torch.cat(parts, -1)).chunk(2, -1)
         return 1 + g, b
 
 
-# ---- transformer block (pre-LN, SDPA full attention with RoPE) -------------
+# ---- transformer blocks ----------------------------------------------------
 def _qk_norms(hd, on):
     """QK-norm: an RMSNorm over each head's query and key, before RoPE (as OLMo 2
     and Qwen3 place it). It bounds the attention logits, which otherwise grow with
     the q/k projections: the qkv biases of the late encoder blocks grew
     monotonically over a 47k-step d768 run (7 -> 18) and one seed went NaN at
-    19.4k. Off by default: it changes the state dict and the numerics."""
+    19.4k. Off by default: it adds parameters and changes the numerics."""
     if not on:
         return None, None
     return nn.RMSNorm(hd, eps=1e-6), nn.RMSNorm(hd, eps=1e-6)
@@ -99,94 +88,31 @@ def qk_normed(blk, q, k):
 
 
 class Block(nn.Module):
-    def __init__(self, d, heads, ffn_mult=4, adaln=False, attn_scale=None, n_sink=0, qk_norm=False):
+    """Pre-LN self-attention block: the parameters only. The forward is
+    ``helix.model.serial.self_block``, which runs it over grouped attention."""
+
+    def __init__(self, d, heads, ffn_mult=4, qk_norm=False):
         super().__init__()
         self.h, self.hd = heads, d // heads
         self.qn, self.kn = _qk_norms(self.hd, qk_norm)
-        # Attention sinks ("registers"): n_sink learned key/value slots every
-        # query may attend to, position-free (no RoPE). Keys start small and
-        # values at zero, so at init they only absorb attention mass -- the role
-        # the encoder's massive activations otherwise take on. 0 = none.
-        self.n_sink = int(n_sink)
-        if self.n_sink:
-            self.sink_k = nn.Parameter(torch.randn(heads, self.n_sink, self.hd) * 0.02)
-            self.sink_v = nn.Parameter(torch.zeros(heads, self.n_sink, self.hd))
-        self.attn_scale = attn_scale          # muP: 1/head_dim (else None => SDPA default 1/sqrt(hd))
-        self.adaln = adaln
-        self.n1 = nn.LayerNorm(d, elementwise_affine=not adaln)
+        self.n1 = nn.LayerNorm(d)
         self.qkv = nn.Linear(d, 3 * d); self.proj = nn.Linear(d, d)
-        self.n2 = nn.LayerNorm(d, elementwise_affine=not adaln)
+        self.n2 = nn.LayerNorm(d)
         self.mlp = nn.Sequential(nn.Linear(d, ffn_mult * d), nn.GELU(), nn.Linear(ffn_mult * d, d))
-        if adaln:                              # AdaLN-Zero: per-token scale/shift/gate, zero-init = identity
-            self.ada = nn.Linear(d, 6 * d)
-            nn.init.zeros_(self.ada.weight); nn.init.zeros_(self.ada.bias)
-
-    def forward(self, x, ang_t, ang_w, c=None):
-        T, d = x.shape
-        if self.adaln:
-            sa, ba, ga, sm, bm, gm = self.ada(c).chunk(6, -1)    # each (T, d)
-            h = self.n1(x) * (1 + sa) + ba
-        else:
-            h = self.n1(x)
-        q, k, v = self.qkv(h).chunk(3, -1)
-        q, k = qk_normed(self, q.view(T, self.h, self.hd), k.view(T, self.h, self.hd))
-        q = apply_rope(q, ang_t, ang_w)
-        k = apply_rope(k, ang_t, ang_w)
-        v = v.view(T, self.h, self.hd)
-        kh, vh = k.transpose(0, 1)[None], v.transpose(0, 1)[None]
-        if self.n_sink:
-            kh = torch.cat([kh, self.sink_k[None].to(kh.dtype)], 2)
-            vh = torch.cat([vh, self.sink_v[None].to(vh.dtype)], 2)
-        o = F.scaled_dot_product_attention(q.transpose(0, 1)[None], kh, vh,
-                                           scale=self.attn_scale)[0].transpose(0, 1)
-        ao = self.proj(o.reshape(T, d))
-        x = x + (ga * ao if self.adaln else ao)
-        if self.adaln:
-            return x + gm * self.mlp(self.n2(x) * (1 + sm) + bm)
-        return x + self.mlp(self.n2(x))
 
 
-# ---- CrossMAE decoder block (cheaper decoder) ------------------------------
+# ---- CrossMAE decoder block ------------------------------------------------
 class CrossBlock(nn.Module):
-    """CrossMAE decoder: masked-token queries cross-attend the VISIBLE encoded
-    tokens (no mask-mask self-attention) -> O(N_mask * N_vis), far cheaper than the
-    full-self-attention decoder over all N. Axial RoPE on BOTH query (masked) and
-    key (visible) positions, so it keeps the relative-position addressing.
-    NOTE: queries see the FULL visible set (not a latent summary) — unlike the
-    Perceiver bottleneck that capped masked prediction at ~33%."""
+    """CrossMAE decoder block: masked-token queries cross-attend the VISIBLE
+    encoded tokens (no mask-mask self-attention), with RoPE on both the query
+    and the key positions. The parameters only; the forward is
+    ``helix.model.serial.cross_block``."""
 
-    def __init__(self, d, heads, ffn_mult=4, attn_scale=None, adaln=False, qk_norm=False):
+    def __init__(self, d, heads, ffn_mult=4, qk_norm=False):
         super().__init__()
         self.h, self.hd = heads, d // heads
         self.qn, self.kn = _qk_norms(self.hd, qk_norm)
-        self.attn_scale = attn_scale          # muP: 1/head_dim (else None => SDPA default)
-        self.adaln = adaln
-        # AdaLN modulates the QUERY stream only. Keys/values are encoder output, already
-        # conditioned encoder-side; re-modulating them here would double-apply.
-        self.nq = nn.LayerNorm(d, elementwise_affine=not adaln); self.nk = nn.LayerNorm(d)
+        self.nq = nn.LayerNorm(d); self.nk = nn.LayerNorm(d)
         self.q = nn.Linear(d, d); self.kv = nn.Linear(d, 2 * d); self.proj = nn.Linear(d, d)
-        self.n2 = nn.LayerNorm(d, elementwise_affine=not adaln)
+        self.n2 = nn.LayerNorm(d)
         self.mlp = nn.Sequential(nn.Linear(d, ffn_mult * d), nn.GELU(), nn.Linear(ffn_mult * d, d))
-        if adaln:                              # AdaLN-Zero, mirroring Block: zero-init = identity
-            self.ada = nn.Linear(d, 6 * d)
-            nn.init.zeros_(self.ada.weight); nn.init.zeros_(self.ada.bias)
-
-    def forward(self, q, kv, qa_t, qa_w, ka_t, ka_w, c=None):
-        Tq, Tk = q.shape[0], kv.shape[0]
-        if self.adaln:
-            sa, ba, ga, sm, bm, gm = self.ada(c).chunk(6, -1)     # each (Tq, d), query-side
-            hq = self.nq(q) * (1 + sa) + ba
-        else:
-            hq = self.nq(q)
-        k, v = self.kv(self.nk(kv)).chunk(2, -1)
-        qh, kh = qk_normed(self, self.q(hq).view(Tq, self.h, self.hd), k.view(Tk, self.h, self.hd))
-        qh = apply_rope(qh, qa_t, qa_w)
-        kh = apply_rope(kh, ka_t, ka_w)
-        vh = v.view(Tk, self.h, self.hd)
-        o = F.scaled_dot_product_attention(qh.transpose(0, 1)[None], kh.transpose(0, 1)[None],
-                                           vh.transpose(0, 1)[None], scale=self.attn_scale)[0].transpose(0, 1)
-        ao = self.proj(o.reshape(Tq, self.h * self.hd))
-        q = q + (ga * ao if self.adaln else ao)
-        if self.adaln:
-            return q + gm * self.mlp(self.n2(q) * (1 + sm) + bm)
-        return q + self.mlp(self.n2(q))

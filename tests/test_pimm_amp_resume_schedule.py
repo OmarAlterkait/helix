@@ -27,7 +27,7 @@ torch = pytest.importorskip("torch")
 from helix.model import build_fm  # noqa: E402
 
 ARCH = dict(n_slot=16, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1,
-            heads=4, dec_mode="cross", mup=True, d_base=32)
+            heads=4, mup=True, d_base=32, n_bins=16)
 LR, WD = 3e-4, 0.05
 
 
@@ -36,22 +36,19 @@ def _batch(n_cells=48, n_slot=16, seed=7):
     r = lambda *s: torch.rand(*s, generator=g)
     occ = (r(n_cells, n_slot) < 0.4).float()
     tgt = torch.randn(n_cells, n_slot, generator=g)
-    cell, slot = occ.nonzero(as_tuple=True)
     return dict(band_id=torch.randint(0, 4, (n_cells,), generator=g),
                 plane_id=torch.randint(0, 6, (n_cells,), generator=g),
                 t_phys=torch.randn(n_cells, generator=g) * 500,
                 wire_pos=r(n_cells) * 1900, wirefeat=r(n_cells, 1),
                 inp=torch.randn(n_cells, n_slot, generator=g), occ=occ,
-                valid=(r(n_cells, n_slot) < 0.9), tgt=tgt,
-                target=tgt[cell, slot], cell=cell, slot=slot, n_cells=n_cells)
+                valid=(r(n_cells, n_slot) < 0.9), tgt=tgt, n_cells=n_cells)
 
 
 def _model(**over):
     torch.manual_seed(0)
     cfg = dict(ARCH, **over)
     m = build_fm(cfg)
-    if cfg.get("n_bins", 0):
-        m.set_bins(torch.linspace(-4, 4, cfg["n_bins"] + 1).repeat(cfg["n_band"], 1))
+    m.set_bins(torch.linspace(-4, 4, cfg["n_bins"] + 1).repeat(cfg["n_band"], 1))
     return m
 
 
@@ -65,13 +62,11 @@ def _one_thread():
 
 # ---- 1. AMP ---------------------------------------------------------------
 
-@pytest.mark.parametrize("head", ["l2", "nll", "cat"])
-def test_bf16_autocast_loss_is_finite_and_close_to_fp32(head):
+def test_bf16_autocast_loss_is_finite_and_close_to_fp32():
     """pimm runs the forward under bf16 autocast. bfloat16 has ~3 decimal digits
     of mantissa, so the question is not whether the loss is NaN but whether it is
     still the same number to a useful tolerance."""
-    over = {"nll": dict(nll=True), "cat": dict(n_bins=16)}.get(head, {})
-    m = _model(**over)
+    m = _model()
     B = _batch(n_slot=ARCH["n_slot"])
     mask = torch.zeros(B["n_cells"], dtype=torch.bool); mask[::2] = True
 
@@ -79,20 +74,17 @@ def test_bf16_autocast_loss_is_finite_and_close_to_fp32(head):
         fp32 = float(m(B, tok_mask=mask)["loss"])
         with torch.autocast("cpu", dtype=torch.bfloat16):
             bf16 = float(m(B, tok_mask=mask)["loss"])
-    assert torch.isfinite(torch.tensor(bf16)), f"{head}: bf16 loss is not finite"
-    # Measured on this fixture: 0.002% (l2), 0.002% (nll), 0.000% (cat). The
-    # 1% bound is loose enough not to be brittle and tight enough that a real
-    # precision regression — e.g. a reduction moved into bf16 — would trip it.
+    assert torch.isfinite(torch.tensor(bf16)), "bf16 loss is not finite"
+    # The 1% bound is loose enough not to be brittle and tight enough that a
+    # real precision regression — e.g. a reduction moved into bf16 — would trip it.
     assert bf16 == pytest.approx(fp32, rel=0.01), (
-        f"{head}: bf16 loss {bf16} diverges from fp32 {fp32} by more than 1%")
+        f"bf16 loss {bf16} diverges from fp32 {fp32} by more than 1%")
 
 
-@pytest.mark.parametrize("head", ["l2", "cat"])
-def test_bf16_backward_produces_finite_gradients(head):
+def test_bf16_backward_produces_finite_gradients():
     """A finite loss with NaN/Inf gradients would poison the optimizer state on
     the first step and never recover."""
-    over = {"cat": dict(n_bins=16)}.get(head, {})
-    m = _model(**over)
+    m = _model()
     B = _batch(n_slot=ARCH["n_slot"])
     with torch.autocast("cpu", dtype=torch.bfloat16):
         loss = m(B)["loss"]
@@ -100,7 +92,7 @@ def test_bf16_backward_produces_finite_gradients(head):
     grads = [(n, p.grad) for n, p in m.named_parameters() if p.grad is not None]
     assert grads, "no gradients at all"
     bad = [n for n, g in grads if not torch.isfinite(g).all()]
-    assert not bad, f"{head}: non-finite gradients in {bad[:5]}"
+    assert not bad, f"non-finite gradients in {bad[:5]}"
     assert any(g.abs().sum() > 0 for _, g in grads), "all gradients are exactly zero"
 
 
@@ -112,7 +104,7 @@ def test_optimizer_resume_preserves_muP_groups(tmp_path):
     AdamW's state_dict stores param_groups, so this is really asserting that the
     muP structure round-trips rather than being rebuilt from a flat config on
     resume — which is how it would silently be lost."""
-    m = _model(n_bins=16)
+    m = _model()
     opt = torch.optim.AdamW(m.param_groups(LR, weight_decay=WD), lr=LR,
                             betas=(0.9, 0.95))
     before = [(g["lr"], g["weight_decay"]) for g in opt.param_groups]
@@ -128,7 +120,7 @@ def test_optimizer_resume_preserves_muP_groups(tmp_path):
     path = tmp_path / "ckpt.pt"
     torch.save({"model": m.state_dict(), "optimizer": opt.state_dict()}, path)
 
-    m2 = _model(n_bins=16)
+    m2 = _model()
     opt2 = torch.optim.AdamW(m2.param_groups(LR, weight_decay=WD), lr=LR,
                              betas=(0.9, 0.95))
     blob = torch.load(path, map_location="cpu", weights_only=False)
@@ -145,7 +137,7 @@ def test_step_after_resume_matches_uninterrupted_training(tmp_path):
     """The strong form: a run saved and restored must take the SAME next step as
     one that never stopped. Adam moments are what make this non-trivial."""
     def run(save_restore):
-        m = _model(n_bins=16)
+        m = _model()
         opt = torch.optim.AdamW(m.param_groups(LR, weight_decay=WD), lr=LR,
                                 betas=(0.9, 0.95))
         for i in range(3):
@@ -156,7 +148,7 @@ def test_step_after_resume_matches_uninterrupted_training(tmp_path):
         if save_restore:
             p = tmp_path / "mid.pt"
             torch.save({"m": m.state_dict(), "o": opt.state_dict()}, p)
-            m = _model(n_bins=16)
+            m = _model()
             opt = torch.optim.AdamW(m.param_groups(LR, weight_decay=WD), lr=LR,
                                     betas=(0.9, 0.95))
             blob = torch.load(p, map_location="cpu", weights_only=False)

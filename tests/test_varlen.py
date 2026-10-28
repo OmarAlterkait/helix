@@ -1,13 +1,8 @@
-"""``varlen=True``: the serial model's groups without padding.
+"""The attention groups' execution paths, and partial decoding.
 
-With token counts that need no padding, the padded and the unpadded formulations
-run the same groups over the same rows, so they must agree -- that pins the
-varlen layouts, group boundaries, permutes and decoder grouping to the existing,
-reference-tested path. Where padding WOULD occur they differ by design (no
-duplicated last token), which is checked only for being finite and different.
-
-GPU tests (skipped on CPU): flash varlen vs the CPU per-group reference, and the
-fused QK-norm + RoPE kernel vs the unfused path.
+CPU: the fused-QK switch's checks and its CPU fallback, bf16 parameters,
+``dec_frac``. GPU tests (skipped on CPU): flash varlen vs the CPU per-group
+reference, and the fused QK-norm + RoPE kernel vs the unfused path.
 """
 
 import pytest
@@ -27,14 +22,8 @@ def _model(seed=0, **kw):
     return m.eval()
 
 
-def _pair(**kw):
-    a, b = _model(**kw), _model(varlen=True, **kw)
-    b.load_state_dict(a.state_dict())
-    return a, b
-
-
 # 288 cells, every third visible: 96 visible (6 x gp=16, 3 x gd=32) and 192
-# masked; the decoder makes 6 groups of 32 queries x 16 keys. No padding anywhere.
+# masked; the decoder makes 6 groups of 32 queries x 16 keys.
 EXACT = dict(n_cells=288)
 
 
@@ -42,47 +31,8 @@ def _exact_mask(n):
     return torch.arange(n) % 3 != 0
 
 
-def test_varlen_equals_padded_when_nothing_is_padded():
-    a, b = _pair()
-    B = make_batch(**EXACT)
-    m = _exact_mask(EXACT["n_cells"])
-    with torch.no_grad():
-        fa, fb = a.forward_feat(B, m), b.forward_feat(B, m)
-        ea, eb = a.encode(B), b.encode(B)
-    torch.testing.assert_close(fb, fa, rtol=1e-5, atol=1e-5)
-    torch.testing.assert_close(eb, ea, rtol=1e-5, atol=1e-5)
-
-
-def test_varlen_gradients_equal_padded_when_nothing_is_padded():
-    a, b = _pair()
-    B = make_batch(**EXACT)
-    m = _exact_mask(EXACT["n_cells"])
-    for mod in (a, b):
-        mod.train()
-        mod.forward_feat(B, m).square().mean().backward()
-    for (n, pa), (_, pb) in zip(a.named_parameters(), b.named_parameters()):
-        if pa.grad is None:
-            continue
-        torch.testing.assert_close(pb.grad, pa.grad, rtol=1e-4, atol=1e-6, msg=n)
-
-
-def test_varlen_differs_where_padding_would_occur():
-    a, b = _pair()
-    B = make_batch(n_cells=100)                     # 75 visible: 75 % 16, 75 % 32 != 0
-    m = torch.arange(100) % 4 != 0
-    with torch.no_grad():
-        fa, fb = a.forward_feat(B, m), b.forward_feat(B, m)
-    assert torch.isfinite(fb).all()
-    assert not torch.allclose(fa, fb)
-
-
-def test_varlen_refuses_attention_sinks():
-    with pytest.raises(ValueError, match="sinks"):
-        build_fm({**SMALL, "varlen": True, "n_sink": 2})
-
-
-def test_fused_qk_needs_varlen_qk_norm_and_hd64():
-    m = _model(varlen=True, qk_norm=True)            # SMALL has head dim 16
+def test_fused_qk_needs_qk_norm_and_hd64():
+    m = _model(qk_norm=True)                         # SMALL has head dim 16
     m.fused_qk = True
     B = make_batch(**EXACT)
     with pytest.raises(ValueError, match="fused_qk"):
@@ -108,7 +58,7 @@ def test_flash_varlen_matches_the_per_group_reference():
 
 @cuda
 def test_fused_qk_matches_the_unfused_path_on_gpu():
-    kw = dict(d=256, heads=4, qk_norm=True, varlen=True)     # head dim 64
+    kw = dict(d=256, heads=4, qk_norm=True)                  # head dim 64
     a = _model(**kw).cuda().train()
     b = _model(**kw).cuda().train()
     b.load_state_dict(a.state_dict()); b.fused_qk = True
@@ -167,7 +117,7 @@ def test_normrope_kernel_matches_the_reference(mode, parts):
 
 
 def test_dec_frac_decodes_a_subset_in_training_only():
-    m = _model(varlen=True).train()
+    m = _model().train()
     m.dec_frac = 1 / 3
     B = make_batch(**EXACT)
     mask = _exact_mask(EXACT["n_cells"])                   # 192 masked
@@ -181,7 +131,7 @@ def test_dec_frac_decodes_a_subset_in_training_only():
 
 
 def test_dec_frac_one_is_the_default_path():
-    a, b = _model(varlen=True).train(), _model(varlen=True).train()
+    a, b = _model().train(), _model().train()
     b.load_state_dict(a.state_dict()); b.dec_frac = 1.0
     B = make_batch(**EXACT); mask = _exact_mask(EXACT["n_cells"])
     torch.manual_seed(0); fa, ra = a.forward_feat(B, mask, masked_only=True)
@@ -190,8 +140,8 @@ def test_dec_frac_one_is_the_default_path():
 
 
 def test_fused_qk_model_runs_on_cpu_through_the_reference_path():
-    a = _model(varlen=True, qk_norm=True, heads=1)          # hd 64: fused_qk is accepted
-    b = _model(varlen=True, qk_norm=True, heads=1)
+    a = _model(qk_norm=True, heads=1)          # hd 64: fused_qk is accepted
+    b = _model(qk_norm=True, heads=1)
     b.load_state_dict(a.state_dict()); b.fused_qk = True
     B = make_batch(**EXACT); m = _exact_mask(EXACT["n_cells"])
     with torch.no_grad():

@@ -453,9 +453,8 @@ def test_full_chain_to_model_keys_at_batch_gt_1(tmp_path):
     `cell`/`slot` are deliberately NOT collected. They are gather indices into
     the cell grid, so concatenating two events leaves the second event's indices
     pointing into the first event's cells — and no `_roles` kind rebases an index
-    by another row-space's running count. They are needed only by the `--fused 0`
-    ablation loss; the production loss (`losses_fused`, `--fused` defaults to 1)
-    reads the dense (n_cells, n_slot) grids and per-cell scalars collected here.
+    by another row-space's running count. The loss reads only the dense
+    (n_cells, n_slot) grids and per-cell scalars collected here.
     """
     import torch
     from torch.utils.data import DataLoader
@@ -466,9 +465,7 @@ def test_full_chain_to_model_keys_at_batch_gt_1(tmp_path):
     # computed table); without it the tokenizer correctly refuses to normalise.
     ns = np.full((len(GIDS), len(BAND_LENGTHS)), 2.0, np.float32)
     _write_pair(tmp_path, [0, 1, 2, 3], seed=11, norm_sigma=ns)
-    # cell_t is REQUIRED (no default). This test lived in pimm-data, where it
-    # never ran against helix's current tokenizer, so the move is what surfaced it.
-    tok = CoeffTokenize(part="coeff", cfg=PatchConfig(cell_t="grid_center"))
+    tok = CoeffTokenize(part="coeff", cfg=PatchConfig())
     # offset counts CELLS (the row-space the model's dense grids live in), not
     # coefficient rows — the bare form otherwise defaults to a 'coord' key that
     # a tokenized part does not have.
@@ -493,7 +490,7 @@ def test_full_chain_to_model_keys_at_batch_gt_1(tmp_path):
     for k in ("band_id", "plane_id", "t_phys", "wire_pos", "wirefeat", "inp", "occ"):
         assert k in b
     # cell-space keys share one row count; the dense (n_cells, n_slot) grids the
-    # PRODUCTION loss (losses_fused) reads line up with the per-cell scalars.
+    # loss reads line up with the per-cell scalars.
     n_cells = b["band_id"].shape[0]
     assert b["plane_id"].shape[0] == n_cells
     assert b["wirefeat"].shape == (n_cells, 1)

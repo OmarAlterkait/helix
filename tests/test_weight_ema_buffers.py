@@ -54,7 +54,7 @@ pytestmark = pytest.mark.skipif(not _pimm_importable(),
                                 reason="pimm not importable")
 
 ARCH = dict(n_slot=16, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1,
-            heads=4, dec_mode="cross", mup=True, d_base=32, n_bins=8)
+            heads=4, mup=True, d_base=32, n_bins=8)
 STEPS = 400
 
 

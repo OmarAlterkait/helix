@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(not _pimm_importable(), reason="pimm not importa
 
 N_BAND, K, N_SLOT = 4, 16, 8
 ARCH = dict(n_slot=N_SLOT, n_band=N_BAND, n_plane=6, d=32, blocks=1, dec_blocks=1,
-            heads=4, dec_mode="cross", n_bins=K)
+            heads=4, n_bins=K)
 
 
 def _tables():

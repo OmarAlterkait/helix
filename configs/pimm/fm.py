@@ -3,7 +3,7 @@
 A run is four choices, and only these differ between configs:
 
 * the corpus: ``HELIX_CORPUS`` (a run dir; its parent is the corpus, ``_calib/RUNS.txt`` its runs);
-* the model: ``model`` below (the m113 architecture); ``fm_smoke.py`` shrinks it;
+* the model: ``model`` below; ``fm_smoke.py`` shrinks it;
 * the phase: stable (this file), cooldown from a checkpoint (``fm_cooldown.py``), evaluation
   only (``fm_eval.py``);
 * the length: ``epoch``.
@@ -93,10 +93,8 @@ model = dict(
     dec_blocks=4,
     heads=8,
     n_bins=128,                         # K=128 needs Ampere: logits ~2.4 GB at a full event
-    dec_mode="cross",
     mup=True,
     d_base=128,
-    serial=True,
     rope_split=False,
     gp=1024,
     gd=2048,
@@ -108,7 +106,7 @@ scheduler = dict(type="WSDStableLR", warmup="auto")
 
 # ---------------------------------------------------------------------------- data
 transform = [
-    dict(type="CoeffTokenize", part="coeff", cfg=dict(cell_t="grid_center"), fm_names=True),
+    dict(type="CoeffTokenize", part="coeff", cfg=dict(cell_t="grid_center")),
     dict(type="CoeffCollect", part="coeff"),
 ]
 # The split hashes each event's identity, so it does not depend on the corpus's build,

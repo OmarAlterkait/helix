@@ -1,12 +1,9 @@
-"""The packaged tokenizer must reproduce the research one EXACTLY.
+"""The patch tokenizer: geometry, normalisation, the transform and its keys.
 
-``helix.model.tokenize.assemble`` is a port of
-``research/coeff_foundation_model/vit_tpc.py::assemble_tpc_band`` — the tokenizer
-the FM was actually trained with (``fm/data.py`` calls it; ``fm/model.py``
-consumes ``inp``/``occ``). The reference below is a transcription of that
-function operating on the OLD data convention (pre-scaled ``val``, packed
-``idx``), so a divergence in either the patch geometry or the normalisation shows
-up as a failed array comparison.
+``_expected`` below states the patch geometry independently of ``assemble``
+(its own key packing, slot numbering, validity and time coordinate), so a
+divergence in either the geometry or the normalisation shows up as a failed
+array comparison.
 """
 from __future__ import annotations
 
@@ -17,23 +14,16 @@ import pytest
 
 from helix.model.tokenize import assemble, PatchConfig
 
-# the research constants (star_tpc / vit_tpc / star_model)
 LENS_T = np.array([271, 271, 542, 1084])
 LEV_T = np.array([4, 4, 3, 2])
 DELTA_T = np.array([-2.38, 0.62, 0.75, 0.50])
 TOFF = np.array([-17.4, 2.6, 5.5], np.float32)
-SIGMA = 2.6
 PW, PT = 16, 8
 N_SLOT = PW * PT
 
 
-def _reference(band, gid, wire, idx, val, target, nw_by_gid, cellt="grid_center"):
-    """Transcription of vit_tpc.assemble_tpc_band (old convention).
-
-    ``cellt`` mirrors the research ``FM_CELLT`` env var: the default grid-centre
-    branch, and the ``centroid`` branch the production configs actually set.
-    """
-    tau = idx % LENS_T[band]
+def _expected(band, gid, wire, tau, raw, sigma, nw_by_gid):
+    """The tokens of PW x PT patches over (wire, tau), per (gid, band)."""
     wb, tb = wire // PW, tau // PT
     key = (gid.astype(np.int64) << 40) | (band.astype(np.int64) << 36) \
         | (wb.astype(np.int64) << 18) | tb
@@ -47,10 +37,8 @@ def _reference(band, gid, wire, idx, val, target, nw_by_gid, cellt="grid_center"
 
     occ = np.zeros((n_cells, N_SLOT), bool)
     inp = np.zeros((n_cells, N_SLOT), np.float32)
-    tgt = np.zeros((n_cells, N_SLOT), np.float32)
     occ[cell, slot] = True
-    inp[cell, slot] = np.arcsinh(val / SIGMA)
-    tgt[cell, slot] = np.arcsinh(target / SIGMA)
+    inp[cell, slot] = np.arcsinh(raw / sigma[gid, band])
 
     nw = nw_by_gid[cell_gid]
     Lb = LENS_T[cell_band]
@@ -64,13 +52,7 @@ def _reference(band, gid, wire, idx, val, target, nw_by_gid, cellt="grid_center"
     _center_tau = cell_tb.astype(np.float32) * PT + PT / 2.0
     cell_t = ((_center_tau + DELTA_T[cell_band]) * _DEC[cell_band]
               - TOFF[cell_gid % 3]).astype(np.float32)
-    if cellt == "centroid":                       # vit_tpc.py FM_CELLT branch
-        _tp = ((tau.astype(np.float32) + DELTA_T[band]) * _DEC[band] - TOFF[gid % 3])
-        _w = np.abs(val).astype(np.float32) + 1e-6
-        _ws = np.zeros(n_cells, np.float32); _ts = np.zeros(n_cells, np.float32)
-        np.add.at(_ws, cell, _w); np.add.at(_ts, cell, _w * _tp)
-        cell_t = (_ts / np.maximum(_ws, 1e-6)).astype(np.float32)
-    return dict(occ=occ, inp=inp, tgt=tgt, valid=valid, cell=cell, slot=slot,
+    return dict(occ=occ, inp=inp, valid=valid, cell=cell, slot=slot,
                 n_cells=n_cells, cell_band=cell_band, cell_gid=cell_gid,
                 cell_t=cell_t, cell_wire=(cell_wb * PW).astype(np.float32))
 
@@ -103,27 +85,14 @@ def _rows(seed=0, n=4000, gids=(0, 1, 2, 3, 4, 5), nw=1969):
     return band, gid, wire, tau, raw, sigma
 
 
-@pytest.mark.parametrize("cellt", ["grid_center", "centroid"])
-def test_matches_research_tokenizer_exactly(cellt):
-    """Both time-coordinate modes must reproduce the research tokenizer.
-
-    ``centroid`` is not an ablation: fm/configs/cent_*.yaml set ``cellt:
-    centroid`` and it is what the production runs train on, so a port that only
-    implemented grid-centre could not reproduce the trained model's coordinate.
-    """
+def test_tokens_match_an_independent_statement_of_the_geometry():
     gids = np.array([0, 1, 2, 3, 4, 5])
     band, gid, wire, tau, raw, sigma = _rows()
     nw = np.full(len(gids), 1969, np.int64)
 
     got = assemble(band, gid, wire, tau, raw, gids=gids, n_wires=nw,
-                   band_lengths=LENS_T, norm_sigma=sigma, cfg=PatchConfig(cell_t=cellt))
-
-    # OLD convention: cache stored val = raw * SIGMA/sigma_tab, packed idx.
-    row_sigma = sigma[gid, band]
-    old_val = raw * (SIGMA / row_sigma)
-    idx = wire * LENS_T[band] + tau
-    ref = _reference(band, gid, wire, idx, old_val, old_val,     # target = the input
-                     nw_by_gid=np.full(len(gids), 1969, np.int64), cellt=cellt)
+                   band_lengths=LENS_T, norm_sigma=sigma, cfg=PatchConfig())
+    ref = _expected(band, gid, wire, tau, raw, sigma, nw_by_gid=nw)
 
     assert got["n_cells"] == ref["n_cells"]
     for k in ("cell", "slot", "cell_band", "cell_gid"):
@@ -132,9 +101,9 @@ def test_matches_research_tokenizer_exactly(cellt):
     np.testing.assert_array_equal(got["occ"].astype(bool), ref["occ"])
     np.testing.assert_allclose(got["cell_t"], ref["cell_t"], rtol=1e-6, atol=1e-4)
     np.testing.assert_array_equal(got["cell_wire"], ref["cell_wire"])
-    # the normalisation identity: arcsinh(raw/sigma) == arcsinh(val_scaled/SIGMA)
     np.testing.assert_allclose(got["inp"], ref["inp"], rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(got["tgt"], ref["tgt"], rtol=1e-5, atol=1e-5)
+    # noisy-only: the target is the input
+    np.testing.assert_array_equal(got["tgt"], got["inp"])
 
 
 def test_duplicate_coordinates_are_rejected_not_silently_overwritten():
@@ -157,36 +126,18 @@ def test_duplicate_coordinates_are_rejected_not_silently_overwritten():
     np.testing.assert_allclose(out["inp"][out["cell"], out["slot"]], out["val"])
 
 
-def test_cell_t_modes_differ_and_centroid_is_occupancy_sensitive():
-    """grid_center depends only on WHICH cell; centroid on what is in it. If the
-    two ever agreed the mode switch would be doing nothing."""
+def test_time_coordinate_ignores_the_cell_contents():
+    """`t_phys` is the masked tokens' RoPE position, computed before masking:
+    it must depend only on WHICH cell, never on the amplitudes in it."""
     gids = np.array([0, 1])
     band, gid, wire, tau, raw, sigma = _rows(seed=17, gids=(0, 1), nw=256)
     kw = dict(gids=gids, n_wires=np.full(2, 256), band_lengths=LENS_T,
-              norm_sigma=sigma)   # cfg passed per-call: these tests compare cell_t modes
-    a = assemble(band, gid, wire, tau, raw, cfg=PatchConfig(cell_t="grid_center"), **kw)
-    b = assemble(band, gid, wire, tau, raw, cfg=PatchConfig(cell_t="centroid"), **kw)
-    assert not np.allclose(a["cell_t"], b["cell_t"])
-    # same cells either way — only the coordinate changes
-    np.testing.assert_array_equal(a["cell_band"], b["cell_band"])
-    np.testing.assert_array_equal(a["cell_gid"], b["cell_gid"])
-    # centroid moves when the amplitudes move; grid_center cannot
-    c = assemble(band, gid, wire, tau, raw * np.linspace(0.1, 4.0, raw.size).astype(np.float32),
-                 cfg=PatchConfig(cell_t="centroid"), **kw)
-    assert not np.allclose(b["cell_t"], c["cell_t"])
-    d = assemble(band, gid, wire, tau, raw * np.linspace(0.1, 4.0, raw.size).astype(np.float32),
-                 cfg=PatchConfig(cell_t="grid_center"), **kw)
+              norm_sigma=sigma, cfg=PatchConfig())
+    a = assemble(band, gid, wire, tau, raw, **kw)
+    d = assemble(band, gid, wire, tau, raw * np.linspace(0.1, 4.0, raw.size).astype(np.float32), **kw)
     np.testing.assert_array_equal(a["cell_t"], d["cell_t"])
-    # cell_t is REQUIRED and has no default. It used to default to 'centroid'
-    # while every helix config trains 'grid_center' -- a default wrong for every
-    # real caller, which fired once (the encode recipe scored a grid_center model
-    # on centroid times, 94.06% of cells). A default is not the fix: 'centroid'
-    # leaks the target into masked-token positions, and 'grid_center' would be
-    # wrong for anyone reproducing research. So there is none.
-    with pytest.raises(ValueError, match="cell_t is REQUIRED"):
-        PatchConfig()
     with pytest.raises(ValueError, match="cell_t must be"):
-        PatchConfig(cell_t="survivor_max")
+        PatchConfig(cell_t="centroid")
 
 
 def test_drops_d1_like_the_fm():
@@ -235,7 +186,7 @@ def test_dead_wire_augmentation_zeroes_input_not_target():
 
 
 def test_non_contiguous_gids_use_row_lookup():
-    """The research code did n_wires[gid]; with a dead plane that is wrong."""
+    """n_wires is looked up by gid ROW, not gid value: with a dead plane they differ."""
     gids = np.array([0, 1, 2, 4, 5])              # plane 3 absent
     nw = np.array([100, 200, 300, 400, 500], np.int64)
     n = 400
@@ -311,10 +262,8 @@ def test_transform_reports_missing_metadata_clearly():
 
 
 def test_to_fm_supplies_every_key_the_model_gathers():
-    """`fm/model.py` gathers band_id, plane_id, t_phys, wire_pos, wirefeat, inp,
-    occ, valid, cell, slot, target, tgt. The tokenizer mirrors vit_tpc's cell_*
-    vocabulary and emits NO wirefeat, so without this adapter FMModel.forward
-    raises KeyError('band_id') on its first access (model.py:266)."""
+    """The model gathers band_id, plane_id, t_phys, wire_pos, wirefeat, inp, occ,
+    valid, tgt; assemble speaks cell_* and emits no wirefeat."""
     from helix.model.tokenize import to_fm, NW_MAX
 
     gids = np.array([0, 1])
@@ -324,7 +273,7 @@ def test_to_fm_supplies_every_key_the_model_gathers():
     B = to_fm(tok)
 
     needed = {"band_id", "plane_id", "t_phys", "wire_pos", "wirefeat",
-              "inp", "occ", "valid", "cell", "slot", "target", "tgt"}
+              "inp", "occ", "valid", "tgt"}
     assert needed <= set(B), f"missing {sorted(needed - set(B))}"
     # renames carry the values through unchanged
     np.testing.assert_array_equal(B["band_id"], tok["cell_band"])

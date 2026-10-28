@@ -98,8 +98,7 @@ class CoeffFMEvaluator(HookBase):
     Masks are drawn from a SEEDED generator keyed on the batch index, so the
     same events are masked the same way at every evaluation. Without that the
     metric moves epoch to epoch because the mask moved, which reads as model
-    variance. (Research's eval intended this and did not get it: its 'plane' mode
-    ignored the generator and drew from the global RNG — see helix.model.mask.)
+    variance.
 
     Publishes ``-avg_loss`` as ``neg_val_loss`` so pimm's CheckpointSaver can
     select on it (higher is better, by its convention).
@@ -112,11 +111,11 @@ class CoeffFMEvaluator(HookBase):
         self.max_batches = max_batches
         self.mask_seed = int(mask_seed)
         # DEFAULT "random", and leave it there for any number meant to be
-        # compared across runs -- see the long note at the make_mask call. The
-        # override exists so the plane-masked task can be scored as a SEPARATE
-        # number, which is what research did (a separate curve, never folded into
-        # val loss). It is reported in the log line, because a row that does not
-        # say which task it scored is not interpretable later.
+        # compared across runs -- see the note at the make_mask call. The
+        # override ("plane") exists so the plane-masked task can be scored as a
+        # SEPARATE number, never folded into val loss. It is reported in the log
+        # line, because a row that does not say which task it scored is not
+        # interpretable later.
         self.mask_mode = str(mask_mode)
         self.n_planes = int(n_planes)
         # None scores at the model's own training mask ratio. A fixed value makes
@@ -124,8 +123,7 @@ class CoeffFMEvaluator(HookBase):
         # task rather than on the (harder or easier) one it trained on.
         self.mask_ratio = None if mask_ratio is None else float(mask_ratio)
         # var_expl + charge closure, computed from the SAME forward as the
-        # loss (see _forward) — so this is free, not a second pass. Silently
-        # inert unless the checkpoint carries the bin centroids.
+        # loss (see _forward) — so this is free, not a second pass.
         self.grid_free = bool(grid_free)
 
     def before_train(self):
@@ -235,27 +233,23 @@ class CoeffFMEvaluator(HookBase):
         i.e. **15.5% of wall time**. Doubling it would cost ~15% of every future
         run to compute two scalars.
 
-        So for the categorical head — the only one we train — reproduce
-        ``FMModel.forward``'s branch here from a single ``raw_heads`` call. Any
-        other head configuration falls back to ``forward``, which keeps this
-        correct for heads it does not know about rather than silently scoring
-        them with the wrong loss.
+        So reproduce ``FMModel.forward``'s objective here from a single
+        ``raw_heads`` call (``grid_free=False`` scores through ``forward``).
 
         Calling ``core`` rather than ``model`` skips the DDP wrapper; under
         ``no_grad`` in eval there is no gradient to synchronise, and the previous
         code already reached for ``core.raw_heads`` for the same reason.
         """
-        if self.grid_free and getattr(core, "n_bins", 0) > 0:
+        if self.grid_free:
             from helix.model.loss import losses_cat
             assert torch.isfinite(core.bin_edges).all(), \
-                ("n_bins > 0 requires set_bins(edges) before evaluation — the "
-                 "edges buffer is still unset (NaN).")
+                ("evaluation requires set_bins(edges) first — the edges buffer "
+                 "is still unset (NaN).")
             # The same check `forward` runs. Skipping `forward` to save a second
             # pass must not also skip its contract.
             core.require_batch_keys(B)
-            occ, val, _ = core.raw_heads(B, mask)
-            bce, vloss = losses_cat(occ, val, B, mask, core.bin_edges,
-                                    vis_w=core.vis_w)
+            occ, val = core.raw_heads(B, mask)
+            bce, vloss = losses_cat(occ, val, B, mask, core.bin_edges)
             _acc_grid_free(core, B, mask, val, gf)
             return {"loss": bce + vloss, "bce": bce.detach(),
                     "val": vloss.detach(),
@@ -317,13 +311,10 @@ class CoeffFMEvaluator(HookBase):
                 # which was already true and is now at least deliberate.
                 gen = torch.Generator(device=device).manual_seed(
                     self.mask_seed + 100003 * comm.get_rank() + i)
-                # mask_mode defaults to "random", matching research: mae_ddp.py:216
-                # passes args.mask_mode to perband_mse_cat, so the eval metric is
-                # a pure random-mask number even when plane_frac > 0 (research
-                # reports the plane-masked number as a SEPARATE curve, and only
-                # for non-categorical heads — m113 is categorical, so its eval
-                # was pure random). Without this, plane_frac makes val loss a
-                # 90/10 mixture and it stops being comparable across runs.
+                # An explicit mode (default "random"), so the eval metric is a
+                # pure random-mask number even when plane_frac > 0. Without it,
+                # plane_frac makes val loss a 90/10 mixture and it stops being
+                # comparable across runs.
                 mask = core.make_mask(B, mode=self.mask_mode,
                                       ratio=self.mask_ratio,
                                       n_planes=self.n_planes,
@@ -342,12 +333,11 @@ class CoeffFMEvaluator(HookBase):
                 # summing those means weights a 5k-token event equally with a
                 # 40k-token one. Dense events are both heavier and harder —
                 # corr(per-event CE, token count) = 0.79 — so the unweighted
-                # mean is biased optimistic by ~0.09 nats, which is larger than
-                # the k30-vs-R1 difference these numbers were used to compare.
-                # Research pools (fm/train.py:143, fm/cross_nll.py:41).
+                # mean is biased optimistic by ~0.09 nats, larger than the
+                # corpus-to-corpus differences these numbers compare.
                 #
-                # The supports are recomputed here rather than returned from the
-                # loss, so `losses*` stay byte-comparable with research.
+                # The supports are recomputed here rather than returned from
+                # the loss, which keeps the loss's signature to its value.
                 mrow = mask[:, None]
                 w_occ = float((mrow & B["valid"].bool()).sum())
                 w_val = float((B["occ"].bool() & B["valid"].bool() & mrow).sum())

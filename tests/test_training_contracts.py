@@ -1,20 +1,8 @@
 """The training step's CONTRACTS: muP scaling, mask reproducibility, and that a
 step moves what it should.
 
-`test_training_parity` pinned these bit-for-bit against the research
-implementation, and retires with `research/`. What it proved -- "helix does
-exactly what research did" -- is the right guarantee for a finished extraction
-and the WRONG one going forward: masking, the loss/head and the model width are
-all expected to change, and a test that pins the old output fires on every
-intentional change until someone deletes it.
-
-So these assert the invariants instead. They are what has to stay true across a
-width change, a new masking policy, or a different head -- and they are checkable
-without any external tree.
-
-Where a frozen artefact IS the only available statement (the legacy DSP chain,
-which is finished and has no analytic form) helix keeps one:
-tests/goldens_legacy_dsp.npz. This file is the other case.
+These assert invariants rather than recorded outputs: they are what has to stay
+true across a width change, a new masking policy, or a different bin grid.
 """
 import numpy as np
 import pytest
@@ -25,7 +13,7 @@ from helix.model import build_fm                                   # noqa: E402
 from helix.model.mask import make_mask, VIEWS_PER_VOLUME           # noqa: E402
 
 SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1,
-             heads=4, dec_mode="cross")
+             heads=4, n_bins=16)
 
 
 def _batch(n=48, seed=0):
@@ -83,7 +71,7 @@ def test_every_trainable_parameter_lands_in_exactly_one_group():
 
 # ------------------------------------------------------- mask reproducibility
 
-@pytest.mark.parametrize("mode", ["random", "block", "plane", "plane_any"])
+@pytest.mark.parametrize("mode", ["random", "plane"])
 def test_the_same_generator_seed_gives_the_same_mask(mode):
     """Reproducibility is the contract; the exact token selection is NOT.
 
@@ -117,13 +105,11 @@ def test_random_mode_honours_the_ratio():
 def test_a_step_updates_exactly_the_parameters_that_got_gradient():
     """forward -> loss -> backward -> AdamW.step over the model's OWN param_groups.
 
-    The parity tests checked this by diffing every tensor against research. The
-    invariant that outlives them: every parameter carrying gradient moves, and
-    nothing else does.
+    Every parameter carrying gradient moves, and nothing else does.
     """
-    from test_model_fm import make_batch
+    from test_model_fm import binned, make_batch
 
-    model = build_fm(dict(SMALL, mup=True, d_base=32))
+    model = binned(build_fm(dict(SMALL, mup=True, d_base=32)))
     B = make_batch(n_slot=SMALL["n_slot"], n_band=SMALL["n_band"],
                    n_plane=SMALL["n_plane"])
     opt = torch.optim.AdamW(model.param_groups(1e-2, weight_decay=0.0))
@@ -144,31 +130,13 @@ def test_a_step_updates_exactly_the_parameters_that_got_gradient():
 
 
 # ------------------------------------------------ masking policy
-#
-# These three came from test_training_parity.py, which is retired. They never
-# had a research dependency: they assert what `plane` vs `plane_any` DO --
-# every volume punctured vs one left intact -- which is the property the
-# cross-plane result rests on, and it survives a change of masking policy
-# because it is stated as structure rather than as a recorded draw.
 
 def test_plane_mask_punctures_every_volume():
     """'plane' hides n_planes views PER VOLUME, leaving no volume intact.
 
-    The point of the mode is to force cross-plane triangulation, and the global
-    selection it replaces did not. Measured on a real R1 event (gids 0..5 = two
-    volumes x three views), `n_planes=1` masked 16.5% of cells and left the
-    punctured volume two of three views in EVERY draw while the other volume
-    stayed fully sighted; two views already determine a 3D point, so the model
-    could interpolate. Even `n_planes=3` left a volume untouched in ~90% of
-    draws.
-
-    This is a deliberate divergence from research/train.py: research picks
-    n_planes gids from the whole event, helix picks n_planes per VOLUME. The
-    byte-identity parity that recorded that divergence retired with research/;
-    the property it protected is asserted here directly.
+    The point of the mode is to force cross-plane triangulation: a volume left
+    fully sighted would let the model interpolate from it instead.
     """
-    from helix.model.mask import make_mask, VIEWS_PER_VOLUME
-
     B = _batch()
     gid = B["plane_id"]
     gids = gid.unique()
@@ -193,57 +161,19 @@ def test_plane_mask_punctures_every_volume():
                     f"triangulating")
 
 
-def test_plane_any_leaves_a_volume_intact_and_plane_does_not():
-    """The two selections are two different TASKS; pin the difference.
+def test_unknown_mask_mode_is_refused():
+    with pytest.raises(ValueError, match="mask mode"):
+        make_mask(_batch(), "plane_any", 0.5, 1)
 
-    `plane_any` is the historical/research selection: n_planes from the whole
-    event, so with two volumes one of them routinely survives untouched. Two
-    views already determine a 3D point, so an intact volume lets the model
-    interpolate instead of triangulating -- which is why `plane` exists and why
-    `plane_any` is kept only for reproducing the runs that used it.
-    """
-    from helix.model.mask import make_mask, VIEWS_PER_VOLUME
 
+def test_plane_frac_steps_mask_planes_in_every_volume():
+    """The mixer's plane steps use the 'plane' selection."""
     B = _batch()
     gid = B["plane_id"]
     vol_of = lambda g: torch.div(g, VIEWS_PER_VOLUME, rounding_mode="floor")
     vols = vol_of(gid.unique()).unique()
-    assert len(vols) > 1, "fixture must span >1 volume or this proves nothing"
-
-    intact = {"plane": 0, "plane_any": 0}
-    for mode in intact:
-        for seed in range(50):
-            hit = gid[make_mask(B, mode, 0.5, 1,
-                                torch.Generator().manual_seed(seed))].unique()
-            if len(vol_of(hit).unique()) < len(vols):
-                intact[mode] += 1
-    assert intact["plane"] == 0, (
-        f"'plane' left a volume fully sighted in {intact['plane']}/50 draws")
-    assert intact["plane_any"] > 0, (
-        "'plane_any' never left a volume intact -- it is supposed to be the "
-        "selection that can, so either the fixture or the mode is wrong")
-
-
-def test_plane_frac_mixer_honours_plane_mode():
-    """`plane_frac` steps must use the selection the run asked for.
-
-    The mixer hardcoded "plane". A run set up to reproduce m113 needs those steps
-    to be `plane_any`, and nothing in the loss would show the difference.
-    """
-    from helix.model import build_fm
-
-    B = _batch()
-    gid = B["plane_id"]
-    vol_of = lambda g: torch.div(g, 3, rounding_mode="floor")
-    vols = vol_of(gid.unique()).unique()
-
-    seen = {}
-    for pm in ("plane", "plane_any"):
-        model = build_fm(dict(SMALL), plane_frac=1.0, plane_mode=pm, n_planes=1)
-        torch.manual_seed(0)
-        seen[pm] = sum(len(vol_of(gid[model.make_mask(B)].unique()).unique())
-                       < len(vols) for _ in range(50))
-    assert seen["plane"] == 0, "plane_mode='plane' still left a volume intact"
-    assert seen["plane_any"] > 0, (
-        "plane_mode='plane_any' never left one intact — the mixer is ignoring "
-        "plane_mode and hardcoding a selection again")
+    model = build_fm(dict(SMALL), plane_frac=1.0, n_planes=1)
+    torch.manual_seed(0)
+    intact = sum(len(vol_of(gid[model.make_mask(B)].unique()).unique()) < len(vols)
+                 for _ in range(50))
+    assert intact == 0, "a plane_frac step left a volume fully sighted"
