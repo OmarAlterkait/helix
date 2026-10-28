@@ -10,17 +10,23 @@ and by helix's hooks, so nothing is exported or promoted first:
     model/last/weights.pth   pimm's split checkpoint: {state_dict}; its step is in
                              model/last/trainer.dcp (``trainer.global_step``)
     model/iter_N.pth,        pimm: {state_dict}
-    model/model_best.pth
+    model/model_best.pth     (best: CheckpointSaver's lowest validation loss, when it selects one)
     provenance.json          HelixPathBootstrap: one record per link (code, corpus identity, step)
 
-``load_run(path, weights="ema")`` takes the run directory (``weights`` picks the EMA or the last
-checkpoint) or one of those weight files / the ``last`` directory, and returns a :class:`Run`:
-the model in eval mode with the bins it trained with (``bin_edges`` and the centroid tables are
-persistent buffers, so they ride in every weight file), the tokenizer's ``PatchConfig``, and
-the run's provenance.
+``load_run(path, weights="ema")`` takes the run directory (``weights`` picks the EMA, the last or
+the best checkpoint) or one of those weight files / the ``last`` directory, and returns a
+:class:`Run`: the model in eval mode with the bins it trained with (``bin_edges`` and the
+centroid tables are persistent buffers, so they ride in every weight file), the tokenizer's
+``PatchConfig``, and the run's provenance.
+
+Two kinds of run, by the model section's ``type``: an FM (``Coeff-FM``, ``configs/pimm/fm.py``)
+and a denoiser (``Coeff-Denoise``, ``configs/pimm/denoise.py``), whose model names the FM run it
+is built on. A denoiser's architecture and tokenizer are that run's, so reading a denoiser reads
+the FM run's ``resolved_config.json`` too (its weights are the denoiser's own).
 
 Starting a TRAINING run from a checkpoint is not this module's job: pimm's ``weight=`` does it
-(``configs/pimm/fm_cooldown.py``).
+(``configs/pimm/fm_cooldown.py``); a denoiser's model initialises its encoder from its FM run
+through this loader (:func:`helix.model.denoise.build_denoise`).
 
 No pimm import: pimm is needed to write a run, not to read one.
 """
@@ -32,21 +38,23 @@ import os
 import re
 from dataclasses import dataclass, field
 
-WEIGHTS = ("ema", "last")
+WEIGHTS = ("ema", "last", "best")
+_WEIGHT_PATH = {"ema": "model_ema.pth", "last": "last", "best": "model_best.pth"}
 _CONFIG = "resolved_config.json"
 
 
 @dataclass
 class Run:
     """A trained model and what it was trained with."""
-    model: object                   # FMModel, eval mode, requires_grad off
+    model: object                   # FMModel or DenoiseModel, eval mode, requires_grad off
     tokenizer: object               # PatchConfig
     config: dict                    # resolved_config.json
     provenance: dict = field(default_factory=dict)
 
     def random_init(self, seed=0):
         """The same architecture freshly initialised (seeded), with the trained model's bins, on
-        its device and in eval mode: the control a frozen-feature probe is compared against."""
+        its device and in eval mode: the control a frozen-feature probe is compared against.
+        (An FM run's.)"""
         import torch
         torch.manual_seed(int(seed))
         m = build_model(self.config)
@@ -82,27 +90,41 @@ def model_config(config):
 
 
 def tokenizer_config(config):
-    """The ``PatchConfig`` of the train split's ``CoeffTokenize`` -- what the weights saw."""
+    """The ``PatchConfig`` of the train split's ``CoeffTokenize`` -- what the weights saw. A
+    ``cfg="model"`` (a denoiser's) is the tokenizer of the FM run its model is built on
+    (``helix.integrations.pimm.trainer.resolve_tokenizer`` resolved it the same way)."""
     from helix.model.tokenize import PatchConfig
     for t in (config.get("data") or {}).get("train", {}).get("transform") or []:
         if isinstance(t, dict) and t.get("type") == "CoeffTokenize":
+            if t.get("cfg") == "model":
+                return tokenizer_config(_read_config(config["model"]["fm"]))
             cfg = {k: tuple(v) if isinstance(v, list) else v for k, v in dict(t.get("cfg") or {}).items()}
             return PatchConfig(**cfg)
     raise ValueError("the run's config has no CoeffTokenize in data.train.transform")
 
 
 def build_model(config):
-    """A freshly initialised FM of the run's architecture (no bins)."""
+    """A freshly initialised model of the run's architecture: an FM (no bins), or a denoiser on
+    its FM run's architecture (that run's weights NOT loaded)."""
+    m = dict(config["model"])
+    if m.get("type") == "Coeff-Denoise":
+        from helix.model.denoise import build_denoise
+        kw = {k: v for k, v in m.items() if k not in ("type", "fm")}
+        return build_denoise(m["fm"], **dict(kw, pretrained=False, compile_blocks=False))
     from helix.model import build_fm
     return build_fm(model_config(config))
+
+
+def _read_config(path):
+    return json.load(open(os.path.join(run_dir(path), _CONFIG)))
 
 
 def load_run(path, weights="ema", *, device=None):
     """A :class:`Run` from a run directory, or from one weight file (or ``last`` directory) of it.
 
-    ``weights``: ``"ema"`` (``model/model_ema.pth``) or ``"last"`` (``model/last``), used when
-    ``path`` is the run directory; a weight file names itself. A missing EMA is an error, not a
-    fallback to the raw weights.
+    ``weights``: ``"ema"`` (``model/model_ema.pth``), ``"last"`` (``model/last``) or ``"best"``
+    (``model/model_best.pth``), used when ``path`` is the run directory; a weight file names
+    itself. A missing EMA is an error, not a fallback to the raw weights.
     """
     import torch
 
@@ -112,11 +134,11 @@ def load_run(path, weights="ema", *, device=None):
     if p == rd:
         if weights not in WEIGHTS:
             raise ValueError(f"weights={weights!r}: one of {WEIGHTS}")
-        p = os.path.join(rd, "model", "model_ema.pth" if weights == "ema" else "last")
+        p = os.path.join(rd, "model", _WEIGHT_PATH[weights])
         if not os.path.exists(p):
             raise FileNotFoundError(f"{rd}: no {os.path.relpath(p, rd)} (weights={weights!r})")
     name = os.path.basename(p)
-    kind = {"model_ema.pth": "ema", "last": "last"}.get(name, name)
+    kind = {v: k for k, v in _WEIGHT_PATH.items()}.get(name, name)
     wfile = os.path.join(p, "weights.pth") if os.path.isdir(p) else p
     blob = torch.load(wfile, map_location="cpu", weights_only=False)
     sd = blob["state_dict"] if isinstance(blob, dict) and "state_dict" in blob else blob
@@ -130,7 +152,7 @@ def load_run(path, weights="ema", *, device=None):
 
     model = build_model(config)
     model.load_state_dict(sd, strict=True)
-    if not torch.isfinite(model.bin_edges).all():
+    if hasattr(model, "bin_edges") and not torch.isfinite(model.bin_edges).all():
         raise ValueError(f"{wfile}: its bin_edges are unset -- these weights cannot be scored")
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 

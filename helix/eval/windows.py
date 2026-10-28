@@ -194,7 +194,7 @@ def near_windows(keys, q, rng, n=60, margin=1, pad=(8, 8)):
     tick) cells -- 16 wires / 128 ticks at the default, exactly the surroundings the floor's own
     noise windows must keep EMPTY. ``keys``/``q``: the event's fine cells and charge. Up to ``n``
     windows, shared equally over the planes that carry charge. (A training-row sampler of
-    :class:`helix.data.denoise.DenoiseEvents`.)
+    :class:`helix.data.denoise.DenoiseRows`.)
     """
     keys = np.asarray(keys, np.int64)[np.asarray(q) > 0]
     if not len(keys):

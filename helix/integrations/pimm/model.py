@@ -1,4 +1,5 @@
-"""The ``Coeff-FM`` MODELS entry: helix's FM with its bin table installed."""
+"""The MODELS entries: ``Coeff-FM`` (helix's FM with its bin table installed) and
+``Coeff-Denoise`` (an FM run plus the denoising head)."""
 
 from __future__ import annotations
 
@@ -43,3 +44,18 @@ def build_coeff_fm(bins=None, **cfg):
         bins = load(bins)
     apply_bins(model, bins)
     return model
+
+
+@MODELS.register_module("Coeff-Denoise")
+class CoeffDenoise:
+    """Factory registered as ``Coeff-Denoise``: a pretrained FM run plus the denoising head
+    (:func:`helix.model.denoise.build_denoise`; ``configs/pimm/denoise.py``).
+
+    ``fm`` names the FM run (architecture, tokenizer and, with ``pretrained``, weights). Not
+    pimm's ``weight=``: that loads a checkpoint of THIS model and is what ``scripts/train.sh``
+    sets on every resumed link, so it cannot also carry the initialisation.
+    """
+
+    def __new__(cls, fm, **cfg):
+        from helix.model.denoise import build_denoise
+        return build_denoise(fm, **cfg)

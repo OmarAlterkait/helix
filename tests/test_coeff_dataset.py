@@ -807,3 +807,18 @@ def test_a_gap_is_judged_against_the_SOURCE_not_assumed_to_be_a_failed_job(tmp_p
     (src / "cx_sensor_0002.h5").write_bytes(b"")
     probs = verify_corpus(str(corpus), "cx", source_root=str(src))
     assert any("source file IS present" in p for p in probs), probs
+
+
+def test_n_events_is_a_fixed_nested_subset_in_corpus_order(tmp_path):
+    """The label-efficiency control: ``n_events`` keeps a seeded random subset of the split,
+    in corpus order, and the subsets of one seed are nested."""
+    _write_shard(tmp_path / "cx_coeff_0000.h5", n_events=10)
+    full = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx").data_list
+    sub = {n: CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx", n_events=n).data_list for n in (3, 6)}
+    assert len(sub[3]) == 3 and len(sub[6]) == 6
+    assert sub[3] == sorted(sub[3]) and set(sub[3]) <= set(sub[6]) <= set(full)
+    assert CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx", n_events=3).data_list == sub[3]
+    other = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx", n_events=6, subset_seed=1).data_list
+    assert other != sub[6]
+    with pytest.raises(ValueError, match="n_events"):
+        CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx", n_events=11)

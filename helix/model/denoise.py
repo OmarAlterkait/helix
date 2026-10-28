@@ -1,25 +1,23 @@
-"""Supervised denoising: noisy coefficient tokens -> pre-response charge per cell.
+"""Supervised denoising: noisy coefficient tokens -> pre-response charge per fine cell.
 
-The target is the simulation's ``hits`` (charge arriving at each wire before the
-field response) summed onto the fine grid of :mod:`helix.data.cells`
-(``FW`` wires x ``FT`` ticks), predicted as ``log1p(q / Q0)``: the representation
-the floor evaluation scores. The input is exactly what the foundation model
-sees -- every noisy token of an event, none masked.
+A denoiser is a pretrained FM run plus a task head. The target is the simulation's ``hits``
+(charge arriving at each wire before the field response) on the fine grid of
+:mod:`helix.data.cells` (``FW`` wires x ``FT`` ticks), predicted as ``log1p(q / Q0)``, together
+with a presence logit for "this cell carries charge" (a hurdle model: the floor is a detection
+question, and a regression alone pulls an ambiguous blip to an intermediate value). The input is
+exactly what the FM sees -- every noisy token of an event, none masked. The query cells and their
+labels come from :class:`helix.data.denoise.DenoiseRows`.
 
-``DenoiseModel`` = the FM encoder (``SerialFMModel.encode``) + ``CellHead``.
-With ``presence`` the head also returns a logit for "this cell carries charge"
-(a hurdle model): the floor is a detection question, and a regression to
-``log1p(q/Q0)`` pulls an ambiguous blip to an intermediate value either way,
-which puts faint deposits beside noise in charge units. The
-head reads, for each queried cell, the encoder features of the token covering it
-in each band plus the cell's offset inside those tokens
-(:func:`helix.data.cells.cell_inputs`) -- the frozen probe's input, made
-trainable -- so the same encoder can be trained from scratch, fine-tuned from a
-pretrained checkpoint, or frozen, and the three differ only in what was trained.
+``DenoiseModel`` = the FM encoder (``FMModel.encode``) + ``CellDecoder``. The encoder's
+architecture and tokenizer are those of the FM run ``fm`` (:func:`helix.model.checkpoint.
+load_run`); ``pretrained`` loads its weights (False: the same architecture from scratch, the
+baseline), ``freeze_encoder`` keeps them fixed. The FM's decoder, heads and mask token never
+train (``encode`` does not reach them, and a parameter DDP never sees a gradient for would stall
+the all-reduce).
 
-The encoder's decoder, heads and mask token are frozen (``requires_grad=False``):
-``encode`` never reaches them, and a parameter DDP never sees a gradient for would
-otherwise stall the all-reduce.
+``cond_charge`` selects the product: off (M6d, docs/DENOISE.md) regresses charge on every queried
+cell -- detection and maps; on (M6dc) regresses it on charged cells only, a charge conditional on
+presence -- calorimetry.
 """
 from __future__ import annotations
 
@@ -30,48 +28,23 @@ import torch.nn as nn
 ENCODER_PREFIXES = ("embed.", "film.", "band_emb.", "plane_emb.", "cond_wire.", "enc.", "pool_")
 
 
-class CellHead(nn.Module):
-    """Per-cell readout over the covering tokens of every band."""
-
-    def __init__(self, d, n_bands=4, proj=256, hidden=1024, n_aux=None, presence=False):
-        super().__init__()
-        self.n_bands, self.proj_dim, self.presence = n_bands, proj, bool(presence)
-        self.norm = nn.LayerNorm(d)
-        self.proj = nn.Linear(d, proj)
-        n_aux = 13 * n_bands if n_aux is None else n_aux
-        self.mlp = nn.Sequential(nn.Linear(n_bands * proj + n_aux, hidden), nn.GELU(),
-                                 nn.Linear(hidden, hidden // 2), nn.GELU(),
-                                 nn.Linear(hidden // 2, 2 if presence else 1))
-
-    def forward(self, feats, idx, aux):
-        """feats (N_tok, d); idx (n, n_bands) covering token or -1; aux (n, n_aux).
-        -> charge ``y`` (n,), or ``(y, presence_logit)`` with ``presence``."""
-        z = self.proj(self.norm(feats))
-        g = z[idx.clamp(min=0)] * (idx >= 0).unsqueeze(-1).to(z.dtype)      # absent band -> zeros
-        out = self.mlp(torch.cat([g.flatten(1), aux.to(g.dtype)], 1))
-        return (out[:, 0], out[:, 1]) if self.presence else out.squeeze(-1)
-
-
 class CellDecoder(nn.Module):
-    """Per-cell readout at cell resolution: cross-attention over the token
-    neighbourhood, plus the covering tokens' raw coefficients.
+    """Per-cell readout at cell resolution: cross-attention over the token neighbourhood, plus
+    the covering tokens' raw coefficients; returns ``(charge, presence_logit)`` per cell.
 
-    ``CellHead`` predicts a 2-wire x 16-tick cell from ONE vector per band (the
-    token covering it, up to 16 wires x 128 ticks) and the cell's offset: it
-    cannot compare the cell with the patch beside it, so near activity it spreads
-    probability over the whole patch -- the blocky haze -- and localises coarsely.
-    Here each cell's query (its offsets and the covering tokens' 128 input slots
-    per band, i.e. the coefficients themselves) attends to the encoder features of
-    the (2r+1)^2 patches around it in every band (:func:`helix.data.cells.
-    cell_neighbors`), with a learned embedding per (band, neighbour slot) and a
-    learned null key so a cell with no token anywhere near still has one.
+    Each cell's query (its offsets and the covering tokens' ``n_slot`` input slots per band, i.e.
+    the coefficients themselves) attends to the encoder features of the (2r+1)^2 patches around
+    it in every band (:func:`helix.data.cells.cell_neighbors`), with a learned embedding per
+    (band, neighbour slot) and a learned null key so a cell with no token anywhere near still
+    has one. (A per-band covering-token MLP predicts a 2-wire x 16-tick cell from one vector per
+    16-wire x 128-tick patch, cannot compare the cell with the patch beside it, and spreads
+    probability over the whole patch near activity: docs/DENOISE.md, "Output model".)
     """
 
-    def __init__(self, d, n_bands=4, n_nbr=9, n_slot=128, proj=128, heads=4, layers=2, hidden=512,
-                 n_aux=None, presence=False):
+    def __init__(self, d, n_bands=4, n_nbr=9, n_slot=128, proj=128, heads=4, layers=2, hidden=512):
         super().__init__()
-        self.n_bands, self.n_nbr, self.heads, self.presence = n_bands, n_nbr, heads, bool(presence)
-        n_aux = 13 * n_bands if n_aux is None else n_aux
+        self.n_bands, self.n_nbr, self.heads = n_bands, n_nbr, heads
+        n_aux = 13 * n_bands                                                    # helix.data.cells.cell_inputs
         self.norm = nn.LayerNorm(d)
         self.kv = nn.Linear(d, proj)
         self.pos = nn.Parameter(torch.zeros(n_bands * n_nbr + 1, proj))       # + null key
@@ -85,20 +58,23 @@ class CellDecoder(nn.Module):
                 nm=nn.LayerNorm(proj), mlp=nn.Sequential(nn.Linear(proj, 4 * proj), nn.GELU(), nn.Linear(4 * proj, proj)))))
         # a plain linear readout of the residual stream: a LayerNorm before it bounds the
         # charge logit by the weights (M5d/M5dc capped near 0.8M e- per cell, M4n reaches 2.6M)
-        self.out = nn.Linear(proj, 2 if presence else 1)
+        self.out = nn.Linear(proj, 2)
         nn.init.normal_(self.pos, std=0.02); nn.init.normal_(self.null, std=0.02)
 
-    def forward(self, feats, idx, aux, nbr=None, B=None):
+    def forward(self, feats, idx, aux, nbr, B):
+        """feats (N_tok, d); idx (n, n_bands) covering token or -1; aux (n, 13 n_bands); nbr
+        (n, n_bands, n_nbr) neighbourhood tokens or -1; ``B`` the FM batch (its ``inp``/``occ``).
+        -> ``(charge, presence_logit)``, each (n,) float32."""
         n = idx.shape[0]
         # keys/values are projected once per TOKEN (~30k rows), then gathered for every
         # (cell, neighbour slot) pair (~n x 37) -- projecting after the gather cost 90x the
         # matmul rows and made a step 5x slower; the slot embedding is projected and added
-        # after the gather instead of before
+        # after the gather instead of before.
         # Gather indices must not repeat heavily: a gather's backward is an atomic
         # scatter-add, and absent slots clamped to one row (or the null key gathered
         # by every cell) serialise ~1M adds on that row -- a 6-9 s backward on real
-        # events against 0.3 s for CellHead. Absent slots get spread dummy rows (masked,
-        # so their gradients are zero); the null key is appended, not gathered.
+        # events. Absent slots get spread dummy rows (masked, so their gradients are
+        # zero); the null key is appended, not gathered.
         z = self.kv(self.norm(feats))                                           # (N_tok, P)
         flat = nbr.reshape(n, -1)                                               # (n, nb*K)
         nt = z.shape[0]
@@ -122,52 +98,72 @@ class CellDecoder(nn.Module):
             att = torch.einsum("nhl,nlhd->nhd", a, V.view(n, L + 1, h, P // h)).reshape(n, P)
             q = q + blk["o"](att).float()
             q = q + blk["mlp"](blk["nm"](q)).float()
-        out = self.out(q)
-        return (out[:, 0], out[:, 1]) if self.presence else out.squeeze(-1)
+        out = self.out(q).float()
+        return out[:, 0], out[:, 1]
 
 
 class DenoiseModel(nn.Module):
-    def __init__(self, fm, head):
+    """The FM encoder + :class:`CellDecoder`; ``forward(batch) -> {loss, mse, bce}`` (pimm's
+    Trainer contract) on the query cells :class:`helix.data.denoise.DenoiseRows` put in the
+    batch (``q_idx``, ``q_aux``, ``q_nbr``, ``q_y``, ``q_present``)."""
+
+    def __init__(self, fm, head, *, tokenizer=None, freeze_encoder=False, cond_charge=False, lr_head=1e-2):
         super().__init__()
         self.fm, self.head = fm, head
+        self.tokenizer = tokenizer                 # the FM run's PatchConfig (FMTrainer gives it to the data)
+        self.freeze_encoder, self.cond_charge, self.lr_head = bool(freeze_encoder), bool(cond_charge), float(lr_head)
         for n, p in self.fm.named_parameters():
-            if not n.startswith(ENCODER_PREFIXES):
+            if self.freeze_encoder or not n.startswith(ENCODER_PREFIXES):
                 p.requires_grad_(False)
 
-    def forward(self, B, idx, aux, nbr=None):
-        feats = self.fm.encode(B)
-        if isinstance(self.head, CellDecoder):
-            return self.head(feats, idx, aux, nbr=nbr, B=B)
-        return self.head(feats, idx, aux)
+    def predict(self, B, idx, aux, nbr):
+        """``(charge, presence_logit)`` per queried cell, float32."""
+        with torch.set_grad_enabled(torch.is_grad_enabled() and not self.freeze_encoder):
+            feats = self.fm.encode(B)
+        return self.head(feats, idx, aux, nbr, B)
 
-    def param_groups(self, lr, lr_head, weight_decay):
-        """The encoder's muP groups (trainable parameters only) plus the head's."""
-        groups = self.fm.param_groups(lr, weight_decay=weight_decay)
-        groups.append(dict(params=[p for p in self.head.parameters()], lr=lr_head,
-                           weight_decay=weight_decay))
-        return groups
+    def forward(self, batch):
+        B = dict(batch)
+        B.setdefault("n_cells", B["plane_id"].shape[0])
+        y_hat, logit = self.predict(B, B["q_idx"], B["q_aux"], B["q_nbr"])
+        y, present = B["q_y"].float(), B["q_present"].float()
+        bce = nn.functional.binary_cross_entropy_with_logits(logit, present)
+        if self.cond_charge:                       # charge only where there is charge
+            mse = ((y_hat - y) ** 2 * present).sum() / present.sum().clamp(min=1)
+        else:
+            mse = nn.functional.mse_loss(y_hat, y)
+        return {"loss": mse + bce, "mse": mse.detach(), "bce": bce.detach()}
+
+    def param_groups(self, base_lr, weight_decay=None):
+        """The encoder's muP groups at ``base_lr`` (trainable parameters only: none when frozen)
+        plus the head's at ``lr_head`` -- ``FMTrainer.build_optimizer``'s contract."""
+        groups = self.fm.param_groups(base_lr, weight_decay=weight_decay)
+        g = dict(params=list(self.head.parameters()), lr=self.lr_head)
+        if weight_decay is not None:
+            g["weight_decay"] = weight_decay
+        return groups + [g]
 
 
-def build_denoise(arch, state_dict=None, *, head_kw=None, overrides=None):
-    """A DenoiseModel from an FM architecture dict (e.g. an eval artifact's
-    ``arch``), optionally with the FM's pretrained weights."""
+def build_denoise(fm, *, pretrained=True, freeze_encoder=False, cond_charge=False, lr_head=1e-2,
+                  compile_blocks=True):
+    """A :class:`DenoiseModel` on the FM run ``fm`` (a run directory, or one checkpoint of it).
+
+    The encoder takes the run's architecture and tokenizer and, with ``pretrained``, its weights
+    (``load_run``: the run's EMA, or the checkpoint named); otherwise it is freshly initialised.
+    ``compile_blocks`` is how the encoder executes (``torch.compile`` per block), not what it is.
+    """
+    import json
+    import os
+
+    from helix.model.checkpoint import load_run, model_config, run_dir, tokenizer_config
     from helix.model.fm import build_fm
 
-    a = dict(arch)
-    a.update(overrides or {})
-    fm = build_fm(a)
-    if state_dict is not None:
-        missing, unexpected = fm.load_state_dict(state_dict, strict=False)
-        enc_missing = [k for k in missing if k.startswith(ENCODER_PREFIXES)]
-        if enc_missing or unexpected:
-            raise ValueError(f"pretrained weights do not fit the encoder: missing {enc_missing[:5]}, "
-                             f"unexpected {list(unexpected)[:5]}")
-    kw = dict(head_kw or {})
-    kind = kw.pop("kind", "mlp")
-    nb = fm.band_emb.weight.shape[0]
-    if kind == "decoder":
-        kw.setdefault("n_slot", int(a.get("n_slot", 128)))          # the raw slots the query reads
-        head = CellDecoder(fm.d, n_bands=nb, **kw)
-    else:
-        head = CellHead(fm.d, n_bands=nb, **kw)
-    return DenoiseModel(fm, head)
+    config = json.load(open(os.path.join(run_dir(fm), "resolved_config.json")))
+    if (config.get("model") or {}).get("type") != "Coeff-FM":
+        raise ValueError(f"{fm}: not an FM run (model type {(config.get('model') or {}).get('type')!r})")
+    enc = build_fm(dict(model_config(config), compile_blocks=bool(compile_blocks)))
+    if pretrained:
+        enc.load_state_dict(load_run(fm, device="cpu").model.state_dict(), strict=True)
+    head = CellDecoder(enc.d, n_bands=enc.band_emb.weight.shape[0], n_slot=enc.n_slot)
+    return DenoiseModel(enc, head, tokenizer=tokenizer_config(config), freeze_encoder=freeze_encoder,
+                        cond_charge=cond_charge, lr_head=lr_head)

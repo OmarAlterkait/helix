@@ -172,6 +172,9 @@ Environment: `LINKS` (1), `NAME`, `GPUS` (4, one node), `TIME` (24:00:00), `MEM`
     NAME=fm_pf25 scripts/train.sh fm model.plane_frac=0.25   # ... as its own run
     scripts/train.sh fm_cooldown                       # WSD cooldown from $HELIX_EXP/fm/model/last
     GPUS=1 scripts/train.sh fm_smoke                   # wiring check: small model, 32 events
+    LINKS=4 scripts/train.sh denoise                   # the denoiser (M6d) on $HELIX_EXP/fm; needs the cells truth
+    NAME=denoise_m6dc scripts/train.sh denoise model.cond_charge=True        # M6dc: calorimetry
+    NAME=dn_scratch_N1024 scripts/train.sh denoise model.pretrained=False data.train.n_events=1024 epoch=16   # le3: 4k steps x 4 GPUs
 
 * **The corpus** is `HELIX_CORPUS`'s parent, with its runs from `_calib/RUNS.txt`
   (S3DF default: `coeff_tpc_r2`). `HELIX_CORPUS=<root>/<run> scripts/train.sh fm` trains
@@ -187,6 +190,12 @@ Environment: `LINKS` (1), `NAME`, `GPUS` (4, one node), `TIME` (24:00:00), `MEM`
 * **Preemption** costs at most one checkpoint interval: the next link resumes. S3DF
   cancels preempted jobs, NERSC requeues them; `afterany` continues either way.
 * fm_smoke reads its bins from `$HELIX_ARCHIVE/coeff_bins_K32_smoke.pt`.
+* **The denoiser** (`configs/pimm/denoise.py`) is an FM run plus a head: `model.fm=<run dir>`
+  gives the encoder's architecture, tokenizer and (`model.pretrained`, default True) EMA
+  weights; `model.freeze_encoder=True` trains the head only. It reads the `cells` truth
+  (section 7: `scripts/build_truth.py` first). Its length is epochs like the FM's: a
+  label subset (`data.train.n_events`) needs a larger `epoch` for the same step count. The
+  best checkpoint by validation loss is `model/model_best.pth`.
 
 Plot progress: `scripts/helix_run.sh python scripts/plot_train_progress.py label=$HELIX_EXP/fm --out fig.png`.
 
@@ -212,7 +221,7 @@ needs flash attention, sm80+):
 (`--split`, `--max-events` for a quick look). Metrics: `recon` (the training evaluator's
 masked reconstruction), `floor` (detection floor / charge map from frozen features; trained
 and random-init arms, rankme), `uprobe` (along-wire coordinate; geo, trained, random arms),
-`denoise` (`--denoiser <train_denoise out>/best.pt`, on the floor's windows). The probes fit
+`denoise` (`--denoiser <denoise run>`, its best checkpoint, on the floor's windows). The probes fit
 on the first two thirds of the events and score the rest, with [16, 84]% event-bootstrap
 intervals. See `helix/eval/__init__.py`.
 

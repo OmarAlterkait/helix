@@ -1,8 +1,10 @@
-"""``FMTrainer`` and the WSD schedules.
+"""``FMTrainer`` and the schedules.
 
 The trainer exists because the FM has no event separation — attention spans the
 whole batch — so ``batch_size_per_gpu`` must be 1; and because muP needs
-per-group LR ratios pimm's default optimizer build does not produce.
+per-group LR ratios pimm's default optimizer build does not produce. It trains
+both of helix's models: the FM (``configs/pimm/fm.py``) and the denoiser built on
+an FM run (``configs/pimm/denoise.py``).
 """
 
 from __future__ import annotations
@@ -27,9 +29,11 @@ class FMTrainer(Trainer):
     Config: ``train = dict(type="FMTrainer")``.
 
     pimm's own machinery covers everything else — DDP, resume, logging, hooks,
-    the loop itself, the training step. Three things cannot be expressed in
-    config: the one-event-per-rank check, muP's param groups, and the
-    ``"auto"`` cadences that follow from the run's step count.
+    the loop itself, the training step. Four things cannot be expressed in
+    config: the one-event-per-rank check, muP's param groups, the ``"auto"``
+    cadences that follow from the run's step count, and a ``CoeffTokenize`` with
+    ``cfg="model"`` -- the tokenizer of the FM run a model is built on, known only
+    once the model is (:func:`resolve_tokenizer`).
     """
 
     def build_train_loader(self):
@@ -54,6 +58,9 @@ class FMTrainer(Trainer):
                 f"requires exactly 1: it has no event separation, so a larger "
                 f"per-GPU batch trains attention ACROSS unrelated events without "
                 f"failing. Set batch_size to the number of ranks.")
+        # Before any loader is built (train is the first; val and test follow).
+        if resolve_tokenizer(self.cfg.data, getattr(unwrap_model(self.model), "tokenizer", None)):
+            self.logger.info(f"tokenizer from the model's FM run: {unwrap_model(self.model).tokenizer}")
         return super().build_train_loader()
 
     def build_optimizer(self):
@@ -110,12 +117,13 @@ class FMTrainer(Trainer):
         """
         from helix.core import cadence
         steps = self._total_steps()
-        m = self.cfg.model
+        core = unwrap_model(self.model)
+        fm = getattr(core, "fm", core)            # the denoiser's encoder is an FM
         val = dict(save_freq=cadence.save_every(steps), every_n_steps=cadence.eval_every(steps),
                    evaluator_every_n_steps=cadence.eval_every(steps))
         sch = self.cfg.scheduler
         if sch.get("warmup") == "auto":
-            sch.warmup = cadence.warmup_steps(steps, m.get("d", 128), m.get("d_base", 128))
+            sch.warmup = cadence.warmup_steps(steps, fm.d, fm.d_base)
         for h in list(self.cfg.hooks) + list(getattr(self, "hooks", None) or []):
             for k, v in val.items():
                 if isinstance(h, dict) and h.get(k) == "auto":
@@ -124,6 +132,45 @@ class FMTrainer(Trainer):
                     setattr(h, k, v)
         self.logger.info(f"cadence over {steps} steps: warmup {sch.get('warmup')}, "
                          f"eval every {val['every_n_steps']}, save every {val['save_freq']}")
+
+
+def resolve_tokenizer(data, tokenizer):
+    """Fill every ``CoeffTokenize`` of ``data`` (the config's ``data`` section, every split)
+    whose ``cfg`` is ``"model"`` with ``tokenizer`` (a ``PatchConfig``); returns whether any was.
+
+    A model built on an FM run (``Coeff-Denoise``) must read tokens exactly as that run's
+    weights saw them, and the run is a model key that a ``key=value`` override may change; so
+    the config names the tokenizer by reference and it is resolved from the built model, never
+    written down twice. ``helix.model.checkpoint.tokenizer_config`` resolves the same reference
+    when the run is read back.
+    """
+    from dataclasses import asdict
+    hit = False
+    for split in (data or {}).values():
+        for t in (split.get("transform") or []) if isinstance(split, dict) else []:
+            if isinstance(t, dict) and t.get("type") == "CoeffTokenize" and t.get("cfg") == "model":
+                if tokenizer is None:
+                    raise ValueError("CoeffTokenize cfg='model', but the model has no FM run's tokenizer")
+                t["cfg"] = asdict(tokenizer)
+                hit = True
+    return hit
+
+
+@SCHEDULERS.register_module()
+class WarmupCosineLR(_LambdaLR):
+    """Linear warmup over ``warmup`` steps, then a cosine from 1 to ``floor`` at ``total_steps``
+    (pimm injects it: ``iters_per_epoch * epoch``). The denoiser's schedule (docs/DENOISE.md:
+    1,000 warmup steps at d768, floor 0.02); ``warmup="auto"`` is resolved by FMTrainer. A
+    LambdaLR, so each param group keeps its own LR (muP's ratios, the head's own LR)."""
+
+    def __init__(self, optimizer, total_steps, warmup=0, floor=0.02, last_epoch=-1):
+        def f(s):
+            if s < warmup:
+                return (s + 1) / warmup
+            p = min(1.0, (s - warmup) / max(1, total_steps - warmup))
+            return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * p))
+
+        super().__init__(optimizer=optimizer, lr_lambda=f, last_epoch=last_epoch)
 
 
 @SCHEDULERS.register_module()

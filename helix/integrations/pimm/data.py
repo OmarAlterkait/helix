@@ -1,7 +1,7 @@
 """The corpus and its terminal transform, as pimm registry entries.
 
-``CoeffTokenize`` needs no adapter (it is already a duck-typed transform living
-in helix with no pimm import); only its NAME has to reach pimm's registry.
+``CoeffTokenize`` and ``DenoiseRows`` need no adapter (each is already a duck-typed
+transform living in helix with no pimm import); only their NAMES reach pimm's registry.
 ``CoeffCollect`` and ``CoeffTPCDataset`` do adapt, so they are defined here.
 """
 
@@ -14,13 +14,15 @@ from pimm.datasets.builder import DATASETS
 from pimm.datasets.transform import Compose
 from pimm.datasets.transform.common import TRANSFORMS
 
+from helix.data.denoise import DenoiseRows
 from helix.model.tokenize import CoeffTokenize
 
 
-# The tokenizer needs no adapter — it is already a duck-typed transform
-# (``scope`` + ``__call__(dict) -> dict``), which is why it can live in helix
-# with no pimm import. Only the NAME has to reach pimm's registry.
+# The tokenizer and the denoiser's label transform need no adapter — each is already
+# a duck-typed transform (``scope`` + ``__call__(dict) -> dict``), which is why they
+# can live in helix with no pimm import. Only the NAMES have to reach pimm's registry.
 TRANSFORMS.register_module(module=CoeffTokenize, name="CoeffTokenize")
+TRANSFORMS.register_module(module=DenoiseRows, name="DenoiseRows")
 
 
 @TRANSFORMS.register_module()
@@ -116,7 +118,7 @@ class CoeffTPCDataset(Dataset):
                  modalities=("coeff",), transform=None, loop=1,
                  max_len=-1, strict_lengths=True, event_range=None,
                  exclude_range=None, holdout=None, split_role=None,
-                 max_event_size=None):
+                 max_event_size=None, n_events=None, subset_seed=0):
         super().__init__()
         from helix.data import CoeffTPCDataset as _DS
         # Split parameters must be FORWARDED. This wrapper re-declares the inner
@@ -130,7 +132,8 @@ class CoeffTPCDataset(Dataset):
                           strict_lengths=strict_lengths,
                           event_range=event_range, exclude_range=exclude_range,
                           holdout=holdout, split_role=split_role,
-                          max_event_size=max_event_size)
+                          max_event_size=max_event_size,
+                          n_events=n_events, subset_seed=subset_seed)
         self.transform = Compose(transform)
 
     def __len__(self):

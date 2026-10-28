@@ -71,6 +71,8 @@ class CoeffTPCDataset(ShardEventDataset):
         holdout=None,
         split_role=None,
         max_event_size=None,
+        n_events=None,
+        subset_seed=0,
     ):
         # strict by DEFAULT, unlike the other datasets. A coeff corpus is built
         # by hundreds of independent jobs, and four separate failure shapes —
@@ -123,6 +125,21 @@ class CoeffTPCDataset(ShardEventDataset):
         # builds there. Calling it before gets an AttributeError, and calling it
         # before the joint index exists would filter against the wrong table.
         self._drop_oversize_events()
+        if n_events is not None:
+            self._subset(int(n_events), int(subset_seed))
+
+    def _subset(self, n, seed):
+        """Keep a fixed random ``n`` of this split's events, in corpus order.
+
+        The label-efficiency control: a downstream task trained on 64, 256, ... labelled
+        events. The draw is a prefix of one permutation of the split (``seed``), so the subsets
+        of one seed are NESTED -- a larger arm holds every event of a smaller one -- and
+        independent of the GPU count and the loader.
+        """
+        if n > len(self.data_list):
+            raise ValueError(f"n_events={n}, but the split holds {len(self.data_list)} events")
+        pick = np.sort(np.random.default_rng(seed).permutation(len(self.data_list))[:n])
+        self.data_list = [self.data_list[i] for i in pick]
 
     def _drop_oversize_events(self):
         """Remove events too large to fit in GPU memory.

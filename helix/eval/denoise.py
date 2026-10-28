@@ -5,10 +5,11 @@ The same scored events, map rows, windows, ``Q0`` and :func:`helix.eval.windows.
 frozen features, so the numbers are directly comparable with the floor's ``trained`` arm. Cells
 no token covers are predicted 0.
 
-The metric needs only a predictor, ``predict(event, keys) -> (y, presence)``: ``y`` the
+The metric needs only a predictor, ``predict(event, keys) -> (y, presence, covered)``: ``y`` the
 predicted ``log1p(q / Q0)`` per fine-cell key, ``presence`` a per-cell probability of charge or
-None. :func:`load_denoiser` makes one from a ``scripts/train_denoise.py`` checkpoint; anything
-else that maps an :class:`helix.eval.events.Event` to per-cell charge plugs in the same way.
+None, ``covered`` whether a token covers the cell. :func:`load_denoiser` makes one from a
+denoiser run (``configs/pimm/denoise.py``); anything else that maps an
+:class:`helix.eval.events.Event` to per-cell charge plugs in the same way.
 
 Reported per score: ``charge`` (window score = predicted charge, ``expm1(max(y, 0)) * Q0``) and,
 for a model with a presence head, ``presence`` (window score = the probability); ``charge``
@@ -25,40 +26,31 @@ from helix.eval.floor import score_maps
 from helix.eval.probe import split_events
 
 
-def load_denoiser(path, device=None):
-    """``(predict, tokenizer)`` from a ``scripts/train_denoise.py`` checkpoint (``best.pt``)."""
+def load_denoiser(path, device=None, weights="best"):
+    """``(predict, tokenizer)`` from a denoiser run (``configs/pimm/denoise.py``): its run
+    directory -- ``weights`` picks the checkpoint, by default the lowest validation loss -- or
+    one checkpoint in it (:func:`helix.model.checkpoint.load_run`)."""
     import torch
-    from helix.model.denoise import build_denoise
-    from helix.model.tokenize import PatchConfig
+    from helix.eval.recon import autocast
+    from helix.model.checkpoint import load_run
 
-    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    ck = torch.load(path, map_location="cpu", weights_only=False)
-    meta = ck["meta"]
-    if abs(float(meta["q0"]) - Q0) > 1e-6 * Q0:
-        raise ValueError(f"{path}: trained with Q0={meta['q0']}, helix scores at Q0={Q0}")
-    ov = dict(meta["overrides"], compile_blocks=False)
-    hk = dict(meta.get("head_kw") or {})
-    model = build_denoise(meta["arch"], None, overrides=ov, head_kw=hk)
-    model.load_state_dict(ck["model"])
-    model.to(dev).eval()
-    cfg = PatchConfig(cell_t="grid_center")          # what DenoiseEvents tokenizes with
-    presence, decoder = bool(hk.get("presence")), hk.get("kind") == "decoder"
+    run = load_run(path, weights, device=device)
+    model, cfg = run.model, run.tokenizer
+    if not hasattr(model, "head"):
+        raise ValueError(f"{path}: not a denoiser run (model type {run.config['model'].get('type')!r})")
+    dev = next(model.parameters()).device
 
     def predict(ev, keys):
         idx, aux = cell_inputs(keys, ev.cell_key, ev.band_lengths, cfg)
         ok = (idx >= 0).any(1)
         y, pr = np.zeros(len(keys), np.float32), np.zeros(len(keys), np.float32)
         if ok.any():
-            nbr = (torch.as_tensor(cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg)).to(dev)
-                   if decoder else None)
-            from helix.eval.recon import autocast
+            nbr = cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg)
+            t = lambda a: torch.as_tensor(a).to(dev)                    # noqa: E731
             with torch.no_grad(), autocast(dev):
-                out = model(ev.batch, torch.as_tensor(idx[ok]).to(dev), torch.as_tensor(aux[ok]).to(dev), nbr)
-            if presence:
-                pr[ok] = torch.sigmoid(out[1].float()).cpu().numpy()
-                out = out[0]
-            y[ok] = out.float().cpu().numpy()
-        return y, (pr if presence else None), ok
+                yc, logit = model.predict(ev.batch, t(idx[ok]), t(aux[ok]), t(nbr))
+            y[ok], pr[ok] = yc.float().cpu().numpy(), torch.sigmoid(logit.float()).cpu().numpy()
+        return y, pr, ok
 
     return predict, cfg
 

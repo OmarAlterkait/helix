@@ -100,7 +100,7 @@ changeable.
 An unstamped corpus is migrated with `scripts/migrate_format.py` or rebuilt.
 
 **Configs state intent.** `configs/pimm/fm.py` plus `fm_cooldown`,
-`fm_smoke`; no config carries a step count (warmup and cadence are `"auto"`, filled
+`fm_smoke`, and `denoise` (the supervised denoiser on an FM run, same trainer); no config carries a step count (warmup and cadence are `"auto"`, filled
 by `FMTrainer` through `helix.core.cadence`). A variant is a `key=value` override,
 not a new file.
 

@@ -1,7 +1,7 @@
 """Evaluating a trained run: one library, one entry point.
 
     python -m helix.eval RUN_DIR --metrics recon,floor,uprobe --out scores.json
-    python -m helix.eval RUN_DIR --metrics denoise --denoiser <train_denoise out>/best.pt --out d.json
+    python -m helix.eval RUN_DIR --metrics denoise --denoiser DENOISE_RUN_DIR --out d.json
 
 ``RUN_DIR`` is a pimm run (``save_path``) or one checkpoint inside it; the model, its tokenizer
 and its corpus come from the run itself (:func:`helix.model.checkpoint.load_run`). Events are the
@@ -42,7 +42,7 @@ def evaluate(path, metrics=("recon", "floor", "uprobe"), *, weights="ema", split
     if unknown:
         raise ValueError(f"unknown metric(s) {unknown}; known: {METRICS}")
     if "denoise" in metrics and denoiser is None:
-        raise ValueError("the denoise metric needs a denoiser checkpoint (denoiser=...)")
+        raise ValueError("the denoise metric needs a denoiser run (denoiser=...)")
     run = load_run(path, weights, device=device)
     dev = next(run.model.parameters()).device
     ds = dataset(run, split)

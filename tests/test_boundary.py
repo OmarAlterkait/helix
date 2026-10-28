@@ -81,7 +81,8 @@ MAY_IMPORT_PIMM_DATA = [
 #:
 #: ``bins`` needs numpy, ``identity`` and ``cells`` h5py -- all base deps, so
 #: unlike the list above this one needs no importorskip.
-LIGHT_INSIDE_HEAVY = ["helix.data", "helix.data.bins", "helix.data.identity", "helix.data.cells"]
+LIGHT_INSIDE_HEAVY = ["helix.data", "helix.data.bins", "helix.data.identity", "helix.data.cells",
+                      "helix.data.denoise"]
 
 # helix.integrations.pimm.hooks is deliberately in NEITHER list.
 #

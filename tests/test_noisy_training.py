@@ -45,16 +45,22 @@ def _string_literals(path):
     return out
 
 
+#: The downstream configs: supervised on the simulation truth by design (the denoiser).
+DOWNSTREAM = ("configs/pimm/denoise.py",)
+
+
 #: Pretraining code: the configs and the modules that build and train the FM.
 def _pretraining_sources():
-    return sorted((ROOT / "configs").rglob("*.py")) + sorted((ROOT / "helix" / "model").glob("*.py")) + \
-        sorted((ROOT / "helix" / "integrations" / "pimm").glob("*.py"))
+    return [p for p in sorted((ROOT / "configs").rglob("*.py")) if str(p.relative_to(ROOT)) not in DOWNSTREAM] + \
+        sorted((ROOT / "helix" / "model").glob("*.py")) + sorted((ROOT / "helix" / "integrations" / "pimm").glob("*.py"))
 
 
 def test_no_config_or_training_module_loads_the_truth_modality():
-    """``'cells'`` as a string is the modality name ("n_cells" and the like are not)."""
+    """``'cells'`` as a string is the modality name ("n_cells" and the like are not). Only the
+    downstream configs name it, and they do (so the exemption cannot outlive its reason)."""
     hits = [str(p.relative_to(ROOT)) for p in _pretraining_sources() if "cells" in _string_literals(p)]
     assert not hits, f"pretraining code that names the simulation-truth modality: {hits}"
+    assert all("cells" in _string_literals(ROOT / p) for p in DOWNSTREAM)
 
 
 def test_no_training_module_names_the_clean_modality():

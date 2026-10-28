@@ -654,7 +654,10 @@ class CoeffTokenize:
         out = to_fm(tok)
         # n_cells stays OUT of the batch on purpose: post-collate it is exactly
         # `B["plane_id"].shape[0]` (the cell row-space length), and a python int
-        # would not survive collate as a per-event value anyway.
-        out["_meta"] = dict(n_cells=n_cells, n_slot=self.cfg.n_slot)
+        # would not survive collate as a per-event value anyway. The geometry and
+        # the band lengths ride along for a later per-event transform that maps
+        # cells to tokens (helix.data.denoise.DenoiseRows); `_meta` never reaches a batch.
+        out["_meta"] = dict(n_cells=n_cells, n_slot=self.cfg.n_slot, cfg=self.cfg,
+                            band_lengths=np.asarray(m["band_lengths"]))
         data[self.part] = out
         return data

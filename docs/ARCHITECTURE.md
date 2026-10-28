@@ -265,9 +265,18 @@ attributes excepted).
   identity at once.
 * The FM has no event separation: one event per rank, and `FMTrainer` refuses any other
   per-GPU batch.
-* `checkpoint.py` (`load_run`) is the one reader of a trained run: pimm's run directory
-  (`resolved_config.json`, `model/model_ema.pth` or `model/last`, `provenance.json`) ->
-  the model with its bins, the train split's `PatchConfig`, provenance. Nothing is exported.
+* `denoise.DenoiseModel` / `build_denoise`: the supervised denoiser, an FM run plus a task
+  head. The encoder takes the FM run's architecture, tokenizer and (`pretrained`) weights,
+  optionally frozen (`freeze_encoder`); `CellDecoder` cross-attends from each 2 x 16 fine cell
+  to the 3 x 3 token neighbourhood per band and returns charge `log1p(q/Q0)` and a presence
+  logit; `cond_charge` regresses charge on charged cells only (calorimetry) instead of on every
+  queried cell (detection, maps). `param_groups` = the encoder's muP groups + the head at
+  `lr_head`. Its labels are `helix.data.denoise.DenoiseRows`, a transform after
+  `CoeffTokenize` on a `("coeff", "cells")` sample.
+* `checkpoint.py` (`load_run`) is the one reader of a trained run, FM or denoiser: pimm's run
+  directory (`resolved_config.json`, `model/model_ema.pth`, `model/last` or
+  `model/model_best.pth`, `provenance.json`) -> the model (an FM with its bins), the train
+  split's `PatchConfig` (a denoiser's is its FM run's), provenance. Nothing is exported.
 
 ---
 
@@ -279,15 +288,14 @@ registers:
 
 | registry | names |
 |---|---|
-| TRANSFORMS | `CoeffTokenize`, `CoeffCollect` |
+| TRANSFORMS | `CoeffTokenize`, `DenoiseRows`, `CoeffCollect` |
 | DATASETS | `CoeffTPCDataset` (wraps `helix.data.CoeffTPCDataset`, runs pimm's transforms) |
-| MODELS | `Coeff-FM` |
-| TRAINERS | `FMTrainer`: muP parameter groups, per-group peak LR, the batch check, `"auto"` cadence |
-| SCHEDULERS | `WSDStableLR`, `WSDCooldownLR` |
-| HOOKS | `HelixPathBootstrap`, `WeightEMA`, `FiniteGuard`, `CoeffFMEvaluator` |
+| MODELS | `Coeff-FM`, `Coeff-Denoise` |
+| TRAINERS | `FMTrainer`: the model's param groups (muP; the denoiser's head), the batch check, `"auto"` cadence, a `CoeffTokenize(cfg="model")` filled from the model's FM run |
+| SCHEDULERS | `WSDStableLR`, `WSDCooldownLR`, `WarmupCosineLR` (the denoiser) |
+| HOOKS | `HelixPathBootstrap`, `WeightEMA`, `FiniteGuard`, `CoeffFMEvaluator`, `DenoiseEvaluator` |
 
-`_compat` patches pimm at import (e.g. RNG restore to CPU). **Cadence is derived at run
-time:** a config writes `warmup="auto"`, `save_freq="auto"`, `every_n_steps="auto"`;
+**Cadence is derived at run time:** a config writes `warmup="auto"`, `save_freq="auto"`, `every_n_steps="auto"`;
 `FMTrainer._resolve_cadence` fills them from pimm's `iters_per_epoch * epoch` through
 `helix.core.cadence` (`warmup_steps`, `eval_every`, `save_every`).
 
@@ -297,6 +305,13 @@ heads, K = 128), AdamW + `WSDStableLR`, batch = world size. Variants override on
 differs: `fm_cooldown.py` (warm start from `$HELIX_EXP/fm/model/last`, first 3 runs, one
 epoch, `WSDCooldownLR`), `fm_smoke.py` (a
 small model, 32 events, one GPU). Anything else is a `key=value` override.
+
+`configs/pimm/denoise.py` (`_base_` fm.py) trains the denoiser through the same trainer and
+launcher: `Coeff-Denoise` on the FM run `model.fm` (default `$HELIX_EXP/fm`), the M6d recipe
+of docs/DENOISE.md as defaults (`model.cond_charge=True` is M6dc), the FM's identity-hash
+holdout, `WarmupCosineLR`, `DenoiseEvaluator` (the training loss on the val split, fixed
+draws) and `model/model_best.pth` by validation loss. `data.train.n_events` trains on a fixed,
+nested subset of the train split (label efficiency).
 
 ---
 

@@ -1,8 +1,9 @@
-"""Validation for the coefficient FM, inside a training run.
+"""Validation inside a training run: the coefficient FM's and the denoiser's.
 
-The metric itself is :mod:`helix.eval.recon` (pimm-free, also the ``recon`` metric of
-``python -m helix.eval``); this hook runs it on pimm's val loader at the run's cadence,
-all-reduces the sums across ranks, logs, and publishes the checkpoint-selection metric.
+``CoeffFMEvaluator``'s metric is :mod:`helix.eval.recon` (pimm-free, also the ``recon`` metric
+of ``python -m helix.eval``); ``DenoiseEvaluator``'s is the denoiser's own loss. Each runs on
+pimm's val loader at the run's cadence, all-reduces the sums across ranks, logs, and publishes
+the checkpoint-selection metric. The denoiser's full scoring is ``helix.eval``'s ``denoise``.
 """
 
 from __future__ import annotations
@@ -183,6 +184,89 @@ class CoeffFMEvaluator(HookBase):
                        self.trainer.comm_info.get("epoch", 0))
             for k, v in avg.items():
                 writer.add_scalar(f"val/{k}", v, step)
+        self.trainer.comm_info["current_metric_value"] = -avg["loss"]   # higher is better
+        self.trainer.comm_info["current_metric_name"] = "neg_val_loss"
+        return avg
+
+
+@HOOKS.register_module()
+class DenoiseEvaluator(HookBase):
+    """Validation for the denoiser: its training loss (``mse``, ``bce``, ``loss``) on the first
+    ``max_batches`` events of each rank's share of the val split, averaged over events.
+
+    The val split's ``DenoiseRows`` has a fixed ``seed``, so every evaluation scores the same
+    cells. Publishes ``-loss`` as ``neg_val_loss``: with ``CheckpointSaver(evaluator_every_n_steps=
+    ...)`` at the same cadence, ``model/model_best.pth`` is the lowest validation loss.
+    """
+
+    KEYS = ("loss", "mse", "bce")
+
+    def __init__(self, every_n_steps="auto", max_batches=16):
+        self.every_n_steps = every_n_steps if every_n_steps == "auto" else int(every_n_steps)
+        self.max_batches = None if max_batches is None else int(max_batches)
+
+    def before_train(self):
+        if self.every_n_steps == "auto":
+            raise RuntimeError("DenoiseEvaluator: every_n_steps='auto' was never resolved; "
+                               "it needs train=dict(type='FMTrainer')")
+
+    def after_step(self):
+        step = (self.trainer.comm_info["iter"]
+                + self.trainer.comm_info["iter_per_epoch"] * self.trainer.comm_info["epoch"])
+        if self.every_n_steps > 0 and (step + 1) % self.every_n_steps == 0:
+            self.eval()
+
+    def after_epoch(self):
+        if self.every_n_steps <= 0:
+            self.eval()
+
+    def eval(self):
+        """Every rank scores its shard and enters the all-reduce, even on failure (an asymmetry
+        here hangs every other rank); a failure is raised after it."""
+        from pimm.distributed import move_batch_to_device
+        loader = self.trainer.val_loader
+        model = self.trainer.model
+        dev = self.trainer.parallel_context.device
+        dtype = torch.bfloat16 if self.trainer.cfg.amp_dtype == "bfloat16" else torch.float16
+        amp = bool(getattr(self.trainer.cfg, "enable_amp", False))
+        acc = torch.zeros(len(self.KEYS) + 1, dtype=torch.float64, device=dev)
+        failure, was_training = None, model.training
+        model.eval()
+        try:
+            core = unwrap_model(model)
+            with torch.no_grad():
+                for i, batch in enumerate(loader or []):
+                    if self.max_batches is not None and i >= self.max_batches:
+                        break
+                    with R.autocast(dev, dtype, enabled=amp):
+                        out = core(move_batch_to_device(batch, dev))
+                    acc += torch.stack([out[k].detach().double() for k in self.KEYS]
+                                       + [torch.ones((), dtype=torch.float64, device=dev)])
+        except Exception as exc:
+            self.trainer.logger.exception("DenoiseEvaluator: shard eval failed")
+            failure, acc = exc, torch.zeros_like(acc)
+        finally:
+            if was_training:
+                model.train()
+        if comm.get_world_size() > 1:
+            import torch.distributed as dist
+            dist.all_reduce(acc, op=dist.ReduceOp.SUM)
+        if failure is not None:
+            raise failure
+        n = int(round(acc[-1].item()))
+        if not n:
+            if comm.get_rank() == 0:
+                self.trainer.logger.info("DenoiseEvaluator: val_loader was empty")
+            return None
+        avg = {k: v / n for k, v in zip(self.KEYS, acc[:-1].tolist())}
+        if comm.get_rank() == 0:
+            self.trainer.logger.info(f"   [denoise-eval] events={n} " +
+                                     " ".join(f"{k}={v:.5f}" for k, v in avg.items()))
+            writer = getattr(self.trainer, "writer", None)
+            if writer is not None:
+                step = int(getattr(self.trainer, "global_step", 0) or 0)
+                for k, v in avg.items():
+                    writer.add_scalar(f"val/{k}", v, step)
         self.trainer.comm_info["current_metric_value"] = -avg["loss"]   # higher is better
         self.trainer.comm_info["current_metric_name"] = "neg_val_loss"
         return avg
