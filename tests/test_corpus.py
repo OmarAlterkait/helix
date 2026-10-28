@@ -194,3 +194,13 @@ def test_sigma_threshold_and_norm_are_populated(tmp_path):
     with h5py.File(tmp_path / "cx_coeff_0000.h5", "r") as f:
         assert f["config"]["norm_sigma"][:].max() > 0
         assert f["coord"]["sigma_threshold"][:].max() > 0
+
+
+def test_clean_target_is_written_only_when_asked(tmp_path):
+    """A source with noise-free planes writes no clean shard by default (nothing trains on it)."""
+    from _build_fixture import PlanesSource
+    from helix.build import build
+    src = PlanesSource(range(2), _plane_fn)
+    build(src, str(tmp_path / "cx"), indices=[0, 1], chain=_chain(), events_per_shard=2)
+    assert (tmp_path / "cx_coeff_0000.h5").exists()
+    assert not (tmp_path / "cx_coeff_clean_0000.h5").exists()

@@ -46,7 +46,7 @@ def build_corpus(events, plane_fn, chain, out_dir, *, dataset_name="cx", run="",
     src = PlanesSource(events, fn, run=run, noise=noise, provenance=provenance)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     build(src, str(Path(out_dir) / dataset_name), indices=list(range(len(src))), chain=chain,
-          events_per_shard=len(src), norm_sigma=norm_sigma)
+          events_per_shard=len(src), norm_sigma=norm_sigma, keep_clean=with_clean)
     p = Path(out_dir) / f"{dataset_name}_coeff_0000.h5"
     noisy = read_coeff_shard(p)
     pc = Path(out_dir) / f"{dataset_name}_coeff_clean_0000.h5"

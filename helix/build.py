@@ -8,7 +8,7 @@ an attribute of the package is the function :func:`build`), which gives it this 
     python scripts/build_<source>.py --input FILE [FILE ...] --output DIR/PREFIX --device cuda \\
         [--first 0] [--count N | --spread N] [--events-per-shard 100] [--shard-start K] \\
         [--norm-sigma TABLE.npy | --calibrate TABLE.npy] [--config chain.json|yaml] \\
-        [--optical-config ...] [--no-optical] [--workers 4] [--deflate 4] [--events-log F] [--profile]
+        [--optical-config ...] [--no-optical] [--keep-clean] [--workers 4] [--deflate 4] [--events-log F] [--profile]
     python scripts/build_<source>.py plan OUT RUN_DIR... [--events-per-task 500] [--events-per-shard 100]
 
 and ``scripts/corpus.sh`` runs a whole corpus of it on the site's scheduler. A source:
@@ -26,7 +26,7 @@ and ``scripts/corpus.sh`` runs a whole corpus of it on the site's scheduler. A s
 
 Everything after the read is shared. Per ``--events-per-shard`` events, shard k
 (``--shard-start`` + 0, 1, ...): ``PREFIX_coeff_k.h5`` (:mod:`helix.core.coeff_io`; the dataset
-name is PREFIX's last component), ``PREFIX_coeff_clean_k.h5`` (when the source gives a clean target),
+name is PREFIX's last component), ``PREFIX_coeff_clean_k.h5`` (with ``--keep-clean``, when the source gives a clean target),
 ``PREFIX_optical_k.h5`` (:mod:`helix.optical.shard`), joined on (run, source_file, event).
 ``norm_sigma`` is ``--norm-sigma`` (one table for a whole corpus) or else each shard's own;
 ``--calibrate TABLE`` writes the table of the selected events and no shards. A JSON summary
@@ -141,10 +141,11 @@ def select(n, first=0, count=None, spread=None):
 
 
 def build(source, prefix, *, indices, chain=None, ochain=None, events_per_shard=100, shard_start=0,
-          norm_sigma=None, calibrate=None, workers=4, deflate=4, events_log=None):
+          norm_sigma=None, calibrate=None, workers=4, deflate=4, events_log=None, keep_clean=False):
     """Run ``indices`` of ``source`` through ``chain`` (TPC; None: optical only) and ``ochain``
     (optical; None: TPC only) into shards at ``prefix`` (none with ``calibrate``: the path the
-    normalization table of the events is saved to). Returns the summary dict."""
+    normalization table of the events is saved to). ``keep_clean`` also writes the source's clean
+    target, when it has one (nothing trains on it). Returns the summary dict."""
     from helix.tpc import chain_coeff
     systems = tuple(source.systems) if ochain is not None else ()
     if chain is not None:
@@ -210,7 +211,7 @@ def build(source, prefix, *, indices, chain=None, ochain=None, events_per_shard=
         ce = clean = None
         if res is not None:
             ce = chain_coeff.coeff_event(chain, res, run=idn["run"], source_file=idn["source_file"], event=idn["event"])
-            if ev.get("clean") is not None and calibrate is None:
+            if keep_clean and ev.get("clean") is not None and calibrate is None:
                 clean = chain_coeff.clean_coeff_event(chain, ce, ev["clean"])
             kept.append(sum(int(r["n_kept"]) for r in res))
         if calibrate is None:
@@ -343,6 +344,8 @@ def main(Source, argv=None):
     ap.add_argument("--deflate", type=int, default=4, help="deflate level of the optical shards")
     ap.add_argument("--events-log", default=None, help="per-event jsonl (kept per plane / system, timing)")
     ap.add_argument("--profile", action="store_true", help="time the TPC chain's stages")
+    ap.add_argument("--keep-clean", action="store_true",
+                    help="also write PREFIX_coeff_clean_k.h5 from a source's noise-free planes")
     ap.add_argument("--skip-complete", action="store_true",
                     help="do nothing when every shard of this selection exists (a resubmitted task)")
     a = ap.parse_args(argv)
@@ -364,6 +367,7 @@ def main(Source, argv=None):
     norm = None if a.norm_sigma is None else np.load(a.norm_sigma).astype(np.float32)
     summary = build(src, a.output, indices=select(len(src), a.first, a.count, a.spread), chain=chain, ochain=ochain,
                     events_per_shard=a.events_per_shard, shard_start=a.shard_start, norm_sigma=norm,
-                    calibrate=a.calibrate, workers=a.workers, deflate=a.deflate, events_log=a.events_log)
+                    calibrate=a.calibrate, workers=a.workers, deflate=a.deflate, events_log=a.events_log,
+                    keep_clean=a.keep_clean)
     print(json.dumps(summary, indent=1))
     return summary
