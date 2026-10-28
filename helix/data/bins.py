@@ -18,19 +18,18 @@ invalidates every checkpoint trained against an existing grid.
 
 Algorithm, matching research ``fm/tier1_setup_bins.py``:
 
-* work in ``tgt = arcsinh(clean / sigma)`` — the space the head predicts in
-* K bins UNIFORM in that space over the band's robust range
-  ``[lo_pct, hi_pct]``. Uniform-in-asinh is log-spaced in raw charge, i.e.
-  constant RELATIVE precision, which is the physically motivated choice — NOT
-  quantile bins, so non-uniform occupancy is expected and correct
+* work in ``tgt = arcsinh(coeff / sigma)`` of the NOISY coefficients — the space
+  the head predicts in (training is noisy-only: real data has no clean counterpart)
+* K bins UNIFORM in that space over the band's robust range ``[lo_pct, hi_pct]``,
+  with ONE bin spanning the sub-threshold gap ``(-a, a)``: noisy coefficients exist
+  only beyond the significance threshold, so a single uniform grid would put ~30-40%
+  of its bins where no value can fall. Uniform-in-asinh is log-spaced in raw charge,
+  i.e. constant RELATIVE precision — NOT quantile bins, so non-uniform occupancy is
+  expected and correct
 * outer two bins extended to +-inf so the tails cannot fall off the grid
 
-The one deliberate difference from the research script: it read ``val_clean``
-from the npz cache and divided by a global ``SIGMA=2.6``, because that cache
-stored values already scaled by ``SIGMA/sigma_tab``. The corpus stores RAW
-coefficients, so we divide by the per-``(plane, band)`` ``norm_sigma`` table
-directly. The two are the same quantity — SIGMA cancels — and doing it this way
-means the edges are in exactly the space ``CoeffTokenize`` produces.
+``sigma`` is the per-``(plane, band)`` ``norm_sigma`` table, so the edges are in
+exactly the space ``CoeffTokenize`` produces.
 
 Produces ``edges`` (n_bands, K+1), ``cent_asinh`` (n_bands, K) — the point
 estimate in model space — and ``cent_ratio`` (n_bands, K) = E[coeff/sigma | bin],
@@ -182,33 +181,33 @@ def derive(corpus, *, dataset_name=DEFAULTS["dataset_name"],
     say = report or (lambda _msg: None)
 
     ds = CoeffTPCDataset(data_root=corpus, dataset_name=dataset_name,
-                         modalities=("coeff", "coeff_clean"), transform=None)
+                         modalities=("coeff",), transform=None)
     n = min(events, len(ds))
     say(f"pooling {n} of {len(ds)} events from {corpus}")
 
     vals: dict[Any, list] = {b: [] for b in range(n_bands)}
     for i in range(n):
         s = ds.get_data(i)
-        c, cc = s["coeff"], s["coeff_clean"]
+        c = s["coeff"]
         meta = c["_meta"]
         band = np.asarray(c["band"], np.int64)
         gid = np.asarray(c["plane_gid"], np.int64)
-        clean = np.asarray(cc["value"], np.float32).reshape(-1)
+        value = np.asarray(c["value"], np.float32).reshape(-1)
         keep = band < n_bands
-        band, gid, clean = band[keep], gid[keep], clean[keep]
+        band, gid, value = band[keep], gid[keep], value[keep]
         sig = np.maximum(sigma_for_rows(gid, band, meta["gids"], meta["norm_sigma"]), 1e-6)
-        t = np.arcsinh(clean / sig).astype(np.float64)
-        # clean/sigma == sinh(t), the DIMENSIONLESS coefficient. This is what a
+        t = np.arcsinh(value / sig).astype(np.float64)
+        # value/sigma == sinh(t), the DIMENSIONLESS coefficient. This is what a
         # read-back needs. The alternative — E[raw ADC | bin] — pools planes whose
         # norm_sigma differ by 22%, biasing a Y-plane coefficient 13% low and a
         # U/V one 6% high. That cancels on a random mask and does NOT cancel on a
         # plane mask (measured 0.857 vs 1.021 cross-plane): invisible on the
         # metric people look at, wrong on the one that matters.
-        ratio = (clean / sig).astype(np.float64)
+        ratio = (value / sig).astype(np.float64)
         for b in range(n_bands):
             sel = band == b
             vals[b].append(t[sel])
-            vals.setdefault(("raw", b), []).append(clean[sel])
+            vals.setdefault(("raw", b), []).append(value[sel])
             vals.setdefault(("ratio", b), []).append(ratio[sel])
 
     edges = np.zeros((n_bands, K + 1), np.float32)
@@ -219,7 +218,11 @@ def derive(corpus, *, dataset_name=DEFAULTS["dataset_name"],
         v = np.concatenate(vals[("raw", b)])
         r = np.concatenate(vals[("ratio", b)])
         lo, hi = np.percentile(t, lo_pct), np.percentile(t, hi_pct)
-        e = np.linspace(lo, hi, K + 1)
+        # Same bin width on both sides of the gap (-a, a); one bin spans it.
+        a = float(np.percentile(np.abs(t), lo_pct))
+        w = ((-a - lo) + (hi - a)) / (K - 1)
+        kn = int(round((-a - lo) / w))
+        e = np.concatenate([np.linspace(lo, -a, kn + 1), np.linspace(a, hi, K - kn)])
         idx = np.clip(np.digitize(t, e[1:-1]), 0, K - 1)
         for k in range(K):
             m = idx == k
@@ -377,6 +380,8 @@ def check_reference(table: Mapping[str, Any]) -> dict[str, Any]:
                      different shard set.
     ``params``       derived with different K/n_bands/events, so the digests are
                      not comparable. Deliberate if you meant to change the grid.
+    ``not-recorded`` the reference names the grid but its digests are not yet recorded
+                     (derived for the first time: record these).
     ``no-reference`` the fingerprint is not installed (an editable checkout
                      missing package data, or a stripped wheel).
     """
@@ -391,6 +396,8 @@ def check_reference(table: Mapping[str, Any]) -> dict[str, Any]:
         return dict(status="params", reference=ref, param_mismatches=differing)
 
     got = fingerprint(table)
+    if not ref.get("digests"):
+        return dict(status="not-recorded", reference=ref, digests=got)
     bad = {k: (ref["digests"][k], got[k]) for k in ARRAY_KEYS
            if ref["digests"].get(k) != got[k]}
     out = dict(status="mismatch" if bad else "match", reference=ref,

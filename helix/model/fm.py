@@ -55,11 +55,50 @@ from helix.model.mask import make_mask
 # (dynamic shapes): ~1.2x steady-state for ~5 minutes' compilation per job, so
 # the training config turns it on and everything else (tests, probes, smoke
 # runs) leaves it off.
+#
+# fused_qk runs QK-norm + RoPE as one Triton kernel each way
+# (helix.model.kernels); the same arithmetic to ~1e-5, so it is an
+# implementation choice, not an architecture one. Needs varlen=True, qk_norm and
+# head dim 64.
+#
+# bf16_params stores every PARAMETER in bfloat16 (buffers such as bin_edges stay
+# fp32). The fp32 master copy then lives in the optimizer (FlatAdamW, which
+# requires it), autocast stops re-casting each weight every forward, and the
+# residual stream follows the weights to bf16. A numerics change: per-run.
+#
+# fp32_stream keeps the residual stream fp32 when bf16_params is on (varlen
+# path). The d768 A/B put bf16_params+FlatAdamW 0.010 above the reference in
+# final val loss while varlen alone was 0.005 below it; this isolates whether
+# the stream's rounding is the cause.
+#
+# dec_frac < 1 decodes only that fraction of the masked tokens in TRAINING
+# (partial reconstruction, CrossMAE); evaluation decodes all of them, so val loss
+# stays comparable. The encoder's input is unchanged. A sequence gives one
+# fraction PER BAND (e.g. (1, 1, 1/3, 1/3): every masked A4/D4 token, a third of
+# D3/D2): each band is then sampled independently and every decoded row weighted
+# 1/p in the loss, so the objective stays an estimate of the full one rather
+# than a reweighting toward the full bands.
+#
+# n_masks > 1 draws that many masks per event per step and averages their losses
+# -- more work per step where a step is fixed-cost bound. Random-mode masks are
+# COMPLEMENTARY (disjoint visible sets, as data2vec 2.0's multi-mask); a
+# plane-mode step draws its masks independently.
+#
+# mask_cell is the (wires, ticks) extent of a location for mask_mode="location".
+#
+# vis_frac > 0 also decodes that fraction of the VISIBLE tokens in training: they
+# join the decoder's queries (their own encoder output is among the keys) and get
+# the value loss against the target -- clean in simulation, so a noise-only slot
+# is taught "nothing here". No occupancy loss for them: it is observed. Without
+# it no token is ever trained to judge its own coefficients, which is what the
+# frozen probe asks of every token.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, plane_mode="plane",
                    loss_fused=False, vis_w=0.0, noisy=False,
                    alpha=0.0, beta=0.0, varb=None, compile_blocks=False,
-                   pad_mask=False, act_ckpt=False)
+                   pad_mask=False, act_ckpt=False, fused_qk=False,
+                   bf16_params=False, fp32_stream=False, dec_frac=1.0,
+                   n_masks=1, mask_cell=(16, 128), vis_frac=0.0)
 
 
 class FMModel(nn.Module):
@@ -67,8 +106,18 @@ class FMModel(nn.Module):
                  dec_blocks=2, heads=4, film=("band", "plane", "wire"), nll=False, ffn_mult=4,
                  lam_t=(8.0, 4336.0), lam_w=(32.0, 2048.0), cond="film", dec_mode="self",
                  mup=False, d_base=128, wire_rope=True, n_bins=0, n_sink=0,
-                 qk_norm=False):
+                 qk_norm=False, d_dec=None):
         super().__init__()
+        # d_dec: decoder width, when it differs from the encoder's. The decoder
+        # then reads the encoder through one linear map (``dec_embed``, MAE's
+        # decoder_embed) applied to the visible features and to the mask queries
+        # alike, and runs at head dim 64 like the encoder. None = d, which
+        # builds exactly the original parameter tree.
+        dd = d if d_dec in (None, d) else int(d_dec)
+        if dd != d and (dd % (d // heads) or dec_mode != "cross"):
+            raise ValueError(f"d_dec={d_dec} needs dec_mode='cross' and a multiple of the "
+                             f"head dim {d // heads}")
+        self.d_dec = dd
         self.d, self.n_slot, self.nll, self.cond, self.heads = d, n_slot, nll, cond, heads
         self.lam_t, self.lam_w = lam_t, lam_w     # per-axis RoPE wavelength band (time / wire)
         # wire_rope=False: RoPE on TIME ONLY. wire_pos is a PER-PLANE projection axis (non-metric
@@ -126,7 +175,8 @@ class FMModel(nn.Module):
         # model; we leave attn_scale=None (SDPA default 1/sqrt(head_dim)) in both paths.
         self.mup, self.d_base = mup, d_base
         self.m = d / d_base if mup else 1.0
-        self.readout_mult = 1.0 / self.m         # output multiplier (1/m under muP, 1 else)
+        self.m_dec = dd / d_base if mup else 1.0  # the decoder's own width multiplier
+        self.readout_mult = 1.0 / self.m_dec     # output multiplier: the heads read the decoder
         attn_scale = None                        # None => SDPA default 1/sqrt(head_dim); width-correct for fixed d_head
         adaln = (cond == "adaln")
         self.embed = nn.Linear(2 * n_slot, d)
@@ -137,14 +187,19 @@ class FMModel(nn.Module):
         self.mask_tok = nn.Parameter(torch.zeros(d))
         self.enc = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale, n_sink, qk_norm)
                                  for _ in range(blocks))
+        self.dec_embed = nn.Linear(d, dd) if dd != d else None
         if dec_mode == "cross":
-            self.dec = nn.ModuleList(CrossBlock(d, heads, ffn_mult, attn_scale, adaln, qk_norm) for _ in range(dec_blocks))
+            self.dec = nn.ModuleList(CrossBlock(dd, dd // (d // heads), ffn_mult, attn_scale, adaln, qk_norm)
+                                     for _ in range(dec_blocks))
         else:
             self.dec = nn.ModuleList(Block(d, heads, ffn_mult, adaln, attn_scale, 0, qk_norm) for _ in range(dec_blocks))
-        self.dec_norm = nn.LayerNorm(d)
-        self.occ_head = nn.Linear(d, n_slot)
+        if adaln and dd != d:
+            raise ValueError("d_dec != d with cond='adaln' is not implemented (the AdaLN "
+                             "conditioning vector is encoder-width)")
+        self.dec_norm = nn.LayerNorm(dd)
+        self.occ_head = nn.Linear(dd, n_slot)
         _vout = n_slot * (n_bins if n_bins > 0 else (2 if nll else 1))  # cat: K/slot; nll: mu+logvar; else mu
-        self.val_head = nn.Linear(d, _vout)
+        self.val_head = nn.Linear(dd, _vout)
         if mup:
             self._mup_init()
 
@@ -156,19 +211,27 @@ class FMModel(nn.Module):
     def _mup_categories(self):
         """-> dict name->('input'|'hidden'|'output') for WEIGHT params (2-D).
         Biases / LayerNorm / 1-D params are always 'input' (LR const, no scaling)."""
-        hidden, output = set(), set()
+        hidden, hidden_dec, output = set(), set(), set()
         for i, blk in enumerate(self.enc):
             for nm in ("qkv", "proj", "mlp.0", "mlp.2", "ada", "q", "kv"):
                 hidden.add(f"enc.{i}.{nm}.weight")
+        # Decoder weights scale with the DECODER's width. At d_dec == d this is
+        # the same multiplier, so the category is merged back into "hidden".
+        dec = hidden if self.d_dec == self.d else hidden_dec
         for i, blk in enumerate(self.dec):
             for nm in ("qkv", "proj", "mlp.0", "mlp.2", "ada", "q", "kv"):
-                hidden.add(f"dec.{i}.{nm}.weight")
+                dec.add(f"dec.{i}.{nm}.weight")
+        if self.dec_embed is not None:
+            hidden_dec.add("dec_embed.weight")    # fan_in d, fan_out d_dec: both O(width)
+        names = dict(self.named_parameters())
+        hidden.update(n for n in ("pool_proj.weight", "pool_up.weight") if n in names)  # serial band_pool
         output.update({"occ_head.weight", "val_head.weight"})
         cats = {}
         for n, p in self.named_parameters():
-            if n in hidden:   cats[n] = "hidden"
-            elif n in output: cats[n] = "output"
-            else:             cats[n] = "input"     # embed/emb/mask_tok/film/cond_wire/all biases/LN
+            if n in hidden:       cats[n] = "hidden"
+            elif n in hidden_dec: cats[n] = "hidden_dec"
+            elif n in output:     cats[n] = "output"
+            else:                 cats[n] = "input"     # embed/emb/mask_tok/film/cond_wire/all biases/LN
         return cats
 
     def _mup_init(self):
@@ -183,6 +246,8 @@ class FMModel(nn.Module):
             for n, p in self.named_parameters():
                 if cats.get(n) == "hidden" and p.dim() == 2:
                     p.mul_(1.0 / _m.sqrt(self.m))       # var -> var / m
+                elif cats.get(n) == "hidden_dec" and p.dim() == 2:
+                    p.mul_(1.0 / _m.sqrt(self.m_dec))
 
     def param_groups(self, base_lr, weight_decay=None):
         """AdamW param groups with muP per-category LR multipliers (call from train.py).
@@ -200,12 +265,12 @@ class FMModel(nn.Module):
         # NO-DECAY group (nanoGPT/timm standard): decay only 2-D weight matrices; exclude
         # all 1-D params (biases, LayerNorm) and tokens from weight decay. Only splits when
         # weight_decay is passed; the legacy (weight_decay=None) path stays 2 groups.
-        buckets = {"hidden": [], "decay": [], "nodecay": []}
+        buckets = {"hidden": [], "hidden_dec": [], "decay": [], "nodecay": []}
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
-            if cats.get(n) == "hidden":
-                buckets["hidden"].append(p)                                     # muP-scaled 2-D weights
+            if cats.get(n) in ("hidden", "hidden_dec"):
+                buckets[cats[n]].append(p)                                      # muP-scaled 2-D weights
             elif p.dim() >= 2:
                 buckets["decay"].append(p)                                      # other 2-D weights (heads, embed, film)
             else:
@@ -225,6 +290,11 @@ class FMModel(nn.Module):
             g = {"params": buckets["hidden"], "lr": base_lr / self.m}           # hidden /= m
             if weight_decay is not None:
                 g["weight_decay"] = weight_decay * self.m                       # decouple: lr*wd = base_lr*weight_decay
+            groups.append(g)
+        if buckets["hidden_dec"]:                                               # only when d_dec != d
+            g = {"params": buckets["hidden_dec"], "lr": base_lr / self.m_dec}
+            if weight_decay is not None:
+                g["weight_decay"] = weight_decay * self.m_dec
             groups.append(g)
         return groups
 
@@ -301,11 +371,13 @@ class FMModel(nn.Module):
             if cond is not None:
                 qm = qm + cond[tok_mask]                          # mask queries carry pos/response
             qm = qm.to(xv.dtype)
+            if self.dec_embed is not None:
+                qm, xv = self.dec_embed(qm), self.dec_embed(xv)
             atm, awm = at[tok_mask], (aw[tok_mask] if aw is not None else None)
             cm = c[tok_mask] if adaln else None                   # AdaLN on the mask queries
             for blk in self.dec:
                 qm = blk(qm, xv, atm, awm, atv, awv, cm)          # masked x-attend visible (full set, RoPE both sides)
-            x = torch.zeros(N, self.d, dtype=xv.dtype, device=xv.device)
+            x = torch.zeros(N, self.d_dec, dtype=xv.dtype, device=xv.device)
             x = x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm)   # visible=encoder feats, masked=decoded
             x = self.dec_norm(x)
             return (x[mask_idx], mask_idx) if masked_only else x
@@ -362,6 +434,7 @@ class FMModel(nn.Module):
         grew a fourth table the third argument silently bound to the wrong one.
         Keyword-only turns that into a TypeError.
         """
+        self._bins_checked = False
         from helix.model.tokenize import bin_centroids_asinh, bin_centroids_ratio
 
         assert self.n_bins > 0, "set_bins() on a model built with n_bins=0"
@@ -412,7 +485,8 @@ class FMModel(nn.Module):
                 m = self.plane_mode
         return make_mask(B, m,
                          self.mask_ratio if ratio is None else ratio,
-                         self.n_planes if n_planes is None else n_planes, gen=gen)
+                         self.n_planes if n_planes is None else n_planes, gen=gen,
+                         cell=tuple(self.mask_cell))
 
     def require_batch_keys(self, B):
         """Raise a named KeyError for anything the objective needs and lacks.
@@ -447,8 +521,42 @@ class FMModel(nn.Module):
         B = dict(batch)
         B.setdefault("n_cells", B["plane_id"].shape[0])
         self.require_batch_keys(B)
-        m = self.make_mask(B) if tok_mask is None else tok_mask
-        if self.n_bins > 0:
+        if tok_mask is None and self.training and self.n_masks > 1:
+            outs = [self._forward_one(B, m) for m in self.draw_masks(B, self.n_masks)]
+            return {k: sum(o[k] for o in outs) / len(outs) for k in outs[0]}
+        return self._forward_one(B, self.make_mask(B) if tok_mask is None else tok_mask)
+
+    def draw_masks(self, B, k, gen=None):
+        """``k`` masks for one step under the model's policy. A random-mode step
+        partitions a uniform draw into ``k`` disjoint visible sets of
+        ``1 - mask_ratio`` each, so each token is visible in at most one of them;
+        a plane-mode step (``plane_frac``) draws ``k`` independent plane masks."""
+        if self.mask_mode != "random":
+            return [self.make_mask(B, gen=gen) for _ in range(k)]
+        dev = B["plane_id"].device
+        rnd = (lambda *s: torch.rand(*s, generator=gen, device=dev)) if gen is not None \
+            else (lambda *s: torch.rand(*s, device=dev))
+        if self.plane_frac > 0 and float(rnd(())) < self.plane_frac:
+            return [self.make_mask(B, mode=self.plane_mode, gen=gen) for _ in range(k)]
+        v = 1.0 - self.mask_ratio
+        if k * v > 1.0 + 1e-9:
+            raise ValueError(f"n_masks={k} complementary masks need mask_ratio >= {1 - 1 / k:.3f}")
+        u = rnd(B["n_cells"])
+        return [~((u >= i * v) & (u < (i + 1) * v)) for i in range(k)]
+
+    def dec_weights(self, B, rows):
+        """Per-row loss weights 1/p for a per-band ``dec_frac`` in training, else
+        None (uniform). p is the band's keep probability, a constant, so the
+        weights follow from the decoded rows alone."""
+        if not (self.training and isinstance(self.dec_frac, (tuple, list))):
+            return None
+        p = torch.as_tensor(self.dec_frac, dtype=torch.float32, device=rows.device)
+        return 1.0 / p[B["band_id"][rows]]
+
+    def _forward_one(self, B, m):
+        if self.n_bins > 0 and not getattr(self, "_bins_checked", False):
+            # once per model, not per step: `.all()` into `assert` is a host sync
+            self._bins_checked = True
             assert torch.isfinite(self.bin_edges).all(), \
                 ("n_bins > 0 requires set_bins(edges) before forward() — the "
                  "edges buffer is still unset (NaN). They are training-set "
@@ -457,7 +565,8 @@ class FMModel(nn.Module):
             # Only masked rows enter this objective, so only they are decoded,
             # and the value head is evaluated only on the slots it weights.
             feat, rows = self.forward_feat(B, m, masked_only=True)
-            bce, vloss = cat_head_sparse(self, feat, B, rows)
+            obs = ~m[rows] if (self.training and self.vis_frac > 0) else None   # decoded visible rows
+            bce, vloss = cat_head_sparse(self, feat, B, rows, w=self.dec_weights(B, rows), no_bce=obs)
             return {"loss": bce + vloss, "bce": bce.detach(), "val": vloss.detach(),
                     "masked_frac": m.float().mean().detach()}
         occ, val, logvar = self.raw_heads(B, m)
@@ -523,4 +632,7 @@ def build_fm(cfg=None, **kw):
     model = cls(**{k: v for k, v in opts.items() if k in arch and k != "self"})
     for k, v in train.items():
         setattr(model, k, v)
+    if model.bf16_params:
+        for p in model.parameters():
+            p.data = p.data.to(torch.bfloat16)
     return model

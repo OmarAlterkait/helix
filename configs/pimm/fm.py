@@ -103,20 +103,19 @@ model = dict(
     plane_frac=0.1,
     compile_blocks=True,
 )
-optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95))
+optimizer = dict(type="AdamW", lr=1.1e-3, weight_decay=0.05, betas=(0.9, 0.95), fused=True)
 scheduler = dict(type="WSDStableLR", warmup="auto")
 
 # ---------------------------------------------------------------------------- data
 transform = [
-    dict(type="CoeffTokenize", part="coeff", clean_part="coeff_clean",
-         cfg=dict(cell_t="grid_center"), fm_names=True),
+    dict(type="CoeffTokenize", part="coeff", cfg=dict(cell_t="grid_center"), fm_names=True),
     dict(type="CoeffCollect", part="coeff"),
 ]
 # The split hashes each event's identity, so it does not depend on the corpus's build,
 # shard layout or run list (scripts/write_holdout.py materialises it).
 HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
 _common = dict(type="CoeffTPCDataset", data_root=CORPUS, split=RUNS, dataset_name="sim_wire",
-               modalities=("coeff", "coeff_clean"), transform=transform, holdout=HOLDOUT)
+               modalities=("coeff",), transform=transform, holdout=HOLDOUT)
 data = dict(
     train=dict(**_common, split_role="train", max_event_size=600_000),
     val=dict(**_common, split_role="val"),

@@ -1,5 +1,12 @@
 # Science record
 
+> **Every training result in sections 1-10 used CLEAN targets.** Until cfc5345
+> (2026-10-06) the value target and the bin grid came from the simulated
+> noise-free `coeff_clean` modality, which real detector data does not have.
+> Training is now noisy-only (section 11); read the numbers below as properties
+> of the clean recipe, and the "Bayes limit" claim just below as a clean-target
+> statement.
+
 > **The posterior-width diagnosis is now measured.** Over 5.4M held-out slots
 > the categorical head's PIT has mean 0.512 and std 0.289, against the
 > 0.5 / 0.2887 of a uniform PIT — the forecast is calibrated. The read-back is a
@@ -392,3 +399,138 @@ the wrong noise anyway.
 
 Full evidence, and file lists of all 220,333 deleted files, are in
 `$HELIX_ARCHIVE/retirement-backups/caches-retired_2026-09-11/`.
+
+---
+
+## 9. Scaling results after the port (2026-09-24 to 10-04)
+
+All on the 8-run corpus (150,239 training events), muP, WSD schedule, scored at a
+fixed 0.75 mask. "Cooled" = a 10% `(1-sqrt p)` cooldown; laws are fit on cooled
+loss only (the cooldown gain grows with stable length: +0.04 after 4.5k steps,
++0.17 after 47.5k at d512, and rankings at equal steps survive it).
+
+**Recipe now in use:** QK-norm (`model.qk_norm=True`), FiniteGuard, LR 4.4e-3
+with warmup `500*sqrt(d/128)` steps, mask 0.75, `plane_frac` 0.1, 4-block decoder.
+A d768 long run went NaN at 19.4k steps (qkv-bias growth 7 -> 18); QK-norm fixed
+the stability (cooled 2.712 / probe 0.862 vs 2.716-2.724 / 0.83-0.85 without).
+
+**Learning rate.** One LR transfers across width once warmup scales with
+sqrt(d) (d1024 at 4.4e-3 with a 1,414-step warmup: 2.939). The optimum falls with
+run length: d512 B=16 over 44.8k steps prefers 2.2e-3 (2.764) to 4.4e-3 (2.778);
+B=64 cooled prefers 6.2e-3 (2.717) to 8.8e-3 (2.745). The stability edge sits
+4-8x above the optimum; sqrt(B) scaling to B=512 lands inside it.
+
+**Critical batch** (cooled, examples to reach a target): B_crit ~33 events at
+val 2.90, ~40 at 2.85, ~59 at 2.80 (~2M cells). Constant in CELLS, not events:
+cropping events to 1/2 and 1/4 raised B_simple by 2.2x and 5.8x. Large batch
+buys wall clock, not compute.
+
+**Width at equal compute ("tier 1",** ~9,500 s of training on 16 nodes, B=64,
+cooled in-run): d768 2.620 (47k steps), d1024 2.579 (33.2k), d1536 2.579 (17.7k),
+d2048 2.616 (11.5k). Width beats depth (d768x12 2.962 vs d512x24 2.993 at equal
+cost). The cooled fit on 12 points, E 2.47, size exponent 0.35, data ~1.0,
+underpredicts long runs (2.71 predicted for a d768 run that reached 2.585).
+Best cooled loss so far: d1024, LR 6.2e-3, two 16-node slots: 2.519 (var_expl 0.787).
+
+**Repetition** (cooled on each run's own events): d512 loss flat to 77 epochs
+(2.785 at 5 and 19 epochs), +0.011 at 310; d768 +0.046 at 310. The probe is noisy
+(0.70-0.87 across seeds). The 150k-event corpus supports ~10M presentations.
+
+**Seed noise.** Early pairs: 0.002-0.008 in loss, ~0.03 in probe. The QK-norm d768
+pair (29.2k steps, `ab_ref` vs `res_pw16_s1`) differs by 0.023 (2.718 vs 2.741);
+treat single-seed d768 differences below ~0.02 as unresolved.
+
+**Design screens** (d512 and d768): defaults kept. `plane_frac=0` collapses the
+along-wire probe (0.51-0.56); an 8-block decoder gives the best loss and a worse
+probe (0.68-0.77); mask 0.85 probes best (0.866, within noise). Loss does not rank
+representations: rank correlation with the probe is 0.15 over 17 models, and the
+probe itself saturates at ~0.83-0.87 for good d768 models.
+
+---
+
+## 10. Patch size and resolution
+
+Validation loss cannot compare tokenizers (a bigger masked token is a harder
+target), and the along-wire probe scores per patch. `helix.probe.resolution`
+scores frozen features on a fixed 2-wire x 16-tick grid instead
+(`scripts/dump_resolution_truth.py`, then `scripts/eval_resolution.py`): charge
+map, faint-charge detection, floor efficiency at a 1% false-positive rate (and
+floor AUC), localisation, close-pair separation, each with an event-bootstrap
+interval. Cells no token covers are predicted 0: the probe never sees an all-zero
+input, and its extrapolated constant used to set window maxima -- the first
+version of this table carried that bug, and it reversed the pw32 conclusion.
+
+Equal-step runs, d768 QK-norm recipe, 29.2k steps, one token change each
+(variants in `configs/pimm/variants/`; tokens per event vs today's 32,480). Scored
+with the v7 probe, which STANDARDISES each feature channel (training-split
+statistics) before the MLP: on raw features one massive-activation channel set
+the probe's input scale, and the floor numbers tracked that, not the
+representation (two seeds with equal validation loss scored faintest-bin floor
+AUC 0.68 and 0.81 raw, 0.80 and 0.82 standardised). The v6 table that stood here
+used raw features; its pt16 and noD2 conclusions are superseded below.
+
+| metric | pw8 (2 seeds) | pw16 (2) | pw32 (2) | pt4 | pt16 | noD2 |
+|---|---|---|---|---|---|---|
+| tokens vs today | 1.29 | 1.00 | 0.74 | >1 (not measured) | 0.74 | 0.75 |
+| charge map r | 0.966-0.968 | 0.943-0.944 | 0.898-0.903 | 0.964 | 0.907 | 0.936 |
+| floor eff @1% FPR, <0.1 MeV | 0.26-0.27 | 0.40-0.44 | 0.44-0.45 | 0.30 | 0.48 | 0.13 |
+| floor eff @1% FPR, 0.1-0.2 MeV | 0.58-0.59 | 0.64-0.65 | 0.61 | 0.62 | 0.60 | 0.36 |
+| floor eff @1% FPR, 0.2-0.5 MeV | 0.97-0.98 | 0.97-0.98 | 0.96-0.97 | 0.97 | 0.94 | 0.92 |
+| floor AUC, <0.1 MeV | 0.841-0.846 | 0.878-0.879 | 0.902-0.905 | 0.830 | 0.902 | 0.801 |
+| floor AUC, 0.1-0.2 MeV | 0.933-0.934 | 0.944-0.945 | 0.946 | 0.934 | 0.940 | 0.895 |
+| localisation >1 MeV, wires / ticks | 0.30-0.32 / 2.0-2.1 | 0.46-0.48 / 2.4 | 0.61-0.63 / 2.6 | 0.38 / 1.50 | 0.58 / 3.04 | 0.43 / 2.13 |
+
+Token size trades the faintest floor against localisation, along either axis:
+bigger tokens (pw32, pt16) score best below 0.1 MeV (floor AUC 0.90, efficiency
+0.44-0.48) and worst in map fidelity and localisation along their coarse axis;
+smaller tokens (pw8, pt4) localise best (pt4: 1.5 ticks against 2.4; pw8: 0.31
+wires against 0.47) and score worst below 0.1 MeV. At 0.1-0.2 MeV pw16 is the best
+of all (0.64-0.65). Dropping D2 is the one change that loses the floor outright
+(0.36 at 0.1-0.2 MeV, AUC 0.80 below 0.1). Coarser time does NOT lose it -- the v6
+table said 0.13; standardised, pt16 scores 0.60 -- so time is not a floor-critical
+axis; it costs time localisation (3.0 ticks) and map fidelity (0.907).
+
+Seed spread now: the pw8, pw16 and pw32 pairs agree to ~0.005 on map r and floor
+AUC and to ~0.04 on floor efficiency at 1% FPR. Floor efficiency at 1% FPR on
+FIXED weights moved by up to 0.09 through probe numerics under raw features;
+standardised, seed pairs agree to 0.005-0.04. Close-pair separation is not used
+for decisions.
+
+**Width.** The tier-1 runs (equal compute per width, B=64; a different recipe
+from the table above) scored the same way: floor efficiency at 0.1-0.2 MeV 0.541
+(d768), 0.610 (d1024), 0.669 (d1536), 0.671 (d2048); floor AUC below 0.1 MeV 0.851,
+0.864, 0.876, 0.874. The floor improves with width at equal compute and saturates
+by d1536 at this budget. The long runs (older recipe, no QK-norm, 2 seeds) show no
+clear gain from training longer (0.58-0.62).
+
+## 11. Training without clean data (from 2026-10-06)
+
+Real detector data has no noise-free counterpart, so the training target is now
+the noisy input itself and nothing in training reads `coeff_clean` (cfc5345;
+`tests/test_noisy_training.py`). The value head's grid is v4, derived from noisy
+values: uniform in asinh on each side of zero with one bin spanning the
+sub-threshold gap (|asinh| < ~1.9-2.0), since noisy coefficients exist only above
+the ~3.35-3.74 sigma threshold. Same recipe as section 10 (d768 unless stated,
+B=16, 29.2k steps, WSD cooldown); v7 probe; floor efficiency at 1% FPR and the
+99th percentile of noise-only-window scores at 0.1-0.2 MeV:
+
+| run | target / grid | map r | floor AUC <0.1 / 0.1-0.2 | eff 5% / 1% FPR | bg p99 |
+|---|---|---|---|---|---|
+| ab_ref, res_pw16_s1 | clean / v3 | 0.943-0.944 | 0.878-0.879 / 0.944-0.945 | 0.821-0.825 / 0.635-0.652 | 636-656 |
+| obj_noisy, _s1 | noisy / v3 (clean grid) | 0.944 | 0.869-0.871 / 0.933-0.942 | 0.782-0.821 / 0.577-0.610 | 677-713 |
+| nz_pw16, _s1 | noisy / v4 | 0.944-0.946 | 0.829-0.875 / 0.912-0.940 | 0.712-0.799 / 0.447-0.577 | 716-874 |
+| nz_d1536, _s1 | noisy / v4, d1536 | 0.947-0.948 | 0.856-0.859 / 0.929-0.932 | 0.783-0.790 / 0.593-0.612 | 659-726 |
+
+* Training without clean data costs floor: 0.45-0.61 at 1% FPR against 0.64-0.65,
+  with map r, localisation and reconstruction scored against clean truth
+  unchanged (0.314-0.344). The v4 grid did not recover it.
+* The noisy recipe is less seed-stable at d768 (0.447 / 0.577; the low seed has the
+  heavy noise tail, 874).
+* Width helps on the noisy recipe: d1536 (equal steps, ~2.5x compute) scores
+  0.612 / 0.593 with tails 659 / 726 -- mean +0.09 over d768 and seed-stable. Most
+  of the mean gain comes from the low d768 seed; against the other it is +0.02 to
+  +0.035, within seed spread. d1536 is still below the clean-target d768.
+* Visible-token decoding (`vis_frac`, obj_vis / _s1) needs clean targets and is not
+  usable under this constraint; for the record it gave no floor change (0.644 /
+  0.609) and small gains in 5%-FPR efficiency (+0.02) and localisation.
+

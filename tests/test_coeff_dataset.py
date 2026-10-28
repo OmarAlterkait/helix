@@ -467,10 +467,8 @@ def test_full_chain_to_model_keys_at_batch_gt_1(tmp_path):
     ns = np.full((len(GIDS), len(BAND_LENGTHS)), 2.0, np.float32)
     _write_pair(tmp_path, [0, 1, 2, 3], seed=11, norm_sigma=ns)
     # cell_t is REQUIRED (no default). This test lived in pimm-data, where it
-    # never ran against helix's current tokenizer, so the move is what
-    # surfaced it -- same latent break as scripts/smoke_train_fm.py had.
-    tok = CoeffTokenize(part="coeff", clean_part="coeff_clean",
-                        cfg=PatchConfig(cell_t="grid_center"))
+    # never ran against helix's current tokenizer, so the move is what surfaced it.
+    tok = CoeffTokenize(part="coeff", cfg=PatchConfig(cell_t="grid_center"))
     # offset counts CELLS (the row-space the model's dense grids live in), not
     # coefficient rows — the bare form otherwise defaults to a 'coord' key that
     # a tokenized part does not have.
@@ -479,7 +477,6 @@ def test_full_chain_to_model_keys_at_batch_gt_1(tmp_path):
         "inp", "occ", "valid", "tgt"),
         offset_keys_dict=dict(offset="band_id"))
     ds = CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx",
-                         modalities=("coeff", "coeff_clean"),
                          transform=[tok, collect])
 
     # the five keys that were missing entirely are present, and UNPREFIXED

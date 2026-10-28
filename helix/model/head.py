@@ -18,19 +18,31 @@ import torch.nn.functional as F
 from helix.model.loss import bucketize_bins
 
 
-def cat_head_sparse(model, feat, B, rows):
+def cat_head_sparse(model, feat, B, rows, w=None, no_bce=None):
     """-> (occupancy BCE, value CE) over the masked rows ``rows`` of the batch,
     whose decoded features are ``feat``; the sums ``losses_cat`` forms at
-    vis_w == 0."""
+    vis_w == 0.
+
+    ``w`` (per row) weights each row's terms in numerator and denominator alike
+    -- a self-normalised estimate of the full-decode mean when rows were sampled
+    with probability 1/w. None is uniform and the original arithmetic.
+
+    ``no_bce`` (per row, bool) drops those rows from the occupancy term --
+    decoded visible rows, whose occupancy is observed -- and keeps them in the
+    value term."""
     NS, K = model.n_slot, model.n_bins
     valid, occ_t, tgt = B["valid"][rows], B["occ"][rows], B["tgt"][rows]
+    vw = valid if w is None else valid * w[:, None]          # valid may be bool
+    if no_bce is not None:
+        vw = vw * (~no_bce)[:, None]
 
     occ = model.occ_head(feat) * model.readout_mult
     bce_e = F.binary_cross_entropy_with_logits(occ, occ_t, reduction="none")
-    bce = (bce_e * valid).sum() / valid.sum().clamp(min=1)
+    bce = (bce_e * vw).sum() / vw.sum().clamp(min=1)
 
     act = occ_t.bool() & valid
-    denom = act.sum().clamp(min=1)
+    denom = act.sum().clamp(min=1) if w is None else \
+        (act.to(w.dtype) * w[:, None]).sum().clamp(min=1)
     ci, si = act.nonzero(as_tuple=True)
     if ci.numel() == 0:
         return bce, feat.sum() * 0
@@ -40,7 +52,8 @@ def cat_head_sparse(model, feat, B, rows):
     # Group by slot so one GEMM covers every pair sharing a val_head row block.
     o = torch.argsort(si)
     ci_s, bin_s = ci[o], binid[o]
-    cnt = torch.bincount(si[o], minlength=NS)
+    cnt = torch.zeros(NS, dtype=torch.long, device=si.device).scatter_add_(
+        0, si, torch.ones_like(si))                         # bincount would sync for its size
     mx = int(cnt.max())
     starts = torch.cat([cnt.new_zeros(1), cnt.cumsum(0)[:-1]])
     col = torch.arange(mx, device=feat.device)[None, :]
@@ -54,4 +67,6 @@ def cat_head_sparse(model, feat, B, rows):
                        W.transpose(1, 2).to(f.dtype)) * model.readout_mult
     ce = F.cross_entropy(lg.reshape(-1, K).float(), bin_s[flat].reshape(-1),
                          reduction="none")
+    if w is not None:
+        keep = keep * w[ci_s[flat]].to(ce.dtype)
     return bce, (ce.view(NS, mx) * keep).sum() / denom

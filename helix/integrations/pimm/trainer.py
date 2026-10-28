@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 
+import torch
 from torch.optim.lr_scheduler import LambdaLR as _LambdaLR
 
 from pimm.distributed import unwrap_model
@@ -17,7 +18,21 @@ from pimm.utils import comm
 from pimm.utils.optimizer import OPTIMIZERS
 from pimm.utils.scheduler import SCHEDULERS
 
+from helix.integrations.pimm.optim import FlatAdamW
 from helix.model.mup import expand_max_lr, param_group_ratios
+
+
+def _fp32_allreduce_hook(state, bucket):
+    """DDP comm hook: average a bf16 gradient bucket in fp32, store back."""
+    import torch.distributed as dist
+    buf = bucket.buffer()
+    t = buf.float().div_(dist.get_world_size())
+    fut = dist.all_reduce(t, async_op=True).get_future()
+
+    def done(f):
+        buf.copy_(f.value()[0])
+        return buf
+    return fut.then(done)
 
 
 @TRAINERS.register_module()
@@ -130,6 +145,17 @@ class FMTrainer(Trainer):
         model = super().build_model()
 
         world = comm.get_world_size()
+        bf16 = any(p.dtype == torch.bfloat16 for p in unwrap_model(model).parameters())
+        if bf16 and world > 1 and hasattr(model, "register_comm_hook") and \
+                not bool(getattr(self.cfg, "ddp_bf16_grads", False)):
+            # bf16 weights give bf16 gradients, and DDP would then SUM them across
+            # ranks in bf16 -- rounding at every ring hop, the mantissa loss the
+            # note below declined to pay. Reduce in fp32 instead: the bytes on the
+            # wire are what fp32 weights already sent.
+            model.register_comm_hook(None, _fp32_allreduce_hook)
+            if comm.is_main_process():
+                print("[helix] bf16 weights: gradients all-reduced in fp32")
+            return model
         # DEFAULT OFF, and the reason is a measurement that overturned the one
         # this hook was written for.
         #
@@ -196,6 +222,8 @@ class FMTrainer(Trainer):
         groups = model.param_groups(base_lr, weight_decay=cfg.get("weight_decay"))
         cfg["params"] = groups                    # type/betas/etc still honoured
         opt = OPTIMIZERS.build(cfg)
+        if isinstance(opt, FlatAdamW):
+            opt.clip = self.cfg.clip_grad         # clipping happens inside its kernel
         self._mup_ratios = param_group_ratios(opt.param_groups, base_lr)
         self.logger.info(
             f"muP param groups: " + ", ".join(
@@ -203,6 +231,36 @@ class FMTrainer(Trainer):
                 f"lr x{r:.3f} wd={g.get('weight_decay')}"
                 for i, (g, r) in enumerate(zip(opt.param_groups, self._mup_ratios))))
         return opt
+
+    def run_step(self):
+        """pimm's step, except with ``FlatAdamW``: no GradScaler (bf16 weights and
+        gradients need none) and no clip_grad_norm_ (the optimizer clips inside
+        its kernel). Everything else -- device move, autocast, hooks, scheduler,
+        bookkeeping -- as pimm's run_step."""
+        if not isinstance(self.optimizer, FlatAdamW):
+            return super().run_step()
+        import pimm.engines.train as _pt
+        input_dict = _pt.move_batch_to_device(self.comm_info["input_dict"],
+                                              self.parallel_context.device)
+        self.comm_info["input_dict"] = input_dict
+        with _pt.sl.log_trace_span("forward"):
+            with torch.amp.autocast(device_type=self.parallel_context.device.type,
+                                    enabled=self.cfg.enable_amp,
+                                    dtype=_pt.AMP_DTYPE[self.cfg.amp_dtype]):
+                output_dict = self.model(input_dict)
+                loss = output_dict["loss"]
+        if "offset" in input_dict:
+            output_dict["avg_pts"] = input_dict["coord"].shape[0] / len(input_dict["offset"])
+        self.optimizer.zero_grad()
+        with _pt.sl.log_trace_span("backward"):
+            loss.backward()
+            self.after_backward()
+        with _pt.sl.log_trace_span("optimizer"):
+            self.optimizer.step()
+            self.scheduler.step()
+        if self.cfg.empty_cache and self.parallel_context.device.type == "cuda":
+            torch.cuda.empty_cache()
+        self.comm_info["model_output_dict"] = output_dict
 
     def build_scheduler(self):
         """Give the scheduler a PER-GROUP peak LR so muP survives it.

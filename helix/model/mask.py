@@ -16,10 +16,28 @@ import torch
 VIEWS_PER_VOLUME = 3
 
 
-def make_mask(B, mode, ratio, n_planes, gen=None):
-    """mode: random | plane | plane_any | block.
+def location_index(B, cell_w=16, cell_t=128):
+    """Dense index of each token's LOCATION: (plane, ``cell_w``-wire block,
+    ``cell_t``-tick drift window), every band together. A 16 x 128 location holds
+    one A4 and one D4 pw16 token and up to two D3 and four D2 ones. One host sync
+    (the unique count)."""
+    wb = torch.div(B["wire_pos"], cell_w, rounding_mode="floor").long()
+    tw = torch.floor(B["t_phys"] / cell_t).long()
+    tw = tw - tw.min()
+    key = (B["plane_id"].long() << 40) | (wb << 20) | tw
+    return torch.unique(key, return_inverse=True)[1]
+
+
+def make_mask(B, mode, ratio, n_planes, gen=None, cell=(16, 128)):
+    """mode: random | location | plane | plane_any | block.
 
     * ``random``    — ``ratio`` of tokens, drawn independently.
+    * ``location``  — ``ratio`` of LOCATIONS (:func:`location_index` at
+      ``cell``), every band of a location masked together. Under ``random`` a
+      masked A4 token has a visible co-located D4/D3/D2 token ~87% of the time
+      (1 - 0.75**7), so part of the task is cross-band; here none is. It is also
+      the mask unit pooling over bands needs: pooled, the visible set shrinks
+      2.7x, against 1.06x under ``random``.
     * ``plane``     — ``n_planes`` whole planes PER VOLUME; every volume punctured.
     * ``plane_any`` — ``n_planes`` whole planes from the event, volumes ignored.
       What research does and what every run to date trained on; use it to
@@ -35,6 +53,9 @@ def make_mask(B, mode, ratio, n_planes, gen=None):
         else (lambda *s: torch.rand(*s, device=dev))
     if mode == "random":
         return rnd(n) < ratio
+    if mode == "location":
+        loc = location_index(B, *cell)
+        return (rnd(int(loc.max()) + 1) < ratio)[loc]
     gid = B["plane_id"]
     if mode in ("plane", "plane_any"):        # cross-plane: hide whole plane(s)
         # Two selections. Coverage, measured on a real R1 event (gids 0..5 =

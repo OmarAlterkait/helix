@@ -1,6 +1,6 @@
 {
   "_comment": "The DEFINITION of the production bin grid: the parameters it is derived with, the corpus it is derived from, and a content digest of the result. This file is the single source of those parameters -- helix.data.bins reads its defaults here, and scripts/derive_coeff_bins.py takes its argparse defaults from those, so the numbers live in one place.",
-  "name": "coeff_bins_r2_run0027575715",
+  "name": "coeff_bins_r2_run0027575715_noisy",
   "params": {
     "K": 128,
     "n_bands": 4,
@@ -15,12 +15,7 @@
     "basis_digest": "0dd4f3a223909fd7d8150f54854111ce6e7c89f030227a20113aabf2a27c9457",
     "_basis_digest_note": "Checkable BEFORE deriving, and catches the pre-tau/r1 confusion. It does NOT identify which run: basis_digest hashes the DSP recipe, so all eight r1 runs share it."
   },
-  "digests": {
-    "edges": "sha256:9eda6d45177501b4c4ab1c7b1bca570bc6b9198ffd113b14ed6e9ebcd012ba7f",
-    "cent_asinh": "sha256:c23eff050b8932872ba7322817331bd358aed498bd992e39cdef3b07e388830c",
-    "cent_ratio": "sha256:04b67ba0a7df771caf96c8f7ee9d05e9e85c6afd03d7d245fa244958788695c8"
-  },
-  "_rerecord_note": "2026-10-26: derived for r2 with the r1 grid's parameters (S3DF, job 42010766). r2's inner edges sit a median 0.35/0.46/0.64/0.98 local bin widths (A4/D4/D3/D2; max 2.0) from r1 v2's, against 0.16 between r1 runs, so the r1 grid (coeff_bins_r1_tau05_run0027575715_v3, NERSC) does not describe r2. Models trained on r1's grid are not value-comparable with ones trained on this. basis_digest is r2's after its migration to helix-coeff-2 (the gate's removal schema; the coefficients, and so this grid, are unchanged).",
+  "digests": null,
   "shapes": {
     "edges": [
       4,
@@ -34,5 +29,6 @@
       4,
       128
     ]
-  }
+  },
+  "_note": "Training is noisy-only, so the grid bins the NOISY coefficients (one bin spans the sub-threshold gap). Not yet derived for r2: scripts/derive_coeff_bins.py --corpus <r2>/run_0027575715 writes it, and its digests go here."
 }

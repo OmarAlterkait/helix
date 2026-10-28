@@ -288,8 +288,7 @@ def pixel_cells(plane_gid, wire, tick, band_lengths, cfg=None):
 
 
 def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
-             norm_sigma, cfg=None, value_clean=None, dead_frac=0.0,
-             rng=None, wire_valid=None):
+             norm_sigma, cfg=None, dead_frac=0.0, rng=None, wire_valid=None):
     """Coefficient rows -> per-band 2-D patch tokens (stateless, pure numpy).
 
     Faithful port of ``vit_tpc.assemble_tpc_band``. The one substantive change is
@@ -317,7 +316,6 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     keep = band < cfg.n_bands                        # D1 (and beyond) dropped
     band, plane_gid, wire, tau = band[keep], plane_gid[keep], wire[keep], tau[keep]
     value = value[keep]
-    clean = None if value_clean is None else np.asarray(value_clean, np.float32)[keep]
 
     # One sigma gather serves both the token value and the centroid weight. The
     # weight must be the PRE-arcsinh ratio: vit_tpc weighted by |val| where its
@@ -327,8 +325,11 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
     sig_row = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), 1e-6)
     ratio = (np.asarray(value, np.float32) / sig_row).astype(np.float32)
     val = np.arcsinh(ratio).astype(np.float32)          # == normalize_values(...)
-    target = (np.arcsinh(np.asarray(clean, np.float32) / sig_row).astype(np.float32)
-              if clean is not None else np.zeros_like(val))
+    # The target IS the (normalised) input: real detector data has no noise-free
+    # counterpart, so masked prediction infers the hidden coefficients from context
+    # (Noise2Self). `tgt` differs from `inp` only where augmentation (dead_frac)
+    # blanked the input.
+    target = val
 
     wb, tb = wire // pw, tau // pt
     key = cell_key(plane_gid, band, wire, tau, cfg)
@@ -691,12 +692,10 @@ class CoeffTokenize:
 
     scope = "sample"
 
-    def __init__(self, part="coeff", clean_part="coeff_clean",
-                 cfg=None, dead_frac=0.0, seed=None, gids=None, n_wires=None,
-                 band_lengths=None, norm_sigma=None, fm_names=True):
+    def __init__(self, part="coeff", cfg=None, dead_frac=0.0, seed=None, gids=None,
+                 n_wires=None, band_lengths=None, norm_sigma=None, fm_names=True):
         cfg = _require_cfg(cfg)
         self.part = part
-        self.clean_part = clean_part
         self.cfg = cfg if isinstance(cfg, PatchConfig) else PatchConfig(**(cfg or {}))
         self.dead_frac = float(dead_frac)
         self.seed = seed
@@ -722,7 +721,6 @@ class CoeffTokenize:
     def __call__(self, data):
         sub = data[self.part]
         m = self._meta(sub)
-        clean = data.get(self.clean_part)
         rng = None if self.seed is None else np.random.default_rng(
             self.seed ^ _name_hash(data.get("name", "")))
         tok = assemble(
@@ -730,8 +728,6 @@ class CoeffTokenize:
             np.asarray(sub["value"]).reshape(-1),
             gids=m["gids"], n_wires=m["n_wires"], band_lengths=m["band_lengths"],
             norm_sigma=m["norm_sigma"], cfg=self.cfg,
-            value_clean=(None if clean is None
-                         else np.asarray(clean["value"]).reshape(-1)),
             dead_frac=self.dead_frac, rng=rng, wire_valid=m.get("wire_valid"))
         n_cells = tok.pop("n_cells")
         # Emit the names fm/model.py gathers, not assemble()'s cell_* vocabulary.
@@ -747,6 +743,4 @@ class CoeffTokenize:
         # would not survive collate as a per-event value anyway.
         out["_meta"] = dict(n_cells=n_cells, n_slot=self.cfg.n_slot)
         data[self.part] = out
-        if self.clean_part in data and self.clean_part != self.part:
-            del data[self.clean_part]        # its values are folded into tgt
         return data

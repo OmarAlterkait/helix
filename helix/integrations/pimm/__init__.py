@@ -44,6 +44,7 @@ from helix.integrations.pimm.data import CoeffCollect, CoeffTPCDataset
 from helix.integrations.pimm.eval import CoeffFMEvaluator, _acc_grid_free
 from helix.integrations.pimm.hooks import HelixPathBootstrap, WeightEMA
 from helix.integrations.pimm.model import CoeffFM, build_coeff_fm, _load_bins
+from helix.integrations.pimm.optim import FlatAdamW
 from helix.integrations.pimm.trainer import (FMTrainer, WSDCooldownLR,
                                              WSDStableLR)
 from helix.integrations.pimm._compat import _patch_rng_restore_to_cpu
@@ -52,4 +53,4 @@ from helix.model.tokenize import CoeffTokenize
 __all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
            "build_coeff_fm",
            "FMTrainer", "CoeffFMEvaluator", "WSDStableLR", "WSDCooldownLR",
-           "WeightEMA", "HelixPathBootstrap"]
+           "WeightEMA", "HelixPathBootstrap", "FlatAdamW"]

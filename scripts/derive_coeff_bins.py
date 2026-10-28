@@ -25,6 +25,7 @@ non-zero if the tables differ.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -156,6 +157,10 @@ def main(argv=None):
         print(f"note: derived with different parameters from the packaged reference "
               f"({pm}), so they are not comparable. Deliberate if you meant to change "
               f"the grid.")
+    elif r["status"] == "not-recorded":
+        print(f"the packaged reference ({ref.get('name')}) records no digests yet; if this is "
+              f"its first derivation, record these in helix/data/data/reference_bins.json:")
+        print(json.dumps(r["digests"], indent=2))
     else:
         print("note: no packaged reference fingerprint installed, so this grid could "
               "not be checked against the released one.")
