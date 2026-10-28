@@ -2,10 +2,10 @@
 """Train the supervised denoiser (helix.model.denoise) -- from scratch or fine-tuned.
 
     torchrun --nnodes N --nproc_per_node 4 ... scripts/train_denoise.py \\
-        --arch-from <artifact> [--init <artifact>] --truth-root <dir> --out <dir> \\
+        --arch-from <run> [--init <run>] --truth-root <dir> --out <dir> \\
         [--n-events N] [--steps S] [--lr 1e-3] [--lr-head 1e-3]
 
-One event per GPU. ``--arch-from`` names an FM eval artifact whose architecture
+One event per GPU. ``--arch-from`` names an FM pimm run whose architecture
 the encoder takes (its weights are NOT loaded unless ``--init`` names one too):
 ``--init`` is the label-efficiency arm, its absence the from-scratch arm, and the
 two are otherwise identical. Validation is MSE on fixed cells of fixed ``val``
@@ -26,8 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def parse():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--arch-from", required=True, help="FM eval artifact whose arch the encoder uses")
-    ap.add_argument("--init", default=None, help="FM eval artifact to load encoder weights from")
+    ap.add_argument("--arch-from", required=True, help="FM pimm run whose arch the encoder uses")
+    ap.add_argument("--init", default=None, help="FM pimm run (EMA) or checkpoint to load encoder weights from")
     ap.add_argument("--corpus-root", default=None, help="default: parent of HELIX_CORPUS")
     ap.add_argument("--runs", nargs="*", default=None, help="default: every run under the corpus root")
     ap.add_argument("--truth-root", required=True)
@@ -67,7 +67,7 @@ def parse():
     ap.add_argument("--near-any-per-sig", type=float, default=0.0,
                     help="cells within +-8 of charge, coefficient or not, per charge cell (activity's surroundings)")
     ap.add_argument("--win-near-per-event", type=int, default=0,
-                    help="charge-free windows NEAR activity per event, every cell (helix.probe.resolution.near_windows)")
+                    help="charge-free windows NEAR activity per event, every cell (helix.eval.windows.near_windows)")
     ap.add_argument("--override", nargs="*", default=[], metavar="KEY=VALUE", help="FM arch overrides")
     return ap.parse_args()
 
@@ -89,7 +89,7 @@ def main():
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
     from helix.data.denoise import DenoiseEvents, split_events
-    from helix.model.artifact import load
+    from helix.model.checkpoint import load_run, model_config, run_dir
     from helix.model.denoise import build_denoise
     from helix.paths import root
 
@@ -108,8 +108,8 @@ def main():
             overrides[k] = ast.literal_eval(v)
         except (ValueError, SyntaxError):
             overrides[k] = v
-    arch = load(a.arch_from).arch
-    sd = load(a.init).state_dict if a.init else None
+    arch = model_config(json.load(open(os.path.join(run_dir(a.arch_from), "resolved_config.json"))))
+    sd = load_run(a.init, device="cpu").model.state_dict() if a.init else None
     torch.manual_seed(a.seed)
     if a.cond_charge and not a.presence:
         raise SystemExit("--cond-charge needs --presence: the charge head no longer sees empty cells")

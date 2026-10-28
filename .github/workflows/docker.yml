@@ -188,8 +188,8 @@ jobs:
   # docs/RUNBOOK.md 0b is this procedure; keeping it in CI means the first thing
   # a receiving site does is the thing that is continuously tested.
   #
-  # dump_probe_truth is deliberately NOT here: the fixture is schema-conformant,
-  # not physics-conformant, so its coverage guard correctly refuses. See 0b.
+  # The truth step is deliberately NOT here: the fixture has no simulation
+  # hits/step files. See 0b.
   smoke:
     needs: build
     if: needs.build.outputs.pushed == 'true'

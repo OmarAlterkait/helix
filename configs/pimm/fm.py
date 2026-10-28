@@ -4,8 +4,7 @@ A run is four choices, and only these differ between configs:
 
 * the corpus: ``HELIX_CORPUS`` (a run dir; its parent is the corpus, ``_calib/RUNS.txt`` its runs);
 * the model: ``model`` below; ``fm_smoke.py`` shrinks it;
-* the phase: stable (this file), cooldown from a checkpoint (``fm_cooldown.py``), evaluation
-  only (``fm_eval.py``);
+* the phase: stable (this file), cooldown from a checkpoint (``fm_cooldown.py``);
 * the length: ``epoch``.
 
 Nothing here is a step count. Warmup, eval and checkpoint cadence are ``"auto"``: FMTrainer

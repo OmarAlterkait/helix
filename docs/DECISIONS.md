@@ -63,7 +63,7 @@ v1, the production corpora, were migrated so and verify against their plans; pre
 
 **Configs state intent; step counts are derived at run time.** `configs/pimm/fm.py` is
 the whole run (corpus = `HELIX_CORPUS`'s parent and its `_calib/RUNS.txt`, the m113
-architecture, the WSD stable phase); `fm_cooldown`, `fm_eval`, `fm_smoke` override only
+architecture, the WSD stable phase); `fm_cooldown`, `fm_smoke` override only
 what differs, and anything else is `key=value`. Warmup and eval / save cadence are
 `"auto"`, filled by `FMTrainer` from pimm's `iters_per_epoch * epoch` through
 `helix.core.cadence`. *Why:* nine configs carried `N_TRAIN_EVENTS` tables and step

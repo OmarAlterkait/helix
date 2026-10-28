@@ -155,48 +155,25 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
     assert not torch.isfinite(m.bin_edges).any(), \
         "a fresh categorical model must have no USABLE edges"
 
-    # a bins sidecar in tier1_setup_bins.py's format
+    # a bins table as scripts/derive_coeff_bins.py writes it, read back by the one loader
     path = tmp_path / "bins.pt"
     torch.save(dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1),
                     cent_asinh=torch.zeros(4, 16),
                     K=16, SIGMA=2.6), path)
+    from helix.data.bins import load
+    from helix.model.checkpoint import apply_bins
+    got = load(str(path))
+    assert "edges" in got and got["edges"].shape == (4, 17)
+    apply_bins(m, got)
+    assert torch.isfinite(m.bin_edges).all() and torch.isfinite(m.bin_cent_ratio).all()
 
     src = pathlib.Path(os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "helix", "integrations", "pimm", "model.py")).read_text()
-    assert "def _load_bins" in src, "no bins loader in the adapter"
     assert "bins=None" in src, "build_coeff_fm does not accept a bins path"
+    assert "helix.data.bins import load" in src, "the adapter must read bins with the one loader"
     assert "TRAINING-SET STATISTICS" in src, (
         "the missing-bins error should explain WHY the model cannot supply them")
-
-    # Extract the function with ast, not a slice to EOF: the module has other
-    # classes whose decorators reference pimm names, and a slice would drag them
-    # in. (The same fragility that once truncated the model extraction.) Less
-    # acute since the split put `_load_bins` in a 90-line file, but the reason
-    # the slice was wrong has not changed.
-    node = next(n for n in ast.parse(src).body
-                if isinstance(n, ast.FunctionDef) and n.name == "_load_bins")
-    ns = {"torch": torch}
-    exec(compile(ast.get_source_segment(src, node), "model.py", "exec"), ns)
-    got = ns["_load_bins"](str(path))
-    assert "edges" in got and got["edges"].shape == (4, 17)
-
-    # An eval artifact carries its edges inline, and it is a DIRECTORY --
-    # `torch.load` raises IsADirectoryError on one before reaching any code that
-    # would cope, which is why _load_bins tests for a directory first.
-    pytest.importorskip("safetensors")
-    from helix.model.artifact import OperatingPoint, save
-
-    art = save(str(tmp_path / "art"), state_dict={},
-               arch=dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=1,
-                         dec_blocks=1, heads=4, n_bins=16),
-               op=OperatingPoint(cell_t="grid_center", pw=16, pt=8, n_bands=4,
-                                 bins=dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1))),
-               weights="raw")
-    ns["os"] = os
-    ns["inspect"] = __import__("helix.model.artifact", fromlist=["inspect"]).inspect
-    got = ns["_load_bins"](art)
-    assert "edges" in got and len(got["edges"]) == 4
 
 
 def test_configs_bootstrap_helix_onto_sys_path():

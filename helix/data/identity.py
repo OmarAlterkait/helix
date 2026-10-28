@@ -3,7 +3,7 @@
 A checkpoint and a corpus can be mismatched with nothing to say so. Each corpus
 is internally consistent -- ``CoeffTPCReader`` rejects shards that disagree with
 each other (coeff_reader.py:134) -- so a reader pointed at the WRONG corpus is
-perfectly satisfied, and ``eval_checkpoint.py`` validates only that the split
+perfectly satisfied, and a split check validates only that the split
 name exists. The result is a plausible number computed against data the model
 never trained on.
 

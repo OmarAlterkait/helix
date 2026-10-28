@@ -16,13 +16,13 @@ waveforms into shards beside the TPC ones (not yet fed to the model).
 | `helix/tpc` | the TPC chain (`chain`), coherent gate, thresholding, noise model, readouts, JAXTPC and SBND readers |
 | `helix/optical` | the optical codec, response calibration, optical shards and tokens |
 | `helix/data` | corpus reader, dataset and verifier; load-time transforms; bin grid; identity guard |
-| `helix/model` | the FM: tokenizer, blocks, masking, loss, muP, eval artifacts |
-| `helix/probe` | the 3D probe |
+| `helix/model` | the FM: tokenizer, blocks, masking, loss, muP, reading a run (`checkpoint.load_run`) |
+| `helix/eval` | evaluating a run: `python -m helix.eval RUN --metrics recon,floor,uprobe,denoise` |
 | `helix/integrations/pimm` | adapters into pimm's trainer |
 | `helix/sites` | per-site roots, container and scheduler (`s3df.yaml`, `nersc.yaml`) |
 | `scripts/build_{sim,sbnd,goop}.py` | the sources, one script each; `scripts/corpus.sh` runs a corpus on the scheduler |
 | `scripts/train.sh` | training as a chain of jobs |
-| `configs/pimm/` | `fm.py` and its variants `fm_cooldown`, `fm_eval`, `fm_smoke` |
+| `configs/pimm/` | `fm.py` and its variants `fm_cooldown`, `fm_smoke` |
 | `container/` | the image recipe (`install.sh`) and its apptainer / Docker front-ends |
 | `tests/` | the suite |
 
@@ -46,9 +46,8 @@ scripts/helix_env.sh` exports them as `$HELIX_*`. The full procedures are in
     LINKS=8 scripts/train.sh fm
     scripts/train.sh fm_cooldown
 
-    # evaluate a checkpoint without a training step (on a GPU node: RUNBOOK section 7)
-    scripts/helix_run.sh python scripts/eval_checkpoint.py --config configs/pimm/fm_eval.py \
-        --options weight=<checkpoint> save_path=<out dir>
+    # evaluate a run (on a GPU node: RUNBOOK section 7); truth first: scripts/build_truth.py
+    scripts/helix_run.sh python -m helix.eval $HELIX_EXP/fm --metrics recon,floor,uprobe --out eval.json
 
 ## Documents
 

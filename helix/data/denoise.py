@@ -3,7 +3,7 @@
 Each item is one corpus event: its tokens exactly as the FM sees them (noisy
 input, no clean modality) plus a set of query cells with their truth
 ``y = log1p(q / Q0)`` (scripts/build_denoise_truth.py) and their per-band
-covering tokens (:func:`helix.probe.resolution.cell_inputs`).
+covering tokens (:func:`helix.data.cells.cell_inputs`).
 
 Query cells: every charge-carrying cell (capped), cells near them, random cells
 under kept coefficients (the evaluation's row recipe), and random cells anywhere
@@ -23,7 +23,7 @@ import re
 
 import numpy as np
 
-Q0_DEFAULT = 2043.2578108909702      # median positive cell charge, truth_v2 probe-train events
+from helix.data.cells import Q0 as Q0_DEFAULT  # noqa: E402  (the one charge scale)
 _NOISY_SHARD = re.compile(r"sim_wire_coeff_\d+\.h5")   # not the *_clean_* shards
 
 
@@ -106,7 +106,7 @@ class DenoiseEvents:
     def rows(self, ce, tkeys, tq, rng):
         """Query cells and their truth, after the evaluation's recipe."""
         from helix.model.tokenize import tick_of_tau
-        from helix.probe.resolution import FT, FW, fkey, unkey
+        from helix.data.cells import FT, FW, fkey, unkey
         k = ce.band < self.cfg.n_bands
         ct = tick_of_tau(ce.tau[k], ce.plane_gid[k], ce.band[k], self.cfg)
         ck = np.unique(fkey(ce.plane_gid[k], ce.wire[k] // FW, np.floor(ct / FT).astype(np.int64)))
@@ -147,7 +147,7 @@ class DenoiseEvents:
             g, w, t = unkey(rng.choice(sig, n, replace=True))
             parts.append(fkey(g, np.maximum(w + rng.integers(-8, 9, n), 0), np.maximum(t + rng.integers(-8, 9, n), 0)))
         if self.win_near_per_event > 0:
-            from helix.probe.resolution import near_windows, window_cells
+            from helix.eval.windows import near_windows, window_cells
             for g, w0, t0 in near_windows(tkeys, np.where(sup, tq, 0.0), rng, n=self.win_near_per_event):
                 parts.append(window_cells(g, w0, t0))
         rows = np.unique(np.concatenate(parts))
@@ -163,7 +163,8 @@ class DenoiseEvents:
         each centred on a kept coefficient with no truth charge within the same
         padding the evaluation's noise windows use (16 wires, 128 ticks). The
         floor scores the MAX over such a window, so training sees all of it."""
-        from helix.probe.resolution import FT, FW, WT, WW, fkey, unkey
+        from helix.data.cells import FT, FW, fkey, unkey
+        from helix.eval.windows import WT, WW
         tg, tw, tt = unkey(tkeys)
         by_plane = {int(g): (tw[tg == g], tt[tg == g]) for g in np.unique(tg)}
         out, n = [], 0
@@ -182,7 +183,7 @@ class DenoiseEvents:
         return np.concatenate(out) if out else np.zeros(0, np.int64)
 
     def __getitem__(self, i):
-        from helix.probe.resolution import cell_inputs
+        from helix.data.cells import cell_inputs
         run, path, pos, event = self.items[i]
         ce, B, bl = self.tokens(path, pos)
         tkeys, tq, tev = self._truth(run, path, pos)
@@ -194,6 +195,6 @@ class DenoiseEvents:
         ok = (idx >= 0).any(1)                               # uncovered cells are not queried
         item = dict(B=B, idx=idx[ok], aux=aux[ok], y=y[ok], name=f"{run}/{os.path.basename(path)}#{pos}")
         if self.neighbors:
-            from helix.probe.resolution import cell_neighbors
+            from helix.data.cells import cell_neighbors
             item["nbr"] = cell_neighbors(rows[ok], B["cell_key"], bl, self.cfg)
         return item

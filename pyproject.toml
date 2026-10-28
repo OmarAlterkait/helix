@@ -24,21 +24,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Stage-1 probe truth reads the doraemon hits/step shards, which are written
-# with a compression plugin. Without this h5py raises "can't open directory
-# /usr/local/hdf5/lib/plugin" on read — it worked in one container by accident.
-# (hdf5plugin's actual importers are helix/tpc/io.py, guarded, and
-# scripts/dump_probe_truth.py — not helix/probe/ itself.)
-#
-# torch is here because helix/probe/{features,fit}.py import it at module scope:
-# without it `pip install helix-tpc[probe]` produced an environment in which
-# helix.probe.fit could not run at all.
+# The truth step (scripts/build_truth.py, helix.data.cells) reads the doraemon hits/step
+# shards, which are written with a compression plugin. Without this h5py raises
+# "can't open directory /usr/local/hdf5/lib/plugin" on read. torch: helix.eval's probes.
 probe = ["hdf5plugin>=4.0", "torch>=2.0"]
 
 # Lazy imports that raise a clear error when absent, so they are opt-in rather
 # than base dependencies — but they were declared NOWHERE, which made them
-# undiscoverable. helix/model/checkpoint.py needs safetensors to read a
-# .safetensors export (it SystemExits telling you to install it).
+# undiscoverable. Nothing in helix reads a .safetensors file any more (runs are
+# read from pimm's own torch checkpoints, helix.model.checkpoint).
 export = ["safetensors>=0.4"]
 
 # helix.data and helix.integrations are the ONLY subpackages that may import

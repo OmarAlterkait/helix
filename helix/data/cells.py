@@ -1,24 +1,28 @@
-"""Simulation truth on the fine cell grid: one ``{name}_cells_<k>.h5`` per coefficient shard.
+"""The fine cell grid: simulation truth on it, one ``{name}_cells_<k>.h5`` per coefficient shard,
+and the join from a cell to the tokens covering it.
 
-The label every downstream task scores against -- the denoiser's target and the
-detection-floor / resolution evaluation -- built once from the simulation's
-``hits`` (and ``step``, for deposited energy), separately from the corpus build:
-labels change more often than the corpus. Same events, same order as
-``{name}_coeff_<k>.h5``; joined to it by identity (``/ident``) as the dataset
-modality ``cells`` (``CoeffTPCDataset(modalities=("coeff", "cells"))``).
-Pretraining never opens it (tests/test_noisy_training.py).
+The label every downstream task scores against -- the denoiser's target, the detection floor
+and the along-wire probe -- built once from the simulation's ``hits`` (and ``step``, for
+deposited energy and 3D position), separately from the corpus build: labels change more often
+than the corpus. Same events, same order as ``{name}_coeff_<k>.h5``; joined to it by identity
+(``/ident``) as the dataset modality ``cells`` (``CoeffTPCDataset(modalities=("coeff",
+"cells"))``). Pretraining never opens it (tests/test_noisy_training.py).
 
-Grid: 2 wires x 16 raw ticks, the fine cell of :mod:`helix.probe.resolution`
-(``FW``, ``FT``, ``fkey``). Not native resolution: every quantity the denoiser
-and the evaluation use is decided per cell (see
-:func:`helix.probe.resolution.cell_truth`) except each particle's charge
-centroid, which is stored per (plane, particle).
+Grid: ``FW`` = 2 wires x ``FT`` = 16 raw ticks, finer than any patch under test, so models
+with different tokenizers are scored on the same cells. Every quantity the evaluation uses is
+decided per cell (every window and padding box is aligned to the grid) except two sub-cell
+ones, stored at their own granularity: each particle's charge centroid per (plane, track),
+and each cell's dominant hits group's 3D centroid (the along-wire probe's label).
 
 Layout (four tables, each a per-event CSR with its own ``event_offset``)::
 
-    /config       attrs: format ("helix-cells-1"), n_events, grid_fw, grid_ft, key,
+    /config       attrs: format ("helix-cells-2"), n_events, grid_fw, grid_ft, key,
                          label_json, provenance_json
-    /cells        key int64 (fkey), q float32                 one row per cell, sorted by key
+    /cells        key int64 (fkey), q float32,                one row per cell, sorted by key
+                  dom_frac float32, dom_y float32,            the cell's largest hits group:
+                  dom_z float32                               its share of the cell's charge
+                                                              and its deposits' charge-weighted
+                                                              (y, z), mm
     /cell_track   cell int32, track int32, q float32          the cells' charge split by track
                                                               (rows of /cells, /tracks)
     /plane_track  plane_gid int32, track int32,               per (plane, track): its PIXEL
@@ -27,11 +31,14 @@ Layout (four tables, each a per-event CSR with its own ``event_offset``)::
                                                               energy = step de summed, MeV
     /ident        run, source_file, event                     copied from the coeff shard
 
-A per-cell label (e.g. a particle type of the dominant track) is a column of
-``/cells``; a per-track one is a column of ``/tracks``.
+A per-cell label (e.g. a particle type of the dominant track) is a column of ``/cells``; a
+per-track one is a column of ``/tracks``.
 
-numpy + h5py only (no pimm-data): ``helix.data.coeff_reader.CellsReader`` serves
-it to the dataset, everything else reads :func:`read_event` directly.
+``Q0`` is the charge scale every per-cell charge target and prediction is expressed in,
+``log1p(q / Q0)``; this is its one definition.
+
+numpy + h5py only (no pimm-data): ``helix.data.coeff_reader.CellsReader`` serves it to the
+dataset, everything else reads :func:`read_event` directly.
 """
 from __future__ import annotations
 
@@ -41,13 +48,27 @@ import os
 import h5py
 import numpy as np
 
-FORMAT = "helix-cells-1"
+FORMAT = "helix-cells-2"
 
-#: (h5 group, column, record name, dtype). The record names are those of
-#: :func:`helix.probe.resolution.cell_truth`, plus the track table's.
+FW, FT = 2, 16                       # fine cell, wires x raw ticks
+_TOFF = 4096                         # fine-tick offset inside the packed key
+
+#: The charge scale of every per-cell charge target and prediction: ``y = log1p(q / Q0)``.
+#: The median positive cell charge (e-) over the probe-split training events of the first
+#: denoising truth; a constant, so a prediction means the same number whatever the events.
+Q0 = 2043.2578108909702
+
+#: Plane order within a volume; ``plane_gid = volume * 3 + PLANES.index(p)``.
+PLANES = ("U", "V", "Y")
+
+#: (h5 group, column, record name, dtype). The record names are those of :func:`cell_truth`,
+#: plus the track table's.
 SCHEMA = (
     ("cells", "key", "key", np.int64),
     ("cells", "q", "q", np.float32),
+    ("cells", "dom_frac", "dom_frac", np.float32),
+    ("cells", "dom_y", "dom_y", np.float32),
+    ("cells", "dom_z", "dom_z", np.float32),
     ("cell_track", "cell", "ct_cell", np.int32),
     ("cell_track", "track", "ct_track", np.int32),
     ("cell_track", "q", "ct_q", np.float32),
@@ -67,8 +88,200 @@ LABEL = dict(
     track="hits group_to_track[group], numbered per volume",
     energy="step de summed over the track's deposits (hits deposit_to_group), MeV",
     centroid="per (plane, track): charge-weighted pixel wire and tick",
+    dominant="per cell: the hits group carrying most of its charge; dom_frac its share, (dom_y, dom_z) "
+             "its deposits' step-charge-weighted position (mm, positions dequantised by volume_ranges)",
 )
 _STR = h5py.string_dtype(encoding="utf-8")
+
+
+# ------------------------------------------------------------------------------------------- grid
+def fkey(g, fw, ft):
+    """Pack (plane_gid, fine wire, fine tick) into one int64. Coordinates must be >= 0 (wire) /
+    > -4096 (tick): a negative wire sets the plane bits."""
+    return (np.asarray(g, np.int64) << 40) | (np.asarray(fw, np.int64) << 20) \
+        | (np.asarray(ft, np.int64) + _TOFF)
+
+
+def unkey(k):
+    k = np.asarray(k, np.int64)
+    return k >> 40, (k >> 20) & 0xFFFFF, (k & 0xFFFFF) - _TOFF
+
+
+def coeff_cells(band, plane_gid, wire, tau, cfg):
+    """Fine-cell keys (sorted, unique) of an event's kept coefficients in the tokenized bands."""
+    from helix.model.tokenize import tick_of_tau
+    band, plane_gid, wire, tau = (np.asarray(x) for x in (band, plane_gid, wire, tau))
+    k = band < cfg.n_bands
+    ct = tick_of_tau(tau[k], plane_gid[k], band[k], cfg)
+    return np.unique(fkey(plane_gid[k], wire[k] // FW, np.floor(ct / FT).astype(np.int64)))
+
+
+def _fourier(x):
+    ang = 2 * np.pi * x[..., None] * np.array([1, 2, 3], np.float32)
+    return np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(x.shape[0], -1)
+
+
+def cell_inputs(keys, cell_key, band_lengths, cfg):
+    """Per fine cell: which token covers it in each band, and where inside it.
+
+    ``keys``: fine-cell keys (:func:`fkey`). ``cell_key``: the tokenized event's per-token cell
+    keys (``B["cell_key"]``). Returns ``idx`` (n, n_bands) int64 -- the covering token's row,
+    -1 if none -- and ``aux`` (n, 13 * n_bands) float32: a presence bit per band, then the cell's
+    continuous offset inside each band's token (wire, tau), Fourier-encoded. The frozen probes
+    (:mod:`helix.eval`) and the trainable denoising head (:mod:`helix.model.denoise`) both read
+    exactly this, so a frozen and a fine-tuned number differ only in what was trained.
+    """
+    from helix.model.tokenize import pixel_cells
+
+    nb, pw, pt = cfg.n_bands, cfg.pw, cfg.pt
+    g, fw, ft = unkey(np.asarray(keys, np.int64))
+    w, t = fw * FW, ft * FT + FT // 2
+    pc = pixel_cells(g, w, t, band_lengths, cfg)
+    ck = np.asarray(cell_key, np.int64)
+    order = np.argsort(ck); cks = ck[order]
+    if len(cks):
+        pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
+        idx = np.where(cks[pos] == pc, order[pos], -1)
+    else:
+        idx = np.full(pc.shape, -1, np.int64)
+    dec = (1 << np.asarray(cfg.lev)).astype(np.float64)
+    toff = np.asarray(cfg.toff)[g % 3]
+    offs = []
+    for b in range(nb):
+        tau = (t + toff) / dec[b] - cfg.delta[b]
+        offs += [(w % pw + 0.5) / pw, (tau / pt) % 1.0]
+    aux = np.concatenate([(idx >= 0).astype(np.float32), _fourier(np.stack(offs, 1).astype(np.float32))], 1)
+    return idx.astype(np.int64), aux.astype(np.float32)
+
+
+def cell_neighbors(keys, cell_key, band_lengths, cfg, radius=1):
+    """Per fine cell and band: the tokens of the (2r+1) x (2r+1) patches around the one covering
+    it, -> (n, n_bands, (2r+1)**2) int64, -1 where no token.
+
+    Found by shifting the covering PATCH's block coordinates, so a cell with no token of its own
+    in a band still sees the tokens beside it. Slot ``(2r+1)**2 // 2`` is the covering token, the
+    same index :func:`cell_inputs` returns. Order: wire offset major, tick offset minor, each from
+    -r to r.
+    """
+    from helix.model.tokenize import cell_key as pack, pixel_cells, unpack_cell_key
+
+    g, fw, ft = unkey(np.asarray(keys, np.int64))
+    pc = pixel_cells(g, fw * FW, ft * FT + FT // 2, band_lengths, cfg)          # (n, nb)
+    pg, pb, wb, tb = unpack_cell_key(pc.ravel())
+    ck = np.asarray(cell_key, np.int64)
+    order = np.argsort(ck); cks = ck[order]
+    offs = [(dw, dt) for dw in range(-radius, radius + 1) for dt in range(-radius, radius + 1)]
+    out = np.full((pc.size, len(offs)), -1, np.int64)
+    for j, (dw, dt) in enumerate(offs):
+        w2, t2 = wb + dw, tb + dt
+        ok = (w2 >= 0) & (t2 >= 0)
+        if not ok.any() or not len(cks):
+            continue
+        k2 = pack(pg[ok], pb[ok], w2[ok] * cfg.pw, t2[ok] * cfg.pt, cfg)
+        pos = np.clip(np.searchsorted(cks, k2), 0, len(cks) - 1)
+        out[np.nonzero(ok)[0], j] = np.where(cks[pos] == k2, order[pos], -1)
+    return out.reshape(pc.shape[0], pc.shape[1], len(offs))
+
+
+# ------------------------------------------------------------------------------------------ truth
+def decode_hits_plane(grp):
+    """One ``hits`` plane group -> flat per-sample ``(wire, tick, q, group)``.
+
+    CSR-style: each group owns ``group_sizes[i]`` consecutive samples, stored as offsets from its
+    centre. ``charges_u16`` is quantised against the group's own peak, so it dequantises as
+    ``q / 65535 * peak_charges[group]``.
+    """
+    cw = grp["center_wires"][:].astype(np.int64)
+    ct = grp["center_times"][:].astype(np.int64)
+    dw = grp["delta_wires"][:].astype(np.int64)
+    dt = grp["delta_times"][:].astype(np.int64)
+    qs = grp["charges_u16"][:].astype(np.float64)
+    gid = grp["group_ids"][:].astype(np.int64)
+    sz = grp["group_sizes"][:].astype(np.int64)
+    pk = grp["peak_charges"][:].astype(np.float64)
+    if sz.sum() != qs.shape[0]:
+        raise ValueError(f"hits plane is inconsistent: sum(group_sizes)={sz.sum()} but "
+                         f"{qs.shape[0]} charge samples")
+    rep = np.repeat(np.arange(len(sz)), sz)          # sample -> its group's row
+    return dict(wire=cw[rep] + dw, tick=ct[rep] + dt, q=qs / 65535.0 * pk[rep], group=gid[rep])
+
+
+def group_centroids(pos, q, deposit_to_group, n_groups):
+    """``(n_groups, 3)`` charge-weighted deposit position per group, NaN for a group with no
+    deposit; a group whose deposits carry no charge falls back to their unweighted mean."""
+    pos, q = np.asarray(pos, np.float64), np.asarray(q, np.float64)
+    d2g = np.asarray(deposit_to_group, np.int64)
+    if d2g.shape[0] != pos.shape[0]:
+        raise ValueError(f"deposit count mismatch: deposit_to_group has {d2g.shape[0]} entries, "
+                         f"step has {pos.shape[0]} positions")
+    w = np.bincount(d2g, weights=q, minlength=n_groups)
+    n = np.bincount(d2g, minlength=n_groups).astype(np.float64)
+    out = np.full((n_groups, 3), np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        for a in range(3):
+            sw = np.bincount(d2g, weights=q * pos[:, a], minlength=n_groups)
+            sp = np.bincount(d2g, weights=pos[:, a], minlength=n_groups)
+            out[:, a] = np.where(w > 1e-12, sw / np.maximum(w, 1e-12), np.where(n > 0, sp / np.maximum(n, 1), np.nan))
+    return out
+
+
+def cell_truth(g, w, t, q, trk, grp, grp_yz):
+    """Per-pixel-sample truth -> the cell record (:data:`SCHEMA` names, without the track table).
+
+    ``g`` (plane_gid), ``w``, ``t``, ``q``, ``trk`` (any integer particle id >= 0) and ``grp``
+    (any integer hits group id, unique within the event) per sample; ``grp_yz``: per sample, its
+    group's (y, z) centroid (mm). Returns
+
+      key, q                     every fine cell a sample falls in (sorted) and its charge,
+                                 summed in sample order (float64)
+      dom_frac, dom_y, dom_z     the cell's largest group: its share of the cell's charge and
+                                 its (y, z)
+      ct_cell, ct_track, ct_q    the cells' charge split by particle: row of ``key``, ``trk``
+                                 value, charge; sorted by (cell, track)
+      pt_gid, pt_track,          per (plane, particle), sorted: its charge-weighted PIXEL
+      pt_wire, pt_tick           centroid (wire, tick)
+    """
+    G, W, T = (np.asarray(x, np.int64) for x in (g, w, t))
+    Q, TRK, GRP = np.asarray(q, np.float64), np.asarray(trk, np.int64), np.asarray(grp, np.int64)
+    YZ = np.asarray(grp_yz, np.float64).reshape(-1, 2)
+    key, inv = np.unique(fkey(G, W // FW, T // FT), return_inverse=True)
+    inv = inv.astype(np.int64).ravel()
+    qc = np.bincount(inv, weights=Q, minlength=len(key))
+    tu, tinv = np.unique(TRK, return_inverse=True)
+    nt = max(len(tu), 1)
+    cu, cinv = np.unique(inv * nt + tinv.ravel(), return_inverse=True)
+    pu, pinv = np.unique(G * nt + tinv.ravel(), return_inverse=True)
+    pq = np.bincount(pinv.ravel(), weights=Q)
+    # the dominant group per cell: charge per (cell, group); the largest is written last
+    gu, ginv = np.unique(GRP, return_inverse=True)
+    ng = max(len(gu), 1)
+    cg, cginv = np.unique(inv * ng + ginv.ravel(), return_inverse=True)
+    cginv = cginv.ravel()
+    cgq = np.bincount(cginv, weights=Q)
+    cell_of = cg // ng
+    order = np.lexsort((cgq, cell_of))
+    top = np.zeros(len(key), np.int64)
+    top[cell_of[order]] = order
+    first = np.zeros(len(cg), np.int64)
+    first[cginv[::-1]] = np.arange(len(Q))[::-1]                     # one sample of each (cell, group)
+    dyz = YZ[first[top]] if len(key) else np.zeros((0, 2))
+    return dict(key=key, q=qc,
+                dom_frac=cgq[top] / np.maximum(qc, 1e-12) if len(key) else np.zeros(0),
+                dom_y=dyz[:, 0], dom_z=dyz[:, 1],
+                ct_cell=cu // nt, ct_track=tu[cu % nt], ct_q=np.bincount(cinv.ravel(), weights=Q),
+                pt_gid=pu // nt, pt_track=tu[pu % nt],
+                pt_wire=np.bincount(pinv.ravel(), weights=Q * W) / np.maximum(pq, 1e-12),
+                pt_tick=np.bincount(pinv.ravel(), weights=Q * T) / np.maximum(pq, 1e-12))
+
+
+def require_format(cfg, where=""):
+    """Refuse a file that is not :data:`FORMAT` on this grid."""
+    got = cfg.attrs.get("format")
+    got = got.decode() if isinstance(got, bytes) else got
+    if got != FORMAT:
+        raise ValueError(f"{where or 'cells shard'}: format {got!r}, not {FORMAT!r}; rebuild it (scripts/build_truth.py)")
+    if (int(cfg.attrs["grid_fw"]), int(cfg.attrs["grid_ft"])) != (FW, FT):
+        raise ValueError(f"{where}: grid {cfg.attrs['grid_fw']} x {cfg.attrs['grid_ft']}, helix scores on {FW} x {FT}")
 
 
 def cells_path(coeff_shard, out_dir=None):
@@ -80,37 +293,27 @@ def cells_path(coeff_shard, out_dir=None):
     return os.path.join(out_dir or d, f"{stem}_cells_{k}.h5")
 
 
-def require_format(cfg, where=""):
-    """Refuse a file that is not :data:`FORMAT` on this grid."""
-    from helix.probe.resolution import FT, FW
-    got = cfg.attrs.get("format")
-    got = got.decode() if isinstance(got, bytes) else got
-    if got != FORMAT:
-        raise ValueError(f"{where or 'cells shard'}: format {got!r}, not {FORMAT!r}; rebuild it (scripts/build_truth.py)")
-    if (int(cfg.attrs["grid_fw"]), int(cfg.attrs["grid_ft"])) != (FW, FT):
-        raise ValueError(f"{where}: grid {cfg.attrs['grid_fw']} x {cfg.attrs['grid_ft']}, helix scores on {FW} x {FT}")
-
-
 # ------------------------------------------------------------------------------------------ build
-def event_record(hits_ev, step_ev):
-    """One simulation event (its ``hits`` and ``step`` groups) -> a record (:data:`SCHEMA` names).
+def event_record(hits_ev, step_ev, volume_ranges):
+    """One simulation event (its ``hits`` and ``step`` groups, and the step file's
+    ``/config/volume_ranges``) -> a record (:data:`SCHEMA` names).
 
-    Samples are concatenated volume by volume (sorted by name), plane by plane, in
-    stored order, so each cell's charge is summed in exactly the order
-    ``scripts/build_denoise_truth.py`` sums it.
+    Samples are concatenated volume by volume (sorted by name), plane by plane, in stored order,
+    so each cell's charge is summed in that order.
     """
-    from helix.probe.resolution import cell_truth
-    from helix.probe.truth import PLANES, decode_hits_plane
-
-    G, W, T, Q, TRK, vol, tid, energy = [], [], [], [], [], [], [], []
-    base = 0
+    G, W, T, Q, TRK, GRP, YZ, vol, tid, energy = [], [], [], [], [], [], [], [], [], []
+    base, gbase = 0, 0
+    vr = np.asarray(volume_ranges, np.float64)
     for vk in sorted(x for x in hits_ev if x.startswith("volume_")):
-        vi, hv = int(vk.split("_")[1]), hits_ev[vk]
+        vi, hv, sv = int(vk.split("_")[1]), hits_ev[vk], step_ev[vk]
         d2g = hv["deposit_to_group"][:].astype(np.int64)
         g2t = hv["group_to_track"][:].astype(np.int64)
-        de = step_ev[vk]["de"][:].astype(np.float64)
+        de = sv["de"][:].astype(np.float64)
         if len(de) != len(d2g):
             raise ValueError(f"{vk}: step has {len(de)} deposits, hits deposit_to_group {len(d2g)}")
+        lo, hi = vr[vi][:, 0], vr[vi][:, 1]
+        pos = lo + sv["positions"][:].astype(np.float64) / 65535.0 * (hi - lo)
+        cen = group_centroids(pos, sv["charge"][:], d2g, len(g2t))[:, 1:]          # (y, z)
         planes = [(pi, decode_hits_plane(hv[pl])) for pi, pl in enumerate(PLANES) if pl in hv]
         tv = np.unique(np.concatenate([g2t[d2g]] + [g2t[s["group"]] for _, s in planes]))
         energy.append(np.bincount(np.searchsorted(tv, g2t[d2g]), weights=de, minlength=len(tv)))
@@ -118,9 +321,12 @@ def event_record(hits_ev, step_ev):
         for pi, s in planes:
             G.append(np.full(len(s["q"]), vi * 3 + pi)); W.append(s["wire"]); T.append(s["tick"])
             Q.append(np.asarray(s["q"], np.float64)); TRK.append(base + np.searchsorted(tv, g2t[s["group"]]))
+            GRP.append(gbase + s["group"]); YZ.append(cen[s["group"]])
         base += len(tv)
+        gbase += len(g2t)
     cat = lambda xs: np.concatenate(xs) if xs else np.zeros(0, np.int64)
-    rec = cell_truth(cat(G), cat(W), cat(T), cat(Q), cat(TRK))
+    rec = cell_truth(cat(G), cat(W), cat(T), cat(Q), cat(TRK), cat(GRP),
+                     np.concatenate(YZ) if YZ else np.zeros((0, 2)))
     rec.update(trk_volume=cat(vol), trk_id=cat(tid), trk_energy=cat(energy))
     return {name: np.asarray(rec[name]).astype(dt) for _, _, name, dt in SCHEMA}
 
@@ -132,7 +338,6 @@ def write_shard(path, ident, records, *, label, provenance):
     part = str(path) + ".part"
     with h5py.File(part, "w") as f:
         cfg = f.create_group("config")
-        from helix.probe.resolution import FT, FW
         cfg.attrs.update(format=FORMAT, n_events=len(records), grid_fw=FW, grid_ft=FT,
                          key="fkey(plane_gid, wire // grid_fw, tick // grid_ft) = g << 40 | fw << 20 | (ft + 4096)",
                          label_json=json.dumps(label, sort_keys=True),
@@ -168,9 +373,9 @@ def read_ident(f):
 def build_shard(coeff_shard, source_root, out_dir=None):
     """Write the cells shard of ``coeff_shard``; ``(path, message)``. An existing one is kept.
 
-    Events come from the coeff shard's ``/ident`` (any number of source files);
-    each is read from ``<source_root>/{hits,step}/<run>/<source_file>`` with
-    ``_sensor_`` replaced by ``_hits_`` / ``_step_``.
+    Events come from the coeff shard's ``/ident`` (any number of source files); each is read
+    from ``<source_root>/{hits,step}/<run>/<source_file>`` with ``_sensor_`` replaced by
+    ``_hits_`` / ``_step_``.
     """
     import hdf5plugin  # noqa: F401  (hits / step use a plugin filter)
     from helix.core.coeff_io import _code_version
@@ -192,7 +397,7 @@ def build_shard(coeff_shard, source_root, out_dir=None):
             fh, fs = files[(run, sf)]
             hits_ev = fh[f"event_{ev:03d}"]
             threshold.add(float(hits_ev.attrs["threshold"]))
-            records.append(event_record(hits_ev, fs[f"event_{ev:03d}"]))
+            records.append(event_record(hits_ev, fs[f"event_{ev:03d}"], fs["config"]["volume_ranges"][:]))
     finally:
         for pair in files.values():
             for x in pair:

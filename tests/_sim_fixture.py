@@ -1,5 +1,8 @@
 """Synthetic simulation ``hits`` + ``step`` files in the JAXTPC layout, for truth tests.
 
+``step`` carries per deposit ``de``, ``charge`` and quantised ``positions`` (dequantised by
+``/config/volume_ranges``).
+
 Per volume: compact particles (tracks) of one to three groups each, scattered over
 the plane, some placed on top of one another so cells hold charge from several
 tracks; one group's samples may land on the same pixel more than once.
@@ -32,6 +35,9 @@ def write_sim(root, run, tag, n_events, seed=0, n_volumes=2, n_tracks=30):
     with h5py.File(paths["hits"], "w") as fh, h5py.File(paths["step"], "w") as fs:
         for f in (fh, fs):
             f.create_group("config").attrs.update(production_version="test", git_commit="abc", git_dirty=False)
+        # per volume (x, y, z) x (lo, hi), mm: what dequantises step positions
+        fs["config"]["volume_ranges"] = np.array([[[-2000.0, 0.0], [-2000.0, 2000.0], [0.0, 5000.0]],
+                                                  [[0.0, 2000.0], [-2000.0, 2000.0], [0.0, 5000.0]]])[:n_volumes]
         for ev in range(n_events):
             eh, es = fh.create_group(f"event_{ev:03d}"), fs.create_group(f"event_{ev:03d}")
             eh.attrs["threshold"] = 25.0
@@ -54,6 +60,8 @@ def write_sim(root, run, tag, n_events, seed=0, n_volumes=2, n_tracks=30):
                 hv["group_to_track"] = np.array(g2t, np.int32)
                 hv["deposit_to_group"] = rng.integers(0, n_groups, n_dep).astype(np.int32)
                 sv["de"] = rng.uniform(0, 0.05, n_dep).astype(np.float16)
+                sv["charge"] = rng.uniform(0, 5000, n_dep).astype(np.float32)
+                sv["positions"] = rng.integers(0, 65536, (n_dep, 3)).astype(np.uint16)
                 for p in "UVY":
                     pg = hv.create_group(p)
                     for k, a in _plane(rng, centres[p]).items():

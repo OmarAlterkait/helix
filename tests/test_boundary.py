@@ -42,7 +42,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: in here; an ``__init__`` that starts re-exporting its submodules would break
 #: it silently.
 CLEAN = ["helix", "helix.core", "helix.tpc", "helix.model.tokenize",
-         "helix.integrations"]
+         "helix.integrations",
+         # reading a run and the window metrics need neither: torch is imported when a
+         # model is built, pimm_data when events are read
+         "helix.model.checkpoint", "helix.eval", "helix.eval.windows"]
 
 #: Modules that are ALLOWED to pull pimm_data in, each with the packages that
 #: must be installed for the check to mean anything. Listed so that a module

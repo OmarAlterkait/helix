@@ -28,9 +28,9 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
                                        v
                      pimm.train + helix.integrations.pimm (FMTrainer, hooks, evaluator)
                                        |
-             RESUME state <save_path>/model/ (pimm's)     EVAL artifact (helix.model.artifact)
+             <save_path>/ (pimm's run dir) -> helix.model.checkpoint.load_run
                                        v
-                     helix.probe (scripts/dump_probe_truth.py, scripts/run_probe.py)
+                     helix.eval (python -m helix.eval; truth: scripts/build_truth.py)
 ```
 
 ---
@@ -42,8 +42,8 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
 | `helix.core` | no | wavelet transform, robust statistics, hysteresis, coeff shard IO, provenance, training cadence |
 | `helix.tpc` | no | TPC chain, coherent gate, thresholding, noise model, readouts, readers |
 | `helix.optical` | no | optical codec, calibration, optical shards, tokens |
-| `helix.model` | no (`tokenize` defers one import) | the FM, tokenizer, masking, loss, muP, artifacts |
-| `helix.probe` | no | the 3D probe |
+| `helix.model` | no (`tokenize` defers one import) | the FM, tokenizer, masking, loss, muP, reading a run |
+| `helix.eval` | no | evaluation: recon, floor, uprobe, denoise |
 | `helix.build` | no (sources may) | the build pipeline |
 | `helix.data` | pimm-data | corpus reader / dataset / verifier, registered transforms, bins, identity guard |
 | `helix.integrations.pimm` | pimm | registry adapters into pimm's trainer |
@@ -265,11 +265,9 @@ attributes excepted).
   identity at once.
 * The FM has no event separation: one event per rank, and `FMTrainer` refuses any other
   per-GPU batch.
-* `artifact.py` is the only reader of EVAL state: `detect` / `inspect` / `load` / `build`
-  over every checkpoint shape in circulation (`tests/test_artifact_formats.py` is the
-  matrix). RESUME state (`<save_path>/model/`) is pimm's and helix does not read it.
-  `scripts/export_artifact.py` promotes a `pimm export` into an artifact recording the
-  weight set, the corpus `basis_digest` and the helix commit.
+* `checkpoint.py` (`load_run`) is the one reader of a trained run: pimm's run directory
+  (`resolved_config.json`, `model/model_ema.pth` or `model/last`, `provenance.json`) ->
+  the model with its bins, the train split's `PatchConfig`, provenance. Nothing is exported.
 
 ---
 
@@ -297,7 +295,7 @@ time:** a config writes `warmup="auto"`, `save_freq="auto"`, `every_n_steps="aut
 `_calib/RUNS.txt`, the reference bin grid, the m113 architecture (d 512, 12 + 4 blocks, 8
 heads, K = 128), AdamW + `WSDStableLR`, batch = world size. Variants override only what
 differs: `fm_cooldown.py` (warm start from `$HELIX_EXP/fm/model/last`, first 3 runs, one
-epoch, `WSDCooldownLR`), `fm_eval.py` (probe split, evaluator only), `fm_smoke.py` (a
+epoch, `WSDCooldownLR`), `fm_smoke.py` (a
 small model, 32 events, one GPU). Anything else is a `key=value` override.
 
 ---

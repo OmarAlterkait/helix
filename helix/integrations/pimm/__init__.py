@@ -4,7 +4,7 @@ Importing this module registers three names into pimm's registries:
 
     CoeffTokenize     TRANSFORMS  coeff rows -> patch tokens (helix.model.tokenize)
     CoeffTPCDataset   DATASETS    the corpus, read by pimm-data
-    Coeff-FM          MODELS      helix.model.build_fm, + converted checkpoint
+    Coeff-FM          MODELS      helix.model.build_fm, with its bin table
 
 **pimm is not modified.** A config pulls this in with mmcv's standard
 out-of-tree hook, which ``pimm.utils.config.Config.fromfile`` already honours::
@@ -33,9 +33,9 @@ WRITES: resume bootstrap, provenance, weight EMA, finite guard) and ``eval``
 """
 
 from helix.integrations.pimm.data import CoeffCollect, CoeffTPCDataset
-from helix.integrations.pimm.eval import CoeffFMEvaluator, _acc_grid_free
+from helix.integrations.pimm.eval import CoeffFMEvaluator
 from helix.integrations.pimm.hooks import HelixPathBootstrap, WeightEMA
-from helix.integrations.pimm.model import CoeffFM, build_coeff_fm, _load_bins
+from helix.integrations.pimm.model import CoeffFM, build_coeff_fm
 from helix.integrations.pimm.trainer import (FMTrainer, WSDCooldownLR,
                                              WSDStableLR)
 from helix.model.tokenize import CoeffTokenize

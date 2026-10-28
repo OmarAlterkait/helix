@@ -15,7 +15,7 @@ the learned representation knows where charge is.
 | `helix.tpc` | **no** | LArTPC physics: TPC chain, coherent gate, forward model (noise + digitize), readouts, readers |
 | `helix.build` | **no** | the build pipeline (sources are `scripts/build_{sim,sbnd,goop}.py`) |
 | `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP |
-| `helix.probe` | no | the 3D deconvolution probe |
+| `helix.eval` | no (events read through `helix.data`) | evaluating a run: `python -m helix.eval` (recon, floor, uprobe, denoise) |
 | `helix.optical` | no | the optical codec — written beside the TPC shards, not yet fed to the FM |
 | `helix.data` | **pimm-data** | coeff corpus reader/dataset/verifier, registered transforms, identity guard |
 | `helix.integrations.pimm` | **pimm** | adapters into the training framework |
@@ -99,7 +99,7 @@ changeable.
 `helix.core.coeff_io` and required by every reader; there are no legacy read paths.
 An unstamped corpus is migrated with `scripts/migrate_format.py` or rebuilt.
 
-**Configs state intent.** `configs/pimm/fm.py` plus `fm_cooldown`, `fm_eval`,
+**Configs state intent.** `configs/pimm/fm.py` plus `fm_cooldown`,
 `fm_smoke`; no config carries a step count (warmup and cadence are `"auto"`, filled
 by `FMTrainer` through `helix.core.cadence`). A variant is a `key=value` override,
 not a new file.
@@ -110,23 +110,14 @@ invalidating comparability with every existing checkpoint. Changing `n_bands`,
 cell geometry or masking costs a config change and a retrain. Vary
 interpretation freely; change compression only with a measured reason.
 
-**Reading a checkpoint has ONE owner (`helix.model.artifact`).** Eight shapes
-are in circulation and eight loaders used to read them, each knowing a subset —
-a `pimm export` directory was taught to `load_probe_model` and not to
-`patch_config_from_checkpoint`, so probing a pimm-trained model died in
-`torch.load`. `detect`/`inspect`/`load`/`build` are the whole surface;
-`tests/test_artifact_formats.py` is the matrix, and a ninth shape without a row
-there fails. The split is by PURPOSE: RESUME state (`<save_path>/model/last/`,
-`iter_N.pth`) is pimm's and nothing here reads it; EVAL state is a weight set
-plus the operating point that makes its number reproducible. The one caller
-deliberately left alone is the `torch.load` in `WeightEMA` (`helix/integrations/pimm/hooks.py`)
-— EMA resume, training hot path.
-
-**A `pimm export` cannot attribute itself; promote it.** `_sanitize_config`
-nulls `weight`, so an export cannot say whether it holds EMA or raw weights, and
-it names neither the corpus nor the helix commit. `scripts/export_artifact.py
-<export_dir> --weights ema --corpus <dir> -o <artifact_dir>` records all three.
-Probe the artifact, not the export, or the row is unattributed.
+**Reading a run has ONE owner (`helix.model.checkpoint.load_run`).** Downstream
+code takes pimm's run directory (`save_path`) or one checkpoint in it, never an
+exported copy: `resolved_config.json` gives the architecture, the train split's
+`CoeffTokenize` cfg and the corpus; `model/model_ema.pth` (WeightEMA) or
+`model/last` the weights, with the bins as persistent buffers; `provenance.json`
+the code and corpus identity. Starting a training run from a checkpoint is pimm's
+`weight=`. Evaluation is `python -m helix.eval RUN --metrics ... --out FILE`
+(`helix/eval/`); truth is the `cells` modality (`scripts/build_truth.py`).
 
 **`plane_id` currently serves FOUR roles** — FiLM conditioning, RoPE projection
 axis, masking group, and plane identity. `make_mask` groups by that LABEL, not
@@ -161,10 +152,9 @@ planes are contiguous). For a second modality those four roles separate; see
   the same thing on its cache; point `UV_CACHE_DIR` at node-local `/tmp`.
 - **A corpus run may have gaps.** `run_0027670361` is missing source files
   51-56 and 94-97; 180 shards / 17,999 events is complete for it, not a failure.
-- **The probe's extraction loop is the long pole.** 2.5M patches over 388
-  events before a single probe is fitted; a preemption used to discard all of
-  it. Pass `--cache-dir $SCRATCH/probe_cache` — chunked, keyed by everything
-  that changes the features, resumable.
+- **The floor's features live on the host.** `helix.eval` floor holds every map
+  row's float16 features in memory, ~10-40 GB over the 388-event probe split;
+  several evaluations on one node can exhaust host memory silently.
 - **`save_path` must resolve through `helix.paths`**, never relative to the
   checkout — a relative one wrote a run INTO the repo and four files were
   committed.

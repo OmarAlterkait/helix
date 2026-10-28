@@ -194,39 +194,27 @@ Plot progress: `scripts/helix_run.sh python scripts/plot_train_progress.py label
 
 ## 7. Evaluate
 
-Score a checkpoint without an optimizer step (`CoeffFMEvaluator` otherwise runs only
-after a step), on the probe split of `fm_eval.py` (S3DF scheduler facts):
+Truth first, once per corpus run (simulation `hits`/`step` from the parent of
+`HELIX_SENSOR_ROOT`; writes `{name}_cells_<k>.h5` beside each coefficient shard):
+
+    scripts/helix_run.sh python scripts/build_truth.py --corpus <run dir>
+
+Then score a run directly from its pimm directory -- no export (GPU: the varlen attention
+needs flash attention, sm80+):
 
     sbatch --account=$HELIX_SLURM_TRAIN_ACCOUNT --partition=$HELIX_SLURM_TRAIN_PARTITION \
-        --qos=$HELIX_SLURM_TRAIN_QOS --gpus=1 --cpus-per-task=8 --mem=50G --time=02:00:00 \
-        --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python scripts/eval_checkpoint.py \
-                --config configs/pimm/fm_eval.py \
-                --options weight=$HELIX_EXP/fm_cooldown/model/model_ema.pth save_path=$HELIX_EXP/fm_eval \
-                --out $HELIX_EXP/fm_eval/scores.jsonl"
+        --qos=$HELIX_SLURM_TRAIN_QOS --gpus=1 --cpus-per-task=8 --mem=100G --time=08:00:00 \
+        --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python -m helix.eval \
+                $HELIX_EXP/fm --metrics recon,floor,uprobe --out $HELIX_EXP/fm/eval.json"
 
-`eval_checkpoint.py` refuses a checkpoint trained on a different corpus
-(`basis_digest`; `--allow-corpus-mismatch` overrides).
-
-**Eval artifacts.** RESUME state (`<save_path>/model/`) is pimm's. For anything that
-must be attributable (the probe), export and promote:
-
-    pimm export --run-dir $HELIX_EXP/fm model_ema.pth <export_dir>
-    scripts/helix_run.sh python scripts/export_artifact.py <export_dir> --weights ema \
-        --corpus <corpus run dir> -o <artifact_dir>
-
-`--weights` (ema or raw) is required: an export cannot say which weight set it holds.
-
-**3D probe**, two stages: truth once per corpus split, then the probe per checkpoint
-(GPU; budget hours, `--cache-dir` makes both extraction and fits resumable):
-
-    scripts/helix_run.sh python scripts/dump_probe_truth.py --corpus <run dir> \
-        --source $(dirname $HELIX_SENSOR_ROOT)          # the simulation root holding hits/ and step/
-    scripts/helix_run.sh python scripts/run_probe.py --checkpoint <artifact_dir> --corpus <run dir> \
-        --tag <name> --out probe_results.jsonl --cache-dir $SCRATCH/probe_cache
-
-Stage 1 needs real simulation (the `hits` / `step` truth) and the probe split's
-`holdout.json`. Other analyses: `scripts/feats_rank.py`, `scripts/viz_mask_recon.py`,
-`scripts/viz_2x2_corpus.py`.
+`RUN` is the run directory (`--weights ema` default, or `last`) or one checkpoint inside it
+(`model/iter_N.pth`). Events: the run's own corpus, `probe` role of its holdout
+(`--split`, `--max-events` for a quick look). Metrics: `recon` (the training evaluator's
+masked reconstruction), `floor` (detection floor / charge map from frozen features; trained
+and random-init arms, rankme), `uprobe` (along-wire coordinate; geo, trained, random arms),
+`denoise` (`--denoiser <train_denoise out>/best.pt`, on the floor's windows). The probes fit
+on the first two thirds of the events and score the rest, with [16, 84]% event-bootstrap
+intervals. See `helix/eval/__init__.py`.
 
 **The identity guard.** `helix.data.identity` refuses a checkpoint whose recorded
 `basis_digest` differs from the corpus being read. Do not work around it; find the

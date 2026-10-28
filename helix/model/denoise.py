@@ -1,7 +1,7 @@
 """Supervised denoising: noisy coefficient tokens -> pre-response charge per cell.
 
 The target is the simulation's ``hits`` (charge arriving at each wire before the
-field response) summed onto the fine grid of :mod:`helix.probe.resolution`
+field response) summed onto the fine grid of :mod:`helix.data.cells`
 (``FW`` wires x ``FT`` ticks), predicted as ``log1p(q / Q0)``: the representation
 the floor evaluation scores. The input is exactly what the foundation model
 sees -- every noisy token of an event, none masked.
@@ -13,7 +13,7 @@ With ``presence`` the head also returns a logit for "this cell carries charge"
 which puts faint deposits beside noise in charge units. The
 head reads, for each queried cell, the encoder features of the token covering it
 in each band plus the cell's offset inside those tokens
-(:func:`helix.probe.resolution.cell_inputs`) -- the frozen probe's input, made
+(:func:`helix.data.cells.cell_inputs`) -- the frozen probe's input, made
 trainable -- so the same encoder can be trained from scratch, fine-tuned from a
 pretrained checkpoint, or frozen, and the three differ only in what was trained.
 
@@ -62,7 +62,7 @@ class CellDecoder(nn.Module):
     probability over the whole patch -- the blocky haze -- and localises coarsely.
     Here each cell's query (its offsets and the covering tokens' 128 input slots
     per band, i.e. the coefficients themselves) attends to the encoder features of
-    the (2r+1)^2 patches around it in every band (:func:`helix.probe.resolution.
+    the (2r+1)^2 patches around it in every band (:func:`helix.data.cells.
     cell_neighbors`), with a learned embedding per (band, neighbour slot) and a
     learned null key so a cell with no token anywhere near still has one.
     """

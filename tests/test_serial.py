@@ -296,9 +296,8 @@ def test_compile_blocks_selects_the_compiled_blocks():
 def test_an_eval_rebuild_does_not_compile():
     """compile_blocks is how a run executed; a probe rebuilding it must not
     inherit minutes of compilation."""
-    from helix.model.artifact import Artifact, build
-    art = Artifact(arch={**SMALL, "compile_blocks": True}, op=None)
-    assert build(art, device="cpu").compile_blocks is False
+    from helix.model.checkpoint import build_model
+    assert build_model({"model": {**SMALL, "type": "Coeff-FM", "compile_blocks": True}}).compile_blocks is False
 
 
 # ------------------------------------------------------------ execution

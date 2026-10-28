@@ -30,7 +30,7 @@ def _pimm_importable():
         return False
 
 
-pytestmark = pytest.mark.skipif(not _pimm_importable(), reason="pimm not importable")
+needs_pimm = pytest.mark.skipif(not _pimm_importable(), reason="pimm not importable")
 
 N_BAND, K, N_SLOT = 4, 16, 8
 ARCH = dict(n_slot=N_SLOT, n_band=N_BAND, n_plane=6, d=32, blocks=1, dec_blocks=1,
@@ -64,7 +64,7 @@ def _batch(n_cells=24, seed=3):
 
 
 def _run(logits, B, mask):
-    from helix.integrations.pimm import _acc_grid_free
+    from helix.eval.recon import acc_grid_free as _acc_grid_free
     edges, ca, cr = _tables()
     core = build_fm(dict(ARCH))
     core.set_bins(edges, cent_asinh=ca, cent_ratio=cr)
@@ -183,7 +183,7 @@ def test_edges_only_still_scores_via_derived_centroids():
 
     `set_bins` derives what it is not given, so edges alone are enough to score.
     """
-    from helix.integrations.pimm import _acc_grid_free
+    from helix.eval.recon import acc_grid_free as _acc_grid_free
     edges, _, _ = _tables()
     core = build_fm(dict(ARCH))
     core.set_bins(edges)                          # edges only — no centroids
@@ -263,49 +263,29 @@ def test_apply_bins_warns_before_overwriting_different_edges():
     assert seen and "max|delta|" in seen[0]
 
 
-def test_backfill_derives_centroids_for_a_pre_fix_checkpoint():
-    """An old state_dict with edges but no centroids must load AND be usable."""
-    from helix.model.checkpoint import _backfill_centroids
-    edges, ca, cr = _tables()
-    core = build_fm(dict(ARCH))
-    core.set_bins(edges, cent_asinh=ca, cent_ratio=cr)
-    sd = {k: v for k, v in core.state_dict().items()
-          if not k.startswith("bin_cent")}
-    sd["bin_cent_lin"] = torch.zeros(N_BAND, K)        # stale buffers to drop
-    sd["bin_cent_measured"] = torch.zeros(2, dtype=torch.uint8)
-    out = _backfill_centroids(core, sd)
-    for dead in ("bin_cent_lin", "bin_cent_measured"):
-        assert dead not in out, f"{dead} must not reach a strict load"
-    fresh = build_fm(dict(ARCH))
-    fresh.load_state_dict(out, strict=True)         # the property that matters
-    assert torch.isfinite(fresh.bin_cent_ratio).all(), \
-        "backfill must derive, not copy the constructor's NaN"
-
-
 def test_the_single_forward_path_still_checks_the_batch_contract():
-    """`_forward` skips `forward` to save a pass — not to skip its guard.
+    """`heads_loss` skips `forward` to save a pass — not to skip its guard.
 
     It reproduces the categorical branch from one `raw_heads` call, and so used
     to reach `losses_cat` with whatever the batch happened to hold. A missing
     `tgt` then surfaced as a bare KeyError from inside the loss, naming nothing.
     """
-    from helix.integrations.pimm import CoeffFMEvaluator
+    from helix.eval.recon import heads_loss
     edges, ca, cr = _tables()
     core = build_fm(dict(ARCH))
     core.set_bins(edges, cent_asinh=ca, cent_ratio=cr)
     B = _batch()
     B.update(inp=B["tgt"].clone(), plane_id=torch.zeros(B["tgt"].shape[0], dtype=torch.long))
     del B["tgt"]                                  # what losses_cat needs and lacks
-    ev = CoeffFMEvaluator.__new__(CoeffFMEvaluator)
-    ev.grid_free = True
     with pytest.raises(KeyError) as ei:
-        ev._forward(core, core, B, torch.ones(B["occ"].shape[0], dtype=torch.bool),
-                    {k: 0.0 for k in ("sse", "sy", "syy", "nv", "chg_pred",
-                                      "chg_true", "chg_pred_s", "chg_true_s")})
+        heads_loss(core, B, torch.ones(B["occ"].shape[0], dtype=torch.bool),
+                   {k: 0.0 for k in ("sse", "sy", "syy", "nv", "chg_pred",
+                                     "chg_true", "chg_pred_s", "chg_true_s")})
     assert "tgt" in str(ei.value) and "losses_cat" in str(ei.value), \
         f"the error must name the key and the objective, got: {ei.value}"
 
 
+@needs_pimm
 def test_eval_mask_mode_defaults_to_random_and_is_honoured():
     """The eval mask must stay `random` by default, and say so when it is not.
 

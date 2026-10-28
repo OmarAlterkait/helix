@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from helix.data.denoise import DenoiseEvents
-from helix.probe.resolution import fkey
+from helix.data.cells import Q0, fkey
 
 
 def _rows(c):
