@@ -4,7 +4,7 @@ Noisy coefficient tokens -> pre-response charge per 2-wire x 16-tick cell, with 
 (helix.model.denoise; labels: helix.data.denoise.DenoiseRows on the ``cells`` truth). The recipe
 is M6d of docs/archive/DENOISE.md, and it is the default:
 
-* the encoder is the FM run ``model.fm`` (default ``$HELIX_EXP/fm``): its architecture, its
+* the encoder is the FM run ``model.fm`` (default ``$HELIX_EXP/fm_cooldown``, the cooled FM): its architecture, its
   tokenizer (``CoeffTokenize(cfg="model")``, filled by FMTrainer from that run) and, with
   ``model.pretrained=True``, its EMA weights; ``pretrained=False`` is the from-scratch baseline
   on the same architecture; ``model.freeze_encoder=True`` keeps the encoder fixed;
@@ -36,7 +36,7 @@ epoch = 4
 model = dict(
     _delete_=True,
     type="Coeff-Denoise",
-    fm=str(_root("HELIX_EXP") / "fm"),
+    fm=str(_root("HELIX_EXP") / "fm_cooldown"),
     pretrained=True,
     freeze_encoder=False,
     cond_charge=False,

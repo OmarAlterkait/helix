@@ -184,7 +184,8 @@ jobs:
             "$REF" /opt/pimm/.venv/bin/python -m pytest tests -q
 
   # The step that actually proves a handover works: corpus -> verify -> holdout
-  # -> bins -> train, on a synthetic dataset, with no production data at all.
+  # -> bins, on a synthetic dataset, with no production data at all. Training
+  # steps are the test suite's (test_pimm_step_contract, test_pimm_amp_resume_schedule).
   # It is docs/RUNBOOK.md §§3-6 at toy scale; keeping it in CI means the first
   # thing a receiving site does is the thing that is continuously tested.
   #
@@ -238,10 +239,6 @@ jobs:
               $PY scripts/derive_coeff_bins.py --corpus $W/corpus/run_synth \
                   --dataset-name sim_wire --out $W/bins.pt --events 100 --K 128 \
                   --allow-foreign-basis
-              # loss must DECREASE from about ln(128) = 4.85, where an untrained
-              # categorical head starts
-              $PY scripts/smoke_train_fm.py --corpus $W/corpus/run_synth \
-                  --bins-from $W/bins.pt --events 4 --steps 8
             '
 
   # The NERSC variant. Same install.sh on the pimm-nersc base, published in a

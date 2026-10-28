@@ -93,7 +93,7 @@ A task writes `PREFIX.summary_NNNN.json` beside its shards.
 **Clean shards are off.** A build writes only the noisy `*_coeff_*` (and optical)
 shards; nothing trains on noise-free values. `--keep-clean` on a build script also
 writes `PREFIX_coeff_clean_k.h5` from the simulation's noise-free planes, to inspect the
-DSP. `corpus.sh` does not forward it, so use it on a build script directly (below).
+DSP; through `corpus.sh`, set `BUILD_ARGS=--keep-clean`.
 
 * **Order.** Every shard embeds the one global `norm_sigma`, so calibration finishes
   before the build; `build` refuses to start without `_calib/norm_sigma_global.npy`
@@ -362,8 +362,8 @@ the same. What differs:
 * **Corpus.** Training reads `$SCRATCH/coeff_tpc_r2` (Lustre, purged on inactivity), the
   durable copy is `$CFS/m5238/users/oalter/coeff_tpc_r2` (`HELIX_CORPUS_DURABLE`). r2 is
   not staged there yet (TODO); once it is, re-stage after a purge with
-  `rsync -a $HELIX_CORPUS_DURABLE/ $SCRATCH/coeff_tpc_r2/`. Do not build corpora here
-  with `corpus.sh` yet: it passes `--partition`, which the NERSC profile does not set.
+  `rsync -a $HELIX_CORPUS_DURABLE/ $SCRATCH/coeff_tpc_r2/`. `corpus.sh` has not been run
+  here yet (it takes account, QOS and constraint from the profile; NERSC sets no partition).
 * **Bin grid.** Not copied: verify it from the staged corpus (§5, `--verify`), on a GPU
   node (no CPU allocation) through `scripts/helix_run.sh`.
 * **Training** (`m5238_g`, `-C gpu`, QOS `preempt` with `--time-min 02:00:00`; preempted

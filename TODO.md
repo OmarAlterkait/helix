@@ -48,16 +48,8 @@ in `docs/archive/`.
 
 ## Corpus, scripts and CI
 
-* **CI runs a deleted script.** `.github/workflows/docker.yml`'s smoke step calls
-  `scripts/smoke_train_fm.py` (retired with the clean targets), and verifies the synthetic
-  run with `coeff_verify`'s default `--modalities coeff coeff_clean`, which a build without
-  `--keep-clean` now fails. Replace the step with a `configs/pimm/fm_smoke.py` run and
-  pass `--modalities coeff`.
-* **`corpus.sh` does not forward `--keep-clean`**, and it passes `--partition` from the
-  site profile, which NERSC's does not set (so it stops on an unbound variable there).
-* **Leftovers of removed options.** `helix.model.denoise.ENCODER_PREFIXES` still lists
-  `cond_wire.` and `pool_` (modules the FM no longer has); the `export` extra in
-  `pyproject.toml` (safetensors) has no reader; `scripts/write_holdout.py` writes a file
+* **Leftovers of removed options.** The `export` extra in `pyproject.toml` (safetensors)
+  has no reader (drop it with a `uv lock` refresh); `scripts/write_holdout.py` writes a file
   nothing reads (kept for inspection; `tests/test_corpus_identity.py` pins it).
 * **`fm_smoke`'s bin table** (`$HELIX_ARCHIVE/coeff_bins_K32_smoke.pt`) may predate the
   noisy grid; rederive it from r2 with K = 32 if the smoke run should resemble production.

@@ -16,7 +16,8 @@
 # disagree on 0.016% of kept coefficients), so the site pins the corpus partition.
 #
 # Environment: EVENTS_PER_TASK (500; sim: one sensor file per task), EVENTS_PER_SHARD (sim 200, else 100),
-# CAL_EVENTS (100 per run), CONFIG (chain overrides, json/yaml), CONC (16 tasks at once per array),
+# CAL_EVENTS (100 per run), CONFIG (chain overrides, json/yaml), BUILD_ARGS (more build options for every
+# shard, e.g. --keep-clean), CONC (16 tasks at once per array),
 # ARRAY_MAX (100: the largest array the scheduler accepts), LOGS (OUT/_logs).
 set -euo pipefail
 H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -32,7 +33,8 @@ LOGS=${LOGS:-$OUT/_logs}
 [ "$SOURCE" = sim ] && EPS=${EVENTS_PER_SHARD:-200} || EPS=${EVENTS_PER_SHARD:-100}
 RUN=("$H/scripts/helix_run.sh" python)
 CFG=(); [ -n "${CONFIG:-}" ] && CFG=(--config "$CONFIG")
-SB=(--account="$HELIX_SLURM_CORPUS_ACCOUNT" --partition="$HELIX_SLURM_CORPUS_PARTITION" --gpus=1)
+SB=(--account="$HELIX_SLURM_CORPUS_ACCOUNT" --gpus=1)
+[ -n "${HELIX_SLURM_CORPUS_PARTITION:-}" ] && SB+=(--partition="$HELIX_SLURM_CORPUS_PARTITION")
 [ -n "${HELIX_SLURM_CORPUS_QOS:-}" ] && SB+=(--qos="$HELIX_SLURM_CORPUS_QOS")
 [ -n "${HELIX_SLURM_CORPUS_CONSTRAINT:-}" ] && SB+=(--constraint="$HELIX_SLURM_CORPUS_CONSTRAINT")
 read -r -a EXTRA <<< "${HELIX_SLURM_CORPUS_EXTRA:-}"
@@ -81,7 +83,7 @@ task() {                   # inside an array task: line OFFSET + SLURM_ARRAY_TAS
   # shellcheck disable=SC2086
   "${RUN[@]}" "$BUILD" --input $inputs --output "$prefix" --device cuda --first "$first" \
       --count "$count" --events-per-shard "$eps" --shard-start "$shard" --norm-sigma "$CAL/norm_sigma_global.npy" \
-      --skip-complete "${CFG[@]}" > "$prefix.summary_$(printf %04d "$shard").json"
+      --skip-complete "${CFG[@]}" ${BUILD_ARGS:-} > "$prefix.summary_$(printf %04d "$shard").json"
   tail -c 400 "$prefix.summary_$(printf %04d "$shard").json"; echo
 }
 

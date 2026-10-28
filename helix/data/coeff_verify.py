@@ -380,7 +380,8 @@ def main(argv=None):
     ap.add_argument("--split", default="")
     ap.add_argument("--expect", type=int, default=None,
                     help="expected total event count across the corpus")
-    ap.add_argument("--modalities", nargs="*", default=["coeff", "coeff_clean"])
+    ap.add_argument("--modalities", nargs="*", default=None,
+                    help="default: coeff, plus coeff_clean when the run has clean shards (--keep-clean)")
     ap.add_argument("--source-root", default=None,
                     help="the SENSOR tree the corpus was built from. Given, a "
                          "file_index gap is judged against it: absent upstream "
@@ -391,8 +392,15 @@ def main(argv=None):
             ap.error("--dataset-name is required unless DATA_ROOT has _calib/CHUNKS.txt")
         return _report(verify_plan(a.data_root))
     return _report(verify_corpus(a.data_root, a.dataset_name, split=a.split,
-                                 expect_events=a.expect, modalities=tuple(a.modalities),
+                                 expect_events=a.expect, modalities=_modalities(a),
                                  source_root=a.source_root))
+
+
+def _modalities(a):
+    if a.modalities is not None:
+        return tuple(a.modalities)
+    clean = glob.glob(os.path.join(a.data_root, f"{a.dataset_name}_coeff_clean_*.h5"))
+    return ("coeff", "coeff_clean") if clean else ("coeff",)
 
 
 if __name__ == "__main__":

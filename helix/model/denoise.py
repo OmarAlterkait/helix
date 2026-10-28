@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 
 #: Encoder parameters ``encode`` reads; everything else in the FM is frozen.
-ENCODER_PREFIXES = ("embed.", "film.", "band_emb.", "plane_emb.", "cond_wire.", "enc.", "pool_")
+ENCODER_PREFIXES = ("embed.", "film.", "band_emb.", "plane_emb.", "enc.")
 
 
 class CellDecoder(nn.Module):
