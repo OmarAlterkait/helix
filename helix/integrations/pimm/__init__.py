@@ -25,32 +25,22 @@ than merely name.
 Importing this needs pimm AND pimm-data installed; helix's own DSP, tokenizer and
 model do not.
 
-Split into submodules — ``_compat`` (import-time pimm patches), ``data``
-(dataset + terminal transform), ``model`` (the ``Coeff-FM`` entry), ``trainer``
-(``FMTrainer`` + the WSD schedules), ``hooks`` (what a run WRITES: resume
-bootstrap, provenance, weight EMA) and ``eval`` (what a run MEASURES) — but the
-MODULE PATH is unchanged. It had grown to 1089 lines and nine registry entries,
-which is a training framework, not an integration seam.
-
-Importing this package still registers everything, because ``custom_imports``
-names this path and nothing else: a config says
-``imports=["helix.integrations.pimm"]`` exactly as before, and every symbol
-that used to be importable from here still is. Order matters — ``_compat``
-first, since it patches pimm before anything else touches it.
+Submodules: ``data`` (dataset + terminal transform), ``model`` (the ``Coeff-FM``
+entry), ``trainer`` (``FMTrainer`` + the WSD schedules), ``hooks`` (what a run
+WRITES: resume bootstrap, provenance, weight EMA, finite guard) and ``eval``
+(what a run MEASURES). Importing this package registers all of them, because
+``custom_imports`` names this path and nothing else.
 """
 
-from helix.integrations.pimm import _compat  # noqa: F401  (import-time patches; MUST be first)
 from helix.integrations.pimm.data import CoeffCollect, CoeffTPCDataset
 from helix.integrations.pimm.eval import CoeffFMEvaluator, _acc_grid_free
 from helix.integrations.pimm.hooks import HelixPathBootstrap, WeightEMA
 from helix.integrations.pimm.model import CoeffFM, build_coeff_fm, _load_bins
-from helix.integrations.pimm.optim import FlatAdamW
 from helix.integrations.pimm.trainer import (FMTrainer, WSDCooldownLR,
                                              WSDStableLR)
-from helix.integrations.pimm._compat import _patch_rng_restore_to_cpu
 from helix.model.tokenize import CoeffTokenize
 
 __all__ = ["CoeffTokenize", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
            "build_coeff_fm",
            "FMTrainer", "CoeffFMEvaluator", "WSDStableLR", "WSDCooldownLR",
-           "WeightEMA", "HelixPathBootstrap", "FlatAdamW"]
+           "WeightEMA", "HelixPathBootstrap"]

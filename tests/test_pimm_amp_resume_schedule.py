@@ -1,23 +1,18 @@
-"""Three things pimm's Trainer does to a run that nothing here had exercised.
+"""Two things pimm's Trainer does around a step.
 
 `test_pimm_step_contract.py` covers the batch reaching the model. This covers
 what happens around the step:
 
-  AMP        run_step wraps the forward in bf16 autocast. Every parity test so
-             far is fp32, so the categorical loss in reduced precision was
-             unverified — and a 128-way log-softmax is exactly the shape that
-             loses precision quietly rather than producing NaN.
+  AMP        run_step wraps the forward in bf16 autocast. The parity tests are
+             fp32, and a 128-way log-softmax is exactly the shape that loses
+             precision quietly rather than producing NaN.
   resume     a restored optimizer must keep the muP per-group lr/weight_decay.
              Losing them on resume rescales learning across width for the rest
              of the run, and the loss curve would look plausible throughout.
-  scheduler  muP is expressed as a per-group LR ratio, and pimm drives LRs with
-             OneCycleLR. If it collapses the groups to one LR, muP is silently
-             discarded — the hidden group drifts to base_lr instead of base_lr/m.
 
 These use torch directly rather than pimm's wrappers where the behaviour under
-test is torch's (autocast, AdamW state, OneCycleLR's per-group max_lr); pimm's
-OneCycleLR subclass only reinterprets `pct_start`, which is noted where it
-matters.
+test is torch's (autocast, AdamW state). The schedules' muP property is in
+`test_mup_scheduler.py`.
 """
 
 import pytest
@@ -166,53 +161,3 @@ def test_step_after_resume_matches_uninterrupted_training(tmp_path):
     for k in p_a:
         assert torch.equal(p_a[k], p_b[k]), f"parameter {k} differs after resume"
 
-
-# ---- 3. scheduler ---------------------------------------------------------
-
-def test_onecycle_per_group_max_lr_preserves_muP_ratio():
-    """pimm drives LRs with OneCycleLR, whose `max_lr` accepts a per-group LIST
-    (that is how HMAE does layer-wise decay). Feeding it the muP ratios keeps
-    them for the whole schedule; feeding it a scalar would flatten them.
-
-    pimm's subclass only reinterprets pct_start > 1 as a warmup step count, so
-    the per-group behaviour under test is torch's."""
-    m = _model()
-    opt = torch.optim.AdamW(m.param_groups(LR, weight_decay=WD), lr=LR,
-                            betas=(0.9, 0.95))
-    ratios = [g["lr"] / LR for g in opt.param_groups]
-    m_width = ARCH["d"] // ARCH["d_base"]
-    assert any(abs(r - 1.0 / m_width) < 1e-12 for r in ratios)
-
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=[LR * r for r in ratios], total_steps=20, pct_start=0.25,
-        anneal_strategy="cos", div_factor=10.0, final_div_factor=1000.0)
-
-    seen_peak = 0.0
-    for _ in range(20):
-        opt.step()
-        sched.step()
-        lrs = [g["lr"] for g in opt.param_groups]
-        base = lrs[0]
-        seen_peak = max(seen_peak, base)
-        for lr_i, r in zip(lrs, ratios):
-            assert lr_i == pytest.approx(base * r / ratios[0], rel=1e-9), (
-                "OneCycleLR broke the muP per-group ratio — the hidden group is "
-                "no longer scaled by 1/m relative to the rest")
-    assert seen_peak == pytest.approx(LR, rel=1e-6), (
-        f"schedule never reached the requested peak LR ({seen_peak} vs {LR})")
-
-
-def test_scalar_max_lr_would_discard_muP():
-    """The failure this guards against, made explicit: a scalar max_lr assigns
-    every group the same LR, so muP's 1/m on the hidden group disappears."""
-    m = _model()
-    opt = torch.optim.AdamW(m.param_groups(LR, weight_decay=WD), lr=LR,
-                            betas=(0.9, 0.95))
-    ratios = [g["lr"] / LR for g in opt.param_groups]
-    assert len(set(ratios)) > 1, "fixture has no distinct muP groups"
-
-    torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=LR, total_steps=10)
-    flattened = {g["lr"] for g in opt.param_groups}
-    assert len(flattened) == 1, (
-        "a scalar max_lr no longer flattens the groups — if torch changed this, "
-        "the per-group list may no longer be required")

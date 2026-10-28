@@ -84,8 +84,7 @@ class HelixPathBootstrap(HookBase):
         plausible number -- see helix.data.identity.
 
         Best-effort by design: a run must not die because provenance could not be
-        read. An unstamped run degrades to the pre-existing behaviour (unchecked),
-        which is what every checkpoint trained before this already is.
+        read; an unstamped run is simply unchecked.
         """
         try:
             from helix.data.identity import corpus_identity
@@ -105,15 +104,10 @@ class HelixPathBootstrap(HookBase):
 
         This hook already resolves the checkouts for the resume bootstrap, so it
         is the one place that knows them — recording them here costs one file and
-        no new hook in the config.
-
-        Nothing recorded this before. A run directory held weights, a config and
-        a log, and no statement of which helix produced them; reconstructing that
-        for m113 meant trying configurations until the goldens matched. Appends
-        rather than overwrites, so a chained/requeued job leaves a record of
-        every link — a run that was preempted and resumed from a DIFFERENT
-        working tree is exactly the case worth catching, and an overwrite would
-        hide it.
+        no new hook in the config. Appends rather than overwrites, so a
+        chained/requeued job leaves a record of every link — a run that was
+        preempted and resumed from a DIFFERENT working tree is exactly the case
+        worth catching, and an overwrite would hide it.
         """
         import json
         import os
@@ -130,17 +124,10 @@ class HelixPathBootstrap(HookBase):
             if os.path.exists(path):
                 with open(path) as fh:
                     log = json.load(fh)
-                if isinstance(log, dict):          # a single record from an older run
-                    log = [log]
             # REFUSE to continue a run directory against a different corpus.
-            #
-            # This hook already appends a record per link precisely because "a
-            # run that was preempted and resumed from a DIFFERENT working tree
-            # is exactly the case worth catching" -- but it only ever RECORDED
-            # that. Nothing checked, and check_corpus_matches was wired into
-            # eval_checkpoint.py alone, so the training path could resume a
-            # checkpoint trained on one corpus against another and report
-            # plausible numbers the whole way.
+            # Recording the corpus is not enough: without the check, the training
+            # path could resume a checkpoint trained on one corpus against
+            # another and report plausible numbers the whole way.
             #
             # The failure is realistic: save_path is derived from a config whose
             # run name is a literal, so pointing HELIX_EXP somewhere new while
@@ -150,14 +137,11 @@ class HelixPathBootstrap(HookBase):
             prev = next((r.get("corpus") for r in reversed(log)
                          if isinstance(r, dict) and r.get("corpus")), None)
             if prev and info.get("corpus") and not info["corpus"].get("error"):
-                # DEFERRED PAST THE except BELOW, deliberately. This check used
-                # to run here, inside the try whose handler says "Provenance is
-                # a record, not a dependency. Never take down a run." That is
-                # right for writing a JSON file and exactly wrong for a corpus
-                # refusal, whose entire job is to take down a run: the
-                # ValueError was caught, logged via logger.exception, and
-                # training continued against the wrong corpus. Measured: 3 of 3
-                # genuine mismatches returned normally.
+                # DEFERRED PAST THE except BELOW, deliberately. That handler
+                # ("never take down a run") is right for writing a JSON file and
+                # exactly wrong for a corpus refusal, whose entire job is to take
+                # down a run: inside the try, the ValueError would be logged and
+                # training would continue against the wrong corpus.
                 _deferred_check = (prev, info["corpus"], path)
 
             log.append(info)
@@ -192,20 +176,19 @@ class HelixPathBootstrap(HookBase):
 
 @HOOKS.register_module()
 class WeightEMA(HookBase):
-    """Exponential moving average of the weights, written into the checkpoint.
+    """Exponential moving average of the weights, written beside the checkpoint.
 
-    m113 trained with ``ema: 0.9999`` (half-life ~6931 steps). Research keeps a
-    full-state EMA on rank 0, updates it after every optimizer step, and saves it
-    into every checkpoint and snapshot (mae_ddp.py:147-155, 201-205, 233).
+    Decay 0.9999 (half-life ~6931 steps), updated on rank 0 after every optimizer
+    step.
 
     It is not an optional polish step for a WSD run. The stable phase is FLAT by
     design — no annealing — so the raw weights stay at full LR noise for the
     whole run. The EMA is what stands in for the annealed model until a cooldown
     is actually run, which is what downstream probing is meant to read. Without
-    it, probes score a checkpoint that is noisier than anything research probed.
+    it, probes score the raw, LR-noisy weights.
 
-    Rank 0 only, matching research: the EMA is an artifact, not part of the
-    optimisation, so it needs no synchronisation.
+    Rank 0 only: the EMA is an artifact, not part of the optimisation, so it
+    needs no synchronisation.
     """
 
     def __init__(self, decay=0.9999, save_freq=None,
@@ -251,15 +234,14 @@ class WeightEMA(HookBase):
         # hits it, because there the shadow is cloned from the live model and is
         # already on-device. Reachable only on resume.
         blob = torch.load(path, map_location="cpu", weights_only=False)
-        saved_step = int(blob.get("step", 0))
-        saved_decay = blob.get("decay")
+        saved_step = int(blob["step"])
+        saved_decay = float(blob["decay"])
         now = int(getattr(self.trainer, "global_step", 0) or 0)
         drift = abs(now - saved_step) if now else 0
 
-        # A shadow cannot change its time constant retroactively. `_save` records
-        # `decay`; nothing used to read it back, so a sidecar written at a
-        # different decay was adopted silently.
-        if saved_decay is not None and float(saved_decay) != self.decay:
+        # A shadow cannot change its time constant retroactively, so a sidecar
+        # written at a different decay is not adopted.
+        if saved_decay != self.decay:
             self.trainer.logger.warning(
                 f"WeightEMA: sidecar written with decay={saved_decay}, hook "
                 f"configured for {self.decay} — discarding; the average restarts.")
@@ -269,8 +251,7 @@ class WeightEMA(HookBase):
         # in cfg.hooks and both key off trainer.global_step, already advanced by
         # _record_step_state (pimm train.py:400-402); the saver seeds step_count
         # from the same value (pimm hooks/checkpoint.py:83-87) and increments it
-        # first. So any non-zero drift is a torn pair — the previous `> 1`
-        # tolerance had no derivation and rejected nothing reachable.
+        # first. So any non-zero drift is a torn pair.
         #
         # Non-zero drift IS reachable: preemption between the two writes (drift =
         # save_freq), and pimm checkpoints.py:1104-1111, which rewinds global_step
@@ -360,22 +341,17 @@ class WeightEMA(HookBase):
         if comm.get_rank() != 0:
             return
         self._step = int(getattr(self.trainer, "global_step", self._step + 1))
-        # With bf16 weights (FlatAdamW) the fp32 master lives in the optimizer:
-        # average THAT, both for precision and to stay on the _foreach fast path.
-        masters = getattr(getattr(self.trainer, "optimizer", None), "master_of", None)
-        pmap = dict(self._model().named_parameters()) if masters else {}
         if self._shadow is None:
-            sd = self._model().state_dict()
-            self._shadow = {k: (masters[pmap[k]] if k in pmap and pmap[k] in masters else v)
-                            .detach().clone().float() for k, v in sd.items()}
+            self._shadow = {k: v.detach().clone().float()
+                            for k, v in self._model().state_dict().items()}
             return
         d = self.decay
         if self._plan is None:
             # Built ONCE. state_dict() tensors alias the live parameters' storage
             # and the optimizer updates in place, so the references stay current.
-            # Rebuilding the dict and looping per tensor every step was hundreds
+            # Rebuilding the dict and looping per tensor every step is hundreds
             # of kernel launches and a Python loop on rank 0 alone -- which, in a
-            # launch-bound step, made rank 0 the straggler every other rank waited
+            # launch-bound step, makes rank 0 the straggler every other rank waits
             # for at the all-reduce.
             sd = self._model().state_dict()
             avg = self._averaged_names()
@@ -385,14 +361,11 @@ class WeightEMA(HookBase):
                 if sh is not None and sh.device != v.device:
                     sh = sh.to(v.device)                  # belt and braces
                     self._shadow[k] = sh
-                mv = masters.get(pmap[k]) if masters and k in pmap else None
-                if mv is not None and sh is not None and k in avg and sh.shape == mv.shape:
-                    shadows.append(sh); live.append(mv)            # fp32 master, updated in place
-                elif (sh is not None and k in avg and v.dtype == torch.float32
+                if (sh is not None and k in avg and v.dtype == torch.float32
                         and sh.shape == v.shape):
                     shadows.append(sh); live.append(v.detach())
                 else:
-                    other[k] = v                          # buffers, non-fp32: as before
+                    other[k] = v                          # buffers, non-fp32
             self._plan = (shadows, live, other, avg)
         shadows, live, other, avg = self._plan
         if shadows:

@@ -6,11 +6,9 @@ assigns a single LR to every group discards it, and the failure is invisible.
 The loss still falls, just to a worse place, and only a run at another width
 would reveal it.
 
-`helix.model.mup` holds the two helpers a trainer integration needs for that, and
-lives outside `helix.integrations.pimm` precisely so it is testable without pimm
-installed. `FMTrainer.build_scheduler` is a three-line wrapper over
-`expand_max_lr`, so testing the helper against a real optimizer and a real
-OneCycleLR covers the behaviour that matters.
+The WSD schedules are `LambdaLR`s, which scale each group's own `lr`; driving
+a real LambdaLR over muP's groups covers the behaviour that matters without
+pimm installed. `helix.model.mup.param_group_ratios` reads the ratios back.
 """
 
 import pytest
@@ -18,7 +16,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from helix.model import build_fm  # noqa: E402
-from helix.model.mup import expand_max_lr, param_group_ratios  # noqa: E402
+from helix.model.mup import param_group_ratios  # noqa: E402
 
 ARCH = dict(n_slot=16, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1,
             heads=4, mup=True, d_base=32, n_bins=16)
@@ -41,39 +39,20 @@ def test_ratios_capture_the_width_multiplier():
     assert any(abs(r - 1.0) < 1e-12 for r in ratios), "no unscaled group"
 
 
-def test_scalar_max_lr_is_expanded_per_group():
+def test_lambda_schedule_preserves_ratios():
+    """The end-to-end property: drive a LambdaLR (what WSDStableLR and
+    WSDCooldownLR are) through warmup and decay and the muP ratios must hold
+    at every step."""
+    import math
     _, opt = _opt()
     ratios = param_group_ratios(opt.param_groups, LR)
-    out = expand_max_lr(LR, ratios)
-    assert out == [LR * r for r in ratios]
-    assert len(set(out)) > 1, "expansion collapsed the distinct groups"
-
-
-def test_explicit_list_passes_through_and_wrong_length_raises():
-    _, opt = _opt()
-    ratios = param_group_ratios(opt.param_groups, LR)
-    explicit = [1e-4] * len(ratios)
-    assert expand_max_lr(explicit, ratios) == explicit
-    with pytest.raises(ValueError, match="one-to-one"):
-        expand_max_lr([1e-4], ratios)
-
-
-def test_expanded_max_lr_preserves_ratios_through_a_full_schedule():
-    """The end-to-end property: drive a real OneCycleLR for its whole span and
-    the muP ratios must hold at every step."""
-    _, opt = _opt()
-    ratios = param_group_ratios(opt.param_groups, LR)
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=expand_max_lr(LR, ratios), total_steps=25, pct_start=0.2,
-        anneal_strategy="cos", div_factor=10.0, final_div_factor=1000.0)
-    peak = 0.0
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda s: min(1.0, s / 5) * max(1e-3, 1.0 - math.sqrt(s / 25)))
     for _ in range(25):
         opt.step(); sched.step()
         lrs = [g["lr"] for g in opt.param_groups]
-        peak = max(peak, lrs[0])
         for lr_i, r in zip(lrs, ratios):
             assert lr_i == pytest.approx(lrs[0] * r / ratios[0], rel=1e-9)
-    assert peak == pytest.approx(LR, rel=1e-6)
 
 
 def test_ratios_reject_a_group_without_an_lr():
@@ -86,8 +65,9 @@ def test_ratios_reject_a_group_without_an_lr():
 
 
 def test_trainer_wires_the_helpers():
-    """FMTrainer is unimportable without pimm, so check by source that its two
-    overrides are the ones described — and that neither silently no-ops."""
+    """FMTrainer is unimportable without pimm, so check by source that its
+    optimizer override is the one described — and that it does not silently
+    no-op."""
     import pathlib
     # `trainer` specifically, not the whole integration: since the split, the
     # file that defines FMTrainer is the file this reads.
@@ -96,7 +76,6 @@ def test_trainer_wires_the_helpers():
     text = src.read_text()
     assert "class FMTrainer(Trainer)" in text
     assert "def build_optimizer" in text and "model.param_groups(" in text
-    assert "def build_scheduler" in text and "expand_max_lr(" in text
     assert "unwrap_model(self.model)" in text, (
         "build_model wraps for DDP, so param_groups must come from the unwrapped "
         "model")

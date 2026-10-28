@@ -35,11 +35,10 @@ def _acc_grid_free(core, B, mask, logits, gf):
         ~31% low; see ``tokenize.decode_categorical``.
     """
     # No presence/finiteness test: `set_bins` DERIVES any centroid table it is
-    # not given, so both are populated whenever `bin_edges` is. The guard that
-    # used to stand here returned silently, and when a caller passed centroids
-    # positionally into the wrong slot every charge metric vanished from the log
-    # with nothing to say it had. If a table is NaN now that is a real bug and
-    # the metrics should come out NaN and say so.
+    # not given, so both are populated whenever `bin_edges` is. A guard that
+    # returned silently would make every charge metric vanish from the log with
+    # nothing to say why; if a table is NaN that is a real bug and the metrics
+    # should come out NaN and say so.
     ca, cr = core.bin_cent_asinh, core.bin_cent_ratio
     tgt, occ_t, valid = B["tgt"], B["occ"].bool(), B["valid"].bool()
     sel = mask[:, None] & valid & occ_t
@@ -73,11 +72,10 @@ def _acc_grid_free(core, B, mask, logits, gf):
     # |E[X]| reported 0.8177 where E[|X|] gives 0.9676, against a one-hot oracle
     # ceiling of 0.9991 -- so 83% of the apparent 19% "charge deficit" was this,
     # and the real magnitude shortfall is ~3%. The artifact is SIGNED: it pulls
-    # every score toward zero, so it also MASKED m113 over-predicting by 46%
-    # (reported 1.2255, true 1.4627).
+    # every score toward zero, so it also masks over-prediction.
     #
-    # The old test could not catch it: it only scored a ONE-HOT posterior, which
-    # is precisely where the two functionals coincide.
+    # A test on a ONE-HOT posterior cannot catch it: that is precisely where the
+    # two functionals coincide.
     t_sel = torch.sinh(y)
     gf["chg_pred"] += float(rec_abs[sel].sum())
     gf["chg_true"] += float(t_sel.abs().sum())
@@ -153,23 +151,16 @@ class CoeffFMEvaluator(HookBase):
     def eval(self):
         """EVERY rank evaluates its shard; the sums are all-reduced.
 
-        This used to be "rank 0 evaluates, the others wait at a barrier", which
-        was correct about the barrier and wrong about the data: pimm builds the
-        val loader with a ``DistributedSampler`` whenever world_size > 1
-        (engines/train.py:687), so rank 0's loader yields only rank 0's SHARD.
-        Every multi-GPU eval we have logged therefore scored ~1/world_size of
-        the validation set and reported it as the validation number — that is
-        the `batches=145` in the 4-GPU logs against a 577-event val set.
+        pimm builds the val loader with a ``DistributedSampler`` whenever
+        world_size > 1 (engines/train.py:687), so rank 0's loader yields only
+        rank 0's SHARD; "rank 0 evaluates" would score ~1/world_size of the
+        validation set and report it as the validation number. Wall time is one
+        shard-sized pass either way.
 
-        Having all ranks work costs nothing: the other ranks were blocked in
-        ``synchronize()`` for the whole of rank 0's pass anyway, so wall time is
-        the same shard-sized pass it always was, now covering the whole set.
-
-        The all-reduce is itself a collective, so the symmetry the old barrier
-        needed is now structural rather than something the try/finally has to
-        maintain. That mattered: getting it wrong did not fail, it HUNG — the
-        run trained, evaluated, logged a checkpoint, and then deadlocked with
-        rank 0 inside the collective save and the others still in the barrier.
+        The all-reduce is itself a collective, so every rank reaching it is
+        structural rather than something a try/finally has to maintain — an
+        asymmetry here does not fail, it HANGS (rank 0 inside the collective
+        save, the others elsewhere).
 
         Caveat, logged rather than papered over: ``DistributedSampler`` pads the
         last shard by repeating samples, so a val set that does not divide by
@@ -182,11 +173,10 @@ class CoeffFMEvaluator(HookBase):
         except Exception as exc:
             # A rank that dies before the reduce hangs every other rank inside
             # it, so this rank still contributes zeros and still enters the
-            # collective. But it must then FAIL: the previous version swallowed
-            # the exception entirely, and zeros are indistinguishable from an
-            # empty val set -- `_report` printed "val_loader was empty",
-            # published no metric, and the run trained on happily. That is how a
-            # NameError in `_eval_shard_inner` survived a green test suite.
+            # collective. But it must then FAIL: zeros are indistinguishable
+            # from an empty val set, so swallowing the exception would make
+            # `_report` print "val_loader was empty", publish no metric, and
+            # let the run train on.
             self.trainer.logger.exception("CoeffFMEvaluator: shard eval failed")
             failure = exc
             acc = None
@@ -237,8 +227,7 @@ class CoeffFMEvaluator(HookBase):
         ``raw_heads`` call (``grid_free=False`` scores through ``forward``).
 
         Calling ``core`` rather than ``model`` skips the DDP wrapper; under
-        ``no_grad`` in eval there is no gradient to synchronise, and the previous
-        code already reached for ``core.raw_heads`` for the same reason.
+        ``no_grad`` in eval there is no gradient to synchronise.
         """
         if self.grid_free:
             from helix.model.loss import losses_cat
@@ -361,13 +350,9 @@ class CoeffFMEvaluator(HookBase):
 
         Runs on EVERY rank, and only rank 0 prints. `current_metric_value` is
         set on every rank because the values agree — they come from the same
-        reduced sums — so no rank can disagree about which step was best.
-
-        An earlier version of this docstring justified that by saying the
-        checkpoint save is collective and would otherwise disagree. That is not
-        why: pimm gates the `model_best` write on `is_main_process()`, so a
-        divergent value could not deadlock the save. Setting it everywhere is
-        cheap insurance, not a correctness requirement.
+        reduced sums — so no rank can disagree about which step was best. pimm
+        gates the `model_best` write on `is_main_process()`, so this is cheap
+        insurance, not a correctness requirement.
         """
         rank0 = comm.get_rank() == 0
         if not n:
@@ -385,11 +370,9 @@ class CoeffFMEvaluator(HookBase):
             # survives a change of bin table or corpus in a way cross-entropy
             # does not. charge_closure is Sum(E[|X|])/Sum(|X_true|) in units of
             # sigma, nominal 1.0 -- the posterior expectation of MAGNITUDE,
-            # which is not |posterior mean|; see _acc_grid_free. Research
-            # computes both every eval
-            # (fm/train.py:perband_mse_cat, mae_ddp.py:216-220); their absence
-            # here is why a 31%-low charge read-back and a cross-table CE
-            # comparison both went unnoticed.
+            # which is not |posterior mean|; see _acc_grid_free. Without them a
+            # 31%-low charge read-back or a cross-table CE comparison goes
+            # unnoticed.
             mean_y = gf["sy"] / gf["nv"]
             var_y = max(gf["syy"] / gf["nv"] - mean_y * mean_y, 1e-12)
             avg["var_expl"] = 1.0 - (gf["sse"] / gf["nv"]) / var_y
@@ -415,11 +398,9 @@ class CoeffFMEvaluator(HookBase):
                 " ".join(f"{k}={v:.4f}" for k, v in sorted(avg.items())))
         writer = getattr(self.trainer, "writer", None)
         if rank0 and writer is not None:
-            # GLOBAL STEP, not epoch. EVAL_EVERY (1178) does not divide
-            # iters_per_epoch (4758), so ~4 evals land inside each epoch and
-            # three of every four were overwritten — 100 evals collapsed to 25
-            # TB points. train.log kept all 100, which is why the curve script
-            # parses the log instead. Research keys fm_curve.jsonl on step.
+            # GLOBAL STEP, not epoch: the eval cadence does not divide
+            # iters_per_epoch, so several evals land inside each epoch and
+            # keying on epoch would overwrite all but one of them.
             step = int(getattr(self.trainer, "global_step", 0) or
                        self.trainer.comm_info.get("epoch", 0))
             for k, v in avg.items():

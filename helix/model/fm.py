@@ -37,16 +37,6 @@ from helix.model.serial import _blocks, _ckpt, _cu_chunks, _cu_even, _inverse, _
 # (helix.model.kernels); the same arithmetic to ~1e-5, so it is an
 # implementation choice, not an architecture one. Needs qk_norm and head dim 64.
 #
-# bf16_params stores every PARAMETER in bfloat16 (buffers such as bin_edges stay
-# fp32). The fp32 master copy then lives in the optimizer (FlatAdamW, which
-# requires it), autocast stops re-casting each weight every forward, and the
-# residual stream follows the weights to bf16. A numerics change: per-run.
-#
-# fp32_stream keeps the residual stream fp32 when bf16_params is on. The d768
-# A/B put bf16_params+FlatAdamW 0.010 above the reference in final val loss
-# while varlen alone was 0.005 below it; this isolates whether the stream's
-# rounding is the cause.
-#
 # dec_frac < 1 decodes only that fraction of the masked tokens in TRAINING
 # (partial reconstruction, CrossMAE); evaluation decodes all of them, so val loss
 # stays comparable. The encoder's input is unchanged. A sequence gives one
@@ -61,8 +51,7 @@ from helix.model.serial import _blocks, _ckpt, _cu_chunks, _cu_even, _inverse, _
 # plane-mode step draws its masks independently.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, compile_blocks=False, act_ckpt=False,
-                   fused_qk=False, bf16_params=False, fp32_stream=False,
-                   dec_frac=1.0, n_masks=1)
+                   fused_qk=False, dec_frac=1.0, n_masks=1)
 
 
 class FMModel(nn.Module):
@@ -253,11 +242,10 @@ class FMModel(nn.Module):
 
     def _encode(self, B, idx, at, aw, layers=()):
         """The encoder over rows ``idx`` of B (None = all) -> (x, {layer: x}),
-        both in natural order. ``at``/``aw`` are already those rows'. The stream
-        takes the weights' dtype, so with bf16 weights (``bf16_params``) the
-        residual stream is bf16 too -- unless ``fp32_stream``."""
+        both in natural order. ``at``/``aw`` are already those rows'. The residual
+        stream is fp32 (the weights' dtype), whatever autocast made of the embedding."""
         sel = slice(None) if idx is None else idx
-        x = self._emb(B, idx).to(torch.float32 if self.fp32_stream else self.embed.weight.dtype)
+        x = self._emb(B, idx).to(self.embed.weight.dtype)
         T, dev = x.shape[0], x.device
         lay = []
         for o, g, uw in self._layouts(B["plane_id"][sel], B["t_phys"][sel], B["wire_pos"][sel]):
@@ -522,7 +510,4 @@ def build_fm(cfg=None, **kw):
     model = FMModel(**opts)
     for k, v in train.items():
         setattr(model, k, v)
-    if model.bf16_params:
-        for p in model.parameters():
-            p.data = p.data.to(torch.bfloat16)
     return model

@@ -1,8 +1,8 @@
 """The attention groups' execution paths, and partial decoding.
 
-CPU: the fused-QK switch's checks and its CPU fallback, bf16 parameters,
-``dec_frac``. GPU tests (skipped on CPU): flash varlen vs the CPU per-group
-reference, and the fused QK-norm + RoPE kernel vs the unfused path.
+CPU: the fused-QK switch's checks and its CPU fallback, ``dec_frac``. GPU tests
+(skipped on CPU): flash varlen vs the CPU per-group reference, and the fused
+QK-norm + RoPE kernel vs the unfused path.
 """
 
 import pytest
@@ -37,12 +37,6 @@ def test_fused_qk_needs_qk_norm_and_hd64():
     B = make_batch(**EXACT)
     with pytest.raises(ValueError, match="fused_qk"):
         m.forward_feat(B, _exact_mask(EXACT["n_cells"]))
-
-
-def test_bf16_params_converts_parameters_not_buffers():
-    m = _model(bf16_params=True)
-    assert all(p.dtype == torch.bfloat16 for p in m.parameters())
-    assert m.bin_edges.dtype == torch.float32
 
 
 @cuda

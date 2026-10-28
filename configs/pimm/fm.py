@@ -61,7 +61,6 @@ batch_size = _WORLD                     # one event per rank: the FM has no even
 batch_size_val = _WORLD
 batch_size_test = _WORLD
 num_worker = int(_scheduler("train", "workers_per_gpu") or 4) * _WORLD
-bucket_by_size = 0
 
 epoch = 3
 eval_epoch = 1

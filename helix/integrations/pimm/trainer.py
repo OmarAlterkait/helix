@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 
-import torch
 from torch.optim.lr_scheduler import LambdaLR as _LambdaLR
 
 from pimm.distributed import unwrap_model
@@ -18,32 +17,19 @@ from pimm.utils import comm
 from pimm.utils.optimizer import OPTIMIZERS
 from pimm.utils.scheduler import SCHEDULERS
 
-from helix.integrations.pimm.optim import FlatAdamW
-from helix.model.mup import expand_max_lr, param_group_ratios
-
-
-def _fp32_allreduce_hook(state, bucket):
-    """DDP comm hook: average a bf16 gradient bucket in fp32, store back."""
-    import torch.distributed as dist
-    buf = bucket.buffer()
-    t = buf.float().div_(dist.get_world_size())
-    fut = dist.all_reduce(t, async_op=True).get_future()
-
-    def done(f):
-        buf.copy_(f.value()[0])
-        return buf
-    return fut.then(done)
+from helix.model.mup import param_group_ratios
 
 
 @TRAINERS.register_module()
 class FMTrainer(Trainer):
-    """pimm's Trainer with the two things muP needs, and nothing else.
+    """pimm's Trainer with what the FM needs, and nothing else.
 
     Config: ``train = dict(type="FMTrainer")``.
 
     pimm's own machinery covers everything else — DDP, resume, logging, hooks,
-    the loop itself. Only the optimizer and the scheduler cannot be expressed in
-    config, for one reason each.
+    the loop itself, the training step. Three things cannot be expressed in
+    config: the one-event-per-rank check, muP's param groups, and the
+    ``"auto"`` cadences that follow from the run's step count.
     """
 
     def build_train_loader(self):
@@ -68,133 +54,7 @@ class FMTrainer(Trainer):
                 f"requires exactly 1: it has no event separation, so a larger "
                 f"per-GPU batch trains attention ACROSS unrelated events without "
                 f"failing. Set batch_size to the number of ranks.")
-
-        # Length bucketing, off unless the config asks (`bucket_by_size`, the
-        # megabatch width in STEPS; 0 disables). See
-        # helix.integrations.pimm.sampler for the measurement that motivates it:
-        # a step costs the largest event among the ranks, events span 2.75x, and
-        # that is the whole of the gap to linear scaling at 128 GPUs.
-        #
-        # Patched around the super() call rather than at import time because the
-        # decision is a CONFIG one and _compat runs before any config exists. The
-        # symbol is restored in `finally` so a run that raises here cannot leave
-        # pimm's sampler replaced for whatever runs next in the same process --
-        # which, in a test session, is another test.
-        mega = int(getattr(self.cfg, "bucket_by_size", 0) or 0)
-        if mega <= 0:
-            return super().build_train_loader()
-
-        import pimm.engines.train as _pt
-        from helix.integrations.pimm.sampler import bucketed_sampler_class
-
-        original = _pt.StatefulRandomSampler
-        _pt.StatefulRandomSampler = bucketed_sampler_class(
-            original, mega=mega, log=getattr(self, "logger", None))
-        try:
-            loader = super().build_train_loader()
-        finally:
-            _pt.StatefulRandomSampler = original
-        # Claiming ON is not the same as being ON. The sampler falls back to
-        # pimm's ordinary order when the dataset cannot supply sizes, and the
-        # first A/B of this feature compared two IDENTICAL runs for exactly that
-        # reason: the flag was set, this line said "ON", and the registered
-        # wrapper did not forward `event_sizes()`. A flag that is SET must take
-        # effect or say so here, where the run can still be stopped.
-        if getattr(getattr(loader, "dataset", None), "event_sizes", None) is None:
-            raise RuntimeError(
-                f"bucket_by_size={mega} but "
-                f"{type(getattr(loader, 'dataset', None)).__name__} exposes no "
-                f"event_sizes(); the sampler would silently fall back to pimm's "
-                f"ordinary order and the run would not be doing what the config "
-                f"says. Forward event_sizes() on the registered wrapper.")
-        if hasattr(self, "logger"):
-            self.logger.info(
-                f"length bucketing ON: megabatch = {mega} steps "
-                f"({mega * comm.get_world_size()} events)")
-        return loader
-
-    def build_model(self):
-        """Build as pimm does, then make the gradient all-reduce cheaper.
-
-        Why this is worth a subclass hook. The FM takes ONE event per rank, so
-        scaling is entirely data-parallel and the per-step cost is
-        ``compute + all_reduce(gradients)``. The gradient buffer is the whole
-        model in fp32 -- 226 MiB at 59.2M parameters -- and it crosses the
-        network every single step. Measured on 16 GPUs over 4 nodes, that
-        all-reduce took 82 ms. At 128 GPUs it is the term that decides whether
-        the run is worth launching, so it is the term to attack.
-
-        pimm's ``parallel_model`` already sets ``broadcast_buffers=False``,
-        ``find_unused_parameters=False`` and ``static_graph=True``, which are the
-        right defaults. It does NOT register a communication hook, and there is
-        no config surface for one (grepped: no ``register_comm_hook``,
-        ``bf16_compress`` or ``gradient_as_bucket_view`` anywhere in pimm).
-
-        ``bf16_compress_hook`` casts each bucket to bfloat16 for the all-reduce
-        and back afterwards, halving the bytes on the wire. The model already
-        trains under ``enable_amp`` with ``amp_dtype: bfloat16``, so activations
-        and the forward are bf16 already; reducing gradients at the same
-        precision does not introduce a dtype the run was not already using. It is
-        not free -- gradient noise rises slightly -- which is why it is a config
-        flag (``ddp_bf16_grads``) rather than unconditional, and why it defaults
-        to ON only above one node, where the wire cost exists at all.
-
-        Set ``ddp_bf16_grads = False`` to disable, or ``True`` to force it on a
-        single node (useful when measuring its effect in isolation).
-        """
-        model = super().build_model()
-
-        world = comm.get_world_size()
-        bf16 = any(p.dtype == torch.bfloat16 for p in unwrap_model(model).parameters())
-        if bf16 and world > 1 and hasattr(model, "register_comm_hook") and \
-                not bool(getattr(self.cfg, "ddp_bf16_grads", False)):
-            # bf16 weights give bf16 gradients, and DDP would then SUM them across
-            # ranks in bf16 -- rounding at every ring hop, the mantissa loss the
-            # note below declined to pay. Reduce in fp32 instead: the bytes on the
-            # wire are what fp32 weights already sent.
-            model.register_comm_hook(None, _fp32_allreduce_hook)
-            if comm.is_main_process():
-                print("[helix] bf16 weights: gradients all-reduced in fp32")
-            return model
-        # DEFAULT OFF, and the reason is a measurement that overturned the one
-        # this hook was written for.
-        #
-        # It was added when the inter-node all-reduce took 82 ms of a ~503 ms
-        # step -- 16% -- because NCCL was falling back to TCP sockets for want of
-        # libnl in the image (see container/Dockerfile.nersc). Halving the bytes
-        # was worth real gradient noise at that ratio.
-        #
-        # With the Slingshot provider actually loading (NET/OFI, cxi, 4 nics) the
-        # same 226 MiB all-reduce takes 6.95 ms -- 59.5 GiB/s bus, 11.8x faster --
-        # which is 1.6% of a 428 ms step. Compression can now save at most 0.81%
-        # of step time, and it is not free: bf16 gradients lose mantissa on the
-        # small updates that matter late in a cooldown.
-        #
-        # Kept, rather than deleted, because the ratio moves with the model: a
-        # wider model, or a site whose fabric is slower, can put it back in range.
-        # Turn it on with ddp_bf16_grads = True and measure, do not assume.
-        want = bool(getattr(self.cfg, "ddp_bf16_grads", False))
-        if not want or world < 2 or not hasattr(model, "register_comm_hook"):
-            return model
-
-        try:
-            from torch.distributed.algorithms.ddp_comm_hooks import (
-                default_hooks as _ddp_hooks,
-            )
-            model.register_comm_hook(None, _ddp_hooks.bf16_compress_hook)
-        except Exception as exc:                                  # noqa: BLE001
-            # Never fail a run over an optimisation. Say so loudly instead: a
-            # silently absent hook looks exactly like one that is working.
-            if comm.is_main_process():
-                print(f"[helix] bf16 gradient compression NOT enabled: {exc}")
-            return model
-
-        if comm.is_main_process():
-            n = sum(p.numel() for p in unwrap_model(model).parameters())
-            print(f"[helix] bf16 gradient compression ON "
-                  f"({n/1e6:.1f}M params: {n*4/2**20:.0f} MiB -> {n*2/2**20:.0f} MiB "
-                  f"per all-reduce, world_size={world})")
-        return model
+        return super().build_train_loader()
 
     def build_optimizer(self):
         """Take param groups from the MODEL rather than from name matching.
@@ -203,8 +63,7 @@ class FMTrainer(Trainer):
         ``cfg.param_dicts`` keywords. muP cannot be written that way: the hidden
         group's ``lr / m`` and its compensating ``weight_decay * m`` come from
         the model's width multiplier, not from anything in a parameter's name.
-        ``FMModel.param_groups`` already computes them, and is verified
-        bit-identical to the research implementation.
+        ``FMModel.param_groups`` already computes them.
         """
         model = unwrap_model(self.model)          # may be DDP-wrapped by build_model
         if not hasattr(model, "param_groups"):
@@ -222,57 +81,16 @@ class FMTrainer(Trainer):
         groups = model.param_groups(base_lr, weight_decay=cfg.get("weight_decay"))
         cfg["params"] = groups                    # type/betas/etc still honoured
         opt = OPTIMIZERS.build(cfg)
-        if isinstance(opt, FlatAdamW):
-            opt.clip = self.cfg.clip_grad         # clipping happens inside its kernel
-        self._mup_ratios = param_group_ratios(opt.param_groups, base_lr)
+        ratios = param_group_ratios(opt.param_groups, base_lr)
         self.logger.info(
             f"muP param groups: " + ", ".join(
                 f"[{i}] {sum(p.numel() for p in g['params'])/1e6:.1f}M "
                 f"lr x{r:.3f} wd={g.get('weight_decay')}"
-                for i, (g, r) in enumerate(zip(opt.param_groups, self._mup_ratios))))
+                for i, (g, r) in enumerate(zip(opt.param_groups, ratios))))
         return opt
 
-    def run_step(self):
-        """pimm's step, except with ``FlatAdamW``: no GradScaler (bf16 weights and
-        gradients need none) and no clip_grad_norm_ (the optimizer clips inside
-        its kernel). Everything else -- device move, autocast, hooks, scheduler,
-        bookkeeping -- as pimm's run_step."""
-        if not isinstance(self.optimizer, FlatAdamW):
-            return super().run_step()
-        import pimm.engines.train as _pt
-        input_dict = _pt.move_batch_to_device(self.comm_info["input_dict"],
-                                              self.parallel_context.device)
-        self.comm_info["input_dict"] = input_dict
-        with _pt.sl.log_trace_span("forward"):
-            with torch.amp.autocast(device_type=self.parallel_context.device.type,
-                                    enabled=self.cfg.enable_amp,
-                                    dtype=_pt.AMP_DTYPE[self.cfg.amp_dtype]):
-                output_dict = self.model(input_dict)
-                loss = output_dict["loss"]
-        if "offset" in input_dict:
-            output_dict["avg_pts"] = input_dict["coord"].shape[0] / len(input_dict["offset"])
-        self.optimizer.zero_grad()
-        with _pt.sl.log_trace_span("backward"):
-            loss.backward()
-            self.after_backward()
-        with _pt.sl.log_trace_span("optimizer"):
-            self.optimizer.step()
-            self.scheduler.step()
-        if self.cfg.empty_cache and self.parallel_context.device.type == "cuda":
-            torch.cuda.empty_cache()
-        self.comm_info["model_output_dict"] = output_dict
-
     def build_scheduler(self):
-        """Give the scheduler a PER-GROUP peak LR so muP survives it.
-
-        ``OneCycleLR`` takes ``max_lr`` as a scalar or a per-group list. A scalar
-        assigns every group the same peak, which discards muP silently — the
-        hidden group would climb to ``base_lr`` instead of ``base_lr / m``.
-        """
-        ratios = getattr(self, "_mup_ratios", None)
-        if ratios and "max_lr" in self.cfg.scheduler:
-            self.cfg.scheduler.max_lr = expand_max_lr(
-                self.cfg.scheduler.max_lr, ratios)
+        """Resolve the ``"auto"`` cadences, then build as pimm does."""
         self._resolve_cadence()
         return super().build_scheduler()
 
@@ -286,9 +104,8 @@ class FMTrainer(Trainer):
         """Fill every ``"auto"`` cadence from the run's actual step count (:mod:`helix.core.cadence`).
 
         A config states intent (epochs, model width), never a step count: that follows from
-        the corpus, the split and the GPU count, which a config used to hard-code
-        (``N_TRAIN_EVENTS``). ``"auto"`` is accepted for the scheduler's ``warmup`` and, in
-        every hook, ``save_freq``, ``every_n_steps`` and ``evaluator_every_n_steps``; hooks
+        the corpus, the split and the GPU count. ``"auto"`` is accepted for the scheduler's
+        ``warmup`` and, in every hook, ``save_freq``, ``every_n_steps`` and ``evaluator_every_n_steps``; hooks
         are patched as config and, if pimm has built them already, as objects.
         """
         from helix.core import cadence
@@ -313,26 +130,17 @@ class FMTrainer(Trainer):
 class WSDStableLR(_LambdaLR):
     """Warmup-stable phase with an ABSOLUTE warmup step count.
 
-    Exists because ``warmup_rate`` cannot express what m113 did.
     ``Trainer.build_scheduler`` (pimm engines/train.py:733) OVERWRITES
     ``cfg.scheduler.total_steps`` with ``iters_per_epoch * epoch`` before
-    building, unconditionally — so a config that sets ``total_steps`` has it
-    discarded, and any ``warmup_rate`` is reinterpreted against the
-    trainer-derived total.
-
-    That is not a hypothetical. Expressing m113's 4,000 warmup steps as
-    ``warmup_rate = 4000/1_010_000`` against a 1,500-step run yields **5.94
-    steps** of warmup: the LR reaches 1.1e-3 by step 7 instead of step 4000 —
-    571x research's value at that point, 5.3x the integrated LR over the run —
-    on a cold 12-block d=512 transformer. That is the classic loss-spike
-    configuration, and it silently rescales again with any change to max_len,
-    epoch or GPU count.
+    building, unconditionally — so any ``warmup_rate`` (pimm's
+    ``MultiStepWithWarmupLR``, for one) is a RATIO of a number that moves with
+    max_len, epoch and GPU count. 4,000 warmup steps written as a rate against a
+    long run become ~6 steps on a 1,500-step one: a cold transformer at full LR
+    by step 7, the classic loss-spike configuration.
 
     So warmup is specified in STEPS here and total_steps is ignored entirely
     (the stable phase is flat, so it needs no horizon — which is the point of
-    WSD: "flat, no horizon baked in", mae_ddp.py:164).
-
-    Matches research's ``lr * s / warmup`` ramp exactly.
+    WSD). The ramp is ``lr * s / warmup``.
     """
 
     def __init__(self, optimizer, warmup=4000, total_steps=None, last_epoch=-1):
@@ -350,31 +158,19 @@ class WSDStableLR(_LambdaLR):
 class WSDCooldownLR(_LambdaLR):
     """The cooldown half of warmup-stable-decay: ``lr * max(floor, 1 - sqrt(p))``.
 
-    m113 trained the STABLE phase — `lr_mode: const`, described in mae_ddp.py as
-    "WSD stable phase: flat, no horizon baked in". That is the point of WSD: the
-    stable run commits to no total step count, so it can be extended, and the
+    The stable run commits to no total step count, so it can be extended; the
     decay is a SEPARATE short run started from a stable-phase checkpoint. A
-    checkpoint like m113's at 1,010,000 steps is therefore not an annealed model
-    and should not be read as one.
+    stable-phase checkpoint is therefore not an annealed model and should not be
+    read as one.
 
     pimm has no equivalent. ``PolyLR`` is ``(1-p)**power``, which is a different
-    curve: at p=0.25 research gives 0.500 and PolyLR(power=0.5) gives 0.866.
+    curve: at p=0.25 this gives 0.500 and PolyLR(power=0.5) gives 0.866.
     ``1 - sqrt(p)`` drops fast and early, which is what a short cooldown wants.
-
-    The stable phase does NOT reduce to ``MultiStepWithWarmupLR(milestones=[])``,
-    despite the shapes matching. An earlier version of this docstring claimed it
-    did; measured, the two lambdas differ only by that scheduler's
-    ``warmup_scale=1e-6`` floor (integral agrees to 2e-9). But its warmup is
-    ``warmup_rate * total_steps`` — a RATIO of a number
-    ``Trainer.build_scheduler`` overwrites unconditionally with
-    ``_iters_per_epoch() * cfg.epoch`` (pimm train.py:733). So the same config
-    yields a 476-step warmup at 118,975 total steps, **17.7** at 4,425, and
-    **6.0** at 1,500 — the two incidents recorded in the earlier training config. WSDStableLR
-    takes warmup in absolute steps and is immune to that rescale, which is the
-    whole reason it exists.
+    Warmup, if any, is in absolute steps for the reason given on
+    :class:`WSDStableLR`.
 
     Being a LambdaLR, this scales each param group's own ``base_lr``, so muP's
-    per-group ratios survive without the ``max_lr`` expansion OneCycleLR needs.
+    per-group ratios survive.
 
     ``stable_frac`` holds the LR flat for that fraction of the post-warmup steps
     before the decay starts, so ONE run can be warmup-stable-decay end to end
@@ -387,7 +183,7 @@ class WSDCooldownLR(_LambdaLR):
 
         def wsd(s):
             if warmup and s < warmup:
-                return s / warmup                      # research: lr * s / warmup
+                return s / warmup
             p = max(0.0, s - flat) / max(1, total_steps - flat)
             return max(floor, 1.0 - math.sqrt(min(p, 1.0)))
 

@@ -35,10 +35,9 @@ class CoeffCollect:
 
     2. **Tensorise.** pimm's ``collate_fn`` CONCATENATES tensor leaves
        (``torch.cat``) but sends anything else to ``default_collate``, which
-       STACKS. Handing it numpy therefore produced ``inp`` of shape
+       STACKS. Handing it numpy would produce ``inp`` of shape
        ``(1, n_cells, n_slot)`` — a spurious batch dimension the model cannot
-       consume. Converting here puts us on the concatenating path, which is also
-       the one that stays correct if batching ever arrives.
+       consume. Converting here puts us on the concatenating path.
 
     3. **Drop ``n_cells``.** It is an int, so collate turns it into
        ``tensor([30976])`` while ``make_mask`` does ``torch.rand(n)``.
@@ -58,11 +57,11 @@ class CoeffCollect:
     DROP = ("n_cells",)
 
     # 'ident' is kept by DEFAULT. CoeffCollect rebuilds `out` from scratch and
-    # copies only `keep` from the top level, so with keep=("name",) the source
-    # identity pimm-data attaches — (run, source_file, event), the thing that
-    # lets a probe reach simulation truth without rebuilding the corpus — was
-    # silently dropped before it ever reached a batch. pimm's collate handles it:
-    # str lists stay lists, the int becomes a tensor.
+    # copies only `keep` from the top level, so without it the source identity
+    # pimm-data attaches — (run, source_file, event), the thing that lets a
+    # probe reach simulation truth without rebuilding the corpus — would never
+    # reach a batch. pimm's collate handles it: str lists stay lists, the int
+    # becomes a tensor.
     def __init__(self, part="coeff", keys=None, keep=("name", "ident")):
         self.part = part
         self.keys = tuple(keys) if keys else None
@@ -122,13 +121,9 @@ class CoeffTPCDataset(Dataset):
         from helix.data import CoeffTPCDataset as _DS
         # Split parameters must be FORWARDED. This wrapper re-declares the inner
         # dataset's signature, so anything added there is invisible here until
-        # it is listed — and configs resolve THIS class, not the inner one.
-        #
-        # That has now bitten twice: event_range/exclude_range (fixed in
-        # df14602) and then holdout/split_role, which failed the first real
-        # 2-GPU launch with "unexpected keyword argument 'holdout'". The unit
-        # tests construct the inner dataset directly and cannot see it. If a
-        # third split parameter appears, add it here in the same commit.
+        # it is listed — and configs resolve THIS class, not the inner one. The
+        # unit tests construct the inner dataset directly and cannot see a
+        # missing one, so add a new parameter here in the same commit.
         self._inner = _DS(data_root=data_root, split=split,
                           dataset_name=dataset_name, modalities=tuple(modalities),
                           transform=None, loop=loop, max_len=max_len,
@@ -140,19 +135,6 @@ class CoeffTPCDataset(Dataset):
 
     def __len__(self):
         return len(self._inner)
-
-    def event_sizes(self):
-        """Per-event coefficient counts, forwarded from the inner dataset.
-
-        THE THIRD TIME the re-declaration noted in ``__init__`` has hidden
-        something the inner dataset gained. Configs -- and pimm's sampler --
-        resolve THIS class, so a method that exists only on the inner one is
-        invisible. Here the symptom was worse than a TypeError: length bucketing
-        asked the dataset for sizes, got nothing, logged one line and trained
-        normally, so the A/B that was supposed to measure bucketing measured two
-        identical runs and the 8% difference between them was noise.
-        """
-        return self._inner.event_sizes()
 
     def get_data(self, idx):
         """The raw nested sample, untransformed."""
