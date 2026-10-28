@@ -168,7 +168,9 @@ def test_example_config_declares_the_custom_import():
         # the configs resolve the corpus's run list at module scope
         pytest.skip(f"config needs a root this site does not configure: {exc}")
     assert "helix.integrations.pimm" in cfg.custom_imports["imports"]
-    assert cfg.batch_size == 1, "the FM has no event separation; see docs/archive/MULTI_EVENT_BATCHING.md"
+    from helix.paths import world_size
+    # one event per rank: the FM has no event separation (docs/archive/MULTI_EVENT_BATCHING.md)
+    assert cfg.batch_size == world_size()
     assert cfg.model["type"] == "Coeff-FM"
     assert cfg.data["train"]["type"] == "CoeffTPCDataset"
 

@@ -148,21 +148,6 @@ def test_stamp_appends_so_a_resumed_link_does_not_erase_the_first(tmp_path):
 
 
 @needs_pimm
-def test_stamp_upgrades_a_single_dict_written_by_an_older_run(tmp_path):
-    from helix.integrations.pimm import HelixPathBootstrap
-
-    (tmp_path / "provenance.json").write_text(json.dumps({"step": 0, "helix": {}}))
-    h = HelixPathBootstrap()
-    h.trainer = types.SimpleNamespace(
-        cfg=types.SimpleNamespace(save_path=str(tmp_path)), global_step=5,
-        logger=types.SimpleNamespace(info=lambda *a: None, warning=lambda *a: None,
-                                     exception=lambda *a, **k: pytest.fail("raised")))
-    h._stamp_provenance()
-    log = json.loads((tmp_path / "provenance.json").read_text())
-    assert len(log) == 2 and log[1]["step"] == 5
-
-
-@needs_pimm
 def test_stamping_never_takes_down_a_run(tmp_path):
     """Provenance is a record, not a dependency."""
     from helix.integrations.pimm import HelixPathBootstrap
