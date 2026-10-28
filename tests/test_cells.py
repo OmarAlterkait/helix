@@ -241,3 +241,21 @@ def test_real_events_reduce_consistently():
                                    rec["q"], rtol=1e-5)
         assert ((rec["dom_frac"] > 0) & (rec["dom_frac"] <= 1 + 1e-6)).all()
         assert np.isfinite(rec["dom_y"]).mean() > 0.99
+
+
+def test_a_volume_with_no_deposit_adds_nothing(tmp_path):
+    """The simulator writes a volume with nothing deposited (n_actual 0) without its per-deposit
+    arrays; that event's cells and tracks are the other volume's alone."""
+    hits = write_sim(str(tmp_path / "sim"), RUN, "0000", 2, empty={(1, 1)})
+    run_dir = tmp_path / "corpus" / RUN
+    run_dir.mkdir(parents=True)
+    _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", [0, 1])
+    out, _ = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(tmp_path / "sim"))
+    rec, _ = C.open_event(out, 1)
+    assert len(rec["key"]) and (C.unkey(rec["key"])[0] < 3).all()       # volume 0's planes only
+    assert (rec["trk_volume"] == 0).all()
+    with h5py.File(hits, "r") as f:
+        q = sum(C.decode_hits_plane(f["event_001"]["volume_0"][pl])["q"].sum() for pl in C.PLANES)
+    np.testing.assert_allclose(rec["q"].sum(), q, rtol=1e-5)
+    full, _ = C.open_event(out, 0)
+    assert set(full["trk_volume"].tolist()) == {0, 1}

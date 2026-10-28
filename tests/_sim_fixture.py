@@ -5,7 +5,9 @@
 
 Per volume: compact particles (tracks) of one to three groups each, scattered over
 the plane, some placed on top of one another so cells hold charge from several
-tracks; one group's samples may land on the same pixel more than once.
+tracks; one group's samples may land on the same pixel more than once. A volume listed in
+``empty`` has no deposit, written as the simulator writes one: ``n_actual = 0``, planes with no
+entries, ``group_to_track`` holding only the null group, and no per-deposit arrays.
 """
 import os
 
@@ -26,7 +28,7 @@ def _plane(rng, centres):
                 delta_times=np.concatenate(dt).astype(np.int8), charges_u16=np.concatenate(qs).astype(np.uint16))
 
 
-def write_sim(root, run, tag, n_events, seed=0, n_volumes=2, n_tracks=30):
+def write_sim(root, run, tag, n_events, seed=0, n_volumes=2, n_tracks=30, empty=()):
     """``root/{hits,step}/<run>/sim_wire_{hits,step}_<tag>.h5``; returns the hits path."""
     rng = np.random.default_rng(seed)
     paths = {k: os.path.join(root, k, run, f"sim_wire_{k}_{tag}.h5") for k in ("hits", "step")}
@@ -42,6 +44,13 @@ def write_sim(root, run, tag, n_events, seed=0, n_volumes=2, n_tracks=30):
             eh, es = fh.create_group(f"event_{ev:03d}"), fs.create_group(f"event_{ev:03d}")
             eh.attrs["threshold"] = 25.0
             for v in range(n_volumes):
+                if (ev, v) in empty:
+                    hv, sv = eh.create_group(f"volume_{v}"), es.create_group(f"volume_{v}")
+                    hv.attrs.update(n_actual=0, n_groups=1); sv.attrs["n_actual"] = 0
+                    hv["group_to_track"] = np.zeros(1, np.int32)
+                    for p in "UVY":
+                        hv.create_group(p).attrs.update(n_entries=0, n_groups_plane=0)
+                    continue
                 n_groups = 0
                 g2t, centres = [], {p: [] for p in "UVY"}
                 for trk in range(n_tracks):
@@ -57,6 +66,7 @@ def write_sim(root, run, tag, n_events, seed=0, n_volumes=2, n_tracks=30):
                         g2t.append(tid); n_groups += 1
                 n_dep = 4 * n_groups
                 hv, sv = eh.create_group(f"volume_{v}"), es.create_group(f"volume_{v}")
+                hv.attrs.update(n_actual=n_dep, n_groups=n_groups); sv.attrs["n_actual"] = n_dep
                 hv["group_to_track"] = np.array(g2t, np.int32)
                 hv["deposit_to_group"] = rng.integers(0, n_groups, n_dep).astype(np.int32)
                 sv["de"] = rng.uniform(0, 0.05, n_dep).astype(np.float16)

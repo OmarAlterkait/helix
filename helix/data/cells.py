@@ -306,6 +306,13 @@ def event_record(hits_ev, step_ev, volume_ranges):
     vr = np.asarray(volume_ranges, np.float64)
     for vk in sorted(x for x in hits_ev if x.startswith("volume_")):
         vi, hv, sv = int(vk.split("_")[1]), hits_ev[vk], step_ev[vk]
+        if int(hv.attrs["n_actual"]) == 0:
+            # Nothing deposited in this volume: the simulator writes its planes with no entries
+            # and no per-deposit arrays (deposit_to_group, step de, ...). It adds no cell, no track.
+            if int(sv.attrs["n_actual"]) != 0 or any(int(hv[pl].attrs["n_entries"]) for pl in PLANES if pl in hv):
+                raise ValueError(f"{vk}: hits n_actual is 0 but step or a plane has entries")
+            gbase += len(hv["group_to_track"])
+            continue
         d2g = hv["deposit_to_group"][:].astype(np.int64)
         g2t = hv["group_to_track"][:].astype(np.int64)
         de = sv["de"][:].astype(np.float64)
