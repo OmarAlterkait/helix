@@ -20,6 +20,42 @@ answered wrongly is worth as much as the answer.
 
 ---
 
+## The simulation source is the 1M-event campaign (2026-10-28)
+
+**The simulation corpus is built from `doraemon_2026_1M_lartpc`, and only from it.** The
+reader (`helix.tpc.io`) reads JAXTPC's format 2 (`entry_NNNNNN`, `/dprod/events`) in the
+campaign layout `<group>/<task>/{sensor,step,hits}/`; format 1 (`event_NNN`,
+`wire_test_00_00_02`) is not read. *Why:* one source, no second identity rule or path
+layout kept for a production nothing new is built from. *Cost:* r2 (built from wire_test)
+can be read, trained on and evaluated, but neither it nor its cells truth can be rebuilt
+or re-migrated by this code; SBND-data-helix `jobs/regress.sh`'s simulation reference must
+be re-made from a campaign task.
+
+**The event is the campaign's.** `/ident` is (run = the campaign group `j00X000`,
+source_file = the task's sensor file name, event = the campaign-unique `event_id`); the
+noise seed and the identity-hash split are functions of it, so they are the same whatever
+helix's sharding. A corpus run is a group (5 runs of 200,000 events), a build task a task
+(1000 events), and shard k holds campaign events `200k .. 200k+199` (generator job k): a
+shard's name says which events it holds. Within an unnumbered source file the reader's
+index follows the events (`[hash(run, file) | event]`), so dataset order is file order.
+
+**Step positions are `uint16 * pos_step_mm + pos_origin`** (JAXTPC `save_event_step` /
+`load_event_step`), not `volume_ranges`. *Why:* the old decode put every r2 cells
+`dom_y`/`dom_z` in [-2160, -1281] mm, compressed 0.22x and offset per event; the
+along-wire probe's label was wrong on r2. Same `helix-cells-2` format (columns unchanged);
+the label text says which decode a file used.
+
+**No physics setting changes.** The campaign's detector and production configs are those
+wire_test ran (same `cubic_wireplane_config.yaml`, `production_cubic_wireplane_doraemon_300micro`
+thresholds, 4321 ticks, 1969/1969/1443 wires, pedestals 1843/410, 182 e-/ADC, 12 bits,
+noise off) and helix's noise model and geometry are unchanged; the input differs in the
+generator (MPV/MPR particle bomb) and JAXTPC f0d2ed3 (diffusion kernel `num_s` 16 -> 32,
+`group_sizes` uint16).
+
+**`coeff_verify` judges a gap against the plan**, not against a sensor-file name
+(`--source-root` is gone): a gap the plan never wrote is fine, a planned shard absent is
+an error.
+
 ## The 2026-10 consolidation: noisy-only, one code path (2026-10-27 .. 28)
 
 origin/main's denoising research was merged into this line and then consolidated. The
@@ -376,8 +412,8 @@ done. There is one launcher, `scripts/train.sh` (§0). The decisions are:
 - **Never edit the helix tree mid-build.** `coeff_verify` fails a corpus whose
   shards carry different `code.git`; it caught exactly this and 7 shards were
   rebuilt.
-- **`coeff_verify --source-root`** distinguishes an upstream gap from a failed
-  job. A gap whose source exists is still an error.
+- **`coeff_verify` judges a gap against the plan** (`_calib/CHUNKS.txt`): an upstream gap
+  is not planned, so not a failure; a planned shard absent is.
 - **Arrays of at most 100 tasks** — `MaxArraySize` is 100 here, so the old
   `#SBATCH --array=0-799` was unsubmittable; `corpus.sh build` splits the plan into
   arrays of `ARRAY_MAX` (100).

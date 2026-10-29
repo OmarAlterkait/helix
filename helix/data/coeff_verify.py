@@ -38,7 +38,7 @@ import h5py
 
 
 def verify_corpus(data_root, dataset_name, *, split="", expect_events=None,
-                  modalities=("coeff", "coeff_clean"), source_root=None):
+                  modalities=("coeff", "coeff_clean"), planned=None):
     """Check a built corpus for cross-shard problems. Returns a list of problem
     strings (empty == clean). Does not open the dataset; pure file inspection, so
     it works on a partially built corpus too."""
@@ -66,30 +66,20 @@ def verify_corpus(data_root, dataset_name, *, split="", expect_events=None,
             probs.append(f"coeff_clean shards with no coeff pair: {sorted(c_idx - n_idx)}")
 
     # --- 2. file_index contiguity --------------------------------------------
-    # A gap usually means a build job died. It can also mean the SOURCE file was
-    # never there: run_0027670361 upstream has 90 files, not 100, so shards
-    # 51-56 and 94-97 can never exist and the corpus is complete without them.
-    # Those two cases look identical from inside the corpus, and the difference
-    # is one directory away — so `source_root` is asked for the evidence rather
-    # than a flag being offered to silence the check. With it, a gap whose source
-    # is ABSENT is fine and a gap whose source EXISTS is still an error, which is
-    # a strictly stronger check than the unconditional one it replaces.
+    # A gap usually means a build job died. It can also mean there was never
+    # anything to build there (an input absent upstream), which looks identical
+    # from inside the corpus -- so `planned` (the shard numbers the corpus's plan,
+    # _calib/CHUNKS.txt, writes) is the evidence: a gap the plan never wrote is
+    # fine, a planned shard that is absent is an error.
     have = sorted(idx_of(p) for p in noisy)
     missing = sorted(set(range(have[0], have[-1] + 1)) - set(have))
-    if missing and source_root:
-        src_dir = os.path.join(source_root, split) if split else source_root
-        recoverable = [i for i in missing if os.path.exists(
-            os.path.join(src_dir, f"{dataset_name}_sensor_{i:04d}.h5"))]
-        upstream = [i for i in missing if i not in recoverable]
-        if upstream:
-            print(f"  note: shards {upstream} have no source under {src_dir} — "
-                  f"absent upstream, not a failed build")
-        missing = recoverable
+    if planned is not None:
+        missing = [i for i in missing if i in planned]
     if missing:
         probs.append(f"file_index gap — shards {missing} absent between "
                      f"{have[0]} and {have[-1]} (a failed job leaves exactly this"
-                     + ("; pass --source-root to distinguish an upstream gap)"
-                        if not source_root else ", and the source file IS present)"))
+                     + (")" if planned is not None else "; the corpus's plan says whether it was "
+                        "meant to exist: verify the corpus root)"))
 
     # --- 3. cross-shard agreement + identity uniqueness ----------------------
     ref = None
@@ -295,14 +285,12 @@ def verify_plan(root):
                     probs.append(f"{q}: cannot read ({type(e).__name__}: {e})")
             if len(ids) == 2 and ids["optical"] != ids["coeff"]:
                 probs.append(f"{paths['optical']}: events differ from its TPC shard")
-    # each run on its own; a file_index gap is judged against the run's input (RUN_DIRS.txt)
-    rd = os.path.join(root, "_calib", "RUN_DIRS.txt")
-    inputs = {os.path.basename(x.rstrip("/")): x for x in open(rd).read().split()} if os.path.exists(rd) else {}
+    # each run on its own; a file_index gap is judged against the plan
     for prefix in sorted({p for p in want if glob.glob(f"{p}_coeff_[0-9]*.h5")}):
         d, name = os.path.split(prefix)
         probs += [f"{os.path.basename(d)}: {p}" for p in verify_corpus(
             d, name, modalities=("coeff", "coeff_clean") if glob.glob(f"{prefix}_coeff_clean_*.h5")
-            else ("coeff",), source_root=inputs.get(os.path.basename(d)))]
+            else ("coeff",), planned=set(want[prefix]))]
     return probs
 
 
@@ -382,18 +370,13 @@ def main(argv=None):
                     help="expected total event count across the corpus")
     ap.add_argument("--modalities", nargs="*", default=None,
                     help="default: coeff, plus coeff_clean when the run has clean shards (--keep-clean)")
-    ap.add_argument("--source-root", default=None,
-                    help="the SENSOR tree the corpus was built from. Given, a "
-                         "file_index gap is judged against it: absent upstream "
-                         "is fine, present-but-unbuilt is still an error.")
     a = ap.parse_args(argv)
     if a.dataset_name is None:
         if not os.path.exists(os.path.join(a.data_root, "_calib", "CHUNKS.txt")):
             ap.error("--dataset-name is required unless DATA_ROOT has _calib/CHUNKS.txt")
         return _report(verify_plan(a.data_root))
     return _report(verify_corpus(a.data_root, a.dataset_name, split=a.split,
-                                 expect_events=a.expect, modalities=_modalities(a),
-                                 source_root=a.source_root))
+                                 expect_events=a.expect, modalities=_modalities(a)))
 
 
 def _modalities(a):

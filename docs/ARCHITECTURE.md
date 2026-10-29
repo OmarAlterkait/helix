@@ -8,8 +8,8 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
 ## 1. Data flow
 
 ```
-  JAXTPC sensor files          SBND extracted files            goop light files
-  (HELIX_SENSOR_ROOT/run_*)    (sbnd_data/extracted/<run>)     (optical only)
+  JAXTPC wire campaign         SBND extracted files            goop light files
+  (HELIX_SIM_ROOT/j00X000)     (sbnd_data/extracted/<run>)     (optical only)
         |                              |                              |
   scripts/build_sim.py          scripts/build_sbnd.py           scripts/build_goop.py
   (noise model + digitize)      (TPC readout + PMT/X-ARAPUCA)
@@ -22,7 +22,7 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
                <run>/<dataset>_coeff_clean_NNNN.h5  clean values, sim, --keep-clean only
                <run>/<dataset>_optical_NNNN.h5      optical streams (helix-optical-2)
                <run>/<dataset>_cells_NNNN.h5        sim truth (helix-cells-2), scripts/build_truth.py
-               _calib/  CHUNKS.txt RUNS.txt RUN_DIRS.txt norm_sigma_global.npy
+               _calib/  CHUNKS.txt RUNS.txt norm_sigma_global.npy
                                        |
                      helix.data: CoeffTPCReader -> CoeffTPCDataset (+ AddNoise / Digitize)
                      helix.model.tokenize.CoeffTokenize -> CoeffCollect
@@ -74,11 +74,11 @@ optical=True)`, `len()`, `systems` (optical systems; empty for TPC only), `datas
 shards' dataset name), `pattern` (its input files in a run directory),
 `events(indices, workers)` (per event: `ident`, the TPC input as `readout` or `planes`,
 optional `clean`, `optical`, `truth`), `shard_attrs()`, and for a TPC `chain_config()` /
-`bind()`, for optical `optical_chain()`; optionally `file_shard(path)`.
+`bind()`, for optical `optical_chain()`; optionally `file_plan(path, events_per_shard)`.
 
 | script | `dataset` | input | TPC | optical | clean values (`--keep-clean`) |
 |---|---|---|---|---|---|
-| `scripts/build_sim.py` | `sim_wire` | `*_sensor_*.h5` (one run per dir) | planes, noised and digitized on the device (`helix.tpc.noise`, seeded per event) | none | yes |
+| `scripts/build_sim.py` | `sim_wire` | `<task>/sensor/*_sensor_*.h5` (one run per campaign group) | planes, noised and digitized on the device (`helix.tpc.noise`, seeded per event) | none | yes |
 | `scripts/build_sbnd.py` | `sbnd` | `*.h5` (extracted SBND) | readout (adc, pedestal, present) | `pmt`, `xarapuca` | no |
 | `scripts/build_goop.py` | `goop` | `*.h5` (goop light) | none | `goop` (+ `truth/pe_counts`) | no |
 
@@ -93,7 +93,7 @@ final name is complete; `--skip-complete` makes a task whose shards all exist do
 
 `plan()` (`build_X.py plan OUT RUN_DIR...`) lists a corpus's tasks, one line each,
 `PREFIX FIRST COUNT EVENTS_PER_SHARD SHARD_START INPUT...`: one task per input file when
-the source defines `file_shard` (sim: shard number = file number), else every
+the source defines `file_plan` (sim: shard k = campaign events k*eps .. (k+1)*eps-1), else every
 `--events-per-task` events of a run. `scripts/corpus.sh` writes the plan to
 `_calib/CHUNKS.txt`, calibrates one `norm_sigma` table per run and their mean
 (`_calib/norm_sigma_global.npy`), then submits arrays over the plan on the site's
@@ -148,8 +148,21 @@ per-event torch generators: reproducible on one device type, statistically (not
 bit-) equal to JAXTPC's numpy; `tests/_noise_reference.py` is the numpy port the tests
 compare against.
 
-Readers: `helix.tpc.io` reads JAXTPC sensor files (`sensor_layout`, `read_sensor_*`);
-`helix.tpc.io_sbnd.SBNDEvents` decodes extracted SBND files in worker processes.
+Readers: `helix.tpc.io` reads a JAXTPC wire production campaign (format 2,
+`doraemon_2026_1M_lartpc`; `sensor_layout`, `event_ids`, `entry`, `read_event_coo`,
+`task_files`); `helix.tpc.io_sbnd.SBNDEvents` decodes extracted SBND files in worker processes.
+
+**The simulation source.** The campaign's wire stage (`HELIX_SIM_ROOT` =
+`<campaign>/data/jaxtpc_wire`) is `<group>/<task>/{sensor,step,hits}/sim_wire_{kind}_<task>.h5`:
+5 groups `j00X000` of 200 tasks, each task 5 generator jobs x 200 = 1000 events in
+`entry_NNNNNN` groups. Every file carries `/dprod/events` (`event_id`, `job_id`, `job_event`)
+and each entry the same as attrs; `event_id` is unique in the campaign (0..999999) and is
+what helix calls the event. A corpus run is a group (`<root>/j00X000/`), a build task is a
+task's sensor file, and shard k holds campaign events `k*eps .. (k+1)*eps-1` (eps 200: shard
+= generator job id). `/ident` is (run = group, source_file = the sensor file's name, event =
+`event_id`); the noise seed and the identity-hash split are functions of it, so neither
+depends on helix's sharding. Format-1 productions (`event_NNN`, e.g. `wire_test_00_00_02`,
+which built r2) are not read.
 
 ---
 
@@ -237,7 +250,6 @@ evaluation window lies on cell edges, so the denoiser's label and the truth of e
     <root>/<run>/<dataset>_cells_NNNN.h5   the truth, scripts/build_truth.py
     <root>/_calib/CHUNKS.txt        the plan (helix.build.plan)
     <root>/_calib/RUNS.txt          run directory names, one per line (training reads this)
-    <root>/_calib/RUN_DIRS.txt      the input run directories
     <root>/_calib/<run>.npy         per-run norm_sigma; norm_sigma_global.npy their mean
 
 The split is computed, not stored (`holdout=` on the dataset: below).

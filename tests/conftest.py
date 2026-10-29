@@ -140,9 +140,9 @@ def pytest_report_header(config):
     import _paths as tp
 
     site = paths.site_name() or "NONE (nothing selected or detected)"
-    present = [n for n, v in (("corpus", tp.CORPUS), ("sensor", tp.SENSOR_ROOT),
+    present = [n for n, v in (("corpus", tp.CORPUS), ("sim", tp.SIM_ROOT),
                               ("pimm", tp.PIMM_ROOT)) if v and os.path.isdir(v)]
-    absent = [n for n, v in (("corpus", tp.CORPUS), ("sensor", tp.SENSOR_ROOT),
+    absent = [n for n, v in (("corpus", tp.CORPUS), ("sim", tp.SIM_ROOT),
                              ("pimm", tp.PIMM_ROOT)) if not (v and os.path.isdir(v))]
     return [f"helix site: {site}",
             f"helix data: present={','.join(present) or '-'}  "
@@ -168,7 +168,7 @@ def _require_data():
     from helix import paths
 
     missing = {n: v for n, v in (("HELIX_CORPUS", tp.CORPUS),
-                                 ("HELIX_SENSOR_ROOT", tp.SENSOR_ROOT))
+                                 ("HELIX_SIM_ROOT", tp.SIM_ROOT))
                if not (v and os.path.isdir(v))}
     if missing:
         detail = "; ".join(f"{k}={v or '(unset)'}" for k, v in missing.items())

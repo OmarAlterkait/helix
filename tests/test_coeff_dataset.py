@@ -563,6 +563,13 @@ def test_identity_includes_run_so_runs_do_not_collide():
     one = _identity_ids(np.array([b"s_0000.h5", b"s_0000.h5", b"s_0001.h5"]),
                         np.array([0, 1, 0], np.int64), run=np.array([b"r"] * 3))
     assert list(one) == sorted(one), "within-run ids must stay ordered"
+    # a campaign task's file is not numbered: its events (campaign ids) still keep their order
+    task = np.array([b"sim_wire_sensor_jaxtpc_wire_j000085-000089.h5"] * 3)
+    ids = _identity_ids(task, np.array([17000, 17001, 17002], np.int64), run=np.array([b"j000000"] * 3))
+    assert list(ids) == sorted(ids) and len(set(ids.tolist())) == 3
+    other = _identity_ids(np.array([b"sim_wire_sensor_jaxtpc_wire_j000090-000094.h5"]),
+                          np.array([17000], np.int64), run=np.array([b"j000000"]))
+    assert other[0] != ids[0]
 
 
 def test_reader_rejects_a_shard_with_duplicate_identities(tmp_path):
@@ -776,37 +783,27 @@ def test_one_gate_across_all_shards_is_accepted(tmp_path):
     assert len(ds) == 4
 
 
-def test_a_gap_is_judged_against_the_SOURCE_not_assumed_to_be_a_failed_job(tmp_path):
-    """A missing file_index means a dead build job — or a file that never existed.
+def test_a_gap_is_judged_against_the_PLAN_not_assumed_to_be_a_failed_job(tmp_path):
+    """A missing file_index means a dead build job -- or a shard that was never planned.
 
-    run_0027670361 has 90 source files upstream, not 100, so its corpus is
-    COMPLETE with shards 51-56 and 94-97 absent. From inside the corpus that is
-    indistinguishable from ten crashed jobs, and the difference is one directory
-    away — so the verifier is given the source tree as evidence rather than a
-    flag that would simply silence it. The result is a STRONGER check than the
-    unconditional one: a gap whose source exists is still an error.
+    An input absent upstream (r2's run_0027670361 had 90 of 100 source files) makes a corpus
+    COMPLETE with shards absent. From inside the corpus that is indistinguishable from crashed
+    jobs, so the verifier is given the plan's shard numbers as evidence rather than a flag that
+    would simply silence it: a gap the plan never wrote is fine, a planned shard absent is not.
     """
     from helix.data.coeff_verify import verify_corpus
 
     corpus = tmp_path / "corpus"; corpus.mkdir()
-    src = tmp_path / "source"; src.mkdir()
     for i in (0, 1, 3):                      # shard 2 is missing
         _write_pair(corpus, [i * 2, i * 2 + 1], file_index=i, seed=i)
 
-    # No source tree: the gap is reported, and the message says how to resolve it.
-    probs = verify_corpus(str(corpus), "cx")
-    assert any("file_index gap" in p for p in probs)
-    assert any("--source-root" in p for p in probs), probs
-
-    # Source for 2 ABSENT -> the corpus is complete.
-    for i in (0, 1, 3):
-        (src / f"cx_sensor_{i:04d}.h5").write_bytes(b"")
-    assert verify_corpus(str(corpus), "cx", source_root=str(src)) == []
-
-    # Source for 2 PRESENT -> still an error, and the message says so.
-    (src / "cx_sensor_0002.h5").write_bytes(b"")
-    probs = verify_corpus(str(corpus), "cx", source_root=str(src))
-    assert any("source file IS present" in p for p in probs), probs
+    # No plan: the gap is reported.
+    assert any("file_index gap" in p for p in verify_corpus(str(corpus), "cx"))
+    # Shard 2 not planned -> the corpus is complete.
+    assert verify_corpus(str(corpus), "cx", planned={0, 1, 3}) == []
+    # Shard 2 planned -> still an error.
+    probs = verify_corpus(str(corpus), "cx", planned={0, 1, 2, 3})
+    assert any("shards [2]" in p for p in probs), probs
 
 
 def test_n_events_is_a_fixed_nested_subset_in_corpus_order(tmp_path):

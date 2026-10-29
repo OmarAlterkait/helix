@@ -39,7 +39,8 @@ from, and whether it exists. It is the first thing to run on a new machine.
     HELIX_CORPUS                  ONE corpus: a run dir under the root.
                                   of r2; the corpus is its parent dir
                                   (_calib/RUNS.txt lists the runs).
-    HELIX_SENSOR_ROOT             simulator output the corpus is built FROM
+    HELIX_SIM_ROOT                the JAXTPC wire campaign the corpus is built
+                                  FROM (<campaign>/data/jaxtpc_wire)
     HELIX_ARCHIVE                 bin tables, converted checkpoints
     HELIX_EXP                     where runs write (save_path, logs, exports)
     HELIX_SCRATCH                 node-local/temporary space
@@ -89,7 +90,7 @@ ROOTS: dict[str, str] = {
     "HELIX_CORPUS_ROOT":   "parent of built coeff corpora",
     "HELIX_CORPUS":        "ONE corpus (a run dir), on the fastest filesystem",
     "HELIX_CORPUS_DURABLE": "the same corpus where it is KEPT, not read",
-    "HELIX_SENSOR_ROOT":   "simulator sensor shards",
+    "HELIX_SIM_ROOT":      "JAXTPC wire campaign (<campaign>/data/jaxtpc_wire)",
     "HELIX_ARCHIVE":       "bin tables, converted ckpts",
     "HELIX_EXP":           "run outputs",
     "HELIX_SCRATCH":       "temporary space",

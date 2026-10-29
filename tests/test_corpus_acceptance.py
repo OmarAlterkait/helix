@@ -153,12 +153,12 @@ def test_noise_mode_is_recorded_on_disk(tmp_path):
 
 # ---- 2. physics acceptance (F0) on real data ------------------------------
 
-from _paths import sensor_shard                                # noqa: E402
+from _paths import sim_file                                     # noqa: E402
 
-REAL = sensor_shard("run_0027575715", "sim_wire_sensor_0000.h5")
+REAL = sim_file("sensor")
 
 
-@pytest.mark.skipif(not os.path.exists(REAL), reason="production shard not reachable")
+@pytest.mark.skipif(not os.path.exists(REAL), reason="campaign task not reachable")
 def test_f0_on_a_real_built_shard(tmp_path):
     """Reconstruct a built shard and compare to the clean truth.
 
@@ -170,7 +170,8 @@ def test_f0_on_a_real_built_shard(tmp_path):
     loss to charge the DSP with. The projection alone keeps 0.989-0.995 of the clean
     signal on this event.
 
-    Floors from the chain on this shard (events 0-3 x 6 planes, this noise):
+    Floors from the chain on wire_test_00_00_02 run_0027575715 shard 0 (events 0-3 x 6 planes,
+    this noise); they hold on the campaign task j000085-000089, which this now reads:
 
         per plane   F0 min 0.871        per-event mean F0 0.910-0.917
         off-support RMS(recon - truth) per-event mean 0.43-0.52, max 0.692 ADC
@@ -186,7 +187,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
     """
     from helix.tpc.geometry import load_plane_registry
     from _noise_reference import generate_noise, digitize
-    from helix.tpc.io import sensor_layout, read_sensor_event
+    from helix.tpc.io import read_event, sensor_layout
 
     layout = sensor_layout(REAL)
     chain = TPCChain(sim_config(layout.num_wires))
@@ -196,7 +197,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
     made = {}
 
     def plane_fn(ev):
-        planes = read_sensor_event(REAL, ev, layout)
+        planes = read_event(REAL, ev, layout)
         rng = np.random.default_rng(7 + ev)
         noisy, clean = {}, {}
         for lab, img in planes.items():

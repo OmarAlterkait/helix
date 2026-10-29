@@ -17,10 +17,11 @@ roots:
   HELIX_CORPUS:        /sdf/data/neutrino/omara/coeff_tpc_r2/run_0027575715
   # One filesystem here, so there is no staged/durable split to record.
   HELIX_CORPUS_DURABLE: null
-  # doraemon belongs to a DIFFERENT group. A handover target will not have read
-  # access, so the simulation truth (hits / step, read by scripts/build_truth.py)
-  # cannot be rebuilt from there (docs/archive/INVENTORY.md).
-  HELIX_SENSOR_ROOT:   /sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor
+  # The JAXTPC wire stage of the 1M-event campaign: <group>/<task>/{sensor,step,hits}/
+  # (helix/tpc/io.py). doraemon belongs to a DIFFERENT group. A handover target will
+  # not have read access, so neither the corpus nor its truth (hits / step, read by
+  # scripts/build_truth.py) can be rebuilt from there (docs/archive/INVENTORY.md).
+  HELIX_SIM_ROOT:      /sdf/data/neutrino/doraemon/doraemon_2026_1M_lartpc/data/jaxtpc_wire
   HELIX_ARCHIVE:       /sdf/data/neutrino/omara/archive
   HELIX_EXP:           /sdf/data/neutrino/omara/exp/helix
   HELIX_SCRATCH:       $SCRATCH

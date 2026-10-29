@@ -89,7 +89,7 @@ LABEL = dict(
     energy="step de summed over the track's deposits (hits deposit_to_group), MeV",
     centroid="per (plane, track): charge-weighted pixel wire and tick",
     dominant="per cell: the hits group carrying most of its charge; dom_frac its share, (dom_y, dom_z) "
-             "its deposits' step-charge-weighted position (mm, positions dequantised by volume_ranges)",
+             "its deposits' step-charge-weighted position (mm: step positions * pos_step_mm + pos_origin)",
 )
 _STR = h5py.string_dtype(encoding="utf-8")
 
@@ -294,16 +294,21 @@ def cells_path(coeff_shard, out_dir=None):
 
 
 # ------------------------------------------------------------------------------------------ build
-def event_record(hits_ev, step_ev, volume_ranges):
-    """One simulation event (its ``hits`` and ``step`` groups, and the step file's
-    ``/config/volume_ranges``) -> a record (:data:`SCHEMA` names).
+def step_positions(sv):
+    """A ``step`` volume's deposit positions (mm): ``positions`` (uint16) * ``pos_step_mm`` +
+    ``pos_origin_{x,y,z}``, as JAXTPC writes them (``production/save.py``, ``load_event_step``)."""
+    origin = np.array([sv.attrs[f"pos_origin_{a}"] for a in "xyz"], np.float64)
+    return sv["positions"][:].astype(np.float64) * float(sv.attrs["pos_step_mm"]) + origin
+
+
+def event_record(hits_ev, step_ev):
+    """One simulation event (its ``hits`` and ``step`` entry groups) -> a record (:data:`SCHEMA` names).
 
     Samples are concatenated volume by volume (sorted by name), plane by plane, in stored order,
     so each cell's charge is summed in that order.
     """
     G, W, T, Q, TRK, GRP, YZ, vol, tid, energy = [], [], [], [], [], [], [], [], [], []
     base, gbase = 0, 0
-    vr = np.asarray(volume_ranges, np.float64)
     for vk in sorted(x for x in hits_ev if x.startswith("volume_")):
         vi, hv, sv = int(vk.split("_")[1]), hits_ev[vk], step_ev[vk]
         if int(hv.attrs["n_actual"]) == 0:
@@ -318,9 +323,7 @@ def event_record(hits_ev, step_ev, volume_ranges):
         de = sv["de"][:].astype(np.float64)
         if len(de) != len(d2g):
             raise ValueError(f"{vk}: step has {len(de)} deposits, hits deposit_to_group {len(d2g)}")
-        lo, hi = vr[vi][:, 0], vr[vi][:, 1]
-        pos = lo + sv["positions"][:].astype(np.float64) / 65535.0 * (hi - lo)
-        cen = group_centroids(pos, sv["charge"][:], d2g, len(g2t))[:, 1:]          # (y, z)
+        cen = group_centroids(step_positions(sv), sv["charge"][:], d2g, len(g2t))[:, 1:]          # (y, z)
         planes = [(pi, decode_hits_plane(hv[pl])) for pi, pl in enumerate(PLANES) if pl in hv]
         tv = np.unique(np.concatenate([g2t[d2g]] + [g2t[s["group"]] for _, s in planes]))
         energy.append(np.bincount(np.searchsorted(tv, g2t[d2g]), weights=de, minlength=len(tv)))
@@ -380,12 +383,14 @@ def read_ident(f):
 def build_shard(coeff_shard, source_root, out_dir=None):
     """Write the cells shard of ``coeff_shard``; ``(path, message)``. An existing one is kept.
 
-    Events come from the coeff shard's ``/ident`` (any number of source files); each is read
-    from ``<source_root>/{hits,step}/<run>/<source_file>`` with ``_sensor_`` replaced by
-    ``_hits_`` / ``_step_``.
+    Events come from the coeff shard's ``/ident`` (any number of source files): ``source_file`` of
+    run (campaign group) ``run`` under the campaign root ``source_root``
+    (:func:`helix.tpc.io.sensor_path`), whose task's ``hits`` and ``step`` files hold campaign event
+    ``event``.
     """
     import hdf5plugin  # noqa: F401  (hits / step use a plugin filter)
     from helix.core.coeff_io import _code_version
+    from helix.tpc import io
 
     out = cells_path(coeff_shard, out_dir)
     if os.path.exists(out):
@@ -396,18 +401,27 @@ def build_shard(coeff_shard, source_root, out_dir=None):
     try:
         for run, sf, ev in zip(ident["run"], ident["source_file"], ident["event"].tolist()):
             if (run, sf) not in files:
-                files[(run, sf)] = [h5py.File(os.path.join(source_root, kind, run, sf.replace("_sensor_", f"_{kind}_")), "r")
-                                    for kind in ("hits", "step")]
-                c = files[(run, sf)][0]["config"].attrs
+                paths = io.task_files(io.sensor_path(source_root, run, sf))
+                fh, fs = (h5py.File(paths[kind], "r") for kind in ("hits", "step"))
+                files[(run, sf)] = fh, fs
+                for x in (fh, fs):
+                    io.require_format(x)
+                ids = io.event_ids(fh)
+                if not np.array_equal(ids, io.event_ids(fs)):
+                    raise ValueError(f"{paths['hits']} and its step file hold different events")
+                files[(run, sf)] = fh, fs, {int(e): i for i, e in enumerate(ids)}
+                c = fh["config"].attrs
                 sim[f"{run}/{sf}"] = {k: (c[k].item() if hasattr(c[k], "item") else str(c[k]))
                                       for k in ("production_version", "git_commit", "git_dirty") if k in c}
-            fh, fs = files[(run, sf)]
-            hits_ev = fh[f"event_{ev:03d}"]
+            fh, fs, pos = files[(run, sf)]
+            if ev not in pos:
+                raise KeyError(f"{run}/{sf}: no event {ev}")
+            hits_ev = io.entry(fh, pos[ev], ev)
             threshold.add(float(hits_ev.attrs["threshold"]))
-            records.append(event_record(hits_ev, fs[f"event_{ev:03d}"], fs["config"]["volume_ranges"][:]))
+            records.append(event_record(hits_ev, io.entry(fs, pos[ev], ev)))
     finally:
-        for pair in files.values():
-            for x in pair:
+        for handles in files.values():
+            for x in handles[:2]:
                 x.close()
     if len(threshold) > 1:
         raise ValueError(f"{coeff_shard}: hits written with different sample thresholds {sorted(threshold)}")

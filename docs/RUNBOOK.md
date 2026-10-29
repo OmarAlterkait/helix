@@ -72,7 +72,7 @@ else reachable:
 
 ## 3. Build a corpus
 
-    scripts/corpus.sh plan      SOURCE OUT RUN_DIR...   # OUT/_calib/CHUNKS.txt, RUNS.txt, RUN_DIRS.txt
+    scripts/corpus.sh plan      SOURCE OUT RUN_DIR...   # OUT/_calib/CHUNKS.txt, RUNS.txt
     scripts/corpus.sh calibrate SOURCE OUT              # one job: norm_sigma per run, mean -> norm_sigma_global.npy
     scripts/corpus.sh build     SOURCE OUT              # job arrays over CHUNKS.txt
     scripts/corpus.sh all       SOURCE OUT RUN_DIR...   # the three, build after calibration (afterok)
@@ -81,14 +81,25 @@ else reachable:
 (goop is optical only and has no `norm_sigma` to calibrate; build it with
 `scripts/build_goop.py` directly.) Examples (S3DF):
 
-    scripts/corpus.sh all sim  $HELIX_CORPUS_ROOT/coeff_tpc_new $HELIX_SENSOR_ROOT/run_*
+    scripts/corpus.sh all sim  $HELIX_CORPUS_ROOT/coeff_tpc_new $HELIX_SIM_ROOT/j00*
     scripts/corpus.sh all sbnd /sdf/data/neutrino/omara/sbnd_data/coeff_sbnd_new \
         /sdf/data/neutrino/omara/sbnd_data/extracted/0182*
 
 Environment: `EVENTS_PER_TASK` (500; sim: one sensor file per task), `EVENTS_PER_SHARD`
 (sim 200, else 100), `CAL_EVENTS` (100 per run), `CONFIG` (chain overrides, json or
 yaml), `CONC` (16 tasks at once per array), `ARRAY_MAX` (100), `LOGS` (`OUT/_logs`).
-A task writes `PREFIX.summary_NNNN.json` beside its shards.
+A task writes `PREFIX.summary_NNNN.json` beside its shards. A run's calibration reads the
+inputs its tasks in `CHUNKS.txt` read.
+
+**The simulation corpus** is built from the JAXTPC wire campaign `doraemon_2026_1M_lartpc`
+(`HELIX_SIM_ROOT`, its `data/jaxtpc_wire`; layout and identity: ARCHITECTURE section 4).
+`RUN_DIR` is a campaign group `j00X000` (200 tasks, 200,000 events), so the corpus has five
+runs `j000000 .. j004000`; a build task is one task's sensor file (1000 events, 5 shards);
+shard k holds campaign events `k*200 .. k*200+199`, i.e. generator job k. `EVENTS_PER_SHARD`
+must divide 1000. Planning a group reads each sensor file's `/dprod/events` only (seconds).
+Measured on one task (j000085-000089, 2080 Ti): 1.27 events/s, 13 min per task, 1.13 MB per
+event (~226 MB per 200-event shard), 1.4 GB of GPU memory; the whole campaign is ~220
+GPU-hours and ~1.1 TB of coefficients, plus its cells truth.
 
 **Clean shards are off.** A build writes only the noisy `*_coeff_*` (and optical)
 shards; nothing trains on noise-free values. `--keep-clean` on a build script also
@@ -106,14 +117,15 @@ DSP; through `corpus.sh`, set `BUILD_ARGS=--keep-clean`.
 * **A clean tree.** Every shard records the helix commit and dirty flag; `coeff_verify`
   rejects a corpus built from a dirty tree or from more than one commit. Do not edit the
   checkout while a build runs.
-* **Upstream gaps are not failures.** `run_0027670361` has 90 of 100 sensor files
-  (missing 51-56, 94-97); the plan only lists files that exist.
+* **Upstream gaps are not failures.** The plan only lists input files that exist, and
+  `coeff_verify` judges a gap against the plan (the campaign has all 1000 tasks).
 * `CONFIG` must be the same for `calibrate` and `build` (the table depends on the gate).
 
 One shard by hand (a GPU node), to check the chain:
 
-    scripts/helix_run.sh python scripts/build_sim.py --input RUN/sim_wire_sensor_0000.h5 \
-        --output OUT/RUN/sim_wire --device cuda --count 200 --events-per-shard 200 [--keep-clean]
+    T=$HELIX_SIM_ROOT/j000000/jaxtpc_wire_j000085-000089      # jobs 85-89: shards 85-89
+    scripts/helix_run.sh python scripts/build_sim.py --input $T/sensor/sim_wire_sensor_${T##*/}.h5 \
+        --output OUT/j000000/sim_wire --device cuda --count 200 --events-per-shard 200 --shard-start 85 [--keep-clean]
     scripts/helix_run.sh python scripts/build_sbnd.py --input RUN/*.h5 --output OUT/RUN/sbnd \
         --device cuda --count 100
 
@@ -127,7 +139,7 @@ All options: `helix/build.py`'s docstring (`--first`, `--spread`, `--shard-start
 
     scripts/helix_run.sh python -m helix.data.coeff_verify OUT                       # every run, against _calib/CHUNKS.txt
     scripts/helix_run.sh python -m helix.data.coeff_verify OUT/RUN --dataset-name sim_wire \
-        --modalities coeff [--expect N] [--source-root SENSOR_RUN_DIR]
+        --modalities coeff [--expect N]
     scripts/helix_run.sh python -m helix.data.coeff_verify compare A.h5 B.h5 [A2.h5 B2.h5 ...]
 
 Prints `corpus OK` or the problems (exit 1). On one run directory pass
@@ -135,8 +147,9 @@ Prints `corpus OK` or the problems (exit 1). On one run directory pass
 `coeff coeff_clean`, also requires a clean shard beside every noisy one (the whole-corpus
 form checks clean pairs only where clean shards exist). The whole-corpus check reads every
 shard's metadata: for a full corpus submit it (`sbatch ... --wrap="$HELIX_ROOT/scripts/helix_run.sh
-python -m helix.data.coeff_verify OUT"`). `--source-root` tells an upstream gap (source
-absent: fine) from a failed task (source present: error). `compare` ignores only
+python -m helix.data.coeff_verify OUT"`). Against the plan, a shard gap the plan never wrote
+(an input absent upstream) is fine and a planned shard absent is an error; one run directory
+alone reports every gap. `compare` ignores only
 provenance attributes (commit, host, time).
 
 **Count events** as distinct `(ident/source_file, ident/event)`, not by summing
@@ -234,12 +247,13 @@ Plot progress: `scripts/helix_run.sh python scripts/plot_train_progress.py label
 
 ## 7. Evaluate
 
-Truth first, once per corpus run (simulation `hits`/`step` from the parent of
-`HELIX_SENSOR_ROOT`; writes `{name}_cells_<k>.h5`, ~197 MB, beside each coefficient shard;
+Truth first, once per corpus run (each event's `hits`/`step` from the campaign at
+`HELIX_SIM_ROOT`: the task its `/ident` source file names, the entry its campaign
+`event_id` names; writes `{name}_cells_<k>.h5` beside each coefficient shard;
 existing files are skipped, so a rerun resumes). It is CPU work over every shard, one
 process per core; submit it per run:
 
-    for d in $HELIX_CORPUS_ROOT/coeff_tpc_r2/run_*; do
+    for d in $HELIX_CORPUS_ROOT/coeff_tpc_new/j00*; do
       sbatch --account=mli:cider-ml --partition=milano --cpus-per-task=16 --mem=64G --time=12:00:00 \
           --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/build_truth.py --corpus $d"
     done
@@ -292,7 +306,7 @@ migration.
 It touches every shard, so submit it (S3DF; the CPU suffices). As it was run for r2 and v1:
 
     R=/sdf/data/neutrino/omara/coeff_tpc_r2
-    IN=$(for d in $R/run_*; do echo $HELIX_SENSOR_ROOT/${d##*/}; done)
+    IN=$(for d in $R/run_*; do echo /sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor/${d##*/}; done)
     sbatch --account=mli:cider-ml --partition=milano --cpus-per-task=4 --mem=16G --time=04:00:00 \
         --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/migrate_format.py sim $R $(echo $IN) --dry-run"
     # read the log, then the same without --dry-run, then
@@ -302,7 +316,9 @@ It touches every shard, so submit it (S3DF; the CPU suffices). As it was run for
     IN=$(for d in $R/run*; do echo /sdf/data/neutrino/omara/sbnd_data/extracted/${d##*/run}; done)
     # ... migrate_format.py sbnd $R $IN, as above
 
-Older corpora (pre-tau `coeff_tpc`, r1) differ beyond the gate and are not readable.
+Older corpora (pre-tau `coeff_tpc`, r1) differ beyond the gate and are not readable. The
+`sim` example is historical: the build no longer reads `wire_test_00_00_02` (format 1), so a
+wire_test-built corpus can no longer be migrated or rebuilt; r2 already is migrated.
 
 ---
 
@@ -334,7 +350,7 @@ Run it after any change meant to be output-neutral.
 | the training corpus (one run dir of it) | `HELIX_CORPUS` |
 | run outputs | `HELIX_EXP` |
 | bin tables | `HELIX_ARCHIVE` |
-| simulation sensor files | `HELIX_SENSOR_ROOT` |
+| the simulation campaign (sensor, step, hits) | `HELIX_SIM_ROOT` |
 | pimm checkout | `HELIX_PIMM_ROOT` |
 | the container | `container:` in the site profile |
 
@@ -382,5 +398,5 @@ the same. What differs:
 
   `shared` caps a GPU's share at 32 cores and 56 GB; the floor holds its features in host
   memory (10-40 GB over the probe split), so one evaluation per job. Truth needs the
-  simulation's `hits` / `step` files beside `HELIX_SENSOR_ROOT` at this site. Write it into
+  simulation campaign (`HELIX_SIM_ROOT`) at this site; NERSC has none. Write it into
   the durable copy, as above, and re-stage: `$SCRATCH` is purged.

@@ -40,7 +40,7 @@ scripts/helix_env.sh` exports them as `$HELIX_*`. The full procedures are in
     $HELIX_PYTHON -m helix.paths           # site, roots, container, scheduler
 
     # build a corpus: plan, calibrate norm_sigma, build (Slurm arrays)
-    scripts/corpus.sh all sim $HELIX_CORPUS_ROOT/coeff_tpc_new $HELIX_SENSOR_ROOT/run_*
+    scripts/corpus.sh all sim $HELIX_CORPUS_ROOT/coeff_tpc_new $HELIX_SIM_ROOT/j00*
 
     # verify it against its plan
     scripts/helix_run.sh python -m helix.data.coeff_verify $HELIX_CORPUS_ROOT/coeff_tpc_new

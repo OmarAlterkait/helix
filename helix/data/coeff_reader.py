@@ -381,8 +381,14 @@ def _identity_ids(source_file, event, run=None):
              for r in runs], np.int64)
         return (rh << np.int64(_EVB + _FILEB)) | \
                (np.asarray(sufs, np.int64) << np.int64(_EVB)) | ev
-    # names not numbered, or counts beyond the field widths: fall back to a full
-    # hash. Ordering is lost, which is cosmetic; a collision deletes events.
+    # names not numbered (a campaign task's sensor_<task>.h5, SBND's time-stamped
+    # files): [hash(run, file) 39b | event 24b], so events still follow the data
+    # within a file; events beyond the field width: a full hash (ordering lost,
+    # which is cosmetic; a collision deletes events).
+    if ev.size and int(ev.max()) < (1 << _EVB) and int(ev.min()) >= 0:
+        fh = np.array([int.from_bytes(hashlib.blake2b(f"{r}#{n}".encode(), digest_size=8).digest(),
+                                      "little") & ((1 << 39) - 1) for r, n in zip(runs, names)], np.int64)
+        return (fh << np.int64(_EVB)) | ev
     return np.array(
         [int.from_bytes(
             hashlib.blake2b(f"{r}#{n}#{int(e)}".encode(), digest_size=8).digest(),

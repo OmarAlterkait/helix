@@ -22,7 +22,8 @@ and ``scripts/corpus.sh`` runs a whole corpus of it on the site's scheduler. A s
   planes, written with ``--keep-clean``), ``optical`` ({system: waveforms}) and ``truth`` ({name: array});
 * ``source.shard_attrs()``: dict(noise=, provenance=) the coeff shards record about the input;
 * for a TPC: ``chain_config(overrides)`` and ``bind(chain)``; for optical: ``optical_chain(overrides)``;
-* optionally ``file_shard(path)``: plan one task per input file, its shards numbered from it.
+* optionally ``file_plan(path, events_per_shard)`` -> ``(events, first shard)``: plan one task per
+  input file, its shards numbered from that.
 
 Everything after the read is shared. Per ``--events-per-shard`` events, shard k
 (``--shard-start`` + 0, 1, ...): ``PREFIX_coeff_k.h5`` (:mod:`helix.core.coeff_io`; the dataset
@@ -171,7 +172,9 @@ def build(source, prefix, *, indices, chain=None, ochain=None, events_per_shard=
         ostream.synchronize()
         return out
 
-    Path(prefix).parent.mkdir(parents=True, exist_ok=True)
+    if calibrate is None:
+        Path(prefix).parent.mkdir(parents=True, exist_ok=True)
+    prefix = prefix or ""
     attrs = source.shard_attrs()
     if attrs["provenance"] is not None or chain is not None:      # the GPU generation is part of a build
         attrs["provenance"] = dict(attrs["provenance"] or {},
@@ -287,15 +290,18 @@ def _datasets(g):
 
 def plan(Source, out, run_dirs, events_per_task, events_per_shard):
     """A corpus's tasks, one line each: ``PREFIX FIRST COUNT EVENTS_PER_SHARD SHARD_START INPUT...``.
-    One task per input file when the source numbers shards by file (``Source.file_shard``), else
+    One task per input file when the source numbers shards by file (``Source.file_plan``), else
     every ``events_per_task`` events of a run's files."""
     lines = []
     for d in map(Path, run_dirs):
         prefix = f"{out}/{d.name}/{Source.dataset}"
         files = sorted(str(f) for f in d.glob(Source.pattern))
-        if hasattr(Source, "file_shard"):
-            lines += [f"{prefix} 0 {len(Source([f], None))} {events_per_shard} {Source.file_shard(f)} {f}"
-                      for f in files]
+        if not files:
+            raise ValueError(f"{d}: no {Source.pattern} input files")
+        if hasattr(Source, "file_plan"):
+            for f in files:
+                n, k = Source.file_plan(f, events_per_shard)
+                lines.append(f"{prefix} 0 {n} {events_per_shard} {k} {f}")
             continue
         n = len(Source(files, None))
         for first in range(0, n, events_per_task):
@@ -327,7 +333,7 @@ def main(Source, argv=None):
         return None
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", nargs="+", required=True)
-    ap.add_argument("--output", required=True, help="DIR/PREFIX of the shards")
+    ap.add_argument("--output", default=None, help="DIR/PREFIX of the shards (not with --calibrate)")
     ap.add_argument("--device", default=None)
     ap.add_argument("--first", type=int, default=0)
     ap.add_argument("--count", type=int, default=None)
@@ -349,6 +355,8 @@ def main(Source, argv=None):
     ap.add_argument("--skip-complete", action="store_true",
                     help="do nothing when every shard of this selection exists (a resubmitted task)")
     a = ap.parse_args(argv)
+    if (a.output is None) == (a.calibrate is None):
+        ap.error("--output (the shards) or --calibrate (a table, no shards): exactly one")
     kind = "coeff" if hasattr(Source, "chain_config") else "optical"
     if a.skip_complete and a.count and a.calibrate is None and _complete(
             a.output, kind, a.shard_start, a.count, a.events_per_shard):

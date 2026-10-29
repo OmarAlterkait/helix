@@ -3,7 +3,8 @@
 # path of any script ending in helix.build.main), on the site's scheduler (helix/sites/<site>.yaml,
 # scheduler.corpus) and in its container (scripts/helix_run.sh).
 #
-#   scripts/corpus.sh plan SOURCE OUT RUN_DIR...  -> OUT/_calib/CHUNKS.txt (one task per line) and RUNS.txt
+#   scripts/corpus.sh plan SOURCE OUT RUN_DIR...  -> OUT/_calib/CHUNKS.txt (one task per line) and RUNS.txt;
+#                                                 sim: RUN_DIR is a campaign group, e.g. $HELIX_SIM_ROOT/j00*
 #   scripts/corpus.sh calibrate SOURCE OUT        one job: a norm_sigma table per run (CAL_EVENTS spread over
 #                                                 the run), their mean -> OUT/_calib/norm_sigma_global.npy
 #   scripts/corpus.sh build SOURCE OUT            job arrays over CHUNKS.txt, after the calibration job when one
@@ -15,7 +16,8 @@
 # One GPU type per corpus: the DSP's float reductions differ between generations (turing and A100
 # disagree on 0.016% of kept coefficients), so the site pins the corpus partition.
 #
-# Environment: EVENTS_PER_TASK (500; sim: one sensor file per task), EVENTS_PER_SHARD (sim 200, else 100),
+# Environment: EVENTS_PER_TASK (500; sim: one sensor file per task), EVENTS_PER_SHARD (sim 200, else 100;
+# sim: a divisor of the 1000 events of a task, since shard k holds campaign events k*EPS..(k+1)*EPS-1),
 # CAL_EVENTS (100 per run), CONFIG (chain overrides, json/yaml), BUILD_ARGS (more build options for every
 # shard, e.g. --keep-clean), CONC (16 tasks at once per array),
 # ARRAY_MAX (100: the largest array the scheduler accepts), LOGS (OUT/_logs).
@@ -46,17 +48,17 @@ plan() {
   "${RUN[@]}" "$BUILD" plan "$OUT" "$@" --events-per-task "${EVENTS_PER_TASK:-500}" \
       --events-per-shard "$EPS" > "$CAL/CHUNKS.txt"
   for d in "$@"; do basename "$d"; done > "$CAL/RUNS.txt"
-  printf '%s\n' "$@" > "$CAL/RUN_DIRS.txt"
   echo "$(wc -l < "$CAL/CHUNKS.txt") tasks over $# runs -> $CAL/CHUNKS.txt"
 }
 
-calibrate_job() {          # inside the job
-  while read -r d; do
-    r=$(basename "$d")
+calibrate_job() {          # inside the job; a run's inputs are those its tasks in CHUNKS.txt read
+  for r in $(cat "$CAL/RUNS.txt"); do
     [ -s "$CAL/$r.npy" ] && { echo "$r calibrated"; continue; }
-    "${RUN[@]}" "$BUILD" --input "$d"/*.h5 --spread "${CAL_EVENTS:-100}" --device cuda \
+    mapfile -t inputs < <(awk -v r="$r" '{ n = split($1, a, "/") } a[n - 1] == r { for (i = 6; i <= NF; i++) print $i }' \
+        "$CAL/CHUNKS.txt" | sort -u)
+    "${RUN[@]}" "$BUILD" --input "${inputs[@]}" --spread "${CAL_EVENTS:-100}" --device cuda \
         --no-optical "${CFG[@]}" --calibrate "$CAL/$r.npy" | tail -3
-  done < "$CAL/RUN_DIRS.txt"
+  done
   "${RUN[@]}" - "$CAL" <<'PY'
 import os, sys
 import numpy as np

@@ -1,6 +1,6 @@
 """helix.data.cells: the simulation truth on the fine grid, one file per coefficient shard.
 
-Synthetic hits/step files (tests/_sim_fixture.py). Pinned: the stored record is the pixels
+A synthetic campaign task (tests/_sim_fixture.py). Pinned: the stored record is the pixels
 reduced (per cell, per (cell, track), per (plane, track), per track, and each cell's dominant
 group with its 3D centroid), computed here independently; it is complete for the evaluation's
 windows (a grid-aligned box holds per track exactly its pixels' charge); the build is resumable
@@ -16,18 +16,22 @@ import pytest
 pytest.importorskip("hdf5plugin")
 
 from _coeff_fixture import write_coeff_shard  # noqa: E402
-from _sim_fixture import write_sim  # noqa: E402
+from _sim_fixture import write_task  # noqa: E402
 from helix.data import cells as C  # noqa: E402
 from helix.eval import windows as Wn  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-RUN, N_EV = "run_x", 3
+RUN, N_EV, FIRST_JOB = "j000000", 3, 85
+EV0 = FIRST_JOB * 200                 # the task's first campaign event id
 BASIS = dict(wavelet="db2", dwt_level=2, dwt_mode="periodization", n_ticks_raw=32, pad=0, sigma_norm=2.6,
              removal_json="{}", threshold_json="{}")
 
 
-def _coeff_shard(path, events, run=RUN, source="sim_wire_sensor_0000.h5"):
+SOURCE = "sim_wire_sensor_jaxtpc_wire_j000085-000089.h5"
+
+
+def _coeff_shard(path, events, run=RUN, source=SOURCE):
     rng = np.random.default_rng(1)
     evs = [dict(band=np.zeros(4, np.uint8), plane_gid=np.zeros(4, np.int32), wire=rng.integers(0, 4, 4),
                 tau=rng.integers(0, 8, 4), value=rng.standard_normal(4).astype(np.float32),
@@ -40,10 +44,10 @@ def _coeff_shard(path, events, run=RUN, source="sim_wire_sensor_0000.h5"):
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory):
     d = tmp_path_factory.mktemp("cells")
-    hits = write_sim(str(d / "sim"), RUN, "0000", N_EV)
+    hits = write_task(str(d / "sim"), RUN, FIRST_JOB, N_EV)["hits"]
     run_dir = d / "corpus" / RUN
     run_dir.mkdir(parents=True)
-    _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", list(range(N_EV)))
+    _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", [EV0 + i for i in range(N_EV)])
     out, msg = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(d / "sim"))
     return dict(dir=d, run_dir=run_dir, hits=hits, cells=out, msg=msg)
 
@@ -53,12 +57,12 @@ def _pixels(hits, ev):
     independently of helix.data.cells."""
     G, W, T, Q, V, TID, GRP, YZ = [], [], [], [], [], [], [], []
     with h5py.File(hits, "r") as f, h5py.File(str(hits).replace("hits", "step"), "r") as fs:
-        vr = fs["config"]["volume_ranges"][:]
         gbase = 0
-        for vk in sorted(x for x in f[f"event_{ev:03d}"] if x.startswith("volume_")):
-            hv, sv, vi = f[f"event_{ev:03d}"][vk], fs[f"event_{ev:03d}"][vk], int(vk.split("_")[1])
+        for vk in sorted(x for x in f[f"entry_{ev:06d}"] if x.startswith("volume_")):
+            hv, sv, vi = f[f"entry_{ev:06d}"][vk], fs[f"entry_{ev:06d}"][vk], int(vk.split("_")[1])
             g2t, d2g = hv["group_to_track"][:], hv["deposit_to_group"][:]
-            pos = vr[vi][:, 0] + sv["positions"][:] / 65535.0 * (vr[vi][:, 1] - vr[vi][:, 0])
+            origin = np.array([sv.attrs[f"pos_origin_{a}"] for a in "xyz"])
+            pos = origin + sv["positions"][:] * float(sv.attrs["pos_step_mm"])
             ch = sv["charge"][:].astype(np.float64)
             cen = {}
             for grp in np.unique(d2g):
@@ -99,9 +103,9 @@ def test_record_is_the_pixels_reduced(corpus):
         assert t_ == pytest.approx((Q[m] * T[m]).sum() / Q[m].sum(), rel=1e-12)
     with h5py.File(corpus["hits"], "r") as fh, h5py.File(str(corpus["hits"]).replace("hits", "step"), "r") as fs:
         for i, (v, t) in enumerate(trk):
-            d2g = fh[f"event_001/volume_{v}/deposit_to_group"][:]
-            g2t = fh[f"event_001/volume_{v}/group_to_track"][:]
-            de = fs[f"event_001/volume_{v}/de"][:].astype(np.float64)
+            d2g = fh[f"entry_000001/volume_{v}/deposit_to_group"][:]
+            g2t = fh[f"entry_000001/volume_{v}/group_to_track"][:]
+            de = fs[f"entry_000001/volume_{v}/de"][:].astype(np.float64)
             assert rec["trk_energy"][i] == pytest.approx(de[g2t[d2g] == t].sum(), rel=1e-6)
 
 
@@ -168,7 +172,7 @@ def test_file_layout_resume_and_atomic_write(corpus):
         assert cfg.attrs["format"] == C.FORMAT and (cfg.attrs["grid_fw"], cfg.attrs["grid_ft"]) == (C.FW, C.FT)
         import json
         assert json.loads(cfg.attrs["label_json"])["hits_threshold"] == 25.0
-        assert C.read_ident(f)["event"].tolist() == list(range(N_EV))
+        assert C.read_ident(f)["event"].tolist() == [EV0 + i for i in range(N_EV)]
         for g in C.GROUPS:
             assert f[g]["event_offset"].shape == (N_EV + 1,)
     before = os.stat(corpus["cells"]).st_mtime_ns
@@ -211,7 +215,8 @@ def test_dataset_refuses_cells_of_other_events(corpus, tmp_path):
     from helix.data.coeff_dataset import CoeffTPCDataset
     d = tmp_path / RUN
     d.mkdir()
-    _coeff_shard(d / "sim_wire_coeff_0000.h5", list(range(N_EV)), source="sim_wire_sensor_0001.h5")
+    _coeff_shard(d / "sim_wire_coeff_0000.h5", [EV0 + i for i in range(N_EV)],
+                 source="sim_wire_sensor_jaxtpc_wire_j000090-000094.h5")
     (d / "sim_wire_cells_0000.h5").write_bytes(open(corpus["cells"], "rb").read())
     with pytest.raises(ValueError):
         CoeffTPCDataset(data_root=str(d), dataset_name="sim_wire", modalities=("coeff", "cells"))
@@ -219,43 +224,46 @@ def test_dataset_refuses_cells_of_other_events(corpus, tmp_path):
 
 # ------------------------------------------------------------------------------------- real data
 def _real():
-    from _paths import CORPUS, SENSOR_ROOT
-    shard = os.path.join(CORPUS, "sim_wire_coeff_0000.h5")
-    return shard, os.path.dirname(SENSOR_ROOT.rstrip("/"))
+    from _paths import sim_file
+    return sim_file("hits"), sim_file("step")
 
 
-@pytest.mark.skipif(not (os.path.exists(_real()[0]) and os.path.isdir(_real()[1])), reason="corpus / sim not reachable")
+@pytest.mark.skipif(not os.path.exists(_real()[0]), reason="campaign task not reachable")
 def test_real_events_reduce_consistently():
-    """Three events of the production corpus: the record's tables agree with one another, and
-    almost every cell has a dominant group with a centroid."""
-    shard, source = _real()
-    with h5py.File(shard, "r") as f:
-        ident = C.read_ident(f)
-    for pos in range(3):
-        run, sf, ev = ident["run"][pos], ident["source_file"][pos], int(ident["event"][pos])
-        hp = os.path.join(source, "hits", run, sf.replace("_sensor_", "_hits_"))
-        with h5py.File(hp, "r") as fh, h5py.File(hp.replace("hits", "step"), "r") as fs:
-            rec = C.event_record(fh[f"event_{ev:03d}"], fs[f"event_{ev:03d}"], fs["config"]["volume_ranges"][:])
-        assert len(rec["key"]) > 10_000 and (np.diff(rec["key"]) > 0).all()
-        np.testing.assert_allclose(np.bincount(rec["ct_cell"], weights=rec["ct_q"], minlength=len(rec["key"])),
-                                   rec["q"], rtol=1e-5)
-        assert ((rec["dom_frac"] > 0) & (rec["dom_frac"] <= 1 + 1e-6)).all()
-        assert np.isfinite(rec["dom_y"]).mean() > 0.99
+    """Events of the campaign task j000085-000089, entry 202 (nothing in volume 1) among them: the
+    record's tables agree with one another, almost every cell has a dominant group with a centroid,
+    and the centroids lie inside the detector (step positions dequantised by their own origin and
+    step)."""
+    from helix.tpc import io
+    hp, sp = _real()
+    with h5py.File(hp, "r") as fh, h5py.File(sp, "r") as fs:
+        ids = io.event_ids(fh)
+        for pos in (0, 1, 202):
+            rec = C.event_record(io.entry(fh, pos, ids[pos]), io.entry(fs, pos, ids[pos]))
+            assert len(rec["key"]) > 1_000 and (np.diff(rec["key"]) > 0).all()
+            np.testing.assert_allclose(np.bincount(rec["ct_cell"], weights=rec["ct_q"], minlength=len(rec["key"])),
+                                       rec["q"], rtol=1e-5)
+            assert ((rec["dom_frac"] > 0) & (rec["dom_frac"] <= 1 + 1e-6)).all()
+            assert np.isfinite(rec["dom_y"]).mean() > 0.99
+            yz = np.stack([rec["dom_y"], rec["dom_z"]])[:, np.isfinite(rec["dom_y"])]
+            assert (np.abs(yz) <= 2160 + 1).all()
+            if pos == 202:
+                assert (C.unkey(rec["key"])[0] < 3).all() and (rec["trk_volume"] == 0).all()
 
 
 def test_a_volume_with_no_deposit_adds_nothing(tmp_path):
     """The simulator writes a volume with nothing deposited (n_actual 0) without its per-deposit
     arrays; that event's cells and tracks are the other volume's alone."""
-    hits = write_sim(str(tmp_path / "sim"), RUN, "0000", 2, empty={(1, 1)})
+    hits = write_task(str(tmp_path / "sim"), RUN, FIRST_JOB, 2, empty={(1, 1)})["hits"]
     run_dir = tmp_path / "corpus" / RUN
     run_dir.mkdir(parents=True)
-    _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", [0, 1])
+    _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", [EV0, EV0 + 1])
     out, _ = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(tmp_path / "sim"))
     rec, _ = C.open_event(out, 1)
     assert len(rec["key"]) and (C.unkey(rec["key"])[0] < 3).all()       # volume 0's planes only
     assert (rec["trk_volume"] == 0).all()
     with h5py.File(hits, "r") as f:
-        q = sum(C.decode_hits_plane(f["event_001"]["volume_0"][pl])["q"].sum() for pl in C.PLANES)
+        q = sum(C.decode_hits_plane(f["entry_000001"]["volume_0"][pl])["q"].sum() for pl in C.PLANES)
     np.testing.assert_allclose(rec["q"].sum(), q, rtol=1e-5)
     full, _ = C.open_event(out, 0)
     assert set(full["trk_volume"].tolist()) == {0, 1}

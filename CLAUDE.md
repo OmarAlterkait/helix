@@ -47,7 +47,7 @@ in-image interpreter and binds are site facts declared in
 ```bash
 source scripts/helix_env.sh && $HELIX_PYTHON -m helix.paths   # FIRST: site, roots, container, scheduler
 scripts/helix_run.sh python -m pytest tests -q
-scripts/helix_run.sh python scripts/build_sim.py --input RUN/sim_wire_sensor_0000.h5 --output OUT/RUN/sim_wire --device cuda
+scripts/helix_run.sh python scripts/build_sim.py --input GROUP/TASK/sensor/sim_wire_sensor_TASK.h5 --output OUT/GROUP/sim_wire --device cuda --shard-start K
 ```
 
 `helix.paths` needs only os/pathlib/yaml, so it runs outside the container too —

@@ -17,7 +17,7 @@ A run directory is renamed to its input run's name where it differs (``run018251
 
 Before anything is written, every shard's old ``/config`` attributes go to
 ``_calib/format1_attrs.json``, and an existing ``_calib/CHUNKS.txt`` to ``CHUNKS.txt.format1``;
-then the corpus gets its plan (``_calib/CHUNKS.txt``, ``RUNS.txt``, ``RUN_DIRS.txt``) as
+then the corpus gets its plan (``_calib/CHUNKS.txt``, ``RUNS.txt``) as
 ``scripts/corpus.sh plan`` writes it. Shards already stamped are skipped, so a rerun finishes an
 interrupted migration. Check the result with ``python -m helix.data.coeff_verify CORPUS_ROOT``.
 """
@@ -55,7 +55,7 @@ def source_class(source):
 def new_basis(Source, run_dir, cfg):
     """The basis the current chain records for this source, on the shard's own geometry."""
     files = sorted(glob.glob(os.path.join(run_dir, Source.pattern)))
-    src = Source(files[:1] if hasattr(Source, "file_shard") else files, None, optical=False)
+    src = Source(files[:1] if hasattr(Source, "file_plan") else files, None, optical=False)
     chain = TPCChain(src.chain_config(None))
     return chain_coeff.basis(chain, cfg["band_lengths"][:], int(cfg.attrs["n_ticks_raw"]),
                              float(cfg.attrs["sigma_norm"]))
@@ -159,8 +159,6 @@ def main(argv=None):
         fh.write("\n".join(lines) + "\n")
     with open(os.path.join(cal, "RUNS.txt"), "w") as fh:
         fh.write("\n".join(os.path.basename(d.rstrip("/")) for d in a.run_dirs) + "\n")
-    with open(os.path.join(cal, "RUN_DIRS.txt"), "w") as fh:
-        fh.write("\n".join(a.run_dirs) + "\n")
     print(f"migrated {len(todo)} shards; plan {ch} ({len(lines)} tasks); old attributes in {bk}")
     return 0
 

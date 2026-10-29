@@ -26,9 +26,9 @@ roots:
   HELIX_CORPUS_ROOT:   $SCRATCH
   HELIX_CORPUS:        $SCRATCH/coeff_tpc_r2/run_0027575715
   HELIX_CORPUS_DURABLE: $CFS/m5238/users/oalter/coeff_tpc_r2
-  # Unlike S3DF, the simulator output lives in OUR project directory rather than
-  # another group's, so a corpus rebuild is possible here and was not there.
-  HELIX_SENSOR_ROOT:   $CFS/m5238/users/oalter/wire_test_00_00_02/sensor
+  # The campaign the corpus is built from (doraemon_2026_1M_lartpc) has no copy here
+  # (the wire_test_00_00_02 copy is a format helix no longer reads).
+  HELIX_SIM_ROOT:      null
   HELIX_ARCHIVE:       $CFS/m5238/users/oalter/archive
   HELIX_EXP:           $CFS/m5238/users/oalter/exp/helix
   # $SCRATCH is Lustre and is PURGED on inactivity. Nothing durable belongs here.

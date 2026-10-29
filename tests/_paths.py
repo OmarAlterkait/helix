@@ -12,7 +12,7 @@ unless an env var is set.
 
     HELIX_PIMM_ROOT       the pimm checkout the config/step contracts import
     HELIX_CORPUS          a built coeff corpus
-    HELIX_SENSOR_ROOT     root of the real sensor shards
+    HELIX_SIM_ROOT        the JAXTPC wire campaign (<campaign>/data/jaxtpc_wire)
 """
 
 import os
@@ -49,18 +49,21 @@ PIMM_ROOT = _opt("HELIX_PIMM_ROOT")
 #: so the wrong one is a plausible wrong answer rather than a crash.
 CORPUS = _opt("HELIX_CORPUS")
 
-#: Root of the real sensor shards. Each test picks its own run/shard beneath it
-#: (they deliberately use different runs), so this is a ROOT, not one file.
-SENSOR_ROOT = _opt("HELIX_SENSOR_ROOT")
+#: The JAXTPC wire campaign the corpus is built from. Each test picks its own task beneath
+#: it, so this is a ROOT, not one file.
+SIM_ROOT = _opt("HELIX_SIM_ROOT")
+
+#: The task the real-data tests read: it holds an event with an empty volume (entry 202).
+SIM_GROUP, SIM_TASK = "j000000", "jaxtpc_wire_j000085-000089"
 
 
-def sensor_shard(run, name):
-    """One shard beneath :data:`SENSOR_ROOT`."""
-    return os.path.join(SENSOR_ROOT, run, name)
+def sim_file(kind="sensor", group=SIM_GROUP, task=SIM_TASK):
+    """One task's ``kind`` (sensor / step / hits) file beneath :data:`SIM_ROOT`."""
+    return os.path.join(SIM_ROOT, group, task, kind, f"sim_wire_{kind}_{task}.h5")
 
 
 def describe():
     """``{name: (path, exists)}`` — so a skip can say WHICH input was missing."""
     return {n: (p, os.path.exists(p)) for n, p in (
         ("PIMM_ROOT", PIMM_ROOT), ("CORPUS", CORPUS),
-        ("SENSOR_ROOT", SENSOR_ROOT))}
+        ("SIM_ROOT", SIM_ROOT))}

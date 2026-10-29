@@ -4,9 +4,9 @@
 
     python scripts/build_truth.py --corpus <run dir>
 
-The events are each shard's own ``/ident``; ``hits`` and ``step`` are read from the
-parent of HELIX_SENSOR_ROOT. A shard whose cells file exists is skipped, and a file
-is renamed into place only once complete, so an interrupted build resumes.
+The events are each shard's own ``/ident``; their ``hits`` and ``step`` are read from the
+campaign at HELIX_SIM_ROOT (helix/tpc/io.py). A shard whose cells file exists is skipped, and a
+file is renamed into place only once complete, so an interrupted build resumes.
 """
 import argparse
 import glob
@@ -28,7 +28,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--corpus", required=True, help="one corpus run directory")
     a = ap.parse_args()
-    source = str(root("HELIX_SENSOR_ROOT").parent)
+    source = str(root("HELIX_SIM_ROOT"))
     shards = sorted(glob.glob(os.path.join(a.corpus, "*_coeff_[0-9]*.h5")))
     if not shards:
         raise SystemExit(f"{a.corpus}: no *_coeff_<k>.h5 shards")
