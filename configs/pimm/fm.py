@@ -101,7 +101,11 @@ model = dict(
     compile_blocks=True,
     fused_qk=True,
 )
-optimizer = dict(type="AdamW", lr=4.4e-3, weight_decay=0.05, betas=(0.9, 0.95), fused=True)
+# The peak LR scales as sqrt(batch): 4.4e-3 at 16 events per step, the batch the recipe was
+# measured at (2.2e-3 was the measured optimum at 4 events, docs/archive/SCIENCE.md sections 5, 9).
+# muP transfers it across width only.
+optimizer = dict(type="AdamW", lr=4.4e-3 * (_WORLD / 16) ** 0.5, weight_decay=0.05, betas=(0.9, 0.95),
+                 fused=True)
 scheduler = dict(type="WSDStableLR", warmup="auto")
 
 # ---------------------------------------------------------------------------- data

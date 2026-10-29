@@ -22,10 +22,10 @@ roots:
   #
   # $SCRATCH is purged on inactivity, so the durable copy stays on $CFS and is
   # named below rather than forgotten. Re-stage by copying it back:
-  # rsync -a $HELIX_CORPUS_DURABLE/ $SCRATCH/coeff_tpc_r2/
+  # rsync -a $HELIX_CORPUS_DURABLE/ $SCRATCH/coeff_tpc_d1m/
   HELIX_CORPUS_ROOT:   $SCRATCH
-  HELIX_CORPUS:        $SCRATCH/coeff_tpc_r2/run_0027575715
-  HELIX_CORPUS_DURABLE: $CFS/m5238/users/oalter/coeff_tpc_r2
+  HELIX_CORPUS:        $SCRATCH/coeff_tpc_d1m/j000000
+  HELIX_CORPUS_DURABLE: $CFS/m5238/users/oalter/coeff_tpc_d1m
   # The campaign the corpus is built from (doraemon_2026_1M_lartpc) has no copy here
   # (the wire_test_00_00_02 copy is a format helix no longer reads).
   HELIX_SIM_ROOT:      null

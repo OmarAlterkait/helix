@@ -59,7 +59,7 @@ scripts/helix_env.sh` exports them as `$HELIX_*`. The full procedures are in
     scripts/helix_run.sh python -m helix.eval $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe --out eval.json
     scripts/helix_run.sh python -m helix.eval $HELIX_EXP/fm_cooldown --metrics denoise --denoiser $HELIX_EXP/denoise --out dn.json
 
-The bin grid the configs read is `$HELIX_ARCHIVE/coeff_bins_r2_run0027575715_noisy.pt`
+The bin grid the configs read is `$HELIX_ARCHIVE/coeff_bins_d1m_j000000_noisy.pt`
 (RUNBOOK section 5).
 
 ## Documents

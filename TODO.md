@@ -6,11 +6,12 @@ in `docs/archive/`.
 
 ## Before the next production run
 
-* **Build r2's cells truth.** `scripts/build_truth.py --corpus <run>` for every r2 run
-  (~197 MB per shard). The denoiser and every `helix.eval` metric but `recon` need it.
-* **Confirm the LR at production length.** `nz_pw16`'s LR 4.4e-3 was tuned at 29.2k steps
-  on 16 GPUs; the optimum falls with run length, so a production-length stable phase
-  should be checked against a lower LR before it is trusted.
+* **The rest of the campaign.** `coeff_tpc_d1m` holds group j000000 (200k events, with cells);
+  `corpus.sh` builds j001000-j004000 the same way (~44 turing GPU-hours per group).
+* **Confirm the LR at production length.** fm.py scales `nz_pw16`'s 4.4e-3 (29.2k steps,
+  16 GPUs) as sqrt(GPUs / 16); the optimum also falls with run length, so a
+  production-length stable phase should be checked against a lower LR before it is trusted.
+  The denoiser's 3e-3 / 1e-2 (configs/pimm/denoise.py) are M6d's, also at 16 GPUs.
 * **The denoiser's default encoder.** `configs/pimm/denoise.py` defaults `model.fm` to
   `$HELIX_EXP/fm` (the stable phase), not the cooled `$HELIX_EXP/fm_cooldown`; pass it
   explicitly (as the RUNBOOK does) or decide which the default should be.
@@ -45,7 +46,7 @@ in `docs/archive/`.
   has no reader (drop it with a `uv lock` refresh); `scripts/write_holdout.py` writes a file
   nothing reads (kept for inspection; `tests/test_corpus_identity.py` pins it).
 * **`fm_smoke`'s bin table** (`$HELIX_ARCHIVE/coeff_bins_K32_smoke.pt`) may predate the
-  noisy grid; rederive it from r2 with K = 32 if the smoke run should resemble production.
+  noisy grid; rederive it from the corpus with K = 32 if the smoke run should resemble production.
 * **Optical tokens are not fed to the model.** `helix.optical.tokens` produces 128-slot
   tokens; the model, the dataset and the corpus scripts are TPC-only.
 * **The geometry file is duplicated** with pimm-data
@@ -68,8 +69,8 @@ in `docs/archive/`.
 The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, container
 (shifter; podman-hpc interactive) and scheduler; RUNBOOK §11 has the commands.
 
-* **Stage r2.** Copy r2 with its `_calib/` to `$CFS/m5238/users/oalter/coeff_tpc_r2`
-  (`HELIX_CORPUS_DURABLE`) and stage it to `$SCRATCH/coeff_tpc_r2`; build or copy its cells
+* **Stage the corpus.** Copy `coeff_tpc_d1m` with its `_calib/` to `$CFS/m5238/users/oalter/coeff_tpc_d1m`
+  (`HELIX_CORPUS_DURABLE`) and stage it to `$SCRATCH/coeff_tpc_d1m`; build or copy its cells
   truth; verify the bin grid there with `derive_coeff_bins.py --verify` rather than
   copying it.
 * **Rebuild the image without jax** and point `container.image` at the new tag or its

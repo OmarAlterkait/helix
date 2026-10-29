@@ -14,7 +14,7 @@ detect:
 
 roots:
   HELIX_CORPUS_ROOT:   /sdf/data/neutrino/omara
-  HELIX_CORPUS:        /sdf/data/neutrino/omara/coeff_tpc_r2/run_0027575715
+  HELIX_CORPUS:        /sdf/data/neutrino/omara/coeff_tpc_d1m/j000000
   # One filesystem here, so there is no staged/durable split to record.
   HELIX_CORPUS_DURABLE: null
   # The JAXTPC wire stage of the 1M-event campaign: <group>/<task>/{sensor,step,hits}/

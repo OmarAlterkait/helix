@@ -161,15 +161,15 @@ provenance attributes (commit, host, time).
 
 The FM's categorical head bins the NOISY coefficients (uniform in asinh on each side of
 zero, one bin over the sub-threshold gap). The production grid is named in
-`helix/data/data/reference_bins.json`: `coeff_bins_r2_run0027575715_noisy`, derived from r2's
-first run with K = 128 over 120 events, read by every config from
-`$HELIX_ARCHIVE/<name>.pt` (derived 2026-10-28; its digests are recorded). To derive a grid
+`helix/data/data/reference_bins.json`: `coeff_bins_d1m_j000000_noisy`, derived from the
+campaign corpus's first run (`coeff_tpc_d1m/j000000`) with K = 128 over 120 events, read by
+every config from `$HELIX_ARCHIVE/<name>.pt` (derived 2026-10-29; its digests are recorded). To derive a grid
 (CPU; milano is AMD, so numpy's results are the canonical ones, and the script disables
 AVX-512 itself elsewhere):
 
     sbatch --account=mli:cider-ml --partition=milano --cpus-per-task=8 --mem=32G --time=01:00:00 \
         --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/derive_coeff_bins.py \
-                --corpus $HELIX_CORPUS --out $HELIX_ARCHIVE/coeff_bins_r2_run0027575715_noisy.pt"
+                --corpus $HELIX_CORPUS --out $HELIX_ARCHIVE/coeff_bins_d1m_j000000_noisy.pt"
 
 For a new reference (a new name in the JSON, `digests: null`), the log ends with `records no
 digests yet ... record these` and a JSON object of three digests (`edges`, `cent_asinh`,
@@ -177,7 +177,7 @@ digests yet ... record these` and a JSON object of three digests (`edges`, `cent
 of copying the file:
 
     scripts/helix_run.sh python scripts/derive_coeff_bins.py \
-        --verify $HELIX_ARCHIVE/coeff_bins_r2_run0027575715_noisy.pt --corpus $HELIX_CORPUS
+        --verify $HELIX_ARCHIVE/coeff_bins_d1m_j000000_noisy.pt --corpus $HELIX_CORPUS
 
 (`VERIFIED` or `MISMATCH`; `--like bins.pt` reuses the parameters a grid records.) A
 derive on another corpus reports whether its result matches the reference. A grid is
@@ -216,7 +216,7 @@ Environment: `LINKS` (1), `NAME`, `GPUS` (4, one node), `TIME` (24:00:00), `MEM`
     NAME=dn_scratch_N1024 scripts/train.sh denoise model.pretrained=False data.train.n_events=1024 epoch=16   # from scratch, 1,024 labelled events
 
 * **The corpus** is `HELIX_CORPUS`'s parent, with its runs from `_calib/RUNS.txt`
-  (S3DF default: `coeff_tpc_r2`). `HELIX_CORPUS=<root>/<run> scripts/train.sh fm` trains
+  (S3DF default: `coeff_tpc_d1m`). `HELIX_CORPUS=<root>/<run> scripts/train.sh fm` trains
   on another; the variable reaches the jobs.
 * **No step counts.** Warmup and the eval / checkpoint / EMA-save cadence are `"auto"`
   and resolved by `FMTrainer` from `iters_per_epoch * epoch`; the log line `cadence over
@@ -356,7 +356,8 @@ Run it after any change meant to be output-neutral.
 
 | corpus | where (S3DF) | |
 |---|---|---|
-| simulation r2 | `/sdf/data/neutrino/omara/coeff_tpc_r2` | production; the bin grid's corpus |
+| simulation d1m | `/sdf/data/neutrino/omara/coeff_tpc_d1m` | production: campaign group j000000 (200k events), with cells; the bin grid's corpus |
+| simulation r2 | `/sdf/data/neutrino/omara/coeff_tpc_r2` | superseded (wire_test_00_00_02); readable, not rebuildable |
 | SBND v1 | `/sdf/data/neutrino/omara/sbnd_data/coeff_sbnd_v1` | production |
 | `coeff_tpc` (pre-tau), `coeff_tpc_r1` | | retired, not readable |
 
@@ -373,10 +374,10 @@ the same. What differs:
   force it), podman-hpc on an interactive TTY; `HDF5_USE_FILE_LOCKING=FALSE` comes from
   the profile. The profile's image tag predates the removal of jax: rebuild and repoint it
   before relying on it.
-* **Corpus.** Training reads `$SCRATCH/coeff_tpc_r2` (Lustre, purged on inactivity), the
-  durable copy is `$CFS/m5238/users/oalter/coeff_tpc_r2` (`HELIX_CORPUS_DURABLE`). r2 is
+* **Corpus.** Training reads `$SCRATCH/coeff_tpc_d1m` (Lustre, purged on inactivity), the
+  durable copy is `$CFS/m5238/users/oalter/coeff_tpc_d1m` (`HELIX_CORPUS_DURABLE`). It is
   not staged there yet (TODO); once it is, re-stage after a purge with
-  `rsync -a $HELIX_CORPUS_DURABLE/ $SCRATCH/coeff_tpc_r2/`. `corpus.sh` has not been run
+  `rsync -a $HELIX_CORPUS_DURABLE/ $SCRATCH/coeff_tpc_d1m/`. `corpus.sh` has not been run
   here yet (it takes account, QOS and constraint from the profile; NERSC sets no partition).
 * **Bin grid.** Not copied: verify it from the staged corpus (§5, `--verify`), on a GPU
   node (no CPU allocation) through `scripts/helix_run.sh`.
@@ -391,7 +392,7 @@ the same. What differs:
 * **Truth and evaluation** run on GPU nodes (there is no usable CPU allocation):
 
       sbatch -A $HELIX_SLURM_TRAIN_ACCOUNT -C gpu -q shared --gpus=1 -c 32 --mem=56G --time=08:00:00 \
-          --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python scripts/build_truth.py --corpus $HELIX_CORPUS_DURABLE/run_0027575715"
+          --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python scripts/build_truth.py --corpus $HELIX_CORPUS_DURABLE/j000000"
       sbatch -A $HELIX_SLURM_TRAIN_ACCOUNT -C gpu -q shared --gpus=1 -c 32 --mem=56G --time=08:00:00 \
           --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python -m helix.eval \
                   $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe --out $HELIX_EXP/fm_cooldown/eval.json"

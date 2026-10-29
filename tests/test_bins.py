@@ -149,7 +149,7 @@ def test_the_reference_fingerprint_ships():
     under [tool.setuptools.package-data]; this asserts it is actually there."""
     ref = binlib.reference()
     assert ref is not None, f"no packaged reference at {binlib.reference_path()}"
-    assert ref["corpus"]["run"] == "run_0027575715"
+    assert ref["corpus"]["run"] == "j000000"
     assert set(ref["digests"]) == set(binlib.ARRAY_KEYS)
     assert ref["params"]["K"] == 128 and ref["params"]["n_bands"] == 4
     assert ref["params"]["events"] == 120

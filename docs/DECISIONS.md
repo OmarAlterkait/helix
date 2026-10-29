@@ -77,9 +77,10 @@ side; a real-data target would.
 of zero, with one bin spanning the sub-threshold gap; no target parameter, no clean
 mode, no legacy-table defaults. *Why:* noisy coefficients exist only beyond the
 ~3.35-3.74 sigma threshold, so a single uniform grid leaves ~30-40% of its bins
-unreachable (SCIENCE §11). The reference is `coeff_bins_r2_run0027575715_noisy`
-(`helix/data/data/reference_bins.json`), derived 2026-10-28 on milano from 120 events of
-r2's first run, K = 128, with no empty bin in any band.
+unreachable (SCIENCE §11). The reference is `coeff_bins_d1m_j000000_noisy`
+(`helix/data/data/reference_bins.json`), derived 2026-10-29 on milano from 120 events of
+`coeff_tpc_d1m/j000000`, K = 128, with no empty bin in any band (it replaced r2's
+`coeff_bins_r2_run0027575715_noisy` when the corpus moved to the campaign).
 
 **One model, on varlen attention.** One `FMModel` (registered `Coeff-FM`) whose only
 attention path is the unpadded grouped (varlen) attention, with its CPU / fp32 per-group
@@ -121,10 +122,12 @@ to sort at one event per rank; `_compat` patched pimm's legacy single-file check
 loader, and helix's split checkpoints restore RNG state through DCP instead.
 
 **The recipe is `nz_pw16`** (`configs/pimm/fm.py`): d768, 12 + 4 blocks, 12 heads (head
-dim 64), QK-norm, fused QK-norm + RoPE, K = 128, AdamW at LR 4.4e-3, the WSD stable phase
-plus a separate cooldown (`fm_cooldown.py`). *Why:* it is the recipe the noisy-only
-results were measured with (SCIENCE §11). *Caveat:* the LR was tuned at 29.2k steps on
-16 GPUs (one event each), and the LR optimum falls with run length, so a production-length
+dim 64), QK-norm, fused QK-norm + RoPE, K = 128, AdamW, the WSD stable phase plus a
+separate cooldown (`fm_cooldown.py`). *Why:* it is the recipe the noisy-only results were
+measured with (SCIENCE §11). The peak LR is `4.4e-3 * sqrt(GPUs / 16)`: 4.4e-3 was tuned at
+16 events per step, the optimum scales as sqrt(batch) (SCIENCE §5: 2.2e-3 was measured best
+at 4 events per step, the one clean arm of that sweep), and muP transfers it across width
+only. *Caveat:* the optimum also falls with run length (SCIENCE §9); a production-length
 run should confirm it (TODO). Supersedes the m113 architecture (d512) named in §0.
 
 **Truth is the `cells` modality, built separately from the corpus.**

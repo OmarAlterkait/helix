@@ -282,8 +282,8 @@ attributes excepted).
   collated batch).
 * `bins.py`: the categorical bin grid over NOISY coefficients (uniform in asinh on each
   side of zero, one bin over the sub-threshold gap); the production grid is named in
-  `helix/data/data/reference_bins.json` (`coeff_bins_r2_run0027575715_noisy`, not yet
-  derived: its digests are unrecorded).
+  `helix/data/data/reference_bins.json` (`coeff_bins_d1m_j000000_noisy`, from the
+  campaign corpus's first run; its digests are recorded).
 * `identity.py`: `corpus_runs()` reads `_calib/RUNS.txt`; `check_corpus_matches`
   refuses a checkpoint whose recorded `basis_digest` differs from the corpus being read.
 
