@@ -262,7 +262,7 @@ Then score a run directly from its pimm directory -- no export (GPU: the varlen 
 needs flash attention, sm80+):
 
     sbatch --account=$HELIX_SLURM_TRAIN_ACCOUNT --partition=$HELIX_SLURM_TRAIN_PARTITION \
-        --qos=$HELIX_SLURM_TRAIN_QOS --gpus=1 --cpus-per-task=8 --mem=100G --time=08:00:00 \
+        --qos=$HELIX_SLURM_TRAIN_QOS --gpus=1 --cpus-per-task=8 --mem=64G --time=03:00:00 \
         --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python -m helix.eval \
                 $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe --out $HELIX_EXP/fm_cooldown/eval.json"
     # a denoiser: RUN is its FM run, --denoiser the denoiser run
@@ -271,13 +271,14 @@ needs flash attention, sm80+):
 
 `RUN` is the run directory (`--weights ema` default, or `last`) or one checkpoint inside it
 (`model/iter_N.pth`). Events: the run's own corpus, `probe` role of its holdout
-(`--split`, `--max-events` for a quick look). Metrics: `recon` (the training evaluator's
+(`--max-events` for a quick look). Metrics: `recon` (the training evaluator's
 masked reconstruction), `floor` (detection floor / charge map from frozen features; trained
 and random-init arms, rankme), `uprobe` (along-wire coordinate; geo, trained, random arms),
 `denoise` (`--denoiser <denoise run>`, its best checkpoint, on the floor's windows). The probes fit
 on the first two thirds of the events (at most `FIT_ROWS` = 1M rows each, sampled evenly over
-them, so memory stays ~25 GB at any split) and score the rest as they arrive, with [16, 84]% event-bootstrap
-intervals. See `helix/eval/__init__.py`.
+them, so memory stays ~25 GB at any split) and score the rest as they arrive, with [16, 84]%
+event-bootstrap intervals; definitions in docs/DECISIONS.md ("The evaluation's definitions").
+See `helix/eval/__init__.py`.
 
 **The identity guard.** `helix.data.identity` refuses a checkpoint whose recorded
 `basis_digest` differs from the corpus being read. Do not work around it; find the

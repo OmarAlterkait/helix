@@ -151,6 +151,30 @@ arms, RankMe), `uprobe` (the along-wire probe on the same features and `fit_prob
 `eval_checkpoint`, `eval_denoise`, `run_probe`, ...) each read the model and the truth
 their own way. `Q0` is defined once (`helix.data.cells.Q0`).
 
+**The evaluation's definitions, and why they scale.** Shared by every metric (`helix.eval.Context`):
+one random-init model, one fit/score split, and per event one truth draw
+(`Event.truth`). *Definitions* (each changed numbers when set, 2026-11):
+* a cell no token covers is SCORED as predicted 0, never dropped, in map rows as in windows
+  -- dropping them made the scored cells depend on the tokenizer (fewer covered faint cells
+  raised faint AUC for free);
+* within-group correlation is per (event, plane gid), in floor, denoise and uprobe alike --
+  `gid % 3` pooled the two TPC volumes, so a between-volume level difference raised `map_r`;
+* one row threshold, `windows.MIN_ROWS` = 21, for early stopping and for the reported number
+  -- uprobe reported >=100 while selecting on >=21, and with the fit budget no validation
+  group reaches 100. A fit with nothing to select on is an error, not its first checkpoint;
+* AUCs count a tie as a half -- the unstable `argsort` put tied scores (an all-zero window
+  is common) in arbitrary order: 0.93 for two identical all-zero sets;
+* the bootstrap resamples events as draw counts: an event drawn twice weighs twice
+  everywhere (uprobe used to merge a duplicate's rows into one group);
+* dropped as diagnostics nothing read: `floor_eff5pct_*`, `floor_auc_*`,
+  `sep_dip_{edge,same}_*` (its token-edge flag re-implemented the tokenizer's arithmetic,
+  and wrongly), `dip_truth`, `masked_frac`.
+*Scaling:* probes fit on at most `FIT_ROWS` = 1M rows and score each later event as it
+arrives (holding predictions only); every bootstrap statistic is a weighted function of
+per-event counts, so a resample costs a few bincounts, not a rebuild of ~8M rows. The
+4113-event probe split had needed >240 GB and, in uprobe scoring, a per-group loop that was
+quadratic in events.
+
 **The denoiser trains on pimm, like the FM.** `configs/pimm/denoise.py` (`_base_` fm.py),
 launched by `scripts/train.sh denoise model.fm=<FM run>`: `Coeff-Denoise` = the encoder of
 the FM run (its architecture, its tokenizer and, with `pretrained=True`, its EMA weights;
@@ -376,9 +400,8 @@ preserve.
 DetectorConfig)` adapter, no longer exists; the TPC chain calls `helix.core.wavelet`
 directly.)
 
-**Tests exercise shipped code, not copies.** `bucketize_bins` and
-`rank_from_gram` exist because the tests previously pinned hand-copies of logic
-that lived elsewhere.
+**Tests exercise shipped code, not copies.** `bucketize_bins` exists because the
+tests previously pinned hand-copies of logic that lived elsewhere.
 
 ---
 

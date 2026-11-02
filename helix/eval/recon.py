@@ -10,7 +10,6 @@ and harder, corr(per-event CE, token count) = 0.79, so the unweighted mean is ~0
 optimistic):
 
   loss = bce + val   occupancy BCE and value cross-entropy, each over its own support
-  masked_frac        the masked fraction of tokens
   var_expl           1 - MSE / Var of the posterior-mean asinh reconstruction against the
                      target, on masked & valid & occupied slots -- grid-free, so it survives a
                      change of bin table where cross-entropy does not
@@ -29,7 +28,7 @@ import torch
 #: Grid-free accumulators, summed per batch (and across ranks).
 GF_KEYS = ("sse", "sy", "syy", "nv", "chg_pred", "chg_true", "chg_pred_s", "chg_true_s")
 #: The pooled loss terms; each is a weighted sum over its own support.
-POOLED = ("bce", "val", "masked_frac")
+POOLED = ("bce", "val")
 #: The evaluator's default mask seed; batch i of rank r is masked with seed + 100003 r + i.
 MASK_SEED = 7
 
@@ -88,8 +87,7 @@ def heads_loss(core, B, mask, gf):
     occ, val = core.raw_heads(B, mask)
     bce, vloss = losses_cat(occ, val, B, mask, core.bin_edges)
     acc_grid_free(core, B, mask, val, gf)
-    return {"loss": bce + vloss, "bce": bce.detach(), "val": vloss.detach(),
-            "masked_frac": mask.float().mean().detach()}
+    return {"loss": bce + vloss, "bce": bce.detach(), "val": vloss.detach()}
 
 
 def pool(out, B, mask, totals, counts):
@@ -97,9 +95,8 @@ def pool(out, B, mask, totals, counts):
     already divided by its own support inside the loss, so the support is its weight."""
     mrow = mask[:, None]
     w = {"bce": float((mrow & B["valid"].bool()).sum()),
-         "val": float((B["occ"].bool() & B["valid"].bool() & mrow).sum()),
-         "masked_frac": float(mask.numel())}
-    for k in (k for k in POOLED if k in out):
+         "val": float((B["occ"].bool() & B["valid"].bool() & mrow).sum())}
+    for k in POOLED:
         totals[k] = totals.get(k, 0.0) + float(out[k]) * w[k]
         counts[k] = counts.get(k, 0.0) + w[k]
 
@@ -136,8 +133,8 @@ class Recon:
 
     name = "recon"
 
-    def __init__(self, run):
-        self.core = run.model
+    def __init__(self, ctx):
+        self.core = ctx.run.model
         self.totals, self.counts, self.n = {}, {}, 0
         self.gf = dict.fromkeys(GF_KEYS, 0.0)
 

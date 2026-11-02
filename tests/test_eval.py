@@ -175,6 +175,12 @@ def _events(run, ds):
     return list(events(ds, run.tokenizer, torch.device("cpu")))
 
 
+def _ctx(run, n, n_boot=20, denoiser=None):
+    from helix.eval import Context
+    from helix.eval.probe import split_events
+    return Context(run, dict(trained=run.model, random=run.random_init(0)), split_events(n), 0, n_boot, denoiser)
+
+
 def _token_feature(ev, values, d=SMALL["d"], seed=0):
     """Per-token features whose column 0 is the mean of ``values`` over the cells a token covers
     in band 0 (the rest noise): what a representation that knows ``values`` would carry."""
@@ -204,7 +210,7 @@ def test_recon_is_the_evaluators_metric(synth):
     from helix.eval import recon as R
     d, ds = synth
     run = load_run(d, device="cpu")
-    m = R.Recon(run)
+    m = R.Recon(_ctx(run, len(ds)))
     evs = _events(run, ds)[:3]
     for e in evs:
         m.add(e)
@@ -224,7 +230,7 @@ def test_floor_learns_what_the_features_carry(synth):
     from helix.eval.floor import Floor
     d, ds = synth
     run = load_run(d, device="cpu")
-    m = Floor(run, len(ds), n_boot=20)
+    m = Floor(_ctx(run, len(ds)))
     for e in _events(run, ds):
         e._feats["trained"] = _token_feature(e, np.log1p(e.cells["q"] / C.Q0))
         m.add(e)
@@ -234,22 +240,25 @@ def test_floor_learns_what_the_features_carry(synth):
         r = out[arm]
         assert r["map_r"][0] == r["map_r"][0] and len(r["floor_eff1pct_0.1-0.2"]) == 3
         assert r["rankme"] > 1 and np.isfinite(r["val_mse"])
-    # the presence bits and offsets alone already separate much (the random arm); the feature adds to it
-    assert out["trained"]["presence_auc"][0] > max(0.95, out["random"]["presence_auc"][0])
+    # presence bits and offsets alone already find the charge (both arms); the charge itself is the
+    # feature's: the trained arm's map correlation is the higher
+    assert min(out["trained"]["presence_auc"][0], out["random"]["presence_auc"][0]) > 0.95
+    assert out["trained"]["map_r"][0] > out["random"]["map_r"][0] + 0.05, (out["trained"]["map_r"], out["random"]["map_r"])
 
 
 def test_uprobe_learns_u_and_geometry_alone_does_not(synth):
     from helix.eval.uprobe import UProbe, u_of
     d, ds = synth
     run = load_run(d, device="cpu")
-    m = UProbe(run, len(ds), n_boot=20)
+    m = UProbe(_ctx(run, len(ds)))
     for e in _events(run, ds):
         g = C.unkey(e.cells["key"])[0]
         e._feats["trained"] = _token_feature(e, u_of(g, e.cells["dom_y"], e.cells["dom_z"]))
         m.add(e)
     out = m.result()
-    assert out["trained"]["fisher_r"][0] > 0.5 > out["geo"]["fisher_r"][0]
-    assert out["d_over_geo"] == pytest.approx(out["trained"]["fisher_r"][0] - out["geo"]["fisher_r"][0], abs=1e-3)
+    assert out["trained"]["fisher_r"][0] > 0.5 > max(out["geo"]["fisher_r"][0], out["random"]["fisher_r"][0])
+    d, lo, hi = out["d_over_geo"]
+    assert d == pytest.approx(out["trained"]["fisher_r"][0] - out["geo"]["fisher_r"][0], abs=1e-3) and lo <= d <= hi
 
 
 def test_patch_rows_label_is_the_dominant_cells_charge_weighted_u():
@@ -275,55 +284,67 @@ def test_a_perfect_denoiser_scores_perfectly(synth):
         idx, _ = C.cell_inputs(keys, ev.cell_key, ev.band_lengths, run.tokenizer)
         ok = (idx >= 0).any(1)
         y = np.log1p(np.array([q.get(k, 0.0) for k in keys.tolist()]) / C.Q0).astype(np.float32)
-        return np.where(ok, y, 0), None, ok
+        y = np.where(ok, y, 0)
+        return y, (y > 0).astype(np.float32)
 
-    m = Denoise(oracle, len(ds), run.tokenizer, n_boot=20)
+    m = Denoise(_ctx(run, len(ds), denoiser=oracle))
     for e in _events(run, ds):
         m.add(e)
-    r = m.result()["charge"]
-    assert r["map_r"][0] >= 0.998 and r["presence_auc"][0] == 1.0 and r["val_mse"] < 1e-12
-    effs = [v[0] for k, v in r.items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
-    assert effs and min(effs) == 1.0
+    out = m.result()
+    for r in (out["charge"], out["presence"]):
+        assert r["presence_auc"][0] == 1.0
+        effs = [v[0] for k, v in r.items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
+        assert effs and min(effs) == 1.0
+    assert out["charge"]["map_r"][0] >= 0.998 and out["charge"]["map_mse"] < 1e-12
 
 
 def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
-    from helix.eval.probe import fisher_r, fit_probe
+    from helix.eval.probe import fit_probe
+    from helix.eval.windows import fisher_z
+    r = lambda p, y, g: float(np.tanh(np.mean(list(fisher_z(p, y, g).values()))))      # noqa: E731
     rng = np.random.default_rng(0)
     n = 6000
     e = np.repeat(np.arange(12), n // 12)
     X = rng.standard_normal((n, 8)).astype(np.float32)
     y = (X[:, 0] + 0.1 * rng.standard_normal(n) + 5 * (e % 3)).astype(np.float32)
-    Xt = torch.from_numpy(X).half()
-    a = fit_probe(Xt, y, e, group=e, seed=1, device="cpu", epochs=300)
-    b = fit_probe(Xt, y, e, group=e, seed=1, device="cpu", epochs=300)
-    pa = a.predict(Xt)
-    np.testing.assert_array_equal(pa, b.predict(Xt))
-    assert fisher_r(y, pa, e) > 0.9 and a.val_score > 0.9
-    geo = fit_probe(None, y, e, extra=(e % 3)[:, None].astype(np.float32), group=e, device="cpu")
-    assert not fisher_r(y, geo.predict(None, (e % 3)[:, None].astype(np.float32)), e) > 0.5   # no within-event signal
+    Xt, none = torch.from_numpy(X).half(), np.zeros((n, 0), np.float32)
+    a = fit_probe(Xt, none, y, e, group=e, seed=1, device="cpu")
+    b = fit_probe(Xt, none, y, e, group=e, seed=1, device="cpu")
+    pa = a.predict(Xt, none)
+    np.testing.assert_array_equal(pa, b.predict(Xt, none))
+    assert r(y, pa, e) > 0.9 and a.val_score > 0.9
+    # geometry alone: an unrelated column fits the between-event offsets, not the within-event signal
+    geo = rng.standard_normal((n, 1)).astype(np.float32)
+    g = fit_probe(torch.zeros((n, 0)), geo, y, e, group=e, device="cpu")
+    assert abs(r(y, g.predict(torch.zeros((n, 0)), geo), e)) < 0.2
+    # nothing to select on (constant within every group): an error, not the first checkpoint
+    with pytest.raises(ValueError, match="no validation score"):
+        fit_probe(torch.zeros((n, 0)), (e % 3)[:, None].astype(np.float32), y, e, group=e, device="cpu")
 
 
 def test_the_probes_fit_on_a_budget_and_keep_no_features_of_a_scored_event(synth, monkeypatch):
     import helix.eval.probe as P
     from helix.eval.floor import Floor
     from helix.eval.uprobe import UProbe
-    rng = lambda: np.random.default_rng(3)
+    rng = lambda: np.random.default_rng(3)                                             # noqa: E731
     assert np.array_equal(P.fit_rows(5, 4, rng()), np.arange(5))
-    monkeypatch.setattr(P, "FIT_ROWS", 60)
-    k = P.fit_rows(1000, 7, rng())
-    assert len(k) == 9 and np.array_equal(k, np.unique(k)) and np.array_equal(k, P.fit_rows(1000, 7, rng()))
+    monkeypatch.setattr(P, "FIT_ROWS", 3000)         # 500 rows per training event: binds, and leaves
+    k = P.fit_rows(1000, 7, rng())                     # each validation (event, plane) >= MIN_ROWS
+    assert len(k) == 428 and np.array_equal(k, np.unique(k)) and np.array_equal(k, P.fit_rows(1000, 7, rng()))
     d, ds = synth
     run = load_run(d, device="cpu")
-    ms = [Floor(run, len(ds), n_boot=5), UProbe(run, len(ds), n_boot=5)]
+    ctx = _ctx(run, len(ds), n_boot=5)
+    ms = [Floor(ctx), UProbe(ctx)]
     for e in _events(run, ds):
         for m in ms:
             m.add(e)
-            assert (m.fit is None) == (e.index >= m.n_train)      # fitted at the first scored event
+            assert (m.fit is None) == (e.index >= ctx.n_train)      # fitted at the first scored event
+    assert P.gather(torch.zeros((5, 3)), np.zeros((0, 4), np.int64)).shape == (0, 12)   # an event without rows
+    held = list(ms[0].scored.p["trained"]) + list(ms[0].scored.ws["trained"]) + list(ms[1].p["trained"])
+    assert held and all(isinstance(x, np.ndarray) and x.ndim == 1 for x in held)    # predictions, no features
     for m in ms:
         out = m.result()
-        assert 0 < out["n_fit_rows"] <= m.n_train * -(-60 // m.n_train)
-    with pytest.raises(ValueError, match="after a scored one"):
-        ms[0].add(next(iter(_events(run, ds))))
+        assert 0 < out["n_fit_rows"] <= 3000
 
 
 def test_the_cli_writes_one_json(synth, tmp_path, monkeypatch):
@@ -331,7 +352,7 @@ def test_the_cli_writes_one_json(synth, tmp_path, monkeypatch):
     import helix.eval.events as EV
     from helix.eval.__main__ import main
     d, ds = synth
-    monkeypatch.setattr(EV, "dataset", lambda run, split="probe": ds)
+    monkeypatch.setattr(EV, "dataset", lambda run: ds)
     out = tmp_path / "s.json"
     assert main([str(d), "--metrics", "recon", "--out", str(out), "--max-events", "2"]) == 0
     res = json.load(open(out))

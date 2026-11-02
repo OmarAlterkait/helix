@@ -61,8 +61,8 @@ def test_all_reduce_packs_and_unpacks_one_flat_vector(monkeypatch):
     """Every accumulator round-trips through the single collective, in order."""
     from helix.integrations import pimm as P
     ev = _ev()
-    totals = {"bce": 1.0, "val": 2.0, "masked_frac": 3.0}
-    counts = {"bce": 10.0, "val": 20.0, "masked_frac": 30.0}
+    totals = {"bce": 1.0, "val": 2.0}
+    counts = {"bce": 10.0, "val": 20.0}
     gf = {k: float(i + 1) for i, k in enumerate(GF)}
 
     seen = {}
@@ -75,7 +75,7 @@ def test_all_reduce_packs_and_unpacks_one_flat_vector(monkeypatch):
     # replacing sys.modules["torch.distributed"] does nothing.
     monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
     t2, c2, g2, n2 = ev._all_reduce(totals, counts, gf, 5)
-    assert seen["n"] == 3 + 3 + len(GF) + 1, "one collective, everything in it"
+    assert seen["n"] == 2 + 2 + len(GF) + 1, "one collective, everything in it"
     assert t2 == {k: 4 * v for k, v in totals.items()}
     assert c2 == {k: 4 * v for k, v in counts.items()}
     assert g2 == {k: 4 * v for k, v in gf.items()}
@@ -94,8 +94,8 @@ def test_reduced_sums_average_to_the_same_value_as_one_big_pass():
     ev.trainer.logger = types.SimpleNamespace(
         info=lambda m: logged.setdefault("line", m), exception=lambda *a: None)
     # rank A: bce 0.5 over 100 tokens; rank B: bce 0.9 over 10 tokens
-    totals = {"bce": 0.5 * 100 + 0.9 * 10, "val": 0.0, "masked_frac": 0.0}
-    counts = {"bce": 110.0, "val": 1.0, "masked_frac": 1.0}
+    totals = {"bce": 0.5 * 100 + 0.9 * 10, "val": 0.0}
+    counts = {"bce": 110.0, "val": 1.0}
     ev._report(totals, counts, {k: 0.0 for k in GF}, 2)
     pooled = (0.5 * 100 + 0.9 * 10) / 110
     assert ev.trainer.comm_info["current_metric_value"] == pytest.approx(-pooled)

@@ -23,7 +23,7 @@ Query cells follow the evaluation's row recipe, plus what the floor's windows sc
 * every cell of ``win_per_event`` charge-free windows (the floor's noise windows);
 * ``near_any_per_sig`` per charged cell within +-8 cells of charge, coefficient or not, and every
   cell of ``win_near_per_event`` charge-free windows NEAR activity
-  (:func:`helix.eval.windows.near_windows`): the surroundings of activity, where a regression
+  (:func:`near_windows`): the surroundings of activity, where a regression
   left to extrapolate predicts a haze.
 
 Cells no token covers are not queried: the model predicts zero there by construction, as the
@@ -126,7 +126,7 @@ class DenoiseRows:
             g, w, t = unkey(rng.choice(sig, n, replace=True))
             parts.append(fkey(g, np.maximum(w + rng.integers(-8, 9, n), 0), np.maximum(t + rng.integers(-8, 9, n), 0)))
         if self.win_near_per_event > 0:
-            from helix.eval.windows import near_windows, window_cells
+            from helix.eval.windows import window_cells
             for g, w0, t0 in near_windows(tkeys, np.where(sup, tq, 0.0), rng, n=self.win_near_per_event):
                 parts.append(window_cells(g, w0, t0))
         keys = np.unique(np.concatenate(parts).astype(np.int64))
@@ -157,3 +157,42 @@ class DenoiseRows:
             if len(out) >= self.win_per_event:
                 break
         return np.concatenate(out) if out else np.zeros(0, np.int64)
+
+
+def near_windows(keys, q, rng, n=60, margin=1, pad=(8, 8)):
+    """Charge-free windows NEAR activity, as pixel origins ``[(g, w0, t0)]``.
+
+    No charge cell within ``margin`` cells of the window, but at least one within ``pad`` (wire,
+    tick) cells -- 16 wires / 128 ticks at the default, exactly the surroundings the floor's own
+    noise windows must keep EMPTY. ``keys``/``q``: the event's fine cells and charge. Up to ``n``
+    windows, shared equally over the planes that carry charge.
+    """
+    from helix.eval.windows import WT, WW
+    keys = np.asarray(keys, np.int64)[np.asarray(q) > 0]
+    if not len(keys):
+        return []
+    G, CW, CT = unkey(keys)
+    ww, wt = WW // FW, WT // FT
+    planes = np.unique(G)
+    per = -(-n // len(planes))
+    out = []
+    for g in planes.tolist():
+        m = G == g
+        o = max(pad) + margin + 1                                 # grid offset: origins may sit left of 0
+        occ = np.zeros((int(CW[m].max()) + ww + 2 * o + 1, int(CT[m].max()) + wt + 2 * o + 1), np.int32)
+        occ[CW[m] + o, CT[m] + o] = 1
+        S = np.pad(occ.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+
+        def box(i0, i1, j0, j1):                                  # charge cells in [i0,i1) x [j0,j1), grid coords
+            i0, i1 = np.clip(i0, 0, occ.shape[0]), np.clip(i1, 0, occ.shape[0])
+            j0, j1 = np.clip(j0, 0, occ.shape[1]), np.clip(j1, 0, occ.shape[1])
+            return S[i1, j1] - S[i0, j1] - S[i1, j0] + S[i0, j0]
+
+        I, J = np.meshgrid(np.arange(o, occ.shape[0] - ww), np.arange(o, occ.shape[1] - wt), indexing="ij")
+        I, J = I.ravel(), J.ravel()
+        empty = box(I - margin, I + ww + margin, J - margin, J + wt + margin) == 0
+        near = box(I - pad[0], I + ww + pad[0], J - pad[1], J + wt + pad[1]) > 0
+        cand = np.nonzero(empty & near)[0]
+        for c in rng.permutation(cand)[:per].tolist():
+            out.append((int(g), int(I[c] - o) * FW, int(J[c] - o) * FT))
+    return out[:n] if len(out) > n else out

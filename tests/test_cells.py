@@ -157,8 +157,10 @@ def test_the_windows_of_a_record(corpus):
     a = Wn.event_truth(rec, coeff, np.random.default_rng(7))
     b = Wn.event_truth(rec, coeff, np.random.default_rng(7))
     assert {"iso", "bg"} <= {m["kind"] for m in a["meta"]}
-    for k in ("mrows", "wkey", "wid", "wq", "mq"):
+    for k in ("mrows", "wkey", "wq", "mq"):
         np.testing.assert_array_equal(a[k], b[k])
+    c = Wn.event_truth(rec, coeff, np.random.default_rng(7), windows=False)     # map rows drawn first
+    assert set(c) == {"mrows", "mq"} and all(np.array_equal(a[k], c[k]) for k in c)
     q = dict(zip(rec["key"].tolist(), rec["q"].tolist()))
     np.testing.assert_allclose(a["wq"], [q.get(k, 0.0) for k in a["wkey"].tolist()])
 

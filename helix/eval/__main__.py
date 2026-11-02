@@ -15,7 +15,6 @@ def main(argv=None):
     ap.add_argument("--metrics", default="recon,floor,uprobe", help=f"comma-separated, of {','.join(METRICS)}")
     ap.add_argument("--out", required=True, help="results JSON (written whole)")
     ap.add_argument("--weights", default="ema", choices=("ema", "last"), help="for a run directory")
-    ap.add_argument("--split", default="probe", help="holdout role scored (default probe)")
     ap.add_argument("--max-events", type=int, default=None, help="only the first N events of the split")
     ap.add_argument("--denoiser", default=None, help="a denoiser run (configs/pimm/denoise.py; its best checkpoint) or one "
                     "checkpoint of it, for --metrics denoise")
@@ -24,7 +23,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     res = evaluate(a.run, [m.strip() for m in a.metrics.split(",") if m.strip()], weights=a.weights,
-                   split=a.split, max_events=a.max_events, denoiser=a.denoiser, seed=a.seed, n_boot=a.boot)
+                   max_events=a.max_events, denoiser=a.denoiser, seed=a.seed, n_boot=a.boot)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     tmp = a.out + ".tmp"
     with open(tmp, "w") as fh:

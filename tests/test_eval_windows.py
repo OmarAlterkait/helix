@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from helix.data import cells as C
+from helix.data.denoise import near_windows
 from helix.eval import windows as W
 
 
@@ -34,13 +35,15 @@ def _event(rng, n_part=40):
     return rec, np.concatenate([cells, noise])
 
 
-def _stats(pred_fn, tr, pw=16, pt=8):
-    meta = tr["meta"]
-    for m in meta:
-        m["ev"] = 0
-    starts = np.searchsorted(tr["wid"], np.arange(len(meta)))
-    ends = np.append(starts[1:], len(tr["wid"]))
-    return W.window_stats(pred_fn(tr["wq"]), tr["wq"], meta, starts, ends, pw, pt, -2.38, {0: -17.4, 1: 2.6, 2: 5.5})
+N_CELL = (W.WW // C.FW) * (W.WT // C.FT)
+
+
+def _meta(tr):
+    return [dict(m, ev=0) for m in tr["meta"]]
+
+
+def _stats(pred_fn, tr):
+    return W.window_stats(pred_fn(tr["wq"]), tr["wq"], _meta(tr))
 
 
 def _truth(seed=0):
@@ -51,10 +54,12 @@ def test_truth_has_all_window_kinds_and_valid_keys():
     tr = _truth()
     kinds = {m["kind"] for m in tr["meta"]}
     assert {"iso", "bg"} <= kinds
-    assert len(tr["wkey"]) == len(tr["wq"]) == len(tr["wid"]) == len(tr["meta"]) * (W.WW // C.FW) * (W.WT // C.FT)
+    assert len(tr["wkey"]) == len(tr["wq"]) == len(tr["meta"]) * N_CELL
     for i, m in enumerate(tr["meta"]):
+        cells = slice(i * N_CELL, (i + 1) * N_CELL)
+        assert np.array_equal(tr["wkey"][cells], W.window_cells(m["g"], m["w0"], m["t0"]))
         if m["kind"] == "bg":
-            assert tr["wq"][tr["wid"] == i].sum() == 0
+            assert tr["wq"][cells].sum() == 0
         if m["kind"] == "iso":
             assert m["E"][0] > 0
 
@@ -69,30 +74,60 @@ def test_perfect_prediction_localises_exactly_and_blur_does_not():
     tr = _truth()
     perfect = _stats(lambda q: q, tr)
     blur = _stats(lambda q: np.full_like(q, q.mean()) + 0.01 * (q > 0), tr)
-    loc_p = [w["loc"][0] for w in perfect if "loc" in w]
-    loc_b = [w["loc"][0] for w in blur if "loc" in w]
-    assert max(loc_p) == pytest.approx(0.0, abs=1e-9)
+    loc_p = perfect["loc_w"][np.isfinite(perfect["loc_w"])]
+    loc_b = blur["loc_w"][np.isfinite(blur["loc_w"])]
+    assert len(loc_p) and max(loc_p) == pytest.approx(0.0, abs=1e-9)
     assert np.median(loc_b) > np.median(loc_p)
 
 
-def test_auc_and_floor_efficiency():
-    assert W.auc([2, 3], [0, 1]) == 1.0 and W.auc([0, 1], [2, 3]) == 0.0
-    Ws = _stats(lambda q: q, _truth())
-    s = W.scalars(np.array([1.0, 0.0]), np.array([1.0, 0.0]), [0.5], Ws, 0.5)
-    effs = [v for k, v in s.items() if k.startswith("floor_eff1pct_") and not np.isnan(v)]
+def test_auc_counts_a_tie_as_a_half():
+    auc = lambda pos, neg: W.auc(W.ranks(np.r_[pos, neg]), np.r_[np.ones(len(pos)), np.zeros(len(neg))],  # noqa: E731
+                                 np.r_[np.zeros(len(pos)), np.ones(len(neg))])
+    assert auc([2, 3], [0, 1]) == 1.0 and auc([0, 1], [2, 3]) == 0.0
+    assert auc(np.zeros(50), np.zeros(60)) == 0.5
+    assert auc(np.r_[np.zeros(40), np.ones(10)], np.zeros(60)) == pytest.approx(0.6)
+    r = W.ranks([0.0, 1.0, 1.0, 2.0])                     # weights: a row counted twice
+    assert W.auc(r, np.array([0, 2, 0, 1.0]), np.array([1, 0, 1, 0.0])) == pytest.approx(5 / 6)   # (2 x (1 + 1/2) + 2) / (3 x 2)
+
+
+def test_a_perfect_prediction_scores_perfectly():
+    tr = _truth()
+    y = np.log1p(tr["mq"] / C.Q0)
+    out = W.score_cells(y, y, np.zeros(len(y), int), np.zeros(len(y), int), tr["wq"], tr["wq"], _meta(tr), n_boot=5)
+    assert out["presence_auc"][0] == 1.0 and out["map_r"][0] > 0.99
+    effs = [v[0] for k, v in out.items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
     assert effs and all(v == 1.0 for v in effs)        # every isolated particle beats empty windows
 
 
-def test_fisher_z_is_within_group_and_bootstrap_brackets_the_point():
+def test_fisher_z_is_within_group():
     rng = np.random.default_rng(0)
     grp = np.repeat(np.arange(10), 50)
     y = rng.standard_normal(500) + 10 * grp                 # between-group variance dominates
     p = y + rng.standard_normal(500)
     z = W.fisher_z(p, y, grp)
     assert len(z) == 10 and np.tanh(np.mean(list(z.values()))) == pytest.approx(0.7, abs=0.1)
-    out = W.bootstrap(lambda evs: {"m": float(np.mean(evs))}, np.arange(20), n_boot=200)
-    pt, lo, hi = out["m"]
+    # the per-group definition: a group too small, or constant in either, has no z
+    grp2 = np.concatenate([grp, np.full(5, 10), np.full(30, 11), np.full(30, 12), np.full(30, 13)])
+    y2 = np.concatenate([y, rng.standard_normal(5), np.ones(30), rng.standard_normal(60)])
+    p2 = np.concatenate([p, rng.standard_normal(65), np.full(30, 2.0)])
+    want = {k: float(np.arctanh(np.clip(np.corrcoef(p2[grp2 == k], y2[grp2 == k])[0, 1], -0.999, 0.999)))
+            for k in range(14) if (grp2 == k).sum() >= 21 and y2[grp2 == k].std() > 0 and p2[grp2 == k].std() > 0}
+    got = W.fisher_z(p2, y2, grp2)
+    assert set(got) == set(want) == set(range(10)) | {12}
+    assert all(got[k] == pytest.approx(want[k], abs=1e-9) for k in want)
+
+
+
+def test_bootstrap_weighs_an_event_by_how_often_it_was_drawn():
+    v, seen = np.arange(20.0), []
+
+    def stat(m):
+        seen.append(m)
+        return {"m": float((m * v).sum() / m.sum())}
+
+    pt, lo, hi = W.bootstrap(stat, 20, n_boot=200)["m"]
     assert pt == pytest.approx(9.5) and lo < pt < hi
+    assert (seen[0] == 1).all() and all(m.sum() == 20 for m in seen) and any(m.max() > 1 for m in seen)
 
 
 def test_cell_inputs_matches_the_gather_arithmetic():
@@ -145,7 +180,7 @@ def test_near_windows_are_empty_but_beside_charge():
             keys.append(C.fkey(np.full(ww.size, g), ww.ravel(), tt.ravel())); q.append(np.full(ww.size, 500.0))
     keys, q = np.concatenate(keys), np.concatenate(q)
     order = np.argsort(keys); keys, q = keys[order], q[order]
-    wins = W.near_windows(keys, q, np.random.default_rng(0), n=20)
+    wins = near_windows(keys, q, np.random.default_rng(0), n=20)
     assert 0 < len(wins) <= 20 and {g for g, _, _ in wins} == {0, 4}
     G, CW, CT = C.unkey(keys)
     for g, w0, t0 in wins:
@@ -155,7 +190,7 @@ def test_near_windows_are_empty_but_beside_charge():
         inside = (CW >= fw - 1) & (CW < fw + W.WW // C.FW + 1) & (CT >= ft - 1) & (CT < ft + W.WT // C.FT + 1)
         near = (CW >= fw - 8) & (CW < fw + W.WW // C.FW + 8) & (CT >= ft - 8) & (CT < ft + W.WT // C.FT + 8)
         assert not (on & inside).any() and (on & near).any()
-    assert wins == W.near_windows(keys, q, np.random.default_rng(0), n=20)
+    assert wins == near_windows(keys, q, np.random.default_rng(0), n=20)
 
 
 def test_cell_neighbors_centre_is_the_covering_token_and_shifts_by_one_patch():

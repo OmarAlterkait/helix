@@ -222,11 +222,13 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
     predict, cfg = load_denoiser(str(tmp_path), "cpu")
     assert cfg == CFG
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
-    y, pr, ok = predict(ev, sample["cells"]["key"])
-    assert y.shape == pr.shape == ok.shape == (len(sample["cells"]["key"]),) and ok.any()
-    assert ((pr >= 0) & (pr <= 1)).all() and (y[~ok] == 0).all()
+    keys = sample["cells"]["key"]
+    y, pr = predict(ev, keys)
+    ok = (C.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    assert y.shape == pr.shape == (len(keys),) and ok.any()
+    assert ((pr >= 0) & (pr <= 1)).all() and (y[~ok] == 0).all() and (pr[~ok] == 0).all()
     with pytest.raises(ValueError, match="not a denoiser"):
-        load_denoiser(str(d), "cpu", weights="ema")
+        load_denoiser(os.path.join(d, "model", "iter_3.pth"), "cpu")
 
 
 def test_the_fm_run_is_required_to_be_an_fm(tmp_path, fm_run):
