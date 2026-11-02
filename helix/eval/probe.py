@@ -4,7 +4,12 @@
 Protocol, the same for every arm of every metric:
 
 * rows are split by EVENT, never by row (rows of one event are not independent): the caller
-  fits on its training events and scores on the rest (:func:`split_events`);
+  fits on its training events and scores on the rest (:func:`split_events`). The training events
+  come first, so a caller fits once they are in and scores each later event as it arrives,
+  holding only its predictions;
+* the fit sees at most :data:`FIT_ROWS` rows, an equal seeded sample of each training event
+  (:func:`fit_rows`), so its memory and time do not grow with the split; every scored row is
+  scored;
 * inside the training events the last ~10% are held out for early stopping, scored by the
   metric the caller reports -- validation MSE, or with ``group`` the within-group correlation.
   Selection by MSE halts a head that has only learned which (event, plane) a row belongs to
@@ -23,12 +28,24 @@ import numpy as np
 #: Fraction of the evaluated events the probes are fitted on; the rest are scored.
 TRAIN_FRAC = 2 / 3
 
+#: Rows one probe is fitted on, at most. A row holds n_bands x d float16 features (6 KB at
+#: 4 x 768), so ~6 GB per probe; an event has ~6k floor and ~9k uprobe rows (SBND campaign), so
+#: the budget binds from ~110-170 training events on.
+FIT_ROWS = 1_000_000
+
 
 def split_events(n_events):
     """How many of ``n_events`` (in evaluation order) are probe-training events."""
     if n_events < 3:
         raise ValueError(f"{n_events} events: a probe needs at least 3 (fit, early stop, score)")
     return min(n_events - 1, max(2, int(round(TRAIN_FRAC * n_events))))
+
+
+def fit_rows(n, n_train, rng):
+    """The rows (sorted indices into ``n``) one of ``n_train`` training events gives the fit: all
+    of them, or a uniform sample of ``ceil(FIT_ROWS / n_train)``."""
+    k = -(-FIT_ROWS // n_train)
+    return np.arange(n) if n <= k else np.sort(rng.choice(n, k, replace=False))
 
 
 def gather(feats, idx):

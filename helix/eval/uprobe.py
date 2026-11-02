@@ -28,7 +28,7 @@ import numpy as np
 
 from helix.data.cells import FT, FW, cell_inputs, unkey
 from helix.eval import windows as W
-from helix.eval.probe import fisher_r, fit_probe, gather, split_events
+from helix.eval.probe import fisher_r, fit_probe, fit_rows, gather, split_events
 
 #: Along-wire unit vector (y, z) per plane gid, SBND: U +120 deg, V -120 deg, Y 180 deg, in each
 #: of the two volumes. The geometry registry carries no wire orientation; this was fitted
@@ -84,40 +84,64 @@ class UProbe:
         self.cfg, self.seed, self.n_boot = run.tokenizer, seed, n_boot
         self.n_planes = int(run.config["model"]["n_plane"])
         self.n_train = split_events(n_events)
-        self.rows = dict(y=[], geo=[], plane=[], e=[], trained=[], random=[])
+        self.fit = dict(y=[], geo=[], grp=[], e=[], trained=[], random=[])   # the training events' fit rows
+        self.probes, self.n_fit, self.n_patch = None, None, 0
+        self.p = {a: [] for a in ARMS}                                        # the scored events'
+        self.y, self.grp, self.e = [], [], []
 
     def add(self, ev):
         idx, _ = cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, self.cfg)
         pr = patch_rows(ev.cells, idx, self.n_planes)
-        if not len(pr["y"]):
+        n = len(pr["y"])
+        self.n_patch += n
+        grp = ev.index * 16 + pr["plane"]
+        if ev.index < self.n_train:
+            if self.probes is not None:
+                raise ValueError(f"uprobe: training event {ev.index} after a scored one")
+            if not n:
+                return
+            keep = fit_rows(n, self.n_train, np.random.default_rng([self.seed, ev.index, 2]))
+            f = self.fit
+            f["y"].append(pr["y"][keep]); f["geo"].append(pr["geo"][keep]); f["grp"].append(grp[keep])
+            f["e"].append(np.full(len(keep), ev.index))
+            for a in ("trained", "random"):
+                f[a].append(gather(ev.features(a, self.models[a]), pr["tok"][keep]))
             return
-        for k in ("y", "geo", "plane"):
-            self.rows[k].append(pr[k])
-        self.rows["e"].append(np.full(len(pr["y"]), ev.index))
-        for a in ("trained", "random"):
-            self.rows[a].append(gather(ev.features(a, self.models[a]), pr["tok"]))
+        if self.probes is None:
+            self._fit()
+        if not n:
+            return
+        for a in ARMS:
+            X = None if a == "geo" else gather(ev.features(a, self.models[a]), pr["tok"])
+            self.p[a].append(self.probes[a].predict(X, pr["geo"]))
+        self.y.append(pr["y"]); self.grp.append(grp); self.e.append(np.full(n, ev.index))
+
+    def _fit(self):
+        import torch
+        f, self.fit = self.fit, None
+        y, geo, grp, e = (np.concatenate(f[k]) for k in ("y", "geo", "grp", "e"))
+        if not len(y):
+            raise ValueError("uprobe: no patch with a dominant cell in any training event")
+        self.probes, self.n_fit = {}, len(y)
+        for a in ARMS:
+            X = None if a == "geo" else torch.cat(f.pop(a))
+            self.probes[a] = fit_probe(X, y, e, extra=geo, group=grp, seed=self.seed)
+            del X
 
     def result(self):
-        import torch
-        if not self.rows["y"]:
-            raise ValueError("uprobe: no patch with a dominant cell in any event")
-        y, geo, plane, e = (np.concatenate(self.rows[k]) for k in ("y", "geo", "plane", "e"))
-        grp = e * 16 + plane
-        tr = e < self.n_train
-        te_e, te_y, te_g = e[~tr], y[~tr], grp[~tr]
-        rows_of = {v: np.nonzero(te_e == v)[0] for v in np.unique(te_e)}
-        out = dict(n_train_events=self.n_train, n_patch=int(len(y)))
+        if not self.y:
+            raise ValueError("uprobe: no patch with a dominant cell in any scored event")
+        y, grp, e = (np.concatenate(x) for x in (self.y, self.grp, self.e))
+        rows_of = {v: np.nonzero(e == v)[0] for v in np.unique(e)}
+        out = dict(n_train_events=self.n_train, n_fit_rows=self.n_fit, n_patch=self.n_patch)
         for a in ARMS:
-            X = None if a == "geo" else torch.cat(self.rows[a])
-            probe = fit_probe(None if X is None else X[torch.from_numpy(tr)], y[tr], e[tr], extra=geo[tr],
-                              group=grp[tr], seed=self.seed)
-            p = probe.predict(None if X is None else X[torch.from_numpy(~tr)], geo[~tr])
+            p = np.concatenate(self.p[a])
 
             def stat(evs, p=p):
                 idx = np.concatenate([rows_of[v] for v in evs])
-                return {"fisher_r": fisher_r(te_y[idx], p[idx], te_g[idx], MIN_ROWS)}
+                return {"fisher_r": fisher_r(y[idx], p[idx], grp[idx], MIN_ROWS)}
 
-            out[a] = dict(W.bootstrap(stat, np.unique(te_e), self.n_boot, self.seed),
-                          val_fisher_r=round(probe.val_score, 4))
+            out[a] = dict(W.bootstrap(stat, np.unique(e), self.n_boot, self.seed),
+                          val_fisher_r=round(self.probes[a].val_score, 4))
         out["d_over_geo"] = round(out["trained"]["fisher_r"][0] - out["geo"]["fisher_r"][0], 4)
         return out

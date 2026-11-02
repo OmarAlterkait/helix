@@ -275,7 +275,8 @@ needs flash attention, sm80+):
 masked reconstruction), `floor` (detection floor / charge map from frozen features; trained
 and random-init arms, rankme), `uprobe` (along-wire coordinate; geo, trained, random arms),
 `denoise` (`--denoiser <denoise run>`, its best checkpoint, on the floor's windows). The probes fit
-on the first two thirds of the events and score the rest, with [16, 84]% event-bootstrap
+on the first two thirds of the events (at most `FIT_ROWS` = 1M rows each, sampled evenly over
+them, so memory stays ~25 GB at any split) and score the rest as they arrive, with [16, 84]% event-bootstrap
 intervals. See `helix/eval/__init__.py`.
 
 **The identity guard.** `helix.data.identity` refuses a checkpoint whose recorded

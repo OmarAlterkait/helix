@@ -17,7 +17,8 @@ Also per arm, ``rankme``: the effective rank ``exp(H(s / sum s))`` of the centre
 (``s`` their singular values, via the d x d Gram matrix) -- label-free, a necessary condition
 for a useful representation (collapse), read alongside the probe.
 
-Memory: map-row features are held on the host (float16), ~10-40 GB at a 400-event split.
+Memory: only the fit's rows hold features (float16, at most :data:`helix.eval.probe.FIT_ROWS`
+per arm, ~6 GB each); a scored event keeps its predictions alone.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import numpy as np
 
 from helix.data.cells import FT, FW, Q0, cell_inputs, unkey
 from helix.eval import windows as W
-from helix.eval.probe import fit_probe, gather, split_events
+from helix.eval.probe import fit_probe, fit_rows, gather, split_events
 
 ARMS = ("trained", "random")
 
@@ -64,31 +65,63 @@ class Floor:
         self.models = {"trained": run.model, "random": run.random_init(seed)}
         self.cfg, self.seed, self.n_boot = run.tokenizer, seed, n_boot
         self.n_train = split_events(n_events)
-        self.rows = {a: dict(X=[], A=[], y=[], e=[], pl=[]) for a in ARMS}
-        self.win = {a: dict(X=[], A=[], ok=[]) for a in ARMS}
-        self.wq, self.meta = [], []
+        self.fit = {a: dict(X=[], A=[], y=[], e=[]) for a in ARMS}   # the training events' fit rows
+        self.probes, self.n_fit = None, None
+        self.p, self.qh = {a: [] for a in ARMS}, {a: [] for a in ARMS}   # the scored events'
+        self.y, self.e, self.pl, self.wq, self.meta = [], [], [], [], []
         self.gram = {a: None for a in ARMS}
 
     def add(self, ev):
         tr = W.event_truth(ev.cells, ev.coeff_cells, np.random.default_rng([self.seed, ev.index]))
-        y = np.log1p(tr["mq"] / Q0).astype(np.float32)
         idx, aux = cell_inputs(tr["mrows"], ev.cell_key, ev.band_lengths, self.cfg)
         ok = (idx >= 0).any(1)                    # a cell no token covers is predicted 0, never fitted
-        test = ev.index >= self.n_train
-        if test and len(tr["wkey"]):
+        idx, aux = idx[ok], aux[ok]
+        y = np.log1p(tr["mq"][ok] / Q0).astype(np.float32)
+        if ev.index < self.n_train:
+            if self.probes is not None:
+                raise ValueError(f"floor: training event {ev.index} after a scored one")
+            keep = fit_rows(len(y), self.n_train, np.random.default_rng([self.seed, ev.index, 1]))
+            for a in ARMS:
+                F = ev.features(a, self.models[a])
+                self._rank(a, F)
+                f = self.fit[a]
+                f["X"].append(gather(F, idx[keep])); f["A"].append(aux[keep]); f["y"].append(y[keep])
+                f["e"].append(np.full(len(keep), ev.index))
+            return
+        if self.probes is None:
+            self._fit()
+        if len(tr["wkey"]):
             widx, waux = cell_inputs(tr["wkey"], ev.cell_key, ev.band_lengths, self.cfg)
+            wok = (widx >= 0).any(1)
         for a in ARMS:
             F = ev.features(a, self.models[a])
             self._rank(a, F)
-            r = self.rows[a]
-            r["X"].append(gather(F, idx[ok])); r["A"].append(aux[ok]); r["y"].append(y[ok])
-            r["e"].append(np.full(ok.sum(), ev.index)); r["pl"].append((unkey(tr["mrows"][ok])[0] % 3).astype(np.int8))
-            if test and len(tr["wkey"]):
-                self.win[a]["X"].append(gather(F, widx)); self.win[a]["A"].append(waux)
-                self.win[a]["ok"].append((widx >= 0).any(1))
-        if test and len(tr["wkey"]):
+            probe = self.probes[a]
+            self.p[a].append(probe.predict(gather(F, idx), aux))
+            if len(tr["wkey"]):
+                qh = np.expm1(np.maximum(probe.predict(gather(F, widx), waux), 0)) * Q0
+                # an uncovered cell carries no model information: predict nothing there (the
+                # probe's output on an all-zero input is an extrapolated constant, which would
+                # set every window's maximum)
+                qh[~wok] = 0.0
+                self.qh[a].append(qh)
+        self.y.append(y); self.e.append(np.full(len(y), ev.index))
+        self.pl.append((unkey(tr["mrows"][ok])[0] % 3).astype(np.int8))
+        if len(tr["wkey"]):
             self.wq.append(tr["wq"])
             self.meta += [dict(m, ev=ev.index) for m in tr["meta"]]
+
+    def _fit(self):
+        import torch
+        fits, self.fit, self.probes = self.fit, None, {}
+        for a in ARMS:
+            f = fits.pop(a)
+            X = torch.cat(f.pop("X"))
+            y = np.concatenate(f["y"])
+            self.probes[a] = fit_probe(X, y, np.concatenate(f["e"]), extra=np.concatenate(f["A"]),
+                                       seed=self.seed)
+            self.n_fit = len(y)
+            del X
 
     def _rank(self, a, F):
         F = F.double()
@@ -96,28 +129,16 @@ class Floor:
         self.gram[a] = g if self.gram[a] is None else tuple(x + y for x, y in zip(self.gram[a], g))
 
     def result(self):
-        import torch
-        out = dict(n_train_events=self.n_train, n_windows=len(self.meta))
+        if self.probes is None:
+            raise ValueError("floor: no scored event was added")
+        out = dict(n_train_events=self.n_train, n_fit_rows=self.n_fit, n_windows=len(self.meta))
+        y, e, pl = (np.concatenate(x) for x in (self.y, self.e, self.pl))
+        wq = np.concatenate(self.wq) if self.wq else np.zeros(0)
         for a in ARMS:
-            r, w = self.rows[a], self.win[a]
-            cat = lambda xs: torch.cat(xs) if isinstance(xs[0], torch.Tensor) else np.concatenate(xs)
-            X, A, y, e, pl = (cat(r[k]) for k in ("X", "A", "y", "e", "pl"))
-            tr = e < self.n_train
-            trt = torch.from_numpy(tr)
-            probe = fit_probe(X[trt], y[tr], e[tr], extra=A[tr], seed=self.seed)
-            p = probe.predict(X[~trt], A[~tr])
-            if self.meta:
-                qh = np.expm1(np.maximum(probe.predict(cat(w["X"]), cat(w["A"])), 0)) * Q0
-                # an uncovered cell carries no model information: predict nothing there (the
-                # probe's output on an all-zero input is an extrapolated constant, which would
-                # set every window's maximum)
-                qh[~cat(w["ok"])] = 0.0
-                wq = np.concatenate(self.wq)
-            else:
-                qh = wq = np.zeros(0)
-            res = score_maps(p, y[~tr], e[~tr], pl[~tr].astype(np.int64), qh, wq, self.meta, self.cfg,
-                             self.n_boot, self.seed)
-            res["val_mse"] = -probe.val_score
+            qh = np.concatenate(self.qh[a]) if self.qh[a] else np.zeros(0)
+            res = score_maps(np.concatenate(self.p[a]), y, e, pl.astype(np.int64), qh, wq, self.meta,
+                             self.cfg, self.n_boot, self.seed)
+            res["val_mse"] = -self.probes[a].val_score
             res["rankme"] = rankme(*self.gram[a])
             out[a] = res
         return out

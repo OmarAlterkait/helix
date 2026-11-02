@@ -303,6 +303,29 @@ def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
     assert not fisher_r(y, geo.predict(None, (e % 3)[:, None].astype(np.float32)), e) > 0.5   # no within-event signal
 
 
+def test_the_probes_fit_on_a_budget_and_keep_no_features_of_a_scored_event(synth, monkeypatch):
+    import helix.eval.probe as P
+    from helix.eval.floor import Floor
+    from helix.eval.uprobe import UProbe
+    rng = lambda: np.random.default_rng(3)
+    assert np.array_equal(P.fit_rows(5, 4, rng()), np.arange(5))
+    monkeypatch.setattr(P, "FIT_ROWS", 60)
+    k = P.fit_rows(1000, 7, rng())
+    assert len(k) == 9 and np.array_equal(k, np.unique(k)) and np.array_equal(k, P.fit_rows(1000, 7, rng()))
+    d, ds = synth
+    run = load_run(d, device="cpu")
+    ms = [Floor(run, len(ds), n_boot=5), UProbe(run, len(ds), n_boot=5)]
+    for e in _events(run, ds):
+        for m in ms:
+            m.add(e)
+            assert (m.fit is None) == (e.index >= m.n_train)      # fitted at the first scored event
+    for m in ms:
+        out = m.result()
+        assert 0 < out["n_fit_rows"] <= m.n_train * -(-60 // m.n_train)
+    with pytest.raises(ValueError, match="after a scored one"):
+        ms[0].add(next(iter(_events(run, ds))))
+
+
 def test_the_cli_writes_one_json(synth, tmp_path, monkeypatch):
     import helix.eval as E
     import helix.eval.events as EV

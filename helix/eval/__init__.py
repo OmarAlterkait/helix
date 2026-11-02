@@ -19,8 +19,9 @@ Metrics:
            geo, trained and random-init arms
   denoise  a denoiser's per-cell charge on the floor's cells and windows (:mod:`helix.eval.denoise`)
 
-The probes (floor, uprobe) fit on the first two thirds of the events and score the rest; denoise
-scores the same rest. Intervals are [16, 84]% over an event bootstrap of the scored events.
+The probes (floor, uprobe) fit on the first two thirds of the events (at most
+``helix.eval.probe.FIT_ROWS`` rows each, sampled evenly over them) and score every row of the
+rest as it arrives; denoise scores the same rest. Intervals are [16, 84]% over an event bootstrap of the scored events.
 """
 
 from __future__ import annotations
