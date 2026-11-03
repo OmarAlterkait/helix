@@ -322,6 +322,21 @@ def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
         fit_probe(torch.zeros((n, 0)), (e % 3)[:, None].astype(np.float32), y, e, group=e, device="cpu")
 
 
+def test_fit_probe_uses_extra_columns_in_any_units_beside_many_features():
+    """The geometry columns are standardised with the features: in their own units beside
+    hundreds of unit-variance channels they were ignored (the along-wire random arm scored 0.005
+    with columns that alone score 0.121)."""
+    from helix.eval.probe import fit_probe
+    rng = np.random.default_rng(0)
+    n = 6000
+    e = np.repeat(np.arange(12), n // 12)
+    s = rng.standard_normal(n).astype(np.float32)
+    X = torch.from_numpy(rng.standard_normal((n, 512)).astype(np.float32)).half()      # noise
+    A = np.stack([1e-3 * s, np.ones(n, np.float32)], 1)               # the signal, tiny units; a constant
+    p = fit_probe(X, A, s, e, seed=0, device="cpu").predict(X, A)
+    assert np.corrcoef(p, s)[0, 1] > 0.9
+
+
 def test_the_probes_fit_on_a_budget_and_keep_no_features_of_a_scored_event(synth, monkeypatch):
     import helix.eval.probe as P
     from helix.eval.floor import Floor

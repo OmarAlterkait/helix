@@ -15,10 +15,13 @@ Protocol, the same for every arm of every metric:
   (:func:`helix.eval.windows.fisher_z`, the reported statistic). Selection by MSE halts a head
   that has only learned which (event, plane) a row belongs to when, as for the along-wire
   coordinate, almost all the target's variance is between groups;
-* features are STANDARDISED per channel from the training rows: one massive-activation channel
-  (measured: 4836 against a next-largest 462) otherwise sets the input scale and the score
-  tracks it, not the representation (two seeds of one recipe: 0.82 and 0.68 on raw inputs).
-  ``extra`` columns (presence bits, offsets, geometry) are appended unstandardised;
+* every input column -- features and ``extra`` (presence bits, offsets, geometry) alike -- is
+  STANDARDISED from the training rows: one massive-activation channel (measured: 4836 against a
+  next-largest 462) otherwise sets the input scale and the score tracks it, not the
+  representation (two seeds of one recipe: 0.82 and 0.68 on raw inputs); and ``extra`` left in
+  its own units next to thousands of unit-variance features is ignored (the along-wire probe's
+  random arm scored 0.005 with the geometry columns that alone score 0.121). A column constant
+  over the training rows is centred, not scaled, and no column is scaled by more than 1e3;
 * the budget is in EPOCHS (at least :data:`MIN_STEPS` steps), so a larger split does not train
   the head less; seeded.
 """
@@ -72,7 +75,7 @@ class Probe:
     def inputs(self, X, extra):
         import torch
         A = extra if isinstance(extra, torch.Tensor) else torch.from_numpy(np.asarray(extra, np.float32))
-        return torch.cat([(X.to(self.device).float() - self.mu) / self.sd, A.to(self.device).float()], 1)
+        return (torch.cat([X.to(self.device).float(), A.to(self.device).float()], 1) - self.mu) / self.sd
 
     def predict(self, X, extra):
         import torch
@@ -86,7 +89,7 @@ def fit_probe(X, extra, y, event, *, group=None, seed=0, device=None):
     """Fit the probe head on training rows.
 
     ``X``: (n, d) features (torch, CPU; d = 0 for geometry alone); ``extra``: (n, k) float32
-    appended unstandardised; ``y``: (n,) target; ``event``: (n,) event index; ``group``: (n,)
+    appended to them; ``y``: (n,) target; ``event``: (n,) event index; ``group``: (n,)
     int -- select on the within-group correlation rather than validation MSE.
     """
     import torch
@@ -98,14 +101,16 @@ def fit_probe(X, extra, y, event, *, group=None, seed=0, device=None):
     torch.manual_seed(seed)
     y, event = np.asarray(y, np.float32), np.asarray(event)
     n = len(y)
-    s1 = torch.zeros(X.shape[1], dtype=torch.float64, device=dev)
+    A = torch.as_tensor(np.asarray(extra, np.float32))
+    s1 = torch.zeros(X.shape[1] + A.shape[1], dtype=torch.float64, device=dev)
     s2 = torch.zeros_like(s1)
-    for c in X.split(CHUNK):                                 # chunked: no float copy of the matrix
-        c = c.to(dev).double()
+    for s in range(0, n, CHUNK):                             # chunked: no float copy of the matrix
+        c = torch.cat([X[s:s + CHUNK].to(dev).double(), A[s:s + CHUNK].to(dev).double()], 1)
         s1 += c.sum(0)
         s2 += (c * c).sum(0)
     mu = (s1 / n).float()
-    sd = (s2 / n - (s1 / n) ** 2).clamp(min=0).sqrt().float().clamp(min=1e-3)
+    sd = (s2 / n - (s1 / n) ** 2).clamp(min=0).sqrt().float()
+    sd = torch.where(sd > 1e-6, sd.clamp(min=1e-3), torch.ones_like(sd))
     net = nn.Sequential(nn.Linear(X.shape[1] + extra.shape[1], 1024), nn.GELU(), nn.Linear(1024, 512),
                         nn.GELU(), nn.Linear(512, 1)).to(dev)
     probe = Probe(net, mu, sd, dev)
@@ -115,7 +120,7 @@ def fit_probe(X, extra, y, event, *, group=None, seed=0, device=None):
         raise ValueError("a probe fit needs rows from at least 2 events (one held out to stop on)")
     va = np.isin(event, evs[-max(1, int(round(0.1 * len(evs)))):])
     tri, vai = np.nonzero(~va)[0], np.nonzero(va)[0]
-    Xg, Ag = X.to(dev), torch.as_tensor(np.asarray(extra, np.float32)).to(dev)
+    Xg, Ag = X.to(dev), A.to(dev)
     yg = torch.from_numpy(y).to(dev)
 
     def score():

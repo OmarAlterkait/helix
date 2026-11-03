@@ -115,6 +115,9 @@ def test_fisher_z_is_within_group():
     got = W.fisher_z(p2, y2, grp2)
     assert set(got) == set(want) == set(range(10)) | {12}
     assert all(got[k] == pytest.approx(want[k], abs=1e-9) for k in want)
+    # constant up to float32 rounding (a batched matmul's last bit) is constant
+    p3 = np.where(rng.random(30) < 0.5, np.float32(2.0), np.nextafter(np.float32(2.0), np.float32(3)))
+    assert W.fisher_z(p3, rng.standard_normal(30), np.zeros(30)) == {}
 
 
 

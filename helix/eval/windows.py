@@ -291,14 +291,19 @@ def group_event(k):
 def fisher_z(p, y, group, min_rows=MIN_ROWS):
     """``{group: arctanh(Pearson r)}`` of prediction ``p`` against truth ``y`` within each group
     with at least ``min_rows`` rows and variance in both. One pass over the rows (per-group sums),
-    not one per group."""
+    not one per group.
+
+    "Variance" means above float32 rounding (a variance over 1e-12 of the mean square): a probe
+    whose output is constant within a group returns values that differ in the last bit with how
+    the batched matmul was split across threads, and r of that is noise, not a score."""
     keys, inv, n = np.unique(np.asarray(group), return_inverse=True, return_counts=True)
     inv, G = inv.ravel(), len(keys)
     p, y = np.asarray(p, np.float64), np.asarray(y, np.float64)
     dp = p - (np.bincount(inv, p, G) / n)[inv]               # centred first: the raw sums cancel
     dy = y - (np.bincount(inv, y, G) / n)[inv]
     spp, syy, spy = (np.bincount(inv, w, G) for w in (dp * dp, dy * dy, dp * dy))
-    ok = (n >= min_rows) & (spp > 0) & (syy > 0)
+    tiny = lambda v, w: v <= 1e-12 * np.bincount(inv, w * w, G)          # noqa: E731
+    ok = (n >= min_rows) & ~tiny(spp, p) & ~tiny(syy, y) & (spp > 0) & (syy > 0)
     r = np.clip(spy[ok] / np.sqrt(spp[ok] * syy[ok]), -0.999, 0.999)
     return dict(zip(keys[ok].tolist(), np.arctanh(r).tolist()))
 
