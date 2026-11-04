@@ -18,7 +18,7 @@ waveforms into shards beside the TPC ones (not yet fed to the model).
 | `helix/optical` | the optical codec, response calibration, optical shards and tokens |
 | `helix/data` | corpus reader, dataset and verifier; load-time transforms; bin grid; the `cells` truth; the denoiser's labels; identity guard |
 | `helix/model` | the FM: tokenizer, blocks, masking, loss, muP; the denoiser on it; reading a run (`checkpoint.load_run`) |
-| `helix/eval` | evaluating a run: `python -m helix.eval RUN --metrics recon,floor,uprobe,denoise` |
+| `helix/eval` | evaluating a run: `python -m helix.eval RUN --metrics recon,floor,uprobe,labels,denoise` |
 | `helix/integrations/pimm` | adapters into pimm's trainer |
 | `helix/sites` | per-site roots, container and scheduler (`s3df.yaml`, `nersc.yaml`) |
 | `scripts/build_{sim,sbnd,goop}.py` | the sources, one script each; `scripts/corpus.sh` runs a corpus on the scheduler |
@@ -56,7 +56,7 @@ scripts/helix_env.sh` exports them as `$HELIX_*`. The full procedures are in
     LINKS=4 scripts/train.sh denoise model.fm=$HELIX_EXP/fm_cooldown
 
     # evaluate (on an A100 node: RUNBOOK section 7)
-    scripts/helix_run.sh python -m helix.eval $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe --out eval.json
+    scripts/helix_run.sh python -m helix.eval $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe,labels --out eval.json
     scripts/helix_run.sh python -m helix.eval $HELIX_EXP/fm_cooldown --metrics denoise --denoiser $HELIX_EXP/denoise --out dn.json
 
 The bin grid the configs read is `$HELIX_ARCHIVE/coeff_bins_d1m_j000000_noisy.pt`

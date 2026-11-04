@@ -132,10 +132,12 @@ run should confirm it (TODO). Supersedes the m113 architecture (d512) named in Â
 
 **Truth is the `cells` modality, built separately from the corpus.**
 `scripts/build_truth.py --corpus <run dir>` writes `{name}_cells_<k>.h5` beside each
-coefficient shard (same events, same order, identity copied; format `helix-cells-2`,
+coefficient shard (same events, same order, identity copied; format `helix-cells-3`,
 `helix/data/cells.py`): per 2-wire x 16-tick cell its charge, its split by track and its
 dominant hits group's share and position; per (plane, track) the charge centroid; per
-track the deposited energy. `CoeffTPCDataset(modalities=("coeff", "cells"))` joins it by
+track the deposited energy and its motif / pid class (pysupera's `labl`, written by
+pimm-data's `supera_labl` beside the task, walked as pimm-data walks `segment_motif` /
+`segment_pid`). `CoeffTPCDataset(modalities=("coeff", "cells"))` joins it by
 identity; pretraining refuses any config or module that names it. *Why:* labels change
 more often than the corpus, and a corpus rebuild is the expensive step; every evaluation
 window and padding box lies on a cell edge, so the cell grid carries everything the
@@ -143,32 +145,45 @@ denoiser label and the evaluation need (on run 0027575715 shard 0 it reproduces 
 pixel-level windows exactly). Size: ~197 MB per shard. It replaces the per-script truth
 dumps (`dump_probe_truth`, `dump_resolution_truth`, `build_denoise_truth`, ...).
 
-**One evaluation command.** `python -m helix.eval RUN --metrics recon,floor,uprobe,denoise
+**One evaluation command.** `python -m helix.eval RUN --metrics recon,floor,uprobe,labels,denoise
 --out FILE` scores a run from its pimm directory: `recon` (the training evaluator's
-metric code), `floor` (the detection floor on frozen features, trained and random-init
-arms, RankMe), `uprobe` (the along-wire probe on the same features and `fit_probe`),
-`denoise` (a denoiser on the floor's windows). *Why:* sixteen scripts (`eval_resolution`,
+metric code), `floor` (the detection floor on frozen features against the fit-free
+coefficient amplitude), `uprobe` (the along-wire probe against the geometry columns),
+`labels` (each signal cell's particle class against the token layout), `denoise` (a
+denoiser on the floor's windows). *Why:* sixteen scripts (`eval_resolution`,
 `eval_checkpoint`, `eval_denoise`, `run_probe`, ...) each read the model and the truth
 their own way. `Q0` is defined once (`helix.data.cells.Q0`).
 
 **The evaluation's definitions, and why they scale.** Shared by every metric (`helix.eval.Context`):
-one random-init model, one fit/score split, and per event one truth draw
-(`Event.truth`). *Definitions* (each changed numbers when set, 2026-11):
-* a cell no token covers is SCORED as predicted 0, never dropped, in map rows as in windows
-  -- dropping them made the scored cells depend on the tokenizer (fewer covered faint cells
-  raised faint AUC for free);
-* within-group correlation is per (event, plane gid), in floor, denoise and uprobe alike --
-  `gid % 3` pooled the two TPC volumes, so a between-volume level difference raised `map_r`;
-* one row threshold, `windows.MIN_ROWS` = 21, for early stopping and for the reported number
-  -- uprobe reported >=100 while selecting on >=21, and with the fit budget no validation
-  group reaches 100. A fit with nothing to select on is an error, not its first checkpoint;
-* AUCs count a tie as a half -- the unstable `argsort` put tied scores (an all-zero window
-  is common) in arbitrary order: 0.93 for two identical all-zero sets;
+one encoder, one fit/score split, and per event one truth draw (`Event.truth`).
+*Definitions* (each changed numbers when set, 2026-11; the measurements behind the last
+four: `exp/helix/report/checks.py`, 600 events of fm / fm_cooldown):
+* a cell no token covers is SCORED as predicted 0, never dropped -- dropping them made the
+  scored cells depend on the tokenizer;
+* the false-positive rate is per VIEW: each view's 99th percentile of its own background
+  windows, sampled per plane -- one pooled threshold, set by the views with most background
+  (U and V: 5.3k / 5.9k windows against Y's 0.8k), ran Y at 2.4-3.2% and raised the faint
+  efficiency 0.35 -> 0.41;
+* every probe arm has a reference that is not a probe of another encoder: the floor's is the
+  fit-free coefficient amplitude, uprobe's the geometry columns, labels' the token layout.
+  The randomly initialised encoder was the control until measured: under the same probe it
+  scored BELOW the amplitude at every energy up to 1 MeV (0.06 vs 0.08 below 0.1 MeV, 0.52
+  vs 0.83 at 0.2-0.5) and below geometry along the wire (within-group R^2 -0.02 vs 0.03) --
+  Gaussian-noise features did the same, so it bounds the probe's fitting (thousands of empty
+  columns drown a weak signal), not the representation;
+* the probe stays an MLP: ridge on the same features lost the faint floor (0.29 vs 0.35
+  below 0.1 MeV) and the Y view along the wire (R^2 0.01 vs 0.48);
+* uprobe reports the pooled within-(event, plane) R^2, not a Fisher-z mean of
+  correlations -- a correlation ignores scale (geometry alone: r 0.15, R^2 0.03), and the
+  per-group row threshold it needed is gone;
+* labels (motif, pid per signal cell) are scored by balanced accuracy and fitted with a
+  class-weighted loss: plain argmax never predicted a Michel (0.4% of cells) or a delta;
 * the bootstrap resamples events as draw counts: an event drawn twice weighs twice
-  everywhere (uprobe used to merge a duplicate's rows into one group);
-* dropped as diagnostics nothing read: `floor_eff5pct_*`, `floor_auc_*`,
-  `sep_dip_{edge,same}_*` (its token-edge flag re-implemented the tokenizer's arithmetic,
-  and wrongly), `dip_truth`, `masked_frac`.
+  everywhere;
+* dropped: map rows as a scored set (`map_r`, presence / faint AUC: their mix of signal,
+  near-signal and noise rows was a choice, not a population), localisation (averaged over
+  windows the probe never detected, it measured noise centroids), pair separation, RankMe,
+  energy bins above 0.5 MeV (every arm is at 0.97-0.99 there), and the random-init arm.
 *Scaling:* probes fit on at most `FIT_ROWS` = 1M rows and score each later event as it
 arrives (holding predictions only); every bootstrap statistic is a weighted function of
 per-event counts, so a resample costs a few bincounts, not a rebuild of ~8M rows. The

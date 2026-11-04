@@ -51,17 +51,6 @@ class Run:
     config: dict                    # resolved_config.json
     provenance: dict = field(default_factory=dict)
 
-    def random_init(self, seed=0):
-        """The same architecture freshly initialised (seeded), with the trained model's bins, on
-        its device and in eval mode: the control a frozen-feature probe is compared against.
-        (An FM run's.)"""
-        import torch
-        torch.manual_seed(int(seed))
-        m = build_model(self.config)
-        apply_bins(m, dict(edges=self.model.bin_edges.cpu(), cent_asinh=self.model.bin_cent_asinh.cpu(),
-                           cent_ratio=self.model.bin_cent_ratio.cpu()))
-        return _frozen(m, next(self.model.parameters()).device)
-
 
 def run_dir(path):
     """The run directory (``save_path``) of ``path``: itself or the nearest ancestor holding

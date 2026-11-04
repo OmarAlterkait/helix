@@ -264,7 +264,7 @@ needs flash attention, sm80+):
     sbatch --account=$HELIX_SLURM_TRAIN_ACCOUNT --partition=$HELIX_SLURM_TRAIN_PARTITION \
         --qos=$HELIX_SLURM_TRAIN_QOS --gpus=1 --cpus-per-task=8 --mem=64G --time=03:00:00 \
         --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python -m helix.eval \
-                $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe --out $HELIX_EXP/fm_cooldown/eval.json"
+                $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe,labels --out $HELIX_EXP/fm_cooldown/eval.json"
     # a denoiser: RUN is its FM run, --denoiser the denoiser run
     sbatch ... --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python -m helix.eval \
                 $HELIX_EXP/fm_cooldown --metrics denoise --denoiser $HELIX_EXP/denoise --out $HELIX_EXP/denoise/eval.json"
@@ -272,9 +272,11 @@ needs flash attention, sm80+):
 `RUN` is the run directory (`--weights ema` default, or `last`) or one checkpoint inside it
 (`model/iter_N.pth`). Events: the run's own corpus, `probe` role of its holdout
 (`--max-events` for a quick look). Metrics: `recon` (the training evaluator's
-masked reconstruction), `floor` (detection floor / charge map from frozen features; trained
-and random-init arms, rankme), `uprobe` (along-wire coordinate; geo, trained, random arms),
-`denoise` (`--denoiser <denoise run>`, its best checkpoint, on the floor's windows). The probes fit
+masked reconstruction), `floor` (detection floor from frozen features, per-view 1% FPR, by
+energy; trained against the coefficient amplitude), `uprobe` (along-wire coordinate,
+within-group R^2; trained against geometry), `labels` (motif / pid per signal cell, balanced
+accuracy; trained against the token layout), `denoise` (`--denoiser <denoise run>`, its best
+checkpoint, on the floor's windows). The probes fit
 on the first two thirds of the events (at most `FIT_ROWS` = 1M rows each, sampled evenly over
 them, so memory stays ~25 GB at any split) and score the rest as they arrive, with [16, 84]%
 event-bootstrap intervals; definitions in docs/DECISIONS.md ("The evaluation's definitions").
@@ -397,7 +399,7 @@ the same. What differs:
           --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python scripts/build_truth.py --corpus $HELIX_CORPUS_DURABLE/j000000"
       sbatch -A $HELIX_SLURM_TRAIN_ACCOUNT -C gpu -q shared --gpus=1 -c 32 --mem=56G --time=08:00:00 \
           --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python -m helix.eval \
-                  $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe --out $HELIX_EXP/fm_cooldown/eval.json"
+                  $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe,labels --out $HELIX_EXP/fm_cooldown/eval.json"
 
   `shared` caps a GPU's share at 32 cores and 56 GB; the floor holds its features in host
   memory (10-40 GB over the probe split), so one evaluation per job. Truth needs the

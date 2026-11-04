@@ -16,7 +16,7 @@ and each cell's dominant hits group's 3D centroid (the along-wire probe's label)
 
 Layout (four tables, each a per-event CSR with its own ``event_offset``)::
 
-    /config       attrs: format ("helix-cells-2"), n_events, grid_fw, grid_ft, key,
+    /config       attrs: format ("helix-cells-3"), n_events, grid_fw, grid_ft, key,
                          label_json, provenance_json
     /cells        key int64 (fkey), q float32,                one row per cell, sorted by key
                   dom_frac float32, dom_y float32,            the cell's largest hits group:
@@ -125,13 +125,35 @@ def unkey(k):
     return k >> 40, (k >> 20) & 0xFFFFF, (k & 0xFFFFF) - _TOFF
 
 
-def coeff_cells(band, plane_gid, wire, tau, cfg):
-    """Fine-cell keys (sorted, unique) of an event's kept coefficients in the tokenized bands."""
+def _coeff_keys(band, plane_gid, wire, tau, cfg):
+    """``(k, key)``: which coefficients are in the tokenized bands, and their fine cells."""
     from helix.model.tokenize import tick_of_tau
     band, plane_gid, wire, tau = (np.asarray(x) for x in (band, plane_gid, wire, tau))
     k = band < cfg.n_bands
     ct = tick_of_tau(tau[k], plane_gid[k], band[k], cfg)
-    return np.unique(fkey(plane_gid[k], wire[k] // FW, np.floor(ct / FT).astype(np.int64)))
+    return k, fkey(plane_gid[k], wire[k] // FW, np.floor(ct / FT).astype(np.int64))
+
+
+def coeff_cells(band, plane_gid, wire, tau, cfg):
+    """Fine-cell keys (sorted, unique) of an event's kept coefficients in the tokenized bands."""
+    return np.unique(_coeff_keys(band, plane_gid, wire, tau, cfg)[1])
+
+
+def coeff_amplitude(c, cfg):
+    """``(keys, amp)``: :func:`coeff_cells` of a coeff part ``c`` (``band, plane_gid, wire, tau,
+    value`` and its ``_meta``) and, per cell, the largest ``|value| / sigma`` of the kept
+    coefficients in it -- the compressor's own detection statistic, in the units the tokenizer
+    normalises by (:func:`helix.model.tokenize.sigma_for_rows`)."""
+    from helix.model.tokenize import sigma_for_rows
+    k, key = _coeff_keys(c["band"], c["plane_gid"], c["wire"], c["tau"], cfg)
+    m = c["_meta"]
+    band, g = np.asarray(c["band"])[k], np.asarray(c["plane_gid"])[k]
+    a = np.abs(np.asarray(c["value"], np.float64).reshape(-1)[k]) \
+        / np.maximum(sigma_for_rows(g, band, m["gids"], m["norm_sigma"]), 1e-6)
+    keys, inv = np.unique(key, return_inverse=True)
+    amp = np.zeros(len(keys))
+    np.maximum.at(amp, inv.ravel(), a)
+    return keys, amp
 
 
 def _fourier(x):

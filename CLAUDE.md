@@ -16,7 +16,7 @@ probe, denoising) against simulation truth on a fine cell grid.
 | `helix.tpc` | **no** | LArTPC physics: TPC chain, coherent gate, forward model (noise + digitize), readouts, readers |
 | `helix.build` | **no** | the build pipeline (sources are `scripts/build_{sim,sbnd,goop}.py`) |
 | `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP; the denoiser; reading a run |
-| `helix.eval` | no (events read through `helix.data`) | evaluating a run: `python -m helix.eval` (recon, floor, uprobe, denoise) |
+| `helix.eval` | no (events read through `helix.data`) | evaluating a run: `python -m helix.eval` (recon, floor, uprobe, labels, denoise) |
 | `helix.optical` | no | the optical codec — written beside the TPC shards, not yet fed to the FM |
 | `helix.data` | **pimm-data** | coeff corpus reader/dataset/verifier, registered transforms, bin grid, `cells` truth, denoiser labels, identity guard |
 | `helix.integrations.pimm` | **pimm** | adapters into the training framework |
@@ -162,9 +162,9 @@ planes are contiguous). For a second modality those four roles separate; see
   the same thing on its cache; point `UV_CACHE_DIR` at node-local `/tmp`.
 - **A corpus run may have gaps.** `run_0027670361` is missing source files
   51-56 and 94-97; 180 shards / 17,999 events is complete for it, not a failure.
-- **The floor's features live on the host.** `helix.eval` floor holds every map
-  row's float16 features in memory, ~10-40 GB over the 388-event probe split;
-  several evaluations on one node can exhaust host memory silently.
+- **The probes' features live on the host.** `helix.eval` floor, uprobe and labels
+  each hold up to `FIT_ROWS` = 1M rows of float16 features (~6 GB each, ~20 GB
+  together); several evaluations on one node can exhaust host memory silently.
 - **`save_path` must resolve through `helix.paths`**, never relative to the
   checkout — a relative one wrote a run INTO the repo and four files were
   committed.

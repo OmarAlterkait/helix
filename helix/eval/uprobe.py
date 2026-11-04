@@ -14,13 +14,14 @@ and scoring them separately would weight the metric by cell count. A row's label
 charge-weighted mean ``u`` over its DOMINANT cells (``dom_frac >= 0.5``); a patch with none is
 dropped, and so are cells no token covers.
 
-Three arms, every one with the geometry columns (plane one-hot, mean wire, mean tick, presence
-bits) appended: ``geo`` (those alone -- the floor; it includes drift time, so any ``u`` leaking
-through timing is already in it), ``trained`` and ``random`` (the same architecture randomly
-initialised). Scored with ``fisher_r``: Pearson r WITHIN each (event, plane) of at least
-:data:`helix.eval.windows.MIN_ROWS` patches, Fisher-z averaged, so the coarse between-event and
+Two arms, both with the geometry columns (plane one-hot, mean wire, mean tick, presence bits)
+appended: ``geo`` (those alone -- the reference; it includes drift time, so any ``u`` leaking
+through timing is already in it) and ``trained``. Scored with ``r2``: the pooled R^2 WITHIN
+each (event, plane) (:func:`helix.eval.windows.group_r2`), so the coarse between-event and
 between-plane structure any position-only baseline reproduces is removed (97.4% of ``u``'s
-variance is between groups). ``d_over_geo`` = trained - geo, bootstrapped paired.
+variance is between groups) while a prediction of the wrong scale is still charged (a
+correlation is not: geometry alone has within-group r 0.15 but R^2 0.03); also per view.
+``d_over_geo`` = trained - geo, bootstrapped paired.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import numpy as np
 
 from helix.data.cells import FT, FW, cell_inputs, unkey
 from helix.eval.probe import fit_probe, fit_rows, gather
-from helix.eval.windows import bootstrap, fisher_z, group_event, plane_group
+from helix.eval.windows import VIEWS, bootstrap, group_event, group_r2, plane_group
 
 #: Along-wire unit vector (y, z) per plane gid, SBND: U +120 deg, V -120 deg, Y 180 deg, in each
 #: of the two volumes. The geometry registry carries no wire orientation; this was fitted
@@ -38,7 +39,7 @@ from helix.eval.windows import bootstrap, fisher_z, group_event, plane_group
 ALONGWIRE = np.array([[-0.5, np.sqrt(3) / 2], [-0.5, -np.sqrt(3) / 2], [-1.0, 0.0]] * 2)
 DOM_THRESHOLD = 0.5
 WIRE_SCALE, TICK_SCALE = 2000.0, 4321.0          # the geometry columns' units
-ARMS = ("geo", "trained", "random")
+ARMS = ("geo", "trained")
 
 
 def u_of(gid, y, z):
@@ -83,7 +84,7 @@ class UProbe:
     def __init__(self, ctx):
         self.ctx = ctx
         self.n_planes = int(ctx.run.config["model"]["n_plane"])
-        self.fit = dict(y=[], geo=[], grp=[], e=[], trained=[], random=[])   # the training events' fit rows
+        self.fit = dict(y=[], geo=[], grp=[], e=[], trained=[])    # the training events' fit rows
         self.probes, self.n_fit, self.n_patch = None, None, 0
         self.p = {a: [] for a in ARMS}                                        # the scored events'
         self.y, self.grp = [], []
@@ -106,11 +107,10 @@ class UProbe:
             f = self.fit
             f["y"].append(pr["y"][keep]); f["geo"].append(pr["geo"][keep]); f["grp"].append(grp[keep])
             f["e"].append(np.full(len(keep), ev.index))
-            for a in ("trained", "random"):
-                f[a].append(gather(ev.features(a, c.models[a]), pr["tok"][keep]).cpu())
+            f["trained"].append(gather(ev.features(c.model), pr["tok"][keep]).cpu())
             return
         for a in ARMS:
-            X = torch.zeros((n, 0)) if a == "geo" else gather(ev.features(a, c.models[a]), pr["tok"])
+            X = torch.zeros((n, 0)) if a == "geo" else gather(ev.features(c.model), pr["tok"])
             self.p[a].append(self.probes[a].predict(X, pr["geo"]))
         self.y.append(pr["y"]); self.grp.append(grp)
 
@@ -131,23 +131,26 @@ class UProbe:
             raise ValueError("uprobe: no patch with a dominant cell in any scored event")
         y, grp = np.concatenate(self.y), np.concatenate(self.grp)
         evs = np.unique(group_event(grp))
-        zs = {}
-        for a in ARMS:                    # each (event, plane)'s z once; a resample weighs its events
-            z = fisher_z(np.concatenate(self.p[a]), y, grp)
-            zs[a] = (np.array(list(z.values()), np.float64),
-                     np.searchsorted(evs, group_event(np.array(list(z), np.int64))))
+        terms = {}
+        for a in ARMS:                    # each (event, plane)'s sums once; a resample weighs its events
+            keys, sse, sst = group_r2(np.concatenate(self.p[a]), y, grp)
+            terms[a] = (sse, sst, np.searchsorted(evs, group_event(keys)), (keys % 16) % 3)
 
         def stat(m):
             r = {}
-            for a, (zv, ze) in zs.items():
-                w = m[ze]
-                r[a] = float(np.tanh((w * zv).sum() / w.sum())) if w.sum() else float("nan")
+            for a, (sse, sst, ge, gv) in terms.items():
+                w = m[ge]
+                r[a] = float(1 - (w * sse).sum() / (w * sst).sum())
+                for v in range(3):
+                    s = gv == v
+                    r[f"{a}_{VIEWS[v]}"] = float(1 - (w * sse)[s].sum() / (w * sst)[s].sum()) if (w * sst)[s].sum() else float("nan")
             r["d_over_geo"] = r["trained"] - r["geo"]
             return r
 
         b = bootstrap(stat, len(evs), c.n_boot, c.seed)
         out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, n_patch=self.n_patch)
         for a in ARMS:
-            out[a] = dict(fisher_r=b[a], val_fisher_r=round(self.probes[a].val_score, 4))
+            out[a] = dict(r2=b[a], **{f"r2_{v}": b[f"{a}_{v}"] for v in VIEWS},
+                          val_r2=round(self.probes[a].val_score, 4))
         out["d_over_geo"] = b["d_over_geo"]
         return out

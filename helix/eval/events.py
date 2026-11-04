@@ -1,8 +1,8 @@
 """The evaluated events: a run's held-out split, tokenized once, with its cells truth.
 
 Every metric reads the same :class:`Event` objects, so an event is read, tokenized and moved to
-the device once, and a model's frozen features and the event's map rows and windows are computed
-once per event however many metrics use them.
+the device once, and the encoder's frozen features and the event's map rows and windows are
+computed once per event however many metrics use them.
 """
 
 from __future__ import annotations
@@ -17,20 +17,22 @@ class Event:
     index: int                 # position in the evaluated sequence, 0..n-1
     cells: dict                # helix.data.cells record
     coeff_cells: np.ndarray    # fine cells of the kept coefficients (helix.data.cells.coeff_cells)
+    coeff_amp: tuple           # (those cells, their largest |coefficient| / sigma): coeff_amplitude
     band_lengths: np.ndarray
     cell_key: np.ndarray       # per token, the tokenizer's cell key (numpy)
     batch: dict                # the FM's batch (torch, on the device)
-    _feats: dict = field(default_factory=dict, repr=False)
+    _feats: object = field(default=None, repr=False)
     _truth: tuple = field(default=None, repr=False)         # (seed, truth)
 
-    def features(self, name, model):
-        """``model.encode(batch)`` (all tokens visible), float32, cached under ``name``."""
-        if name not in self._feats:
+    def features(self, model):
+        """``model.encode(batch)`` (all tokens visible), float32, cached: an evaluation probes
+        one encoder."""
+        if self._feats is None:
             import torch
             from helix.eval.recon import autocast
             with torch.no_grad(), autocast(self.batch["plane_id"].device):
-                self._feats[name] = model.encode(self.batch).float()
-        return self._feats[name]
+                self._feats = model.encode(self.batch).float()
+        return self._feats
 
     def truth(self, seed, windows):
         """:func:`helix.eval.windows.event_truth` of the event (its windows only if ``windows``),
@@ -56,7 +58,7 @@ def dataset(run):
 def events(ds, tokenizer, device, max_events=None):
     """:class:`Event` for each of the first ``max_events`` events of ``ds``, in its order."""
     import torch
-    from helix.data.cells import coeff_cells
+    from helix.data.cells import coeff_amplitude
     from helix.model.tokenize import CoeffTokenize
 
     tokenize = CoeffTokenize(part="coeff", cfg=tokenizer)          # the training transform itself
@@ -68,6 +70,6 @@ def events(ds, tokenizer, device, max_events=None):
         fm = tokenize(dict(s))["coeff"]
         B = {k: torch.as_tensor(v).to(device) for k, v in fm.items() if isinstance(v, np.ndarray)}
         B["n_cells"] = B["plane_id"].shape[0]
-        yield Event(index=i, cells=s["cells"],
-                    coeff_cells=coeff_cells(c["band"], c["plane_gid"], c["wire"], c["tau"], tokenizer),
+        amp = coeff_amplitude(c, tokenizer)
+        yield Event(index=i, cells=s["cells"], coeff_cells=amp[0], coeff_amp=amp,
                     band_lengths=np.asarray(meta["band_lengths"]), cell_key=np.asarray(fm["cell_key"]), batch=B)

@@ -21,7 +21,7 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
   corpus root  <run>/<dataset>_coeff_NNNN.h5        noisy coefficients (helix-coeff-2)
                <run>/<dataset>_coeff_clean_NNNN.h5  clean values, sim, --keep-clean only
                <run>/<dataset>_optical_NNNN.h5      optical streams (helix-optical-2)
-               <run>/<dataset>_cells_NNNN.h5        sim truth (helix-cells-2), scripts/build_truth.py
+               <run>/<dataset>_cells_NNNN.h5        sim truth (helix-cells-3), scripts/build_truth.py
                _calib/  CHUNKS.txt RUNS.txt norm_sigma_global.npy
                                        |
                      helix.data: CoeffTPCReader -> CoeffTPCDataset (+ AddNoise / Digitize)
@@ -44,7 +44,7 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
 | `helix.tpc` | no | TPC chain, coherent gate, thresholding, noise model, readouts, readers |
 | `helix.optical` | no | optical codec, calibration, optical shards, tokens |
 | `helix.model` | no (`tokenize` defers one import) | the FM, tokenizer, masking, loss, muP, reading a run |
-| `helix.eval` | no | evaluation: recon, floor, uprobe, denoise |
+| `helix.eval` | no | evaluation: recon, floor, uprobe, labels, denoise |
 | `helix.build` | no (sources may) | the build pipeline |
 | `helix.data` | pimm-data | corpus reader / dataset / verifier, registered transforms, bins, identity guard |
 | `helix.integrations.pimm` | pimm | registry adapters into pimm's trainer |
@@ -233,16 +233,16 @@ keep bits, stored differences), plus per-event channel noise. Joins its TPC shar
 (run, source_file, event). `read_optical` / `read_event` read it,
 `helix.optical.tokens.shard_tokens` tokenizes it.
 
-### Truth shards: `helix-cells-2` (`helix/data/cells.py`)
+### Truth shards: `helix-cells-3` (`helix/data/cells.py`)
 
 Simulation truth on the 2-wire x 16-tick cell grid, one `{name}_cells_<k>.h5` per coefficient
 shard (same events, same order, `/ident` copied), written by `scripts/build_truth.py` from the
-simulator's `hits` and `step` files, separately from the corpus build. Four per-event CSR
+simulator's `hits`, `step` and pysupera `labl` files, separately from the corpus build. Four per-event CSR
 tables: `/cells` (per cell: charge, the dominant hits group's share and (y, z)),
 `/cell_track` (the cells' charge split by track), `/plane_track` (per plane and track: the
-charge-weighted wire / tick centroid), `/tracks` (per track: deposited energy). Every
-evaluation window lies on cell edges, so the denoiser's label and the truth of every
-`helix.eval` metric (floor, uprobe, denoise) come from this alone. ~197 MB per shard of 200 events.
+charge-weighted wire / tick centroid), `/tracks` (per track: deposited energy and its
+motif / pid class). Every evaluation window lies on cell edges, so the denoiser's label and
+the truth of every `helix.eval` metric (floor, uprobe, labels, denoise) come from this alone. ~197 MB per shard of 200 events.
 
 ### The corpus root
 

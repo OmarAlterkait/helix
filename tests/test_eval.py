@@ -5,8 +5,9 @@ split-checkpoint writer when pimm is importable); the metrics run on synthetic e
 truth is a cells record and whose tokens come from the training tokenizer. Pinned: the loader
 returns exactly the saved weights, the tokenizer of the train split and the step of the weight
 set it read, and refuses what it cannot read; the probes are seeded and learn what a feature
-carries (an informative "trained" arm beats the random-init control); a perfect denoiser scores
-perfectly; recon is the evaluator's metric.
+carries (an informative "trained" arm beats its reference: the coefficient amplitude, the
+geometry columns, the token layout); a perfect denoiser scores perfectly; recon is the
+evaluator's metric.
 """
 import json
 import os
@@ -116,14 +117,6 @@ def test_load_run_refuses_what_it_cannot_read(tmp_path):
         load_run(tmp_path / "model" / "iter_9.pth", device="cpu")
 
 
-def test_random_init_is_seeded_and_keeps_the_bins(tmp_path):
-    _write_run(tmp_path)
-    r = load_run(tmp_path, device="cpu")
-    a, b, c = r.random_init(0), r.random_init(0), r.random_init(1)
-    assert _same(a, b) and not _same(a, c) and not _same(a, r.model)
-    assert torch.equal(a.bin_edges, r.model.bin_edges) and torch.equal(a.bin_cent_ratio, r.model.bin_cent_ratio)
-
-
 # ------------------------------------------------------------------------------ synthetic events
 def _sample(rng, i, n_trk=60):
     """One event: compact particles on all six planes, each with a 3D point; coefficients under
@@ -178,7 +171,7 @@ def _events(run, ds):
 def _ctx(run, n, n_boot=20, denoiser=None):
     from helix.eval import Context
     from helix.eval.probe import split_events
-    return Context(run, dict(trained=run.model, random=run.random_init(0)), split_events(n), 0, n_boot, denoiser)
+    return Context(run, run.model, split_events(n), 0, n_boot, denoiser)
 
 
 def _token_feature(ev, values, d=SMALL["d"], seed=0):
@@ -202,8 +195,12 @@ def test_events_are_the_training_tokens_with_their_cells(synth):
     e = evs[0]
     assert e.batch["inp"].shape == (len(e.cell_key), SMALL["n_slot"]) and e.batch["n_cells"] == len(e.cell_key)
     assert (np.diff(e.cell_key) > 0).all() and e.cells is ds[0]["cells"]
-    f1 = e.features("trained", run.model)
-    assert f1 is e.features("trained", run.model) and f1.shape == (len(e.cell_key), SMALL["d"])
+    f1 = e.features(run.model)
+    assert f1 is e.features(run.model) and f1.shape == (len(e.cell_key), SMALL["d"])
+    keys, amp = e.coeff_amp                          # norm_sigma 1: |value| itself, the largest per cell
+    assert np.array_equal(keys, e.coeff_cells) and (amp > 0).all()
+    k0 = C.coeff_cells(*(ds[0]["coeff"][x][:1] for x in ("band", "plane_gid", "wire", "tau")), run.tokenizer)
+    assert amp[np.searchsorted(keys, k0[0])] >= abs(ds[0]["coeff"]["value"][0, 0]) - 1e-6
 
 
 def test_recon_is_the_evaluators_metric(synth):
@@ -232,18 +229,18 @@ def test_floor_learns_what_the_features_carry(synth):
     run = load_run(d, device="cpu")
     m = Floor(_ctx(run, len(ds)))
     for e in _events(run, ds):
-        e._feats["trained"] = _token_feature(e, np.log1p(e.cells["q"] / C.Q0))
+        e._feats = _token_feature(e, np.log1p(e.cells["q"] / C.Q0))
         m.add(e)
     out = m.result()
-    assert out["n_train_events"] == 6 and out["n_windows"] > 0
-    for arm in ("trained", "random"):
+    assert out["n_train_events"] == 6 and np.isfinite(out["val_mse"])
+    for arm in ("trained", "amplitude"):
         r = out[arm]
-        assert r["map_r"][0] == r["map_r"][0] and len(r["floor_eff1pct_0.1-0.2"]) == 3
-        assert r["rankme"] > 1 and np.isfinite(r["val_mse"])
-    # presence bits and offsets alone already find the charge (both arms); the charge itself is the
-    # feature's: the trained arm's map correlation is the higher
-    assert min(out["trained"]["presence_auc"][0], out["random"]["presence_auc"][0]) > 0.95
-    assert out["trained"]["map_r"][0] > out["random"]["map_r"][0] + 0.05, (out["trained"]["map_r"], out["random"]["map_r"])
+        assert len(r["floor_eff1pct_0.1-0.2"]) == 3 and min(r["n_windows"].values()) > 0
+    # the coefficient values are noise here, so the amplitude finds nothing the features do not
+    eff = lambda a: np.nanmean([v[0] for k, v in out[a].items() if k.startswith("floor_eff")])   # noqa: E731
+    assert eff("trained") > eff("amplitude") + 0.2, (out["trained"], out["amplitude"])
+    k = "floor_eff1pct_0.5-1e+09"
+    assert out["d_over_amplitude"][k] == pytest.approx(out["trained"][k][0] - out["amplitude"][k][0], abs=1e-4)
 
 
 def test_uprobe_learns_u_and_geometry_alone_does_not(synth):
@@ -253,12 +250,29 @@ def test_uprobe_learns_u_and_geometry_alone_does_not(synth):
     m = UProbe(_ctx(run, len(ds)))
     for e in _events(run, ds):
         g = C.unkey(e.cells["key"])[0]
-        e._feats["trained"] = _token_feature(e, u_of(g, e.cells["dom_y"], e.cells["dom_z"]))
+        e._feats = _token_feature(e, u_of(g, e.cells["dom_y"], e.cells["dom_z"]))
         m.add(e)
     out = m.result()
-    assert out["trained"]["fisher_r"][0] > 0.5 > max(out["geo"]["fisher_r"][0], out["random"]["fisher_r"][0])
+    assert out["trained"]["r2"][0] > 0.5 > out["geo"]["r2"][0]
+    assert all(out["trained"][f"r2_{v}"][0] > 0.3 for v in "UVY")
     d, lo, hi = out["d_over_geo"]
-    assert d == pytest.approx(out["trained"]["fisher_r"][0] - out["geo"]["fisher_r"][0], abs=1e-3) and lo <= d <= hi
+    assert d == pytest.approx(out["trained"]["r2"][0] - out["geo"]["r2"][0], abs=1e-3) and lo <= d <= hi
+
+
+def test_labels_learn_the_class_the_features_carry(synth):
+    from helix.eval.labels import Labels
+    d, ds = synth
+    run = load_run(d, device="cpu")
+    m = Labels(_ctx(run, len(ds)))
+    for e in _events(run, ds):
+        e._feats = _token_feature(e, C.cell_class(e.cells, "trk_motif").astype(np.float64))
+        m.add(e)
+    out = m.result()
+    mo = out["motif"]
+    assert set(mo["prior"]) == set(C.MOTIF_NAMES) and sum(mo["prior"].values()) == pytest.approx(1, abs=1e-3)
+    assert mo["trained"]["macro_recall"][0] > 0.6 > mo["geo"]["macro_recall"][0]
+    assert mo["d_over_geo"][0] == pytest.approx(mo["trained"]["macro_recall"][0] - mo["geo"]["macro_recall"][0], abs=1e-3)
+    assert set(out["pid"]["trained"]["recall"]) <= set(C.PID_NAMES)
 
 
 def test_patch_rows_label_is_the_dominant_cells_charge_weighted_u():
@@ -292,16 +306,17 @@ def test_a_perfect_denoiser_scores_perfectly(synth):
         m.add(e)
     out = m.result()
     for r in (out["charge"], out["presence"]):
-        assert r["presence_auc"][0] == 1.0
         effs = [v[0] for k, v in r.items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
         assert effs and min(effs) == 1.0
-    assert out["charge"]["map_r"][0] >= 0.998 and out["charge"]["map_mse"] < 1e-12
 
 
 def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
     from helix.eval.probe import fit_probe
-    from helix.eval.windows import fisher_z
-    r = lambda p, y, g: float(np.tanh(np.mean(list(fisher_z(p, y, g).values()))))      # noqa: E731
+    from helix.eval.windows import group_r2
+
+    def r(p, y, g):
+        _, sse, sst = group_r2(p, y, g)
+        return float(1 - sse.sum() / sst.sum())
     rng = np.random.default_rng(0)
     n = 6000
     e = np.repeat(np.arange(12), n // 12)
@@ -312,14 +327,28 @@ def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
     b = fit_probe(Xt, none, y, e, group=e, seed=1, device="cpu")
     pa = a.predict(Xt, none)
     np.testing.assert_array_equal(pa, b.predict(Xt, none))
-    assert r(y, pa, e) > 0.9 and a.val_score > 0.9
+    assert r(pa, y, e) > 0.8 and a.val_score > 0.8          # R^2: charged for scale, not only rank
     # geometry alone: an unrelated column fits the between-event offsets, not the within-event signal
     geo = rng.standard_normal((n, 1)).astype(np.float32)
     g = fit_probe(torch.zeros((n, 0)), geo, y, e, group=e, device="cpu")
-    assert abs(r(y, g.predict(torch.zeros((n, 0)), geo), e)) < 0.2
-    # nothing to select on (constant within every group): an error, not the first checkpoint
-    with pytest.raises(ValueError, match="no validation score"):
-        fit_probe(torch.zeros((n, 0)), (e % 3)[:, None].astype(np.float32), y, e, group=e, device="cpu")
+    assert r(g.predict(torch.zeros((n, 0)), geo), y, e) < 0.1
+    # a prediction constant within every group explains nothing within them: R^2 0, not a NaN
+    c = fit_probe(torch.zeros((n, 0)), (e % 3)[:, None].astype(np.float32), y, e, group=e, device="cpu")
+    assert c.val_score == pytest.approx(0, abs=1e-6)
+
+
+def test_a_classifier_probe_balances_its_classes():
+    """A class at 2% of the rows that the inputs separate is still recalled: the loss is
+    weighted by inverse class frequency and selection is on the mean per-class recall."""
+    from helix.eval.probe import fit_probe
+    rng = np.random.default_rng(0)
+    n = 6000
+    e = np.repeat(np.arange(12), n // 12)
+    y = np.where(rng.random(n) < 0.02, 2, rng.integers(0, 2, n))
+    X = (rng.standard_normal((n, 16)) + 1.5 * np.eye(16)[y]).astype(np.float32)
+    p = fit_probe(torch.from_numpy(X), np.zeros((n, 0), np.float32), y, e, n_classes=3, seed=0, device="cpu")
+    got = p.predict(torch.from_numpy(X), np.zeros((n, 0), np.float32))
+    assert got.dtype == np.int64 and (got[y == 2] == 2).mean() > 0.6 and 0.6 < p.val_score <= 1
 
 
 def test_fit_probe_uses_extra_columns_in_any_units_beside_many_features():
@@ -340,22 +369,23 @@ def test_fit_probe_uses_extra_columns_in_any_units_beside_many_features():
 def test_the_probes_fit_on_a_budget_and_keep_no_features_of_a_scored_event(synth, monkeypatch):
     import helix.eval.probe as P
     from helix.eval.floor import Floor
+    from helix.eval.labels import Labels
     from helix.eval.uprobe import UProbe
     rng = lambda: np.random.default_rng(3)                                             # noqa: E731
     assert np.array_equal(P.fit_rows(5, 4, rng()), np.arange(5))
-    monkeypatch.setattr(P, "FIT_ROWS", 3000)         # 500 rows per training event: binds, and leaves
-    k = P.fit_rows(1000, 7, rng())                     # each validation (event, plane) >= MIN_ROWS
+    monkeypatch.setattr(P, "FIT_ROWS", 3000)         # 500 rows per training event: binds
+    k = P.fit_rows(1000, 7, rng())
     assert len(k) == 428 and np.array_equal(k, np.unique(k)) and np.array_equal(k, P.fit_rows(1000, 7, rng()))
     d, ds = synth
     run = load_run(d, device="cpu")
     ctx = _ctx(run, len(ds), n_boot=5)
-    ms = [Floor(ctx), UProbe(ctx)]
+    ms = [Floor(ctx), UProbe(ctx), Labels(ctx)]
     for e in _events(run, ds):
         for m in ms:
             m.add(e)
             assert (m.fit is None) == (e.index >= ctx.n_train)      # fitted at the first scored event
     assert P.gather(torch.zeros((5, 3)), np.zeros((0, 4), np.int64)).shape == (0, 12)   # an event without rows
-    held = list(ms[0].scored.p["trained"]) + list(ms[0].scored.ws["trained"]) + list(ms[1].p["trained"])
+    held = list(ms[0].scored.s["trained"]) + list(ms[1].p["trained"]) + list(ms[2].p[("motif", "trained")])
     assert held and all(isinstance(x, np.ndarray) and x.ndim == 1 for x in held)    # predictions, no features
     for m in ms:
         out = m.result()

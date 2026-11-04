@@ -1,9 +1,9 @@
-"""The ``denoise`` metric: a denoiser's per-cell charge, scored on the floor's cells and windows.
+"""The ``denoise`` metric: a denoiser's per-cell charge, scored on the floor's windows.
 
-The same scored events, map rows, windows and numbers (:class:`helix.eval.floor.Scored`) as
-``floor`` -- only the per-cell prediction comes from a trained denoiser instead of a probe on
-frozen features, so the numbers are directly comparable with the floor's ``trained`` arm. Cells
-no token covers are predicted 0.
+The same scored events, windows and numbers (:class:`helix.eval.floor.Scored`) as ``floor`` --
+only the per-cell prediction comes from a trained denoiser instead of a probe on frozen
+features, so the numbers are directly comparable with the floor's ``trained`` and ``amplitude``
+arms. Cells no token covers are predicted 0.
 
 The metric needs only a predictor, ``predict(event, keys) -> (y, presence)``: ``y`` the
 predicted ``log1p(q / Q0)`` and ``presence`` the probability of charge per fine-cell key, both 0
@@ -11,8 +11,7 @@ where no token covers the cell. :func:`load_denoiser` makes one from a denoiser 
 (``configs/pimm/denoise.py``).
 
 Reported per score: ``charge`` (window score = predicted charge, ``expm1(max(y, 0)) * Q0``) and
-``presence`` (window score = the probability); ``charge`` also carries ``map_mse``, the MSE of
-``y`` on the scored map rows.
+``presence`` (window score = the probability).
 """
 
 from __future__ import annotations
@@ -64,14 +63,9 @@ class Denoise:
         if ev.index < c.n_train:
             return
         tr = ev.truth(c.seed, windows=True)
-        n = len(tr["mrows"])
-        y, pr = c.denoiser(ev, np.concatenate([tr["mrows"], tr["wkey"]]))     # one encode
-        self.scored.add(ev, tr, {"charge": (y[:n], np.expm1(np.maximum(y[n:], 0)) * Q0),
-                                 "presence": (pr[:n], pr[n:])})
+        y, pr = c.denoiser(ev, tr["wkey"])
+        self.scored.add(ev, tr, {"charge": np.expm1(np.maximum(y, 0)) * Q0, "presence": pr})
 
     def result(self):
         c = self.ctx
-        out = dict(n_train_events=c.n_train, n_windows=len(self.scored.meta), **self.scored.result(c.n_boot, c.seed))
-        y, p = np.concatenate(self.scored.y), np.concatenate(self.scored.p["charge"])
-        out["charge"]["map_mse"] = float(np.mean((p - y) ** 2))
-        return out
+        return dict(n_train_events=c.n_train, **self.scored.result(c.n_boot, c.seed))

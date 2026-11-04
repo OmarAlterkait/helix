@@ -1,9 +1,10 @@
 """helix.eval.windows and the fine-grid join in helix.data.cells.
 
 Synthetic events, CPU, numpy only. Each test pins one property the metrics must have for a
-patch-size comparison to mean anything: keys round-trip, a perfect prediction localises exactly
-and separates every pair, a blurred one does not, windows are not centred on the particle they
-score, and a cell finds the tokens covering it with the tokenizer's own arithmetic.
+patch-size comparison to mean anything: keys round-trip, a perfect prediction finds every
+isolated particle, the false-positive rate is set per view, windows are not centred on the
+particle they score, the within-group R^2 ignores offsets and charges scale, and a cell finds
+the tokens covering it with the tokenizer's own arithmetic.
 """
 
 import numpy as np
@@ -38,87 +39,85 @@ def _event(rng, n_part=40):
 N_CELL = (W.WW // C.FW) * (W.WT // C.FT)
 
 
-def _meta(tr):
-    return [dict(m, ev=0) for m in tr["meta"]]
 
 
-def _stats(pred_fn, tr):
-    return W.window_stats(pred_fn(tr["wq"]), tr["wq"], _meta(tr))
+def _charge(rec, keys):
+    k, q = np.asarray(rec["key"]), np.asarray(rec["q"], np.float64)
+    p = np.clip(np.searchsorted(k, keys), 0, len(k) - 1)
+    return np.where(k[p] == keys, q[p], 0.0)
 
 
-def _truth(seed=0):
-    return W.event_truth(*_event(np.random.default_rng(seed)), np.random.default_rng(1))
-
-
-def test_truth_has_all_window_kinds_and_valid_keys():
-    tr = _truth()
-    kinds = {m["kind"] for m in tr["meta"]}
-    assert {"iso", "bg"} <= kinds
-    assert len(tr["wkey"]) == len(tr["wq"]) == len(tr["meta"]) * N_CELL
+def test_truth_has_both_window_kinds_and_valid_keys():
+    rec, ck = _event(np.random.default_rng(0))
+    tr = W.event_truth(rec, ck, np.random.default_rng(1))
+    kinds = [m["kind"] for m in tr["meta"]]
+    assert set(kinds) == {"iso", "bg"} and kinds.count("bg") <= W.N_BG_PLANE * 1      # one plane here
+    assert len(tr["wkey"]) == len(tr["meta"]) * N_CELL
+    q = _charge(rec, tr["wkey"])
     for i, m in enumerate(tr["meta"]):
         cells = slice(i * N_CELL, (i + 1) * N_CELL)
         assert np.array_equal(tr["wkey"][cells], W.window_cells(m["g"], m["w0"], m["t0"]))
         if m["kind"] == "bg":
-            assert tr["wq"][cells].sum() == 0
-        if m["kind"] == "iso":
-            assert m["E"][0] > 0
+            assert q[cells].sum() == 0 and np.isnan(m["E"])
+        else:
+            assert m["E"] > 0 and q[cells].sum() > 0
+
+
+def test_every_plane_gets_its_own_background():
+    rec, ck = _event(np.random.default_rng(0))
+    g, fw, ft = C.unkey(ck)
+    ck = np.concatenate([ck, C.fkey(np.full(len(ck), 2), fw, ft)])      # a second plane: noise only
+    tr = W.event_truth(rec, ck, np.random.default_rng(1))
+    bg = [m["g"] for m in tr["meta"] if m["kind"] == "bg"]
+    assert bg.count(0) == W.N_BG_PLANE and bg.count(2) == W.N_BG_PLANE
 
 
 def test_windows_are_not_centred_on_the_particle():
-    tr = _truth()
-    off = [m["cen"][0][0] - W.WW / 2 for m in tr["meta"] if m["kind"] == "iso"]
-    assert np.std(off) > 1.0
-
-
-def test_perfect_prediction_localises_exactly_and_blur_does_not():
-    tr = _truth()
-    perfect = _stats(lambda q: q, tr)
-    blur = _stats(lambda q: np.full_like(q, q.mean()) + 0.01 * (q > 0), tr)
-    loc_p = perfect["loc_w"][np.isfinite(perfect["loc_w"])]
-    loc_b = blur["loc_w"][np.isfinite(blur["loc_w"])]
-    assert len(loc_p) and max(loc_p) == pytest.approx(0.0, abs=1e-9)
-    assert np.median(loc_b) > np.median(loc_p)
-
-
-def test_auc_counts_a_tie_as_a_half():
-    auc = lambda pos, neg: W.auc(W.ranks(np.r_[pos, neg]), np.r_[np.ones(len(pos)), np.zeros(len(neg))],  # noqa: E731
-                                 np.r_[np.zeros(len(pos)), np.ones(len(neg))])
-    assert auc([2, 3], [0, 1]) == 1.0 and auc([0, 1], [2, 3]) == 0.0
-    assert auc(np.zeros(50), np.zeros(60)) == 0.5
-    assert auc(np.r_[np.zeros(40), np.ones(10)], np.zeros(60)) == pytest.approx(0.6)
-    r = W.ranks([0.0, 1.0, 1.0, 2.0])                     # weights: a row counted twice
-    assert W.auc(r, np.array([0, 2, 0, 1.0]), np.array([1, 0, 1, 0.0])) == pytest.approx(5 / 6)   # (2 x (1 + 1/2) + 2) / (3 x 2)
+    rec, ck = _event(np.random.default_rng(0))
+    tr = W.event_truth(rec, ck, np.random.default_rng(1))
+    q = _charge(rec, tr["wkey"]).reshape(len(tr["meta"]), W.WW // C.FW, W.WT // C.FT)
+    wire = np.arange(W.WW // C.FW)[:, None]
+    off = [(qi * wire).sum() / qi.sum() - (W.WW // C.FW - 1) / 2 for qi, m in zip(q, tr["meta"]) if m["kind"] == "iso"]
+    assert np.std(off) > 0.5
 
 
 def test_a_perfect_prediction_scores_perfectly():
-    tr = _truth()
-    y = np.log1p(tr["mq"] / C.Q0)
-    out = W.score_cells(y, y, np.zeros(len(y), int), np.zeros(len(y), int), tr["wq"], tr["wq"], _meta(tr), n_boot=5)
-    assert out["presence_auc"][0] == 1.0 and out["map_r"][0] > 0.99
+    rec, ck = _event(np.random.default_rng(0))
+    tr = W.event_truth(rec, ck, np.random.default_rng(1))
+    out = W.score_windows(_charge(rec, tr["wkey"]), [dict(m, ev=0) for m in tr["meta"]], n_boot=5)
     effs = [v[0] for k, v in out.items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
     assert effs and all(v == 1.0 for v in effs)        # every isolated particle beats empty windows
+    assert out["n_windows"]["bg_U"] > 0 and out["n_windows"]["bg_V"] == 0
 
 
-def test_fisher_z_is_within_group():
+def test_the_threshold_is_each_views_own():
+    """A noisy view's background sets only that view's threshold: a quiet view's particles,
+    above its own background but below the noisy one's, are all detected."""
+    rng = np.random.default_rng(0)
+    meta, score = [], []
+    for g, scale in ((0, 1.0), (1, 1.0), (2, 10.0)):
+        for _ in range(300):
+            meta.append(dict(kind="bg", g=g, E=np.nan, ev=int(rng.integers(0, 30))))
+            score.append(scale * rng.random())
+        for _ in range(50):
+            meta.append(dict(kind="iso", g=g, E=0.15, ev=int(rng.integers(0, 30))))
+            score.append(scale * (1.5 + rng.random()))
+    out = W.score_windows(np.repeat(score, N_CELL), meta, n_boot=5)
+    assert out["floor_eff1pct_0.1-0.2"][0] == 1.0
+    pooled = np.quantile([s for s, m in zip(score, meta) if m["kind"] == "bg"], 0.99)
+    assert np.mean([s > pooled for s, m in zip(score, meta) if m["kind"] == "iso"]) < 0.7   # what one pooled cut gives
+
+
+def test_group_r2_ignores_offsets_and_charges_scale():
     rng = np.random.default_rng(0)
     grp = np.repeat(np.arange(10), 50)
     y = rng.standard_normal(500) + 10 * grp                 # between-group variance dominates
-    p = y + rng.standard_normal(500)
-    z = W.fisher_z(p, y, grp)
-    assert len(z) == 10 and np.tanh(np.mean(list(z.values()))) == pytest.approx(0.7, abs=0.1)
-    # the per-group definition: a group too small, or constant in either, has no z
-    grp2 = np.concatenate([grp, np.full(5, 10), np.full(30, 11), np.full(30, 12), np.full(30, 13)])
-    y2 = np.concatenate([y, rng.standard_normal(5), np.ones(30), rng.standard_normal(60)])
-    p2 = np.concatenate([p, rng.standard_normal(65), np.full(30, 2.0)])
-    want = {k: float(np.arctanh(np.clip(np.corrcoef(p2[grp2 == k], y2[grp2 == k])[0, 1], -0.999, 0.999)))
-            for k in range(14) if (grp2 == k).sum() >= 21 and y2[grp2 == k].std() > 0 and p2[grp2 == k].std() > 0}
-    got = W.fisher_z(p2, y2, grp2)
-    assert set(got) == set(want) == set(range(10)) | {12}
-    assert all(got[k] == pytest.approx(want[k], abs=1e-9) for k in want)
-    # constant up to float32 rounding (a batched matmul's last bit) is constant
-    p3 = np.where(rng.random(30) < 0.5, np.float32(2.0), np.nextafter(np.float32(2.0), np.float32(3)))
-    assert W.fisher_z(p3, rng.standard_normal(30), np.zeros(30)) == {}
-
+    r2 = lambda p: (lambda k, sse, sst: 1 - sse.sum() / sst.sum())(*W.group_r2(p, y, grp))   # noqa: E731
+    assert r2(y + 7 * rng.standard_normal(10)[grp]) == pytest.approx(1.0)      # a per-group offset is free
+    assert r2(np.zeros(500)) == pytest.approx(0.0) and r2(10 * grp) == pytest.approx(0.0)
+    assert r2(3 * y) < 0                                 # perfectly correlated, wrong scale
+    keys, sse, sst = W.group_r2(y, y, grp)
+    assert keys.tolist() == list(range(10)) and (sse == 0).all() and (sst > 0).all()
 
 
 def test_bootstrap_weighs_an_event_by_how_often_it_was_drawn():

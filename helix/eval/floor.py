@@ -1,4 +1,4 @@
-"""The ``floor`` metric: what a frozen encoder knows about charge on the fixed fine grid.
+"""The ``floor`` metric: how faint a deposit frozen encoder features let a probe find.
 
 Every model is scored on the same 2-wire x 16-tick cells whatever its patch size, through FROZEN
 per-token encoder features: each cell's input is, per band, the feature of the token that covers
@@ -9,57 +9,57 @@ information: it is never fitted on and is scored as predicted 0 (the probe's out
 all-zero input is an extrapolated constant, which would set every window's maximum).
 
 A probe (:func:`helix.eval.probe.fit_probe`) predicts ``log1p(q / Q0)`` per cell, fitted on the
-first events of the split and scored on the rest, on the map rows and windows of
-:func:`helix.eval.windows.event_truth`. Two arms, which define the metric: the trained encoder
-and the same architecture randomly initialised (the floor a trained model must beat to have
-learned anything). Every number of :func:`helix.eval.windows.score_cells` comes with a [16, 84]%
-interval from an event bootstrap.
+map rows of the first events of the split; a window's score is its largest predicted charge,
+scored on the windows of the rest (:func:`helix.eval.windows.score_windows`: efficiency at a 1%
+false-positive rate per view, by energy). Two arms:
 
-Also per arm, ``rankme``: the effective rank ``exp(H(s / sum s))`` of the centred token features
-(``s`` their singular values, via the d x d Gram matrix) -- label-free, a necessary condition
-for a useful representation (collapse), read alongside the probe.
+  trained    the probe on the trained encoder's features
+  amplitude  no fit: a cell's largest |kept coefficient| / sigma
+             (:func:`helix.data.cells.coeff_amplitude`) -- what the compressor itself sees. The
+             reference a representation must beat. (The randomly initialised encoder under the
+             same probe scored below it at every energy up to 1 MeV, so it is no floor.)
 
-Memory: only the fit's rows hold features (float16, at most :data:`helix.eval.probe.FIT_ROWS`
-per arm, ~6 GB each); a scored event keeps its predictions alone.
+Memory: only the fit's rows hold features (float16, at most :data:`helix.eval.probe.FIT_ROWS`,
+~6 GB); a scored event keeps its window scores alone.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from helix.data.cells import Q0, cell_inputs, unkey
+from helix.data.cells import Q0, cell_inputs
 from helix.eval.probe import fit_probe, fit_rows, gather
-from helix.eval.windows import score_cells
+from helix.eval.windows import score_windows
 
-ARMS = ("trained", "random")
+ARMS = ("trained", "amplitude")
+
+
+def amplitude(ev, keys):
+    """The amplitude baseline's score of fine cells ``keys``: 0 where no kept coefficient."""
+    uk, amp = ev.coeff_amp
+    if not len(uk):
+        return np.zeros(len(keys))
+    p = np.clip(np.searchsorted(uk, keys), 0, len(uk) - 1)
+    return np.where(uk[p] == keys, amp[p], 0.0)
 
 
 class Scored:
-    """The scored events' map rows and windows, and named per-cell predictions on them, scored by
-    :func:`helix.eval.windows.score_cells`: the floor's probe arms and the denoiser alike."""
+    """The scored events' windows and named per-cell scores on them, scored by
+    :func:`helix.eval.windows.score_windows`: the floor's arms and the denoiser alike."""
 
     def __init__(self):
-        self.y, self.e, self.g, self.wq, self.meta = [], [], [], [], []
-        self.p, self.ws = {}, {}
+        self.meta, self.s = [], {}
 
-    def add(self, ev, tr, preds):
-        """``tr``: the event's truth; ``preds``: ``{name: (log1p(q/Q0) on its map rows, window
-        score on its window cells)}``."""
-        self.y.append(np.log1p(tr["mq"] / Q0).astype(np.float32))
-        self.e.append(np.full(len(tr["mrows"]), ev.index))
-        self.g.append(unkey(tr["mrows"])[0])
-        self.wq.append(tr["wq"])
+    def add(self, ev, tr, scores):
+        """``tr``: the event's truth; ``scores``: ``{name: score per window cell}``."""
         self.meta += [dict(m, ev=ev.index) for m in tr["meta"]]
-        for k, (p, ws) in preds.items():
-            self.p.setdefault(k, []).append(p)
-            self.ws.setdefault(k, []).append(ws)
+        for k, s in scores.items():
+            self.s.setdefault(k, []).append(np.asarray(s, np.float32))
 
     def result(self, n_boot, seed):
-        if not self.y:
-            raise ValueError("no scored event was added")
-        y, e, g, wq = (np.concatenate(x) for x in (self.y, self.e, self.g, self.wq))
-        return {k: score_cells(np.concatenate(self.p[k]), y, e, g, np.concatenate(self.ws[k]), wq, self.meta,
-                               n_boot, seed) for k in self.p}
+        if not self.meta:
+            raise ValueError("no scored window")
+        return {k: score_windows(np.concatenate(v), self.meta, n_boot, seed) for k, v in self.s.items()}
 
 
 class Floor:
@@ -67,77 +67,45 @@ class Floor:
 
     def __init__(self, ctx):
         self.ctx = ctx
-        self.fit = {a: dict(X=[], A=[], y=[], e=[]) for a in ARMS}   # the training events' fit rows
-        self.probes, self.n_fit = None, None
+        self.fit = dict(X=[], A=[], y=[], e=[])         # the training events' fit rows
+        self.probe, self.n_fit = None, None
         self.scored = Scored()
-        self.gram = dict.fromkeys(ARMS)
 
     def add(self, ev):
         c = self.ctx
         scored = ev.index >= c.n_train
         tr = ev.truth(c.seed, windows=scored)
-        idx, aux = cell_inputs(tr["mrows"], ev.cell_key, ev.band_lengths, c.run.tokenizer)
-        ok = (idx >= 0).any(1)
         if not scored:
-            keep = np.nonzero(ok)[0][fit_rows(int(ok.sum()), c.n_train, np.random.default_rng([c.seed, ev.index, 1]))]
-            y = np.log1p(tr["mq"][keep] / Q0).astype(np.float32)
-            for a in ARMS:
-                F = ev.features(a, c.models[a])
-                self._rank(a, F)
-                f = self.fit[a]
-                f["X"].append(gather(F, idx[keep]).cpu()); f["A"].append(aux[keep]); f["y"].append(y)
-                f["e"].append(np.full(len(keep), ev.index))
+            idx, aux = cell_inputs(tr["mrows"], ev.cell_key, ev.band_lengths, c.run.tokenizer)
+            ok = np.nonzero((idx >= 0).any(1))[0]
+            keep = ok[fit_rows(len(ok), c.n_train, np.random.default_rng([c.seed, ev.index, 1]))]
+            f = self.fit
+            f["X"].append(gather(ev.features(c.model), idx[keep]).cpu()); f["A"].append(aux[keep])
+            f["y"].append(np.log1p(tr["mq"][keep] / Q0).astype(np.float32)); f["e"].append(np.full(len(keep), ev.index))
             return
-        if self.probes is None:
+        if self.probe is None:
             self._fit()
         widx, waux = cell_inputs(tr["wkey"], ev.cell_key, ev.band_lengths, c.run.tokenizer)
-        wok = (widx >= 0).any(1)
-        preds = {}
-        for a in ARMS:
-            F = ev.features(a, c.models[a])
-            self._rank(a, F)
-            wp = self._predict(a, F, widx, waux, wok)
-            preds[a] = (self._predict(a, F, idx, aux, ok), np.expm1(np.maximum(wp, 0)) * Q0)
-        self.scored.add(ev, tr, preds)
-
-    def _predict(self, a, F, idx, aux, ok):
-        """The probe's ``log1p(q/Q0)`` per cell, 0 where no token covers it."""
-        p = np.zeros(len(idx), np.float32)
+        ok = (widx >= 0).any(1)
+        p = np.zeros(len(widx), np.float32)
         if ok.any():
-            p[ok] = self.probes[a].predict(gather(F, idx[ok]), aux[ok])
-        return p
+            p[ok] = self.probe.predict(gather(ev.features(c.model), widx[ok]), waux[ok])
+        self.scored.add(ev, tr, dict(trained=np.expm1(np.maximum(p, 0)) * Q0, amplitude=amplitude(ev, tr["wkey"])))
 
     def _fit(self):
         import torch
-        fits, self.fit, self.probes = self.fit, None, {}
-        for a in ARMS:
-            f = fits.pop(a)
-            y = np.concatenate(f["y"])
-            self.probes[a] = fit_probe(torch.cat(f.pop("X")), np.concatenate(f["A"]), y, np.concatenate(f["e"]),
-                                       seed=self.ctx.seed)
-            self.n_fit = len(y)
-
-    def _rank(self, a, F):
-        F = F.double()
-        g = (F.T @ F, F.sum(0), F.shape[0])
-        self.gram[a] = g if self.gram[a] is None else tuple(x + y for x, y in zip(self.gram[a], g))
+        f, self.fit = self.fit, None
+        if not f["y"]:
+            raise ValueError("floor: no covered map row in any training event")
+        y = np.concatenate(f["y"])
+        self.probe = fit_probe(torch.cat(f.pop("X")), np.concatenate(f["A"]), y, np.concatenate(f["e"]),
+                               seed=self.ctx.seed)
+        self.n_fit = len(y)
 
     def result(self):
         c = self.ctx
-        res = self.scored.result(c.n_boot, c.seed)
-        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, n_windows=len(self.scored.meta))
-        for a in ARMS:
-            out[a] = dict(res[a], val_mse=-self.probes[a].val_score, rankme=rankme(*self.gram[a]))
+        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, val_mse=-self.probe.val_score,
+                   **self.scored.result(c.n_boot, c.seed))
+        out["d_over_amplitude"] = {k: round(out["trained"][k][0] - out["amplitude"][k][0], 4)
+                                   for k in out["trained"] if k.startswith("floor_eff")}
         return out
-
-
-def rankme(gram, total, n):
-    """``exp(-sum p log p)``, ``p = s / sum s``, ``s`` the singular values of the centred feature
-    matrix, from its Gram matrix ``X^T X``, column sum and row count."""
-    import torch
-    C = gram - torch.outer(total, total) / max(n, 1)
-    ev = torch.linalg.eigvalsh(C).clamp(min=0)
-    s = ev.sqrt()
-    p = s / (s.sum() + 1e-12)
-    p = p[p > 0]
-    return float(torch.exp(-(p * p.log()).sum()))

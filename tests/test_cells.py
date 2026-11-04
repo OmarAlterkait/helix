@@ -175,8 +175,8 @@ def test_grid_aligned_boxes_see_the_same_charge_per_track_as_pixels(corpus):
 
 
 def test_the_windows_of_a_record(corpus):
-    """event_truth on a stored record: every window kind, reproducible, and the windows' truth
-    is the record's charge."""
+    """event_truth on a stored record: every window kind, reproducible, the map rows' truth the
+    record's charge, and no background window holding any."""
     rec, _ = C.open_event(corpus["cells"], 2)
     rng = np.random.default_rng(3)
     coeff = np.concatenate([rec["key"][::3], C.fkey(rng.integers(0, 6, 400), rng.integers(0, 500, 400),
@@ -184,12 +184,15 @@ def test_the_windows_of_a_record(corpus):
     a = Wn.event_truth(rec, coeff, np.random.default_rng(7))
     b = Wn.event_truth(rec, coeff, np.random.default_rng(7))
     assert {"iso", "bg"} <= {m["kind"] for m in a["meta"]}
-    for k in ("mrows", "wkey", "wq", "mq"):
+    for k in ("mrows", "wkey", "mq"):
         np.testing.assert_array_equal(a[k], b[k])
     c = Wn.event_truth(rec, coeff, np.random.default_rng(7), windows=False)     # map rows drawn first
     assert set(c) == {"mrows", "mq"} and all(np.array_equal(a[k], c[k]) for k in c)
     q = dict(zip(rec["key"].tolist(), rec["q"].tolist()))
-    np.testing.assert_allclose(a["wq"], [q.get(k, 0.0) for k in a["wkey"].tolist()])
+    np.testing.assert_allclose(a["mq"], [q.get(k, 0.0) for k in a["mrows"].tolist()])
+    wq = np.array([q.get(k, 0.0) for k in a["wkey"].tolist()]).reshape(len(a["meta"]), -1).sum(1)
+    assert all(w == 0 for w, m in zip(wq, a["meta"]) if m["kind"] == "bg")
+    assert all(w > 0 for w, m in zip(wq, a["meta"]) if m["kind"] == "iso")
 
 
 def test_file_layout_resume_and_atomic_write(corpus):
