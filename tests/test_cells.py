@@ -2,7 +2,7 @@
 
 A synthetic campaign task (tests/_sim_fixture.py). Pinned: the stored record is the pixels
 reduced (per cell, per (cell, track), per (plane, track), per track, and each cell's dominant
-group with its 3D centroid), computed here independently; it is complete for the evaluation's
+group with its 3D centroid), computed here independently; each track carries its labl classes; it is complete for the evaluation's
 windows (a grid-aligned box holds per track exactly its pixels' charge); the build is resumable
 and atomic; the dataset serves it identity-checked.
 """
@@ -44,12 +44,13 @@ def _coeff_shard(path, events, run=RUN, source=SOURCE):
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory):
     d = tmp_path_factory.mktemp("cells")
-    hits = write_task(str(d / "sim"), RUN, FIRST_JOB, N_EV)["hits"]
+    task = write_task(str(d / "sim"), RUN, FIRST_JOB, N_EV)
+    hits = task["hits"]
     run_dir = d / "corpus" / RUN
     run_dir.mkdir(parents=True)
     _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", [EV0 + i for i in range(N_EV)])
     out, msg = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(d / "sim"))
-    return dict(dir=d, run_dir=run_dir, hits=hits, cells=out, msg=msg)
+    return dict(dir=d, run_dir=run_dir, hits=hits, labl=task["labl"], cells=out, msg=msg)
 
 
 def _pixels(hits, ev):
@@ -107,6 +108,32 @@ def test_record_is_the_pixels_reduced(corpus):
             g2t = fh[f"entry_000001/volume_{v}/group_to_track"][:]
             de = fs[f"entry_000001/volume_{v}/de"][:].astype(np.float64)
             assert rec["trk_energy"][i] == pytest.approx(de[g2t[d2g] == t].sum(), rel=1e-6)
+
+
+def test_tracks_carry_their_labl_classes_and_cells_their_dominant_tracks(corpus):
+    """A track's motif is its fragment's semantic type in pimm-data's vocabulary, its pid its
+    instance's sign-blind PDG (a low-energy instance -> le, another PDG -> -1), -1 for an unowned
+    track; a cell takes the class of the track carrying most of its charge."""
+    rec, _ = C.open_event(corpus["cells"], 1)
+    motif_of_sem = {1: 0, 2: 1, 3: 3, 4: 2, 5: 4}
+    pid_of_pdg = {22: 0, 11: 1, 13: 2, 211: 3, 2212: 4}
+    with h5py.File(corpus["labl"], "r") as f:
+        e = f["entry_000001"]
+        tid, frag = list(e["track/id"][:]), e["track/fragment"][:]
+        sem, isem, pdg = (e[f"particle/{k}"][:] for k in ("fragment_sem_type", "instance_sem_type", "pdg"))
+    seen = set()
+    for t, m, p in zip(rec["trk_id"], rec["trk_motif"], rec["trk_pid"]):
+        fr = frag[tid.index(t)]
+        want_m = -1 if fr < 0 else motif_of_sem[int(sem[fr])]
+        want_p = -1 if fr < 0 else 5 if isem[fr] == 5 else pid_of_pdg.get(abs(int(pdg[fr])), -1)
+        assert (m, p) == (want_m, want_p)
+        seen.add((want_m >= 0, want_p))
+    assert (False, -1) in seen and any(m for m, _ in seen) and {p for _, p in seen} >= {-1, 5}
+    cls = C.cell_class(rec, "trk_motif")
+    for i in range(0, len(rec["key"]), 7):
+        rows = np.nonzero(rec["ct_cell"] == i)[0]
+        top = rows[np.argmax(rec["ct_q"][rows])]
+        assert cls[i] == rec["trk_motif"][rec["ct_track"][top]]
 
 
 def test_each_cell_records_its_dominant_group_and_its_centroid(corpus):
@@ -227,7 +254,7 @@ def test_dataset_refuses_cells_of_other_events(corpus, tmp_path):
 # ------------------------------------------------------------------------------------- real data
 def _real():
     from _paths import sim_file
-    return sim_file("hits"), sim_file("step")
+    return sim_file("hits"), sim_file("step"), sim_file("labl")
 
 
 @pytest.mark.skipif(not os.path.exists(_real()[0]), reason="campaign task not reachable")
@@ -237,11 +264,11 @@ def test_real_events_reduce_consistently():
     and the centroids lie inside the detector (step positions dequantised by their own origin and
     step)."""
     from helix.tpc import io
-    hp, sp = _real()
-    with h5py.File(hp, "r") as fh, h5py.File(sp, "r") as fs:
+    hp, sp, lp = _real()
+    with h5py.File(hp, "r") as fh, h5py.File(sp, "r") as fs, h5py.File(lp, "r") as fl:
         ids = io.event_ids(fh)
         for pos in (0, 1, 202):
-            rec = C.event_record(io.entry(fh, pos, ids[pos]), io.entry(fs, pos, ids[pos]))
+            rec = C.event_record(*(io.entry(f, pos, ids[pos]) for f in (fh, fs, fl)))
             assert len(rec["key"]) > 1_000 and (np.diff(rec["key"]) > 0).all()
             np.testing.assert_allclose(np.bincount(rec["ct_cell"], weights=rec["ct_q"], minlength=len(rec["key"])),
                                        rec["q"], rtol=1e-5)
@@ -249,6 +276,9 @@ def test_real_events_reduce_consistently():
             assert np.isfinite(rec["dom_y"]).mean() > 0.99
             yz = np.stack([rec["dom_y"], rec["dom_z"]])[:, np.isfinite(rec["dom_y"])]
             assert (np.abs(yz) <= 2160 + 1).all()
+            # nearly all charge is on a labelled track
+            cm = C.cell_class(rec, "trk_motif")
+            assert rec["q"][cm >= 0].sum() > 0.99 * rec["q"].sum()
             if pos == 202:
                 assert (C.unkey(rec["key"])[0] < 3).all() and (rec["trk_volume"] == 0).all()
 

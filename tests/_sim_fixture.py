@@ -1,7 +1,8 @@
 """A synthetic JAXTPC wire campaign task: ``sensor``, ``step`` and ``hits`` files in the layout and
-format of ``doraemon_2026_1M_lartpc`` (format 2, helix/tpc/io.py), small enough for a test.
+format of ``doraemon_2026_1M_lartpc`` (format 2, helix/tpc/io.py), and the task's pysupera ``labl``
+(pimm-data ``supera_labl``), small enough for a test.
 
-    <root>/<group>/<task>/{sensor,step,hits}/sim_wire_{kind}_<task>.h5
+    <root>/<group>/<task>/{sensor,step,hits,labl}/sim_wire_{kind}_<task>.h5
 
 Every file has ``/config`` (format_version 2, production_version, git_commit), ``/dprod/events``
 and ``entry_NNNNNN`` groups carrying the campaign identity (event_id, job_id, job_event). The sensor
@@ -137,7 +138,39 @@ def write_task(root, group="j000000", first_job=0, n_events=3, seed=0, n_volumes
                     pg = hv.create_group(p)
                     for k, a in _hits_plane(rng, centres[p]).items():
                         pg[k] = a
+    paths["labl"] = _write_labl(root, group, task, ids, fh_path=paths["hits"], seed=seed)
     return dict(paths, truth=truth)
+
+
+#: pdg codes the fixture's particles draw from: the five PID classes (one sign-flipped) and one
+#: outside them (a kaon -> pid -1)
+PDGS = (22, 11, 13, -13, 211, 2212, 321)
+
+
+def _write_labl(root, group, task, ids, fh_path, seed):
+    """The task's labl: every hits track listed in ``track/``, owned by its own fragment row except
+    every 7th (fragment -1); each fragment its own instance, semantic types and PDGs drawn."""
+    rng = np.random.default_rng(seed + 1)
+    path = os.path.join(root, group, task, "labl", f"sim_wire_labl_{task}.h5")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with h5py.File(fh_path, "r") as fh, h5py.File(path, "w") as f:
+        f.create_group("config").attrs.update(labl_format="supera-labl/1", readout_type="wire")
+        ev = f.create_group("dprod").create_group("events")
+        ev["event_id"], ev["job_id"], ev["job_event"] = ids, ids // EVENTS_PER_JOB, ids % EVENTS_PER_JOB
+        for pos, eid in enumerate(ids.tolist()):
+            src = fh[f"entry_{pos:06d}"]
+            tids = np.unique(np.concatenate([src[v]["group_to_track"][:] for v in src if v.startswith("volume_")]))
+            n = len(tids)
+            e = f.create_group(f"entry_{pos:06d}")
+            e.attrs.update(event_id=eid, job_id=eid // EVENTS_PER_JOB, job_event=eid % EVENTS_PER_JOB)
+            frag = np.arange(n, dtype=np.int32)
+            frag[::7] = -1
+            e["track/id"], e["track/fragment"] = tids.astype(np.int32), frag
+            e["particle/fragment_sem_type"] = rng.integers(1, 6, n).astype(np.int8)
+            e["particle/instance_sem_type"] = rng.integers(1, 6, n).astype(np.int8)
+            e["particle/fragment_instance"] = np.arange(n, dtype=np.int32)
+            e["particle/pdg"] = rng.choice(PDGS, n).astype(np.int32)
+    return path
 
 
 def write_geometry(path, n_volumes=2):

@@ -58,7 +58,7 @@ SIM_GROUP, SIM_TASK = "j000000", "jaxtpc_wire_j000085-000089"
 
 
 def sim_file(kind="sensor", group=SIM_GROUP, task=SIM_TASK):
-    """One task's ``kind`` (sensor / step / hits) file beneath :data:`SIM_ROOT`."""
+    """One task's ``kind`` (sensor / step / hits / labl) file beneath :data:`SIM_ROOT`."""
     return os.path.join(SIM_ROOT, group, task, kind, f"sim_wire_{kind}_{task}.h5")
 
 

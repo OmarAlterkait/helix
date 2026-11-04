@@ -139,7 +139,7 @@ def _sample(rng, i, n_trk=60):
     G, W, T, Q, TRK, YZ = (np.concatenate(x) for x in (G, W, T, Q, TRK, YZ))
     rec = C.cell_truth(G, W, T, Q, TRK, TRK, YZ)
     rec.update(trk_volume=(np.arange(n_trk) % 2).astype(np.int16), trk_id=np.arange(n_trk),
-               trk_energy=rng.uniform(0.01, 2.0, n_trk))
+               trk_energy=rng.uniform(0.01, 2.0, n_trk), trk_motif=np.arange(n_trk) % 5, trk_pid=np.arange(n_trk) % 6)
     rec = {name: np.asarray(rec[name]).astype(dt) for _, _, name, dt in C.SCHEMA}
     cfg = PatchConfig(**TOK)
     g, fw, ft = C.unkey(rec["key"])

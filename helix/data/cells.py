@@ -1,10 +1,10 @@
 """The fine cell grid: simulation truth on it, one ``{name}_cells_<k>.h5`` per coefficient shard,
 and the join from a cell to the tokens covering it.
 
-The label every downstream task scores against -- the denoiser's target, the detection floor
-and the along-wire probe -- built once from the simulation's ``hits`` (and ``step``, for
-deposited energy and 3D position), separately from the corpus build: labels change more often
-than the corpus. Same events, same order as ``{name}_coeff_<k>.h5``; joined to it by identity
+The label every downstream task scores against -- the denoiser's target, the detection floor,
+the along-wire probe and the particle labels -- built once from the simulation's ``hits`` (and
+``step``, for deposited energy and 3D position, and pysupera's ``labl``, for each track's class),
+separately from the corpus build: labels change more often than the corpus. Same events, same order as ``{name}_coeff_<k>.h5``; joined to it by identity
 (``/ident``) as the dataset modality ``cells`` (``CoeffTPCDataset(modalities=("coeff",
 "cells"))``). Pretraining never opens it (tests/test_noisy_training.py).
 
@@ -27,12 +27,16 @@ Layout (four tables, each a per-event CSR with its own ``event_offset``)::
                                                               (rows of /cells, /tracks)
     /plane_track  plane_gid int32, track int32,               per (plane, track): its PIXEL
                   wire float64, tick float64                  charge-weighted centroid
-    /tracks       volume int16, track_id int32, energy f32    hits group_to_track ids, per volume;
-                                                              energy = step de summed, MeV
+    /tracks       volume int16, track_id int32, energy f32,   hits group_to_track ids, per volume;
+                  motif int8, pid int8                        energy = step de summed, MeV; the
+                                                              track's classes (MOTIF_NAMES,
+                                                              PID_NAMES; -1 none) from labl
     /ident        run, source_file, event                     copied from the coeff shard
 
-A per-cell label (e.g. a particle type of the dominant track) is a column of ``/cells``; a
-per-track one is a column of ``/tracks``.
+A per-track label is a column of ``/tracks``; a cell takes its dominant track's
+(:func:`cell_class`). The classes follow pimm-data's walk (``segment_motif`` = group -> fragment
+-> motif, ``segment_pid`` = group -> fragment -> instance -> pid) at the track: a track lies in
+one fragment for all but ~1 in 10^6 (labl lists those groups as overrides, not read here).
 
 ``Q0`` is the charge scale every per-cell charge target and prediction is expressed in,
 ``log1p(q / Q0)``; this is its one definition.
@@ -48,7 +52,7 @@ import os
 import h5py
 import numpy as np
 
-FORMAT = "helix-cells-2"
+FORMAT = "helix-cells-3"
 
 FW, FT = 2, 16                       # fine cell, wires x raw ticks
 _TOFF = 4096                         # fine-tick offset inside the packed key
@@ -79,6 +83,8 @@ SCHEMA = (
     ("tracks", "volume", "trk_volume", np.int16),
     ("tracks", "track_id", "trk_id", np.int32),
     ("tracks", "energy", "trk_energy", np.float32),
+    ("tracks", "motif", "trk_motif", np.int8),
+    ("tracks", "pid", "trk_pid", np.int8),
 )
 GROUPS = tuple(dict.fromkeys(g for g, *_ in SCHEMA))
 
@@ -90,7 +96,19 @@ LABEL = dict(
     centroid="per (plane, track): charge-weighted pixel wire and tick",
     dominant="per cell: the hits group carrying most of its charge; dom_frac its share, (dom_y, dom_z) "
              "its deposits' step-charge-weighted position (mm: step positions * pos_step_mm + pos_origin)",
+    motif="per track: labl track.fragment -> particle.fragment_sem_type, as MOTIF_NAMES; -1 unowned",
+    pid="per track: labl track.fragment -> particle.fragment_instance -> (pdg, instance_sem_type), "
+        "as PID_NAMES; -1 unowned or another PDG",
 )
+
+#: The label classes, pimm-data's PILArNet vocabulary (pimm_data/_resolve.py, docs/LABELS.md):
+#: pysupera SemanticType (1 shower, 2 track, 3 delta, 4 michel, 5 le_scatter) -> motif; a
+#: particle's sign-blind PDG -> pid, a low-energy instance -> le.
+MOTIF_NAMES = ("shower", "track", "michel", "delta", "le")
+PID_NAMES = ("photon", "electron", "muon", "pion", "proton", "le")
+_MOTIF_OF_SEM = np.array([-1, 0, 1, 3, 2, 4, -1], np.int64)
+_PID_OF_PDG = {22: 0, 11: 1, 13: 2, 211: 3, 2212: 4}
+_SEM_LE = 5
 _STR = h5py.string_dtype(encoding="utf-8")
 
 
@@ -274,6 +292,45 @@ def cell_truth(g, w, t, q, trk, grp, grp_yz):
                 pt_tick=np.bincount(pinv.ravel(), weights=Q * T) / np.maximum(pq, 1e-12))
 
 
+def track_classes(labl_ev, track_id):
+    """Per Geant4 ``track_id``: its ``(motif, pid)`` class from a labl entry (pimm-data
+    ``supera_labl``: ``track/{id, fragment}``, ``particle/...``); -1 for a track the entry does
+    not list or that no fragment owns."""
+    tid, frag = labl_ev["track"]["id"][:].astype(np.int64), labl_ev["track"]["fragment"][:].astype(np.int64)
+    part = labl_ev["particle"]
+    sem = part["fragment_sem_type"][:].astype(np.int64)
+    inst = part["fragment_instance"][:].astype(np.int64)
+    pdg, isem = np.abs(part["pdg"][:].astype(np.int64)), part["instance_sem_type"][:].astype(np.int64)
+    track_id = np.asarray(track_id, np.int64)
+    f = np.full(len(track_id), -1, np.int64)
+    if len(tid):
+        p = np.clip(np.searchsorted(tid, track_id), 0, len(tid) - 1)
+        f = np.where(tid[p] == track_id, frag[p], -1)
+
+    def take(col, rows):                                       # col[rows], -1 where rows is -1
+        return np.where(rows >= 0, col[np.maximum(rows, 0)], -1) if len(col) else np.full(len(rows), -1)
+
+    s_ = take(sem, f)
+    motif = np.where((s_ >= 0) & (s_ < len(_MOTIF_OF_SEM)), _MOTIF_OF_SEM[np.clip(s_, 0, len(_MOTIF_OF_SEM) - 1)], -1)
+    i = take(inst, f)
+    pid = np.full(len(track_id), -1, np.int64)
+    ap, ise = take(pdg, i), take(isem, i)
+    for code, cls in _PID_OF_PDG.items():
+        pid[ap == code] = cls
+    pid[(i >= 0) & (ise == _SEM_LE)] = PID_NAMES.index("le")
+    return motif, pid
+
+
+def cell_class(rec, col):
+    """Per cell of a record: the class (``col``: ``"trk_motif"`` / ``"trk_pid"``) of the track
+    carrying most of its charge; -1 if that track has none."""
+    c, t, q = (np.asarray(rec[k]) for k in ("ct_cell", "ct_track", "ct_q"))
+    out = np.full(len(rec["key"]), -1, np.int64)
+    o = np.lexsort((q, c))                                     # per cell, the largest share last
+    out[c[o]] = np.asarray(rec[col], np.int64)[t[o]]
+    return out
+
+
 def require_format(cfg, where=""):
     """Refuse a file that is not :data:`FORMAT` on this grid."""
     got = cfg.attrs.get("format")
@@ -301,8 +358,9 @@ def step_positions(sv):
     return sv["positions"][:].astype(np.float64) * float(sv.attrs["pos_step_mm"]) + origin
 
 
-def event_record(hits_ev, step_ev):
-    """One simulation event (its ``hits`` and ``step`` entry groups) -> a record (:data:`SCHEMA` names).
+def event_record(hits_ev, step_ev, labl_ev):
+    """One simulation event (its ``hits``, ``step`` and ``labl`` entry groups) -> a record
+    (:data:`SCHEMA` names).
 
     Samples are concatenated volume by volume (sorted by name), plane by plane, in stored order,
     so each cell's charge is summed in that order.
@@ -337,7 +395,8 @@ def event_record(hits_ev, step_ev):
     cat = lambda xs: np.concatenate(xs) if xs else np.zeros(0, np.int64)
     rec = cell_truth(cat(G), cat(W), cat(T), cat(Q), cat(TRK), cat(GRP),
                      np.concatenate(YZ) if YZ else np.zeros((0, 2)))
-    rec.update(trk_volume=cat(vol), trk_id=cat(tid), trk_energy=cat(energy))
+    motif, pid = track_classes(labl_ev, cat(tid))
+    rec.update(trk_volume=cat(vol), trk_id=cat(tid), trk_energy=cat(energy), trk_motif=motif, trk_pid=pid)
     return {name: np.asarray(rec[name]).astype(dt) for _, _, name, dt in SCHEMA}
 
 
@@ -380,13 +439,21 @@ def read_ident(f):
                 event=f["ident"]["event"][:].astype(np.int64))
 
 
+def labl_path(hits_file):
+    """The pysupera ``labl`` file (pimm-data ``supera_labl``) of a task, beside its ``hits``:
+    ``<task>/labl/{name}_labl_<task>.h5``."""
+    p = os.path.abspath(str(hits_file))
+    task = os.path.dirname(os.path.dirname(p))
+    return os.path.join(task, "labl", os.path.basename(p).replace("_hits_", "_labl_"))
+
+
 def build_shard(coeff_shard, source_root, out_dir=None):
     """Write the cells shard of ``coeff_shard``; ``(path, message)``. An existing one is kept.
 
     Events come from the coeff shard's ``/ident`` (any number of source files): ``source_file`` of
     run (campaign group) ``run`` under the campaign root ``source_root``
-    (:func:`helix.tpc.io.sensor_path`), whose task's ``hits`` and ``step`` files hold campaign event
-    ``event``.
+    (:func:`helix.tpc.io.sensor_path`), whose task's ``hits``, ``step`` and ``labl``
+    (:func:`labl_path`) files hold campaign event ``event``.
     """
     import hdf5plugin  # noqa: F401  (hits / step use a plugin filter)
     from helix.core.coeff_io import _code_version
@@ -403,25 +470,26 @@ def build_shard(coeff_shard, source_root, out_dir=None):
             if (run, sf) not in files:
                 paths = io.task_files(io.sensor_path(source_root, run, sf))
                 fh, fs = (h5py.File(paths[kind], "r") for kind in ("hits", "step"))
-                files[(run, sf)] = fh, fs
+                fl = h5py.File(labl_path(paths["hits"]), "r")
+                files[(run, sf)] = fh, fs, fl
                 for x in (fh, fs):
                     io.require_format(x)
                 ids = io.event_ids(fh)
-                if not np.array_equal(ids, io.event_ids(fs)):
-                    raise ValueError(f"{paths['hits']} and its step file hold different events")
-                files[(run, sf)] = fh, fs, {int(e): i for i, e in enumerate(ids)}
+                if not (np.array_equal(ids, io.event_ids(fs)) and np.array_equal(ids, io.event_ids(fl))):
+                    raise ValueError(f"{paths['hits']} and its step / labl files hold different events")
+                files[(run, sf)] = fh, fs, fl, {int(e): i for i, e in enumerate(ids)}
                 c = fh["config"].attrs
                 sim[f"{run}/{sf}"] = {k: (c[k].item() if hasattr(c[k], "item") else str(c[k]))
                                       for k in ("production_version", "git_commit", "git_dirty") if k in c}
-            fh, fs, pos = files[(run, sf)]
+            fh, fs, fl, pos = files[(run, sf)]
             if ev not in pos:
                 raise KeyError(f"{run}/{sf}: no event {ev}")
             hits_ev = io.entry(fh, pos[ev], ev)
             threshold.add(float(hits_ev.attrs["threshold"]))
-            records.append(event_record(hits_ev, io.entry(fs, pos[ev], ev)))
+            records.append(event_record(hits_ev, io.entry(fs, pos[ev], ev), io.entry(fl, pos[ev], ev)))
     finally:
         for handles in files.values():
-            for x in handles[:2]:
+            for x in handles[:3]:
                 x.close()
     if len(threshold) > 1:
         raise ValueError(f"{coeff_shard}: hits written with different sample thresholds {sorted(threshold)}")
