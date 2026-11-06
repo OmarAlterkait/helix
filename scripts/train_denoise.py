@@ -51,6 +51,14 @@ def parse():
     ap.add_argument("--charge-weight-pow", type=float, default=0.0,
                     help="with --cond-charge: weight each present row's charge loss by (1 + q / Q0) ** POW "
                          "(helix.model.denoise.charge_loss); 0 = the plain mean, 2 ~ squared error in linear charge")
+    ap.add_argument("--dist", choices=("point", "gauss", "hlgauss"), default="point",
+                    help="with --cond-charge and the decoder head: the conditional charge as a distribution -- point "
+                         "(squared error), gauss (learned per-cell width, beta-NLL) or hlgauss (fine bins, smoothed "
+                         "targets); helix.model.denoise.CellDecoder")
+    ap.add_argument("--beta", type=float, default=0.5, help="--dist gauss: beta-NLL exponent (0 = plain likelihood)")
+    ap.add_argument("--n-bins", type=int, default=1024, help="--dist hlgauss: bins over y in [0, --y-hi]")
+    ap.add_argument("--y-hi", type=float, default=7.5, help="--dist hlgauss: top of the binned range in y = log1p(q/Q0)")
+    ap.add_argument("--hl-sigma", type=float, default=0.75, help="--dist hlgauss: target smoothing, in bin widths")
     ap.add_argument("--keep-every", type=int, default=0,
                     help="also keep a copy of the checkpoint every N steps (step<N>.pt), to follow convergence")
     ap.add_argument("--cond-charge", action="store_true",
@@ -107,7 +115,7 @@ def main():
     from torch.nn.parallel import DistributedDataParallel as DDP
     from helix.data.denoise import DenoiseEvents, split_events
     from helix.model.artifact import load
-    from helix.model.denoise import build_denoise, charge_loss
+    from helix.model.denoise import build_denoise, charge_loss, gauss_nll_loss, hlgauss_loss
     from helix.paths import root
 
     dist.init_process_group("nccl")
@@ -128,6 +136,10 @@ def main():
     arch = load(a.arch_from).arch
     sd = load(a.init).state_dict if a.init else None
     torch.manual_seed(a.seed)
+    if a.dist != "point" and not (a.cond_charge and a.head == "decoder"):
+        raise SystemExit("--dist needs --cond-charge and --head decoder")
+    if a.dist != "point" and a.charge_weight_pow:
+        raise SystemExit("--dist and --charge-weight-pow are alternatives (the distribution's width does the weighting)")
     if a.charge_weight_pow and not a.cond_charge:
         raise SystemExit("--charge-weight-pow needs --cond-charge")
     if a.cond_charge and not a.presence:
@@ -135,11 +147,17 @@ def main():
     head_kw = dict(presence=a.presence)
     if a.head == "decoder":
         head_kw.update(kind="decoder", proj=a.dec_proj, layers=a.dec_layers)
+        if a.dist != "point":
+            head_kw.update(dist=a.dist, **(dict(n_bins=a.n_bins, y_hi=a.y_hi, hl_sigma=a.hl_sigma) if a.dist == "hlgauss" else {}))
     model = build_denoise(arch, sd, overrides=overrides, head_kw=head_kw).to(dev)
     if a.init_denoiser:
         from helix.model.denoise import pad_input_columns
         sd0 = torch.load(a.init_denoiser, map_location="cpu", weights_only=False)["model"]
-        model.load_state_dict(pad_input_columns(model, sd0))          # new input columns (lin_amp_scale) start at zero
+        missing, unexpected = model.load_state_dict(pad_input_columns(model, sd0), strict=False)  # new input columns start at zero
+        if unexpected or any(not k.startswith("head.dist_out.") for k in missing):
+            raise SystemExit(f"--init-denoiser does not fit: missing {missing[:5]}, unexpected {list(unexpected)[:5]}")
+        if missing:                                                    # a point checkpoint into a distributional head
+            model.head.init_dist_from_point()
     if a.freeze_encoder:
         for p_ in model.fm.parameters():
             p_.requires_grad_(False)
@@ -238,9 +256,14 @@ def main():
         with torch.autocast("cuda", dtype=torch.bfloat16):
             p = ddp(B, idx, aux, nbr)
         if a.presence:
+            extra = p[2] if len(p) > 2 else None
             p, logit = p[0].float(), p[1].float()
             pos = y > y_sup                                        # present: charge above the support threshold
-            if a.cond_charge:                                      # charge only where there is charge
+            if a.dist == "gauss":                                  # charge where there is charge, as a distribution
+                reg = gauss_nll_loss(p, extra, y, pos, a.beta)
+            elif a.dist == "hlgauss":
+                reg = hlgauss_loss(extra, y, pos, model.head.edges, model.head.hl_sigma)
+            elif a.cond_charge:                                    # charge only where there is charge
                 reg = charge_loss(p, y, pos, a.charge_weight_pow)
             else:
                 reg = torch.nn.functional.mse_loss(p, y)

@@ -138,3 +138,68 @@ def test_charge_loss_weighting():
     gref = 2 * (p.detach() - y) * torch.exp(2 * y) * pos / (torch.exp(2 * y) * pos).sum()
     assert torch.allclose(p.grad, gref, rtol=1e-4, atol=1e-8)
     assert charge_loss(p.detach(), y, torch.zeros_like(pos), 2.0) == 0
+
+
+def _decoder_inputs(B, n=50, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    idx, aux = _inputs(B, n, seed)
+    nbr = torch.randint(-1, B["plane_id"].shape[0], (n, SMALL["n_band"], 9), generator=g)
+    return idx, aux, nbr
+
+
+@pytest.mark.parametrize("dist", ["gauss", "hlgauss"])
+def test_dist_head_starts_where_the_point_head_is(dist):
+    """A point checkpoint loads into a distributional head (only dist_out missing) and init_dist_from_point makes it
+    start at the point head: gauss -- same mean, log sigma 0; hlgauss -- the bins' mean = the point charge (a
+    Gaussian of width init_sigma around it, inside the binned range). Presence is untouched."""
+    kw = dict(kind="decoder", presence=True, proj=32, layers=1, hidden=64)
+    torch.manual_seed(0)
+    pt = build_denoise(dict(SMALL), head_kw=kw).eval()
+    with torch.no_grad():                                          # put the point charge well inside [0, y_hi]
+        pt.head.out.bias[0] += 3.0
+    dm = build_denoise(dict(SMALL), head_kw=dict(kw, dist=dist, n_bins=512)).eval()
+    missing, unexpected = dm.load_state_dict(pt.state_dict(), strict=False)
+    assert not unexpected and missing and all(k.startswith("head.dist_out.") for k in missing)
+    dm.head.init_dist_from_point()
+    B = make_batch(n_cells=N_CELLS)
+    idx, aux, nbr = _decoder_inputs(B)
+    with torch.no_grad():
+        y0, l0 = pt(B, idx, aux, nbr)
+        y1, l1, extra = dm(B, idx, aux, nbr)
+    assert torch.allclose(l0, l1)
+    if dist == "gauss":
+        assert torch.allclose(y0, y1) and torch.all(extra == 0)
+    else:
+        assert extra.shape == (50, 512)
+        assert torch.allclose(y0, y1, atol=2e-3)                   # mean of a Gaussian of width 0.05 on 0.0146 bins
+
+
+def test_gauss_nll_loss():
+    """beta 0.5 at sigma 1 is half the squared error; the plain likelihood (beta 0) is minimised in sigma at |y - mu|;
+    absent rows do not count; the weight sigma^(2 beta) carries no gradient."""
+    from helix.model.denoise import charge_loss, gauss_nll_loss
+    g = torch.Generator().manual_seed(0)
+    y = torch.rand(64, generator=g) * 5; mu = y + 0.1 * torch.randn(64, generator=g); pos = y > 1
+    assert torch.allclose(gauss_nll_loss(mu, torch.zeros(64), y, pos, 0.5), 0.5 * charge_loss(mu, y, pos, 0.0))
+    e = (y - mu).abs()
+    ls = torch.log(e).clone().requires_grad_(True)
+    gauss_nll_loss(mu, ls, y, pos, 0.0).backward()
+    assert ls.grad[pos].abs().max() < 1e-5                         # d/d(log s) [e^2 / 2 s^2 + log s] = 0 at s = e
+    mu2 = mu.clone(); mu2[~pos] += 100
+    assert torch.allclose(gauss_nll_loss(mu2, ls.detach(), y, pos, 0.5), gauss_nll_loss(mu, ls.detach(), y, pos, 0.5))
+
+
+def test_hlgauss_targets_and_loss():
+    """Targets are normalised and their mean is y (inside the range, to well below a bin width); the loss is minimised
+    by the targets' own log-probabilities; absent rows do not count."""
+    from helix.model.denoise import hlgauss_loss, hlgauss_targets
+    edges = torch.linspace(0, 7.5, 1025); c = 0.5 * (edges[1:] + edges[:-1]); w = float(edges[1] - edges[0])
+    y = torch.tensor([0.5, 2.0, 3.3333, 6.1]); pos = torch.tensor([True, True, True, False])
+    t = hlgauss_targets(y, edges, 0.75 * w)
+    assert torch.allclose(t.sum(-1), torch.ones(4))
+    assert torch.allclose((t * c).sum(-1), y, atol=0.02 * w)
+    best = hlgauss_loss(torch.log(t + 1e-12), y, pos, edges, 0.75 * w)
+    other = hlgauss_loss(torch.log(torch.roll(t, 3, -1) + 1e-12), y, pos, edges, 0.75 * w)
+    assert best < other
+    lg = torch.log(t + 1e-12); lg2 = lg.clone(); lg2[3] = 0
+    assert torch.allclose(hlgauss_loss(lg2, y, pos, edges, 0.75 * w), best)

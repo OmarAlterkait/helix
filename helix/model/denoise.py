@@ -68,7 +68,7 @@ class CellDecoder(nn.Module):
     """
 
     def __init__(self, d, n_bands=4, n_nbr=9, n_slot=128, proj=128, heads=4, layers=2, hidden=512,
-                 n_aux=None, presence=False):
+                 n_aux=None, presence=False, dist="point", n_bins=1024, y_hi=7.5, hl_sigma=0.75, init_sigma=0.05):
         super().__init__()
         self.n_bands, self.n_nbr, self.heads, self.presence = n_bands, n_nbr, heads, bool(presence)
         n_aux = 13 * n_bands if n_aux is None else n_aux
@@ -87,6 +87,41 @@ class CellDecoder(nn.Module):
         # charge logit by the weights (M5d/M5dc capped near 0.8M e- per cell, M4n reaches 2.6M)
         self.out = nn.Linear(proj, 2 if presence else 1)
         nn.init.normal_(self.pos, std=0.02); nn.init.normal_(self.null, std=0.02)
+        # The conditional charge as a DISTRIBUTION (needs presence; trained by gauss_nll_loss / hlgauss_loss):
+        #   "point"    one value y, squared error -- a Gaussian of fixed, equal width for every cell (the original)
+        #   "gauss"    + log sigma per cell: a Gaussian of learned width in y = log1p(q / Q0)
+        #   "hlgauss"  n_bins logits over y in [0, y_hi] (Gaussian-smoothed targets); the point value is their mean
+        # The distribution has its own layer, so a point checkpoint loads unchanged and init_dist_from_point()
+        # makes it start exactly where the point head was.
+        self.dist = dist
+        if dist not in ("point", "gauss", "hlgauss"):
+            raise ValueError(f"dist must be point / gauss / hlgauss, got {dist!r}")
+        if dist != "point":
+            if not self.presence:
+                raise ValueError("a distributional charge head needs presence=True (the hurdle's conditional charge)")
+            self.init_sigma = float(init_sigma)
+            if dist == "gauss":
+                self.dist_out = nn.Linear(proj, 1)
+            else:
+                edges = torch.linspace(0.0, float(y_hi), int(n_bins) + 1)
+                self.register_buffer("edges", edges, persistent=False)          # derived from n_bins, y_hi
+                self.register_buffer("centers", 0.5 * (edges[1:] + edges[:-1]), persistent=False)
+                self.hl_sigma = float(hl_sigma) * float(edges[1] - edges[0])
+                self.dist_out = nn.Linear(proj, int(n_bins))
+            self.init_dist_from_point()
+
+    @torch.no_grad()
+    def init_dist_from_point(self):
+        """Start the distribution where the point head is: gauss -- log sigma 0, so gauss_nll_loss (beta 0.5) is half
+        the squared error; hlgauss -- logits_j = (c_j y - c_j^2 / 2) / s^2 with y the point head's charge output (the
+        log of a Gaussian of width init_sigma centred on y, up to a constant that softmax drops; linear in y, so it is
+        a linear layer built from the charge row of ``out``)."""
+        if self.dist == "gauss":
+            self.dist_out.weight.zero_(); self.dist_out.bias.zero_()
+        elif self.dist == "hlgauss":
+            c, s2 = self.centers, self.init_sigma ** 2
+            self.dist_out.weight.copy_(c[:, None] * self.out.weight[0][None, :] / s2)
+            self.dist_out.bias.copy_(c * self.out.bias[0] / s2 - c * c / (2 * s2))
 
     def forward(self, feats, idx, aux, nbr=None, B=None):
         n = idx.shape[0]
@@ -123,6 +158,11 @@ class CellDecoder(nn.Module):
             q = q + blk["o"](att).float()
             q = q + blk["mlp"](blk["nm"](q)).float()
         out = self.out(q)
+        if self.dist == "gauss":
+            return out[:, 0], out[:, 1], self.dist_out(q).squeeze(-1)
+        if self.dist == "hlgauss":
+            lg = self.dist_out(q).float()
+            return (lg.softmax(-1) * self.centers).sum(-1), out[:, 1], lg
         return (out[:, 0], out[:, 1]) if self.presence else out.squeeze(-1)
 
 
@@ -158,6 +198,34 @@ def charge_loss(p, y, pos, weight_pow=0.0):
     """
     w = pos.to(p.dtype) if weight_pow == 0 else torch.exp(weight_pow * (y - y.max()).detach()) * pos
     return ((p - y) ** 2 * w).sum() / w.sum().clamp(min=torch.finfo(w.dtype).tiny)
+
+
+def gauss_nll_loss(mu, log_sigma, y, pos, beta=0.5, ls_min=-7.0, ls_max=3.0):
+    """Gaussian negative log-likelihood of y under (mu, sigma) over the present rows ``pos`` -- the network's own
+    per-cell width weights each cell by its achievable precision (inverse variance), from the INPUT, so the mean
+    stays unbiased. beta-NLL (Seitzer et al. 2022): each row's term times stop-grad sigma^(2 beta); 0 is the plain
+    likelihood (whose mean gradient vanishes as 1/sigma^2 where sigma is large), 1 gives the mean the gradient of
+    plain squared error. Normalised by the number of present rows."""
+    ls = log_sigma.float().clamp(ls_min, ls_max)
+    nll = 0.5 * (y - mu.float()) ** 2 * torch.exp(-2 * ls) + ls
+    w = pos.to(nll.dtype) * (torch.exp(2 * beta * ls).detach() if beta else 1.0)
+    return (nll * w).sum() / pos.sum().clamp(min=1)
+
+
+def hlgauss_targets(y, edges, sigma):
+    """Per row, the probability a Gaussian of width ``sigma`` centred on y (clamped into the range) puts in each bin."""
+    yc = y.float().clamp(float(edges[0]), float(edges[-1]))[:, None]
+    cdf = 0.5 * (1 + torch.erf((edges[None, :] - yc) / (sigma * 2 ** 0.5)))
+    p = cdf[:, 1:] - cdf[:, :-1]
+    return p / p.sum(-1, keepdim=True).clamp(min=1e-12)
+
+
+def hlgauss_loss(logits, y, pos, edges, sigma):
+    """Cross-entropy of the head's bin logits against Gaussian-smoothed targets (HL-Gauss; Imani & White 2018,
+    Farebrother et al. 2024) over the present rows; the smoothing makes the bins' mean resolve y below a bin width."""
+    t = hlgauss_targets(y, edges, sigma)
+    ce = -(t * logits.float().log_softmax(-1)).sum(-1)
+    return (ce * pos).sum() / pos.sum().clamp(min=1)
 
 
 def pad_input_columns(module, state_dict):
