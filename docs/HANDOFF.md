@@ -127,7 +127,7 @@ hits entry records `threshold: 25.0`; per helix-nersc, samples <= 1 e- per group
 are dropped in box compaction and <= 25 e- at the CSR encode, on 1ea2282). That drops every
 deposit group's diffusion tails, ~1.6% of in-window charge, growing with drift (complete /
 hits = 1.0155-1.0161 on r1). Fine for the particle labels, centroids and track splits; for
-charge targets see C13. its
+charge targets see C13. Also per cell: its
 split by track, and the dominant hits group's share and 3D (y, z). Per (plane, track) the
 pixel-charge centroid. Per track: deposited energy (step dE summed, MeV), `motif` (shower,
 track, michel, delta, le) and `pid` (photon, electron, muon, pion, proton, le), -1 = none,
