@@ -32,10 +32,12 @@ The other four campaign groups (j001000-j004000) are **not built**. No clean sha
 | floor, 0.2-0.5 MeV | 0.84 | 0.95 | 0.97 |
 | floor, > 0.5 MeV | 0.99 | 0.99 | 0.99 |
 | uprobe within-group R^2 (U / V / Y) | geometry 0.03 | 0.52 | 0.53 (0.56 / 0.56 / 0.49) |
-| same, Fisher-mean r (checks.py, 600 events) | 0.15 | -- | 0.75 |
 | labels motif, balanced accuracy | token layout 0.29 | 0.80 | 0.80 |
 | labels pid, balanced accuracy | 0.24 | 0.65 | 0.65 |
 | recon var_expl | -- | 0.645 | 0.693 |
+
+Not from this package: the uprobe's Fisher-mean within-group r, 0.75 trained / 0.15 geometry
+(fm_cooldown), came from `exp/helix/report/checks.py` on 600 events.
 
 pid recall per class (cooldown): electron 0.40, photon 0.48, muon 0.78, proton 0.92.
 Background windows per view: U 27,420, V 27,420, Y 26,539.
@@ -246,6 +248,27 @@ Each is either measured (with where) or assumed (with what would break it).
     bypasses `plane_frac`); var_expl pools all bands against the noisy target.
 30. **Features are the last encoder block** (no final norm, no other layer), bf16 autocast,
     gathered as float16.
+31. **The windows are asymmetric** (helix-nersc's audit): bg windows need no truth within
+    +-16 w / +-128 t (windows.py:147), iso windows only cap foreign charge INSIDE the window at
+    5% (windows.py:134), so a probe that hazes charge around tracks gains iso efficiency at no
+    FPR cost, which the amplitude reference cannot. main's eval measured an FPR near activity
+    (`near_fpr_at_far`); `helix.data.denoise.near_windows` already draws such windows for the
+    denoiser's training. Not yet measured here.
+32. **No raw-input arm:** the same MLP on the token INPUTS (main's `raw`) is what separates
+    the probe's capacity over 4 x 768 covering features from what pretraining adds; floor and
+    labels lack it (labels' layout reference is 0.29 / 0.24 against chance 0.20 / 0.17).
+33. **The floor probe's zero-charge fit rows are kept-coefficient cells only**
+    (windows.py:80-82), but most scored window cells hold no kept coefficient: the probe
+    extrapolates there, and that sets the bg tail.
+34. **uprobe scoring is uncapped per event** (fit capped at ~364 rows per event), so dense
+    events dominate its R^2.
+35. **`helix.eval.denoise` scores detection only**: no charge bias / resolution per bin,
+    linearity, presence calibration, near-activity FPR, noise draws or complete truth.
+36. **recon's mask is random, main's was a 75% region mask** (var_expl ~0.69 against
+    ~0.31-0.39); the two are not comparable, and the change has no DECISIONS entry.
+37. **CI is red on `consolidated`:** `uv lock --check` fails (uv.lock still lists the removed
+    `gpu` / `jax-cpu` extras); `uv lock` and commit fixes it. The full suite runs only in
+    docker.yml, on main and tags, so on this branch it has run at S3DF only.
 
 ---
 
