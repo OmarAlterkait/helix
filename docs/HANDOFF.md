@@ -322,8 +322,17 @@ detection, removed the bright bias (median 0.972 -> 0.995) and presence ECE 0.00
 with presence defined at q > 25 e- (`--support-min-q 25`: without it 37% of charged cells
 hold <= 25 e-). Options: (a) an uncut `q` column in cells-3, presence at 25 e-; (b) a
 separate complete-truth family. Either is built at S3DF (needs step + hits and a JAXTPC
-checkout at f0d2ed39, which `/sdf/group/neutrino/omara/JAXTPC` does not have yet) and is
-validated against the hits-based `q` first. Recommendation (a): one truth format, the
+checkout; `/sdf/group/neutrino/omara/JAXTPC` now has f0d2ed39 fetched) and is validated
+against the hits-based `q` first (`--validate`: the cut rebuild must reproduce hits; r1
+reference median relative L2 0.0038 per event-plane, thresholded / hits 1.00005). Checked
+against helix-nersc's 1ea2282: of the four JAXTPC functions the script imports,
+`compute_wire_distances`, `calculate_max_diffusion_sigmas` and `prepare_deposit_with_diffusion`
+do the same maths; `create_sim_config` differs in `num_s` (diffusion kernel levels 16 -> 32)
+and a pixel-only origin fix; `config/cubic_wireplane_config.yaml` is unchanged (the campaign
+is the same cubic detector, so the script's constants -- 1.6 mm/us, 10 ms lifetime, 0.5 us
+tick -- hold). The script reads hits through the removed `helix.probe.truth`, so it needs
+porting to `helix.tpc.io` / `helix.data.cells` first. Cost: ~6,000 s per shard on 2 CPU
+workers, ~1,700 worker-hours for j000000. Recommendation (a): one truth format, the
 particle labels unchanged. Whether the floor / uprobe / labels windows should use the uncut
 charge too is part of the choice (window selection uses charge fractions, so the change is
 small but not zero).
