@@ -329,10 +329,14 @@ against helix-nersc's 1ea2282: of the four JAXTPC functions the script imports,
 `compute_wire_distances`, `calculate_max_diffusion_sigmas` and `prepare_deposit_with_diffusion`
 do the same maths; `create_sim_config` differs in `num_s` (diffusion kernel levels 16 -> 32)
 and a pixel-only origin fix; `config/cubic_wireplane_config.yaml` is unchanged (the campaign
-is the same cubic detector, so the script's constants -- 1.6 mm/us, 10 ms lifetime, 0.5 us
-tick -- hold). The script reads hits through the removed `helix.probe.truth`, so it needs
-porting to `helix.tpc.io` / `helix.data.cells` first. Cost: ~6,000 s per shard on 2 CPU
-workers, ~1,700 worker-hours for j000000. Recommendation (a): one truth format, the
+is the same cubic detector: the script's constants -- 1.6 mm/us, 10 ms lifetime, 0.5 us
+tick, D_L 7.2 / D_T 12.0 cm^2/s, 216 cm max drift, pre-window fraction 0.3 -- match it). The
+campaign's production config (`production_cubic_wireplane_doraemon_300micro.yaml`) sets
+`inter_thresh` 1.0 (the box-compaction cut) and `corr_threshold` 25.0 (the CSR cut) and does
+not pass `num_s`, so the campaign ran the default 32; the script hard-codes `num_s=16` and
+must use 32 for d1m (validate one shard at each). The script reads hits through the removed `helix.probe.truth`, so it needs
+porting to `helix.tpc.io` / `helix.data.cells` first. Cost: ~6,000 s per shard per 2-worker
+job: ~1,700 job-hours, ~3,300 CPU worker-hours for j000000. Recommendation (a): one truth format, the
 particle labels unchanged. Whether the floor / uprobe / labels windows should use the uncut
 charge too is part of the choice (window selection uses charge fractions, so the change is
 small but not zero).
