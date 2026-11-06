@@ -222,12 +222,16 @@ Numbered for reference; each with the options, the recommendation from this side
 what it costs. Several are also in `TODO.md`.
 
 **C1. The base.** This branch is the base (it already contains origin/main to 039f3ee).
-helix-nersc's 10 commits merge on top: take 494a8f6, 3dfc02e (truth label), 8cfd2cf
+helix-nersc's work is on origin `denoise-m14` (tip 8a84597; origin/main + 14 commits; its
+suite 706 passed, 7 skipped, 1 xfailed). Of its commits, merge on top: take 494a8f6, 3dfc02e (truth label), 8cfd2cf
 (linear-amplitude input), e68fe7e (charge-scale augmentation; its volume-aware drift
 layouts not as a default), 23bd7f8 (FM into an encoder with added input columns),
 2a8533e + 975218f (record, read together). Skip 42f6188 (charge-weight power: biases faint
-cells; does not import), 5f70a66 / e0eb082 (NERSC launchers). The Gaussian-NLL head is
-uncommitted and waits on M15. **Port:** the denoiser read `helix.probe.resolution`
+cells; does not import), 5f70a66 / e0eb082 (NERSC launchers). The distributional heads
+(5edce72: `CellDecoder(dist=point|gauss|hlgauss)`; `forward()` returns 3 values for them)
+are committed but not a default until M15. c7ac8b3 (the import fix) comes with 42f6188's
+tree; b9962a9 (launchers) and 8a84597 (`baselines/uboone_sp`, the M7-M14 record in
+`causes/results/m7_tests_results.md`) are records. **Port:** the denoiser read `helix.probe.resolution`
 (`cell_inputs`, `cell_neighbors`, `set_cell`); here those live in `helix.data.cells` /
 `helix.data.denoise` and `helix.eval`. 3dfc02e's label and `helix-cells-3`'s `q` should be
 checked to be the same quantity (both: complete hits charge on 2 x 16) before one replaces
@@ -279,7 +283,9 @@ The +-1e18 open edges go when the format next changes.
 * an amplitude metric: median and hw68 of log(pred / truth) per view and per truth-charge
   bin (1-4k, 4-16k, 16-64k, 64-256k, >= 256k e), for the denoiser and a frozen charge
   probe; it is what exposed the ~3% bright floor;
-* two seeds per arm;
+* two seeds per arm; for the denoiser also >= 5 fresh noise draws per test event (`AddNoise`):
+  the stored realisation is not special (stored - fresh 0.000 +- 0.008 over 386 events), but
+  one draw understates method differences ~1.7x (DENOISE.md);
 * the pretrained-vs-scratch label-efficiency curve (64 / 256 / 1k / 4k / 16k labelled
   events) for the denoiser (`data.train.n_events`, `model.pretrained=False` already exist)
   and for the particle labels;
