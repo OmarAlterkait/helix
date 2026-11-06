@@ -214,9 +214,38 @@ Each is either measured (with where) or assumed (with what would break it).
     as a baseline or as the denoiser's default encoder (C9).
 
 ### 4.5 Optical
-22. **No optical labels exist for this corpus.** The campaign has no light stage; optical
-    data exist only for SBND (real) and goop (simulated PMTs, `truth/pe_counts`). The codec
+22. **No optical stage, but per-deposit light exists.** The campaign has no light stage
+    (edepsim, jaxtpc_wire, jaxtpc_pixel, supera_wire, supera_pixel), but every step-file entry
+    carries per deposit and volume `photons` (float32) with `charge`, `de`, `dx`, `positions`,
+    `t0_us`, `theta`, `phi` (checked: j000000/jaxtpc_wire_j000000-000004, entry 0). JAXTPC
+    f0d2ed39 ships `run_light_sim.py` (`process_event_light`: per-segment Q, L, position, t0).
+    Missing for a TPC-paired light sample: propagation to photodetectors (visibility / LUT,
+    detector geometry) and their response. goop is already PMT-level (digitised `adc` chunks
+    per `pmt_id`, `pe_counts` as truth); what generated it is not recorded in helix. The codec
     is validated (docs/OPTICAL.md); tokens exist but no model reads them.
+
+### 4.6 Evaluation caveats (from a line-by-line review, 2026-11-06)
+23. **Intervals understate:** the bootstrap resamples scored events with the probe fixed;
+    probe-fit and probe-seed variance are not in them (seed pairs, C8).
+24. **The 1% FPR threshold is in-sample**: the per-view 99th percentile of the scored events'
+    own bg windows (recomputed per bootstrap draw).
+25. **bg windows are conditioned on a kept coefficient** (centred on a random kept noise cell,
+    no truth within +-16 w / +-128 t): the FPR is per region where the compressor fired, not
+    per area or event; harder than unconditioned noise windows (those score 0 on both arms).
+26. **The floor is about compact, isolated particles** (iso selection), not deposits in
+    showers. Counts per view and bin (fm_cooldown): ~8.5-8.9k (< 0.1 MeV), 4.9-5.3k (0.1-0.2),
+    2.8-3.0k (0.2-0.5), 4.3-4.9k (> 0.5); binomial error ~0.005 per view at < 0.1 MeV, the event
+    bootstrap ~0.006 (windows cluster by event).
+27. **The amplitude reference divides by the corpus `norm_sigma`**, not the event's
+    `sigma_threshold`.
+28. **The labels reference sees no charge** (presence bits + Fourier offsets, 52 columns), so
+    0.29 / 0.24 is a weak floor; whether `le` (53% of cells) follows from charge alone is not
+    measured. A charge-aware reference (the amplitude, or the covering tokens' raw values) is
+    the missing control.
+29. **recon masks randomly at 0.75 with plane masking off** (an explicit `mode="random"`
+    bypasses `plane_frac`); var_expl pools all bands against the noisy target.
+30. **Features are the last encoder block** (no final norm, no other layer), bf16 autocast,
+    gathered as float16.
 
 ---
 
@@ -311,7 +340,8 @@ until the RoPE re-test with a full-width single-axis path (TODO). Token geometry
 untested; only with localisation back.
 
 **C11. Optical.** A joint TPC + light model needs a simulated light source paired with
-the TPC; the campaign has none. Options: goop for optical-only work, SBND data for real
+the TPC; the campaign has per-deposit photons and times (assumption 22) but no propagation or
+photodetector stage, so pairing light means adding one. Options: goop for optical-only work, SBND data for real
 light, or a light stage added to a campaign. Until then optical stays outside the model.
 If and when it enters, `plane_id`'s four roles (FiLM index, RoPE axis, masking group,
 plane identity) must separate, and charge-light correlation is physics: test couplings with
