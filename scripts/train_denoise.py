@@ -82,9 +82,8 @@ def parse():
                     help="... and of a per-(gid, --gain-block-wires wires) gain on top")
     ap.add_argument("--gain-block-wires", type=int, default=64)
     ap.add_argument("--clean-root", default=None, help="corpus root of the co-supported clean shards (needed by the gains)")
-    ap.add_argument("--cell", default="2x16", help="fine cell WIRESxTICKS; the truth root must be built on the same cell")
     ap.add_argument("--q0", type=float, default=None,
-                    help="target scale y = log1p(q / Q0); default the 2x16 value (median positive cell charge)")
+                    help="target scale y = log1p(q / Q0); default the median positive cell charge")
     ap.add_argument("--sig-cap", type=int, default=20000, help="charged cells sampled per event, at most")
     ap.add_argument("--freeze-encoder", action="store_true", help="train the head only (encoder from --init/--init-denoiser)")
     return ap.parse_args()
@@ -102,9 +101,6 @@ def to_device(item, dev):
 
 def main():
     a = parse()
-    from helix.probe.resolution import set_cell
-    cell = tuple(int(x) for x in a.cell.split("x"))
-    set_cell(*cell)                                           # before any dataset (loader workers fork and inherit it)
     import ast
     import torch
     import torch.distributed as dist
@@ -184,7 +180,7 @@ def main():
         say(f"[denoise] resumed at step {step}")
     y_sup = float(np.log1p(a.support_min_q / train.q0))      # presence threshold in target units
     meta = dict(arch=arch, overrides=overrides, args=vars(a), q0=train.q0, runs=runs,
-                head_kw=head_kw, cond_charge=a.cond_charge, cell=list(cell))
+                head_kw=head_kw, cond_charge=a.cond_charge)
 
     def save(path, extra=None):
         if rank:
