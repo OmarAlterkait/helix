@@ -26,9 +26,10 @@ in `docs/archive/`.
 * **Score the `dec_frac` / `n_masks` arms** on the noisy recipe. They are kept as
   switches only until scored; `dec_frac` was measured only on the pooled encoder
   (`docs/archive/ENCODER_POOLING.md` §6). Keep or remove them after.
-* **CRPS, per-slot NLL and PIT in `CoeffFMEvaluator`.** `var_expl` is at its Bayes limit
-  (the read-back is a posterior mean) and the probe cannot resolve effects below ~0.013,
-  so nothing in the code can measure an objective-side change. The open outer bins are
+* **CRPS, per-slot NLL and PIT in `CoeffFMEvaluator`.** `var_expl` was shown to
+  be a Bayes limit (calibrated PIT) under CLEAN targets only, on r1; it has no ceiling for
+  the noisy-only target, and loss / var_expl do not rank representations anyway (rank
+  correlation 0.15 with the probe over 17 models), so an objective-side change needs these. The open outer bins are
   stored as +-1e18, which a CRPS integral must not trust (`docs/archive/NEXT.md` §1).
 * **Tokenizer cell geometry.** ~32k tokens per event at 6.87% slot occupancy; try
   `pw x pt = 32 x 16` (`n_slot` 512) at equal wall clock (`docs/archive/NEXT.md` §3). A
