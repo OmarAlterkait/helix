@@ -207,7 +207,11 @@ Each is either measured (with where) or assumed (with what would break it).
     `data.train.max_len=46200` (a single-run corpus makes `COOLDOWN_RUNS = 3` a whole epoch,
     a third of the stable phase), i.e. on the first ~46k events of j000000 in file order, which
     DECISIONS warns against. It is ~8% of the stable phase.
-21. **Eval read `last` weights** for both runs, not EMA.
+21. **Eval read `last` weights** for both runs, not EMA. Fine for fm_cooldown (annealed).
+    For fm, a WSD stable-phase run, raw `last` sits at full-LR noise and the EMA (0.9999) is
+    what stands in for an annealed model, so fm's column in §1 probably understates it and
+    the fm / fm_cooldown gap is partly LR noise. Score fm with `--weights ema` before using it
+    as a baseline or as the denoiser's default encoder (C9).
 
 ### 4.5 Optical
 22. **No optical labels exist for this corpus.** The campaign has no light stage; optical
@@ -233,9 +237,8 @@ are committed but not a default until M15. c7ac8b3 (the import fix) comes with 4
 tree; b9962a9 (launchers) and 8a84597 (`baselines/uboone_sp`, the M7-M14 record in
 `causes/results/m7_tests_results.md`) are records. **Port:** the denoiser read `helix.probe.resolution`
 (`cell_inputs`, `cell_neighbors`, `set_cell`); here those live in `helix.data.cells` /
-`helix.data.denoise` and `helix.eval`. 3dfc02e's label and `helix-cells-3`'s `q` should be
-checked to be the same quantity (both: complete hits charge on 2 x 16) before one replaces
-the other.
+`helix.data.denoise` and `helix.eval`. 3dfc02e's label is NOT cells-3's `q`: it is complete
+(uncut) truth with presence at 25 e-, `q` is hits truth with JAXTPC's 25 e- cut (C13).
 
 **C2. How much corpus.** One group (200k) or all five (1M, ~176 more turing GPU-hours and
 ~0.9 TB). Recommendation: calibrate the recipe on j000000 first (C5); build more only when
