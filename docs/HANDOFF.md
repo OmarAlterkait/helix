@@ -122,7 +122,12 @@ light simulation**.
 
 Per 2-wire x 16-tick cell: `q` = the hits file's electrons (pre-response: the charge reaching
 the wires, before field response and electronics), built from hits independently of the
-corpus threshold (sub-threshold charge included; helix applies no support cutoff), its
+CORPUS threshold, but **not complete**: JAXTPC f0d2ed39 writes hits after its own cuts (each
+hits entry records `threshold: 25.0`; per helix-nersc, samples <= 1 e- per group x wire x tick
+are dropped in box compaction and <= 25 e- at the CSR encode, on 1ea2282). That drops every
+deposit group's diffusion tails, ~1.6% of in-window charge, growing with drift (complete /
+hits = 1.0155-1.0161 on r1). Fine for the particle labels, centroids and track splits; for
+charge targets see C13. its
 split by track, and the dominant hits group's share and 3D (y, z). Per (plane, track) the
 pixel-charge centroid. Per track: deposited energy (step dE summed, MeV), `motif` (shower,
 track, michel, delta, le) and `pid` (photon, electron, muon, pion, proton, le), -1 = none,
@@ -162,8 +167,9 @@ Each is either measured (with where) or assumed (with what would break it).
    the problem.
 
 ### 4.2 Truth and labels
-6. **hits = the charge a perfect detector would see** (pre-response). The label of every
-   metric and of the denoiser.
+6. **hits = the charge a perfect detector would see** (pre-response), apart from JAXTPC's
+   per-group 25 e- cut (§3.3), which removes ~1.6% of the charge as diffusion tails. The
+   label of every metric here; helix-nersc's denoiser moved to the uncut (complete) truth.
 7. **The 2 x 16 grid is finer than any patch under test** (a pw16 token spans 8 cells in
    wire), and every window edge lies on it, so models with different tokenizers score on the same
    cells.
@@ -307,6 +313,20 @@ controlled perturbations, not augmentation.
 copy in `$CFS/m5238/users/oalter/coeff_tpc_d1m`; verify the bin grid there; run the suite
 with `HELIX_REQUIRE_PIMM=1 HELIX_REQUIRE_DATA=1`. Evaluation fits in a `shared` GPU job (32
 cores, 56 GB): the floor holds features in host memory, ~25 GB at `FIT_ROWS` = 1M.
+
+**C13. The charge label: hits or complete truth.** cells-3 `q` carries the production's
+25 e- cut (§3.3). helix-nersc's complete truth (`scripts/build_complete_corpus_truth.py` on
+their branch: every step deposit through JAXTPC's own drift, attenuation and diffusion, no
+cuts; `--validate` re-applies the cut and must reproduce hits) gave the denoiser +0.035-0.05
+detection, removed the bright bias (median 0.972 -> 0.995) and presence ECE 0.0084 -> 0.0031,
+with presence defined at q > 25 e- (`--support-min-q 25`: without it 37% of charged cells
+hold <= 25 e-). Options: (a) an uncut `q` column in cells-3, presence at 25 e-; (b) a
+separate complete-truth family. Either is built at S3DF (needs step + hits and a JAXTPC
+checkout at f0d2ed39, which `/sdf/group/neutrino/omara/JAXTPC` does not have yet) and is
+validated against the hits-based `q` first. Recommendation (a): one truth format, the
+particle labels unchanged. Whether the floor / uprobe / labels windows should use the uncut
+charge too is part of the choice (window selection uses charge fractions, so the change is
+small but not zero).
 
 ---
 
