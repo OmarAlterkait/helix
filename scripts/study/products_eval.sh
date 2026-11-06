@@ -11,6 +11,7 @@ for t in lb_dec_hits lb_dec_cond_hits lb_dec_ct lb_dec_cond_ct sp_dec_c25 sp_dec
 CK[M7d]=$D/M7d_ft_full_dec_ct25/final.pt; CK[M7dc]=$D/M7dc_ft_full_dec_cond_ct25/final.pt
 CK[M10lin]=$D/M10lin_ft_full_dec_cond_ct25/final.pt
 CK[M11]=$D/M11_ft_full_dec_cond_ct25/final.pt
+CK[M13]=$D/M13_ft_full_dec_cond_ct25_w1/final.pt
 i=${GPU0:-0}
 for n in "$@"; do
   CUDA_VISIBLE_DEVICES=$(( i % 4 )) HELIX_INTERACTIVE=0 HDF5_USE_FILE_LOCKING=FALSE OMP_NUM_THREADS=4 scripts/helix_run.sh python \

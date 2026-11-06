@@ -8,7 +8,7 @@
 #   M12w2  k = 2  ~ squared error in linear charge (the linear map's objective)
 # Output representation (log1p q / Q0) unchanged. Checkpoints kept every 2000 steps. Then, on the same allocation:
 # paired per-bin comparison vs M12w0 from 1 k e- up (c13, incl. the faint bins the weighting may cost).
-# 4-node PREEMPT allocation (2 h floor, 24 h ceiling), resumable.
+# 4-node interactive allocations (4 h), resumable.
 set -uo pipefail
 H=$(cd "$(dirname "$0")/../.." && pwd); W=/pscratch/sd/o/oalter/helix_work; A=$W/probe/artifact_nz_pw16_s1
 O=/global/cfs/cdirs/m5238/users/oalter/ost61; R=/global/cfs/cdirs/m5238/users/oalter/helix_runs; M=$R/m7tests
@@ -22,8 +22,8 @@ TAGS=(M12w0 M12w1 M12w2)
 cd $H
 until [ -f $D/M12w0/final.pt ] && [ -f $D/M12w1/final.pt ] && [ -f $D/M12w2/final.pt ] && [ -f $M/c13_m12.json ]; do
   J=""; until [ -n "$J" ]; do
-    J=$(timeout 21600 salloc --no-shell --qos=preempt --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
-        --time-min=02:00:00 --time=24:00:00 --job-name=hx-m12 2>&1 | grep -o "Granted job allocation [0-9]*" | grep -o "[0-9]*$")
+    J=$(timeout 21600 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
+        --time=04:00:00 --job-name=hx-m12 2>&1 | grep -o "Granted job allocation [0-9]*" | grep -o "[0-9]*$")
     [ -z "$J" ] && sleep 30
   done
   echo "[m12] got $J at $(date)"

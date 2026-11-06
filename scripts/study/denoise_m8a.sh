@@ -2,7 +2,7 @@
 # Can cross-volume attention stay? M8a = M7dc fine-tuned 6k steps with the charge-scaling augmentation ONLY, the
 # original (time-sorted, volume-mixing) drift layouts -- the missing arm of M8g (layout + augmentation) / M8c (layout
 # only), same schedule. Then, on the same allocation: the partial-scaling gain test (t2d, 24 events) and the paired
-# bright-cell comparison vs M8g / M8c / M7dc (c13, incl. the cathode region). 4-node PREEMPT allocation (2 h floor).
+# bright-cell comparison vs M8g / M8c / M7dc (c13, incl. the cathode region). 4-node interactive allocations (4 h).
 set -uo pipefail
 H=$(cd "$(dirname "$0")/../.." && pwd); W=/pscratch/sd/o/oalter/helix_work; A=$W/probe/artifact_nz_pw16_s1
 O=/global/cfs/cdirs/m5238/users/oalter/ost61; R=/global/cfs/cdirs/m5238/users/oalter/helix_runs; M=$R/m7tests
@@ -16,8 +16,8 @@ common=(--corpus-root $O/corpus --arch-from $A --init-denoiser $INIT --steps 600
 cd $H
 until [ -f $D/M8a/final.pt ] && [ -f $M/c13_m8a.json ] && [ -f $M/t2d_M8a_summary.log ]; do
   J=""; until [ -n "$J" ]; do
-    J=$(timeout 21600 salloc --no-shell --qos=preempt --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
-        --time-min=02:00:00 --time=24:00:00 --job-name=hx-m8a 2>&1 | grep -o "Granted job allocation [0-9]*" | grep -o "[0-9]*$")
+    J=$(timeout 21600 salloc --no-shell --qos=interactive --account=m5238_g --constraint="gpu&hbm80g" --nodes=4 --gpus-per-node=4 \
+        --time=04:00:00 --job-name=hx-m8a 2>&1 | grep -o "Granted job allocation [0-9]*" | grep -o "[0-9]*$")
     [ -z "$J" ] && sleep 30
   done
   echo "[m8a] got $J at $(date)"

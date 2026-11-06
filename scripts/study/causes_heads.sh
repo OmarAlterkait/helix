@@ -34,12 +34,14 @@ while ! alldone; do
         "${E[@]}" CUDA_VISIBLE_DEVICES=$gpu "$@"; }
   run_tags() { local node=$1; shift; local i=0
     for t in "$@"; do
-      done_ $t || S $node $i scripts/helix_run.sh python baselines/uboone_sp/causes/t11_head_probe.py --tag $t ${ARGS[$t]} \
+      S $node $i scripts/helix_run.sh python baselines/uboone_sp/causes/t11_head_probe.py --tag $t ${ARGS[$t]} \
         --steps 10000 --accum 4 --workers 6 --converge --out $O >> $O/$t.log 2>&1 &
       i=$((i + 1))
     done; }
-  run_tags ${NODES[0]} "${A_TAGS[@]}"
-  run_tags ${NODES[1]} "${B_TAGS[@]}"
+  todo=(); for t in "${A_TAGS[@]}" "${B_TAGS[@]}"; do done_ $t || todo+=($t); done
+  h=$(( (${#todo[@]} + 1) / 2 ))                                   # unfinished probes, split over the two nodes
+  run_tags ${NODES[0]} "${todo[@]:0:$h}"
+  run_tags ${NODES[1]} "${todo[@]:$h}"
   [ -f $M/c14.json ] || S ${NODES[1]} 3 scripts/helix_run.sh python baselines/uboone_sp/causes/c14_overflow.py --out $M/c14.json \
     > $M/c14.log 2>&1 &
   [ -f $M/t13.json ] || S ${NODES[1]} 2 env XLA_PYTHON_CLIENT_PREALLOCATE=false scripts/helix_run.sh python \
