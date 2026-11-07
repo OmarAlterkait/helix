@@ -239,6 +239,38 @@ def test_recon_is_the_evaluators_metric(synth):
     assert got["n_events"] == 3 and {"loss", "bce", "val", "var_expl", "charge_closure", "charge_resid"} <= set(got)
     for k, v in want.items():
         assert got[k] == pytest.approx(v, rel=1e-6)
+    # and the same under the region mask, beside it
+    totals, counts, gf = {}, {}, dict.fromkeys(R.GF_KEYS, 0.0)
+    for e in evs:
+        mask = R.region_mask(e.batch, run.tokenizer.pw)
+        with torch.no_grad():
+            R.pool(R.heads_loss(run.model, e.batch, mask, gf), e.batch, mask, totals, counts)
+    want = R.average(totals, counts, gf)
+    assert {"loss", "var_expl", "charge_closure", "mask_frac"} <= set(got["region"])
+    for k, v in want.items():
+        assert got["region"][k] == pytest.approx(v, rel=1e-6)
+    assert 0 < got["region"]["mask_frac"] < 1 and got["region"]["var_expl"] != got["var_expl"]
+
+
+def test_the_region_mask_hides_whole_regions_as_the_predecessor_did():
+    """Tokens of one (plane, 32-wire, 128-tick) region are masked together, 75% of regions are,
+    and the regions are the predecessor's (scripts/eval_resolution.py's crc32 of the key)."""
+    import zlib
+    from helix.eval.recon import region_mask
+    rng = np.random.default_rng(0)
+    n, pw = 20000, 16
+    B = dict(cell_wb=torch.from_numpy(rng.integers(0, 120, n)),
+             t_phys=torch.from_numpy(rng.uniform(-20, 6000, n).astype(np.float32)),
+             plane_id=torch.from_numpy(rng.integers(0, 6, n)))
+    m = region_mask(B, pw).numpy()
+    wc = B["cell_wb"].float().numpy() * pw + pw / 2
+    rk = (B["plane_id"].numpy().astype(np.int64) << 40) | ((wc // 32).astype(np.int64) << 20) \
+        | (np.floor(B["t_phys"].numpy() / 128).astype(np.int64) + 4096)
+    ref = np.array([zlib.crc32(int(x).to_bytes(8, "little", signed=True)) % 1000 for x in rk]) < 750
+    np.testing.assert_array_equal(m, ref)
+    u, inv = np.unique(rk, return_inverse=True)
+    per = np.bincount(inv, m, len(u)) / np.bincount(inv, minlength=len(u))
+    assert set(np.unique(per)) <= {0.0, 1.0} and 0.7 < per.mean() < 0.8
 
 
 def test_floor_learns_what_the_features_carry(synth):
