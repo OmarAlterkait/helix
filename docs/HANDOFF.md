@@ -25,22 +25,27 @@ The other four campaign groups (j001000-j004000) are **not built**. No clean sha
 
 ### Results (fm_cooldown; [16, 84]% event-bootstrap intervals in the JSON)
 
-| metric | reference (no fit) | fm (stable) | fm_cooldown |
-|---|---|---|---|
-| floor eff @1% FPR/view, < 0.1 MeV | amplitude 0.08 | 0.35 | 0.40 |
-| floor, 0.1-0.2 MeV | 0.18 | 0.55 | 0.62 |
-| floor, 0.2-0.5 MeV | 0.84 | 0.95 | 0.97 |
-| floor, > 0.5 MeV | 0.99 | 0.99 | 0.99 |
-| uprobe within-group R^2 (U / V / Y) | geometry 0.03 | 0.52 | 0.53 (0.56 / 0.56 / 0.49) |
-| labels motif, balanced accuracy | token layout 0.29 | 0.80 | 0.80 |
-| labels pid, balanced accuracy | 0.24 | 0.65 | 0.65 |
-| recon var_expl | -- | 0.645 | 0.693 |
+| metric | reference (no fit) | fm (stable, last) | fm (stable, EMA) | fm_cooldown (last) |
+|---|---|---|---|---|
+| floor eff @1% FPR/view, < 0.1 MeV | amplitude 0.08 | 0.35 | 0.40 | 0.40 |
+| floor, 0.1-0.2 MeV | 0.18 | 0.55 | 0.61 | 0.62 |
+| floor, 0.2-0.5 MeV | 0.84 | 0.95 | 0.96 | 0.97 |
+| floor, > 0.5 MeV | 0.99 | 0.99 | 0.99 | 0.99 |
+| uprobe within-group R^2 (U / V / Y) | geometry 0.03 | 0.52 | 0.53 (0.55 / 0.55 / 0.49) | 0.53 (0.56 / 0.56 / 0.49) |
+| labels motif, balanced accuracy | token layout 0.29 | 0.80 | 0.81 | 0.80 |
+| labels pid, balanced accuracy | 0.24 | 0.65 | 0.66 | 0.65 |
+| recon var_expl | -- | 0.645 | 0.676 | 0.693 |
 
 Not from this package: the uprobe's Fisher-mean within-group r, 0.75 trained / 0.15 geometry
 (fm_cooldown), came from `exp/helix/report/checks.py` on 600 events.
 
 pid recall per class (cooldown): electron 0.40, photon 0.48, muon 0.78, proton 0.92.
 Background windows per view: U 27,420, V 27,420, Y 26,539.
+
+**The stable phase's EMA matches the cooldown on every probe** (`eval2_ema.json`, 2026-11-06):
+floor 0.404 / 0.611 against 0.397 / 0.622, uprobe 0.528 against 0.534, motif 0.810 against
+0.803, all inside the ~0.03-0.04 seed spread; the `last` column's deficit was full-LR noise. The
+cooldown still lowers recon (var_expl 0.693 against 0.676; loss 3.340 against 3.407).
 
 **What these numbers do not show** (by helix-nersc's measurements on r1): a single seed
 moves the floor by 0.03-0.04 at d768, so stable vs cooldown below that is unresolved;
@@ -210,10 +215,9 @@ Each is either measured (with where) or assumed (with what would break it).
     a third of the stable phase), i.e. on the first ~46k events of j000000 in file order, which
     DECISIONS warns against. It is ~8% of the stable phase.
 21. **Eval read `last` weights** for both runs, not EMA. Fine for fm_cooldown (annealed).
-    For fm, a WSD stable-phase run, raw `last` sits at full-LR noise and the EMA (0.9999) is
-    what stands in for an annealed model, so fm's column in §1 probably understates it and
-    the fm / fm_cooldown gap is partly LR noise. Score fm with `--weights ema` before using it
-    as a baseline or as the denoiser's default encoder (C9).
+    For fm, a WSD stable-phase run, raw `last` sits at full-LR noise; scored with its EMA
+    (0.9999) it matches fm_cooldown on every probe (§1), so the stable/cooldown probe gap was
+    LR noise. Use fm's EMA, or fm_cooldown, as the baseline and denoiser encoder (C9).
 
 ### 4.5 Optical
 22. **No optical stage, but per-deposit light exists.** The campaign has no light stage
