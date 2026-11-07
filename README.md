@@ -12,18 +12,18 @@ waveforms into shards beside the TPC ones (not yet fed to the model).
 
 | path | what |
 |---|---|
-| `helix/build.py` | the build pipeline: event loop, TPC chain, optical codec, shard writer, calibration, task plan, one CLI (`main(Source)`); knows no source |
+| `helix/build.py` | the build pipeline: event loop, TPC chain, optical codec, shard writer, calibration, task plan, the simulation source; one CLI, `python -m helix.build sim` (or `sbnd`, `goop`) |
 | `helix/core` | wavelet transform, robust statistics and hysteresis (`robust`), the shard format (`coeff_io`), the event and its provenance (`coeff_event`) |
-| `helix/tpc` | the TPC chain (`chain`), coherent gate, thresholding, noise model, readouts, JAXTPC and SBND readers |
-| `helix/optical` | the optical codec, response calibration, optical shards and tokens |
+| `helix/tpc` | the TPC chain (`chain`), coherent gate, thresholding, noise model, readouts and plane geometry (`readout`), JAXTPC and SBND readers (the SBND build source) |
+| `helix/optical` | the optical codec, response calibration, optical shards and tokens, the goop build source |
 | `helix/data` | corpus reader, dataset and verifier; bin grid; the `cells` truth; the denoiser's labels; identity guard |
 | `helix/model` | the FM: tokenizer, blocks, masking, loss, muP; the denoiser on it; reading a run (`checkpoint.load_run`) |
 | `helix/eval` | evaluating a run: `python -m helix.eval RUN --metrics recon,floor,uprobe,labels,denoise` |
 | `helix/integrations/pimm` | adapters into pimm's trainer |
 | `helix/sites` | per-site roots, container and scheduler (`s3df.yaml`, `nersc.yaml`) |
-| `scripts/build_{sim,sbnd,goop}.py` | the sources, one script each; `scripts/corpus.sh` runs a corpus on the scheduler |
+| `scripts/corpus.sh` | a corpus on the scheduler, through `python -m helix.build` |
 | `scripts/build_truth.py` | the simulation truth (`cells`) beside a corpus run |
-| `scripts/derive_coeff_bins.py` | the categorical head's bin grid |
+| `python -m helix.data.bins` | the categorical head's bin grid |
 | `scripts/train.sh` | training (FM or denoiser) as a chain of jobs |
 | `configs/pimm/` | `fm.py` and its variants `fm_cooldown`, `fm_smoke`; `denoise.py`, the supervised denoiser on an FM run |
 | `container/` | the image recipe (`install.sh`) and its apptainer / Docker front-ends |

@@ -8,8 +8,14 @@ Decompressing ~77 MB of ADC per event is CPU work, and h5py serialises all HDF5 
 behind one lock, so threads do not overlap it: :func:`loader` uses a torch DataLoader
 with worker PROCESSES (each opens its own file handles) and pinned memory, so the
 next events decode while the GPU processes the current one.
+
+:class:`SBNDSource` is the build's source over these files (``python -m helix.build sbnd``, see
+:mod:`helix.build`): the TPC readout (adc, pedestal, present per channel), PMT and X-ARAPUCA
+waveforms; chain ``SBND_DEFAULT``.
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -95,3 +101,43 @@ def loader(files, *, workers=4, prefetch=2, indices=None, optical_kinds=()):
     return DataLoader(ds, batch_size=None, shuffle=False, num_workers=workers, collate_fn=_collate,
                       pin_memory=torch.cuda.is_available(), prefetch_factor=prefetch if workers > 0 else None,
                       persistent_workers=False)
+
+
+# ---- the build source ------------------------------------------------------------------------
+
+class SBNDSource:
+    """Extracted SBND files: the TPC readout and the PMT / X-ARAPUCA waveforms."""
+
+    systems = ("pmt", "xarapuca")
+    dataset = "sbnd"
+    pattern = "*.h5"
+
+    def __init__(self, files, device, optical=True):
+        self.files, self.device = sorted(files), device
+        self.systems = SBNDSource.systems if optical else ()
+        self.n = len(SBNDEvents(self.files))
+
+    def __len__(self):
+        return self.n
+
+    def chain_config(self, overrides):
+        from helix.tpc.chain import make_config
+        return make_config(overrides)
+
+    def bind(self, chain):
+        pass
+
+    def optical_chain(self, overrides):
+        from helix.optical.codec import OpticalChain
+        return OpticalChain(overrides, device=self.device)
+
+    def events(self, indices, workers):
+        for ev in loader(self.files, workers=workers, indices=indices, optical_kinds=self.systems):
+            m = ev["meta"]
+            yield dict(ident=dict(run=str(m["run"]), source_file=Path(m["file"]).name, event=int(m["event"]),
+                                  subrun=int(m["subrun"]), time=float(m["time"])),
+                       readout=(ev["adc"], ev["pedestal"], ev["present"]),
+                       optical={s: ev[s] for s in self.systems})
+
+    def shard_attrs(self):
+        return dict(noise=None, provenance=None)

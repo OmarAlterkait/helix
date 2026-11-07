@@ -216,12 +216,12 @@ numbers are not comparable with today's anyway. Supersedes the artifact entries 
 
 ## 0. One of each (2026-10-24 .. 26)
 
-**One build entry point; sources are scripts.** `helix/build.py` holds the event loop,
-the TPC and optical chains, the shard writer, calibration and the task plan, and knows
-no source; `scripts/build_sim.py`, `build_sbnd.py`, `build_goop.py` each define one
-reader class and end with `helix.build.main(Source)`. *Why:* three builders
+**One build entry point.** `helix/build.py` holds the event loop, the TPC and optical chains,
+the shard writer, calibration and the task plan; a source is one reader class (sim, sbnd,
+goop; `python -m helix.build SOURCE`; 2026-11: moved from `scripts/build_{sim,sbnd,goop}.py`
+next to their readers). *Why:* three builders
 (`build_coeff_corpus.py`, `helix.tpc.sbnd_run`, `helix.optical.goop_run`) each carried
-their own copy of everything after the read. A new source is now a new script and
+their own copy of everything after the read. A new source is now a new class and
 nothing else. Shards are written `.part` and renamed, so `--skip-complete` lets a
 resubmitted task skip finished work; `scripts/corpus.sh` replaced
 `submit_coeff_corpus.sh` and `calibrate_norm_sigma.sh`. Checked output-neutral: rebuilt

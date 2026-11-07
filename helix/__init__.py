@@ -5,7 +5,7 @@
   helix.tpc     — wire-plane chain (helix.tpc.chain.TPCChain): coherent noise
                   removal + wavelet threshold
   helix.optical — optical waveforms (SBND PMT / X-ARAPUCA, goop): one codec, optical shards
-  helix.build   — any source's events through both into shards (sources: scripts/build_*.py)
+  helix.build   — any source's events through both into shards (python -m helix.build sim)
   helix.model   — the coefficient foundation model and its tokenizer
 
 **Every name below is resolved lazily** (PEP 562). This is not a style choice.

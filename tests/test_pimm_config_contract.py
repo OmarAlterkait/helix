@@ -154,7 +154,7 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
     assert not torch.isfinite(m.bin_edges).any(), \
         "a fresh categorical model must have no USABLE edges"
 
-    # a bins table as scripts/derive_coeff_bins.py writes it, read back by the one loader
+    # a bins table as helix.data.bins writes it, read back by the one loader
     path = tmp_path / "bins.pt"
     torch.save(dict(edges=torch.linspace(-4, 4, 17).repeat(4, 1),
                     cent_asinh=torch.zeros(4, 16),

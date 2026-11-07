@@ -449,7 +449,7 @@ def decode_prediction(occ_logit, values, tok, *, gids, norm_sigma,
 def bin_centroids_ratio(edges, cent_ratio=None):
     """Per-band ``E[raw/sigma | bin]`` for the categorical head, shape (n_band, K).
 
-    Prefers the MEASURED table (``cent_ratio`` from ``derive_coeff_bins``, which
+    Prefers the MEASURED table (``cent_ratio`` from ``helix.data.bins``, which
     is what the reference ships and reads back with). Falls back to the exact
     closed form for a uniform density inside each bin::
 
@@ -486,7 +486,7 @@ def bin_centroids_asinh(edges):
 def _close_open_edges(edges):
     """Replace the +-1e18 open-bin sentinels with a reflected neighbouring width.
 
-    ``derive_coeff_bins`` writes the outer edges as +-1e18 so a tail can never
+    ``helix.data.bins`` writes the outer edges as +-1e18 so a tail can never
     fall off the grid. Any centroid formula has to invent a finite edge for those
     two bins; reflecting the adjacent width is the convention, and it is why a
     DERIVED outer centroid runs ~24% below a measured one, which costs 2.7-3.0%

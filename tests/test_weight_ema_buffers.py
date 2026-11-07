@@ -65,7 +65,7 @@ def _edges(n_band=4, n_bins=8):
     than a tidy symmetric range: values that are exactly representable in float32
     are fixed points of the old update and stay bit-exact, so a tidy table hides
     the bug entirely. Outer edges are the +-1e18 open sentinels, as
-    ``derive_coeff_bins`` writes them.
+    ``helix.data.bins`` writes them.
     """
     inner = torch.linspace(-6.84699, 7.10671, n_bins - 1)
     row = torch.cat([torch.tensor([-1e18]), inner, torch.tensor([1e18])])

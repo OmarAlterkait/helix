@@ -62,7 +62,7 @@ The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, containe
 
 * **Stage the corpus.** Copy `coeff_tpc_d1m` with its `_calib/` to `$CFS/m5238/users/oalter/coeff_tpc_d1m`
   (`HELIX_CORPUS_DURABLE`) and stage it to `$SCRATCH/coeff_tpc_d1m`; build or copy its cells
-  truth; verify the bin grid there with `derive_coeff_bins.py --verify` rather than
+  truth; verify the bin grid there with `python -m helix.data.bins --verify` rather than
   copying it.
 * **Rebuild the image without jax** and point `container.image` at the new tag or its
   digest (the profile's `jax-cuda12` tag is stale).

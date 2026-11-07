@@ -187,7 +187,7 @@ def _dcp_step(trainer_dir):
 def apply_bins(model, bins, *, log=None):
     """Install a bin table onto ``model``. The ONLY caller of ``set_bins``.
 
-    ``bins`` is the mapping ``derive_coeff_bins`` writes (``helix.data.bins.load``): ``edges``
+    ``bins`` is the mapping ``helix.data.bins`` writes (``helix.data.bins.load``): ``edges``
     required, ``cent_asinh``/``cent_ratio`` optional (``set_bins`` derives what is absent); any
     other key is ignored. When the model already holds finite edges, the largest disagreement is
     reported before overwriting: replacing a checkpoint's own edges with another table's is how a

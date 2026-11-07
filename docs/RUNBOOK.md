@@ -77,9 +77,10 @@ else reachable:
     scripts/corpus.sh build     SOURCE OUT              # job arrays over CHUNKS.txt
     scripts/corpus.sh all       SOURCE OUT RUN_DIR...   # the three, build after calibration (afterok)
 
-`SOURCE` is `sim`, `sbnd` or the path of a build script ending in `helix.build.main`.
-(goop is optical only and has no `norm_sigma` to calibrate; build it with
-`scripts/build_goop.py` directly.) Examples (S3DF):
+`SOURCE` is `sim`, `sbnd`, a `module:Class` source, or the path of a build script ending in
+`helix.build.main(Source)`; the jobs run `python -m helix.build SOURCE`. (goop is optical only
+and has no `norm_sigma` to calibrate; build it with `python -m helix.build goop` directly.)
+Examples (S3DF):
 
     scripts/corpus.sh all sim  $HELIX_CORPUS_ROOT/coeff_tpc_new $HELIX_SIM_ROOT/j00*
     scripts/corpus.sh all sbnd /sdf/data/neutrino/omara/sbnd_data/coeff_sbnd_new \
@@ -124,9 +125,9 @@ DSP; through `corpus.sh`, set `BUILD_ARGS=--keep-clean`.
 One shard by hand (a GPU node), to check the chain:
 
     T=$HELIX_SIM_ROOT/j000000/jaxtpc_wire_j000085-000089      # jobs 85-89: shards 85-89
-    scripts/helix_run.sh python scripts/build_sim.py --input $T/sensor/sim_wire_sensor_${T##*/}.h5 \
+    scripts/helix_run.sh python -m helix.build sim --input $T/sensor/sim_wire_sensor_${T##*/}.h5 \
         --output OUT/j000000/sim_wire --device cuda --count 200 --events-per-shard 200 --shard-start 85 [--keep-clean]
-    scripts/helix_run.sh python scripts/build_sbnd.py --input RUN/*.h5 --output OUT/RUN/sbnd \
+    scripts/helix_run.sh python -m helix.build sbnd --input RUN/*.h5 --output OUT/RUN/sbnd \
         --device cuda --count 100
 
 All options: `helix/build.py`'s docstring (`--first`, `--spread`, `--shard-start`,
@@ -164,11 +165,11 @@ zero, one bin over the sub-threshold gap). The production grid is named in
 `helix/data/data/reference_bins.json`: `coeff_bins_d1m_j000000_noisy`, derived from the
 campaign corpus's first run (`coeff_tpc_d1m/j000000`) with K = 128 over 120 events, read by
 every config from `$HELIX_ARCHIVE/<name>.pt` (derived 2026-10-29; its digests are recorded). To derive a grid
-(CPU; milano is AMD, so numpy's results are the canonical ones, and the script disables
+(CPU; milano is AMD, so numpy's results are the canonical ones, and the command disables
 AVX-512 itself elsewhere):
 
     sbatch --account=mli:cider-ml --partition=milano --cpus-per-task=8 --mem=32G --time=01:00:00 \
-        --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/derive_coeff_bins.py \
+        --wrap="$HELIX_ROOT/scripts/helix_run.sh python -m helix.data.bins \
                 --corpus $HELIX_CORPUS --out $HELIX_ARCHIVE/coeff_bins_d1m_j000000_noisy.pt"
 
 For a new reference (a new name in the JSON, `digests: null`), the log ends with `records no
@@ -176,7 +177,7 @@ digests yet ... record these` and a JSON object of three digests (`edges`, `cent
 `cent_ratio`): paste it as the value of `"digests"` and commit. Any other site checks its copy of the corpus against the record instead
 of copying the file:
 
-    scripts/helix_run.sh python scripts/derive_coeff_bins.py \
+    scripts/helix_run.sh python -m helix.data.bins \
         --verify $HELIX_ARCHIVE/coeff_bins_d1m_j000000_noisy.pt --corpus $HELIX_CORPUS
 
 (`VERIFIED` or `MISMATCH`; `--like bins.pt` reuses the parameters a grid records.) A

@@ -1,11 +1,10 @@
-"""helix.tpc.io and the simulation source (scripts/build_sim.py) on a JAXTPC wire campaign.
+"""helix.tpc.io and the simulation source (helix.build.SimSource) on a JAXTPC wire campaign.
 
 Synthetic tasks in the campaign's layout and format (tests/_sim_fixture.py, format 2: entry_NNNNNN,
 /dprod/events, campaign event ids), written uncompressed; production files additionally need
 hdf5plugin, which io imports best-effort. Then the real campaign task, site-gated.
 """
 import os
-import runpy
 
 import h5py
 import numpy as np
@@ -14,11 +13,10 @@ import pytest
 from _sim_fixture import CAMPAIGN, N_TICKS, N_WIRES, PEDESTAL, PLANES, write_geometry, write_task
 from helix.tpc import io
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 
 def _source():
-    return runpy.run_path(os.path.join(ROOT, "scripts", "build_sim.py"))["SimSource"]
+    from helix.build import SimSource
+    return SimSource
 
 
 def test_layout_from_config(tmp_path):

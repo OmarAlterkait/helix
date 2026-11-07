@@ -1,8 +1,8 @@
-"""Build from goop light files, optical only (the codec's GOOP specs and responses); goop's photon
-counts per PMT go into the optical shards as ``truth/pe_counts``.
+"""goop light files as a build source, optical only (the codec's GOOP specs and responses); goop's
+photon counts per PMT go into the optical shards as ``truth/pe_counts``.
 
-    python scripts/build_goop.py --input light.h5 --output OUT/RUN/goop --device cuda
-    python scripts/build_goop.py plan OUT RUN_DIR...
+    python -m helix.build goop --input light.h5 --output OUT/RUN/goop --device cuda
+    python -m helix.build goop plan OUT RUN_DIR...
 
 Options and the shards: :mod:`helix.build`.
 """
@@ -11,8 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-
-from helix.build import main
 
 
 class GoopSource:
@@ -70,6 +68,3 @@ class GoopSource:
     def shard_attrs(self):
         return dict(noise=None, provenance=None)
 
-
-if __name__ == "__main__":
-    main(GoopSource)

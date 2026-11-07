@@ -1,5 +1,5 @@
 {
-  "_comment": "The DEFINITION of the production bin grid: the parameters it is derived with, the corpus it is derived from, and a content digest of the result. This file is the single source of those parameters -- helix.data.bins reads its defaults here, and scripts/derive_coeff_bins.py takes its argparse defaults from those, so the numbers live in one place.",
+  "_comment": "The DEFINITION of the production bin grid: the parameters it is derived with, the corpus it is derived from, and a content digest of the result. This file is the single source of those parameters -- helix.data.bins reads its defaults here, and its command line (python -m helix.data.bins) takes its argparse defaults from those, so the numbers live in one place.",
   "name": "coeff_bins_d1m_j000000_noisy",
   "params": {
     "K": 128,

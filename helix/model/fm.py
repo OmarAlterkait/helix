@@ -387,7 +387,7 @@ class FMModel(nn.Module):
 
         Centroids are DERIVED from the edges when not supplied, so no centroid
         buffer is ever NaN and no consumer has to ask whether they are present.
-        A measured table (from ``derive_coeff_bins``) is strictly better, but its
+        A measured table (from ``helix.data.bins``) is strictly better, but its
         absence cannot disable anything.
 
         The centroid arguments are KEYWORD-ONLY, so a table passed positionally

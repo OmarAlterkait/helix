@@ -1,6 +1,6 @@
 #!/bin/bash
-# A corpus from one source through its build script (scripts/build_SOURCE.py: sim, sbnd, goop, or the
-# path of any script ending in helix.build.main), on the site's scheduler (helix/sites/<site>.yaml,
+# A corpus from one source through helix.build (`python -m helix.build SOURCE`: sim, sbnd, goop, a
+# module:Class, or the path of any script ending in helix.build.main(Source)), on the site's scheduler (helix/sites/<site>.yaml,
 # scheduler.corpus) and in its container (scripts/helix_run.sh).
 #
 #   scripts/corpus.sh plan SOURCE OUT RUN_DIR...  -> OUT/_calib/CHUNKS.txt (one task per line) and RUNS.txt;
@@ -25,12 +25,13 @@ set -euo pipefail
 H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$H/scripts/helix_env.sh"
 CMD=${1:?usage: corpus.sh plan|calibrate|build|all|task SOURCE OUT [RUN_DIR...]}
-SOURCE=${2:?source: sim, sbnd, goop or a build script}
+SOURCE=${2:?source: sim, sbnd, goop, module:Class or a build script}
 OUT=${3:?output corpus root}
 shift 3
 CAL=$OUT/_calib
-if [ -f "$SOURCE" ]; then BUILD=$(realpath "$SOURCE"); SOURCE=$(basename "$SOURCE" .py); SOURCE=${SOURCE#build_}
-else BUILD=$H/scripts/build_$SOURCE.py; fi
+SRC=$SOURCE                 # what the jobs this submits are told, to rebuild BUILD from
+if [ -f "$SOURCE" ]; then SRC=$(realpath "$SOURCE"); BUILD=("$SRC"); SOURCE=$(basename "$SOURCE" .py); SOURCE=${SOURCE#build_}
+else BUILD=(-m helix.build "$SOURCE"); SOURCE=${SOURCE##*:}; fi
 LOGS=${LOGS:-$OUT/_logs}
 [ "$SOURCE" = sim ] && EPS=${EVENTS_PER_SHARD:-200} || EPS=${EVENTS_PER_SHARD:-100}
 RUN=("$H/scripts/helix_run.sh" python)
@@ -45,7 +46,7 @@ export HELIX_INTERACTIVE=0 OMP_NUM_THREADS=2 HELIX_FORWARD_ENV="OMP_NUM_THREADS"
 
 plan() {
   mkdir -p "$CAL"
-  "${RUN[@]}" "$BUILD" plan "$OUT" "$@" --events-per-task "${EVENTS_PER_TASK:-500}" \
+  "${RUN[@]}" "${BUILD[@]}" plan "$OUT" "$@" --events-per-task "${EVENTS_PER_TASK:-500}" \
       --events-per-shard "$EPS" > "$CAL/CHUNKS.txt"
   for d in "$@"; do basename "$d"; done > "$CAL/RUNS.txt"
   echo "$(wc -l < "$CAL/CHUNKS.txt") tasks over $# runs -> $CAL/CHUNKS.txt"
@@ -56,7 +57,7 @@ calibrate_job() {          # inside the job; a run's inputs are those its tasks 
     [ -s "$CAL/$r.npy" ] && { echo "$r calibrated"; continue; }
     mapfile -t inputs < <(awk -v r="$r" '{ n = split($1, a, "/") } a[n - 1] == r { for (i = 6; i <= NF; i++) print $i }' \
         "$CAL/CHUNKS.txt" | sort -u)
-    "${RUN[@]}" "$BUILD" --input "${inputs[@]}" --spread "${CAL_EVENTS:-100}" --device cuda \
+    "${RUN[@]}" "${BUILD[@]}" --input "${inputs[@]}" --spread "${CAL_EVENTS:-100}" --device cuda \
         --no-optical "${CFG[@]}" --calibrate "$CAL/$r.npy" | tail -3
   done
   "${RUN[@]}" - "$CAL" <<'PY'
@@ -74,7 +75,7 @@ PY
 calibrate() {
   mkdir -p "$LOGS"
   CAL_JOB=$(sbatch --parsable "${SB[@]}" --cpus-per-task=8 --mem=48G --time=02:00:00 --job-name=calib_$SOURCE \
-      --output="$LOGS/calib_${SOURCE}_%j.out" --wrap="bash $H/scripts/corpus.sh calibrate_job $BUILD $OUT")
+      --output="$LOGS/calib_${SOURCE}_%j.out" --wrap="bash $H/scripts/corpus.sh calibrate_job $SRC $OUT")
   echo "calibration job $CAL_JOB"
 }
 
@@ -83,7 +84,7 @@ task() {                   # inside an array task: line OFFSET + SLURM_ARRAY_TAS
   mkdir -p "$(dirname "$prefix")"
   echo "$prefix: events $first..$((first + count - 1)) -> shards from $shard"
   # shellcheck disable=SC2086
-  "${RUN[@]}" "$BUILD" --input $inputs --output "$prefix" --device cuda --first "$first" \
+  "${RUN[@]}" "${BUILD[@]}" --input $inputs --output "$prefix" --device cuda --first "$first" \
       --count "$count" --events-per-shard "$eps" --shard-start "$shard" --norm-sigma "$CAL/norm_sigma_global.npy" \
       --skip-complete "${CFG[@]}" ${BUILD_ARGS:-} > "$prefix.summary_$(printf %04d "$shard").json"
   tail -c 400 "$prefix.summary_$(printf %04d "$shard").json"; echo
@@ -98,7 +99,7 @@ build() {
     sbatch --parsable "${SB[@]}" ${CAL_JOB:+--dependency=afterok:$CAL_JOB} --cpus-per-task=8 --mem=48G \
         --time=02:00:00 --array="0-$last%${CONC:-16}" --job-name="corpus_$SOURCE" \
         --output="$LOGS/corpus_${SOURCE}_%A_%a.out" --export=ALL,OFFSET=$o \
-        --wrap="bash $H/scripts/corpus.sh task $BUILD $OUT"
+        --wrap="bash $H/scripts/corpus.sh task $SRC $OUT"
   done
 }
 

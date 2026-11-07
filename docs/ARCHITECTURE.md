@@ -11,7 +11,7 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
   JAXTPC wire campaign         SBND extracted files            goop light files
   (HELIX_SIM_ROOT/j00X000)     (sbnd_data/extracted/<run>)     (optical only)
         |                              |                              |
-  scripts/build_sim.py          scripts/build_sbnd.py           scripts/build_goop.py
+  helix.build sim               helix.build sbnd                helix.build goop
   (noise model + digitize)      (TPC readout + PMT/X-ARAPUCA)
         \______________________________|______________________________/
                                        |
@@ -67,20 +67,22 @@ in `pyproject.toml` (`[tool.uv.sources]`); `container/install.sh` reads it from 
 
 ## 3. The build pipeline (`helix/build.py`)
 
-`helix.build` holds no source. A source is a class in its own script that only reads;
-the script ends with `helix.build.main(Source)`, which gives it the command line
-documented in `helix/build.py`'s docstring. A source provides `Source(files, device,
+A source is a class that only reads, next to its reader: `SimSource` in `helix/build.py` (it
+densifies with pimm-data, which `helix.tpc` may not import), `SBNDSource` in
+`helix/tpc/io_sbnd.py`, `GoopSource` in `helix/optical/goop.py`. `python -m helix.build SOURCE`
+(`SOURCES` names them; `module:Class` names any other) gives the command line documented in
+`helix/build.py`'s docstring, and `helix.build.main(Source)` the same for a class. A source provides `Source(files, device,
 optical=True)`, `len()`, `systems` (optical systems; empty for TPC only), `dataset` (the
 shards' dataset name), `pattern` (its input files in a run directory),
 `events(indices, workers)` (per event: `ident`, the TPC input as `readout` or `planes`,
 optional `clean`, `optical`, `truth`), `shard_attrs()`, and for a TPC `chain_config()` /
 `bind()`, for optical `optical_chain()`; optionally `file_plan(path, events_per_shard)`.
 
-| script | `dataset` | input | TPC | optical | clean values (`--keep-clean`) |
+| source | `dataset` | input | TPC | optical | clean values (`--keep-clean`) |
 |---|---|---|---|---|---|
-| `scripts/build_sim.py` | `sim_wire` | `<task>/sensor/*_sensor_*.h5` (one run per campaign group) | planes, noised and digitized on the device (`helix.tpc.noise`, seeded per event) | none | yes |
-| `scripts/build_sbnd.py` | `sbnd` | `*.h5` (extracted SBND) | readout (adc, pedestal, present) | `pmt`, `xarapuca` | no |
-| `scripts/build_goop.py` | `goop` | `*.h5` (goop light) | none | `goop` (+ `truth/pe_counts`) | no |
+| `sim` (`SimSource`) | `sim_wire` | `<task>/sensor/*_sensor_*.h5` (one run per campaign group) | planes, noised and digitized on the device (`helix.tpc.noise`, seeded per event) | none | yes |
+| `sbnd` (`SBNDSource`) | `sbnd` | `*.h5` (extracted SBND) | readout (adc, pedestal, present) | `pmt`, `xarapuca` | no |
+| `goop` (`GoopSource`) | `goop` | `*.h5` (goop light) | none | `goop` (+ `truth/pe_counts`) | no |
 
 Shared after the read: per `--events-per-shard` events, shard k (`--shard-start` + 0,
 1, ...) is written as `PREFIX_coeff_k.h5`, `PREFIX_optical_k.h5` and, with `--keep-clean`
@@ -91,7 +93,7 @@ final name is complete; `--skip-complete` makes a task whose shards all exist do
 `norm_sigma` is `--norm-sigma TABLE` (one table for the corpus) or else each shard's own;
 `--calibrate TABLE` writes the table of the selected events and no shards.
 
-`plan()` (`build_X.py plan OUT RUN_DIR...`) lists a corpus's tasks, one line each,
+`plan()` (`python -m helix.build SOURCE plan OUT RUN_DIR...`) lists a corpus's tasks, one line each,
 `PREFIX FIRST COUNT EVENTS_PER_SHARD SHARD_START INPUT...`: one task per input file when
 the source defines `file_plan` (sim: shard k = campaign events k*eps .. (k+1)*eps-1), else every
 `--events-per-task` events of a run. `scripts/corpus.sh` writes the plan to
@@ -142,7 +144,7 @@ group's decision covers all its rows, so one GPU generation builds a corpus.
 (`DEFAULT_ENC = (0.90, 0.79, 0.22)`), plus one coherent waveform per group of 64
 contiguous wires (adjacent groups anti-correlated by `beta`, renormalised to
 `rms_adc` 2.5), then `digitize`. The same functions build the simulation corpus
-(`scripts/build_sim.py`). Realisations come from
+(`python -m helix.build sim`). Realisations come from
 per-event torch generators: reproducible on one device type, statistically (not
 bit-) equal to JAXTPC's numpy; `tests/_noise_reference.py` is the numpy port the tests
 compare against.

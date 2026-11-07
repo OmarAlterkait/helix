@@ -305,12 +305,11 @@ def _goop_file(path, n_events=2, seed=16):
 
 def test_goop_build_writes_readable_optical_shards(tmp_path):
     import h5py
-    from helix.build import main
+    from helix.build import cli
+    from helix.optical.goop import GoopSource
     from helix.optical.shard import read_optical
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-    from build_goop import GoopSource
     src = _goop_file(tmp_path / "light.h5"); out = tmp_path / "goop_optical_0000.h5"
-    main(GoopSource, ["--input", str(src), "--output", str(tmp_path / "goop")])
+    cli(["goop", "--input", str(src), "--output", str(tmp_path / "goop")])
     ch = OpticalChain(codec.GOOP, templates="goop")
     with h5py.File(src, "r") as f:
         wf, pe = GoopSource.waveforms(f, "event_001")

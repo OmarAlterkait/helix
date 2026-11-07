@@ -225,14 +225,14 @@ jobs:
               $PY -c "from pimm_data.testing import make_jaxtpc_sample; \
                       make_jaxtpc_sample(\"$W/sim\", dataset_name=\"sim_wire\", \
                                          n_events=200, readout_type=\"wire\")"
-              $PY scripts/build_sim.py --input $W/sim/sensor/sim_wire_sensor_0000.h5 \
+              $PY -m helix.build sim --input $W/sim/sensor/sim_wire_sensor_0000.h5 \
                   --output $W/corpus/run_synth/sim_wire --events-per-shard 200
               $PY -m helix.data.verify $W/corpus/run_synth --dataset-name sim_wire
               # --allow-foreign-basis: the fixture is a DIFFERENT DSP generation
               # by construction, so its basis_digest cannot match the packaged
               # reference. Without the flag this step exits 2 and the documented
               # RUNBOOK 0b path cannot run at all -- which is why this job failed.
-              $PY scripts/derive_coeff_bins.py --corpus $W/corpus/run_synth \
+              $PY -m helix.data.bins --corpus $W/corpus/run_synth \
                   --dataset-name sim_wire --out $W/bins.pt --events 100 --K 128 \
                   --allow-foreign-basis
             '

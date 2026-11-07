@@ -14,7 +14,7 @@ probe, denoising) against simulation truth on a fine cell grid.
 |---|---|---|
 | `helix.core` | **no** | wavelet transform, robust statistics and hysteresis (`robust`), coeff IO, the event and its provenance (`coeff_event`) |
 | `helix.tpc` | **no** | LArTPC physics: TPC chain, coherent gate, forward model (noise + digitize), readouts, readers |
-| `helix.build` | **no** | the build pipeline (sources are `scripts/build_{sim,sbnd,goop}.py`) |
+| `helix.build` | no (the sim source defers one import) | the build pipeline and the simulation source; `python -m helix.build sim` (or `sbnd`, `goop`) |
 | `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP; the denoiser; reading a run |
 | `helix.eval` | no (events read through `helix.data`) | evaluating a run: `python -m helix.eval` (recon, floor, uprobe, labels, denoise) |
 | `helix.optical` | no | the optical codec — written beside the TPC shards, not yet fed to the FM |
@@ -47,7 +47,7 @@ in-image interpreter and binds are site facts declared in
 ```bash
 source scripts/helix_env.sh && $HELIX_PYTHON -m helix.paths   # FIRST: site, roots, container, scheduler
 scripts/helix_run.sh python -m pytest tests -q
-scripts/helix_run.sh python scripts/build_sim.py --input GROUP/TASK/sensor/sim_wire_sensor_TASK.h5 --output OUT/GROUP/sim_wire --device cuda --shard-start K
+scripts/helix_run.sh python -m helix.build sim --input GROUP/TASK/sensor/sim_wire_sensor_TASK.h5 --output OUT/GROUP/sim_wire --device cuda --shard-start K
 ```
 
 `helix.paths` needs only os/pathlib/yaml, so it runs outside the container too —
