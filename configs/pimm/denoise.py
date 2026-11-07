@@ -10,10 +10,12 @@ is M6d of DENOISE at tag archive-2026-11, and it is the default:
   on the same architecture; ``model.freeze_encoder=True`` keeps the encoder fixed;
 * ``model.cond_charge``: False = M6d (detection, maps), True = M6dc (calorimetry: charge
   regressed on charged cells only);
+* presence = q > 25 e- (``_SUPPORT_MIN_Q``: the cells-3 truth's own cut, the evaluation's
+  ``--presence-q``), for ``DenoiseRows``;
 * encoder LR 3e-3 (muP-scaled), head LR 1e-2 (``model.lr_head``), linear warmup ("auto") then a
   cosine to 2%; 4 epochs (~38k steps at 16 GPUs, the study's 40k);
 * label sampling: ``DenoiseRows``' defaults (whole noise windows, near-activity cells and
-  windows, support threshold 0 on the hits label); the val split draws with a fixed seed;
+  windows); the val split draws with a fixed seed;
 * the train/val split is the FM's identity-hash HOLDOUT; best checkpoint
   (``model/model_best.pth``) by validation loss.
 
@@ -33,6 +35,8 @@ _base_ = ["./fm.py"]
 save_path = str(_root("HELIX_EXP") / "denoise")
 epoch = 4
 
+_SUPPORT_MIN_Q = 25.0                                            # e-: presence = q above this
+
 model = dict(
     _delete_=True,
     type="Coeff-Denoise",
@@ -50,10 +54,12 @@ scheduler = dict(_delete_=True, type="WarmupCosineLR", warmup="auto", floor=0.02
 _tokenize = dict(type="CoeffTokenize", part="coeff", cfg="model")
 _collect = dict(type="CoeffCollect", part="coeff")
 _val = dict(modalities=("coeff", "cells"),
-            transform=[_tokenize, dict(type="DenoiseRows", part="coeff", seed=0), _collect])
+            transform=[_tokenize, dict(type="DenoiseRows", part="coeff", support_min_q=_SUPPORT_MIN_Q, seed=0),
+                       _collect])
 data = dict(
     train=dict(modalities=("coeff", "cells"), n_events=None, subset_seed=0,
-               transform=[_tokenize, dict(type="DenoiseRows", part="coeff"), _collect]),
+               transform=[_tokenize, dict(type="DenoiseRows", part="coeff", support_min_q=_SUPPORT_MIN_Q),
+                          _collect]),
     val=_val,
     test=_val,
 )
@@ -70,4 +76,4 @@ hooks = [
     dict(type="CheckpointSaver", save_freq="auto", evaluator_every_n_steps="auto"),
 ]
 
-del _root, _tokenize, _collect, _val
+del _root, _tokenize, _collect, _val, _SUPPORT_MIN_Q

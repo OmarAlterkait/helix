@@ -330,6 +330,25 @@ and localisation, M6dc better on energy (DENOISE, "Dense rerun ... M6d / M6dc");
 trainer, launcher and checkpoint format for both models instead of
 `scripts/train_denoise.py`'s own DDP loop and its `holdout.json` split.
 
+**The denoiser's encoder default stays `$HELIX_EXP/fm_cooldown`.** *Why:* the SBND session
+measured the stable phase `fm` with its EMA weights against `fm_cooldown` on every probe and
+found them equal within 0.011, so either serves; the config, README, RUNBOOK and ARCHITECTURE
+all name `fm_cooldown`, and changing the default would change the recipe of record for nothing.
+
+**Presence is q > 25 e-, everywhere.** `DenoiseRows(support_min_q=25)` (its default, and
+`configs/pimm/denoise.py`'s `_SUPPORT_MIN_Q`), the evaluation's `--presence-q`. *Why:* cells-3
+`q` is hits truth cut at 25 e- per sample by the simulation (d1m), so 25 is the truth's own
+detection threshold. The transform's default was 0; on d1m the two select the same cells (every
+surviving sample is above 25 e-, so every nonzero 2 x 16 cell is), so no d1m label changes: the
+threshold is now stated where it is used instead of inherited from the truth.
+
+**One noise realisation per event; no charge-scaling augmentation, no fresh noise.** *Why:* real
+data has one realisation and no clean counterpart, and the augmentation needs clean shards
+(gain on the SIGNAL), which this corpus does not have and a detector never will. The study
+branch's `gain_sigma_*` / `clean_root` / `draw_gain` (origin/denoise-m14) are not ported.
+*Cost, measured on r1:* the whole-event gain response (charge out / in when one event's charge
+is scaled) was 0.87 without the augmentation against 0.97 with it (M10lin vs M11).
+
 **Checkpoints load directly.** `helix.model.checkpoint.load_run` reads pimm's run directory
 (`resolved_config.json`, the WeightEMA sidecar, `model/last` or `model/model_best.pth`,
 `provenance.json`); nothing is exported. *Why:* the artifact layer (`artifact.py`,

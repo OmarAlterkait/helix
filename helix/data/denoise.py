@@ -29,7 +29,7 @@ Query cells follow the evaluation's row recipe, plus what the floor's windows sc
 Cells no token covers are not queried: the model predicts zero there by construction, as the
 evaluation does. ``seed=None`` draws afresh at every access (training); an int fixes each event's
 draw by its name (validation). The defaults are the M6d / M6dc recipe (DENOISE, at git tag
-archive-2026-11).
+archive-2026-11), except ``support_min_q``: 25 e-, the cells-3 truth's own cut.
 
 numpy only (no pimm-data): ``helix.integrations.pimm`` registers it by name, as it does
 ``CoeffTokenize``.
@@ -59,7 +59,7 @@ class DenoiseRows:
     scope = "sample"
 
     def __init__(self, part="coeff", *, sig_cap=20000, cov_per_sig=2.0, win_per_event=48,
-                 near_any_per_sig=1.0, win_near_per_event=24, support_min_q=0.0, seed=None):
+                 near_any_per_sig=1.0, win_near_per_event=24, support_min_q=25.0, seed=None):
         self.part = part
         self.sig_cap = int(sig_cap)
         self.cov_per_sig, self.win_per_event = float(cov_per_sig), int(win_per_event)
@@ -68,7 +68,9 @@ class DenoiseRows:
         # charge-free windows) and for the presence label -- only above this charge (e-).
         # The complete truth gives sub-electron diffusion tails to most cells near activity;
         # with 0 they all become 'charged' (DENOISE at tag archive-2026-11, "Complete-truth label"). The
-        # regression target is unchanged: the cell's full charge, whatever the threshold.
+        # cells-3 q carries the simulation's own 25 e- cut (d1m), so the default is that cut: the
+        # presence label is the evaluation's (helix.eval.denoise.PRESENCE_Q) and cat's bin 0
+        # (helix.model.denoise). The regression target is unchanged: the cell's full charge.
         self.support_min_q = float(support_min_q)
         self.seed = seed
 

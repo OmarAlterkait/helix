@@ -13,10 +13,6 @@ are at git tag `archive-2026-11` (`git show archive-2026-11:docs/archive/NEXT.md
   16 GPUs) as sqrt(GPUs / 16); the optimum also falls with run length, so a
   production-length stable phase should be checked against a lower LR before it is trusted.
   The denoiser's 3e-3 / 1e-2 (configs/pimm/denoise.py) are M6d's, also at 16 GPUs.
-* **The denoiser's default encoder.** `configs/pimm/denoise.py` defaults `model.fm` to the
-  cooled `$HELIX_EXP/fm_cooldown`. The stable phase `$HELIX_EXP/fm` was scored only with
-  `--weights last`, which for a WSD stable phase sits at full-LR noise; score it with
-  `--weights ema` before using it as a baseline or as the denoiser's encoder.
 
 ## Model and evaluation
 

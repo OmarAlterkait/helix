@@ -75,9 +75,9 @@ def test_query_cells_shapes_and_labels(sample):
     np.testing.assert_allclose(t["q_y"], np.log1p(q[ok] / C.Q0).astype(np.float32))
     truth = dict(zip(rec["key"].tolist(), rec["q"].tolist()))
     np.testing.assert_allclose(q, [truth.get(k, 0.0) for k in keys.tolist()])
-    np.testing.assert_array_equal(t["q_present"], (t["q_y"] > 0).astype(np.float32))
+    np.testing.assert_array_equal(t["q_present"], (t["q_y"] > np.log1p(25.0 / C.Q0)).astype(np.float32))
     covered = (C.cell_inputs(rec["key"], t["cell_key"], t["_meta"]["band_lengths"], CFG)[0] >= 0).any(1)
-    assert set(rec["key"][covered & (rec["q"] > 0)].tolist()) <= set(keys[ok].tolist())   # every charged cell
+    assert set(rec["key"][covered & (rec["q"] > 25.0)].tolist()) <= set(keys[ok].tolist())  # every charged cell
     assert (t["q_present"] == 0).sum() > (t["q_present"] == 1).sum()  # and more empty ones beside them
 
 
@@ -102,6 +102,8 @@ def test_support_threshold_decides_charged_not_the_target():
     assert set(tkeys.tolist()) <= set(k0.tolist())
     assert tkeys[0] not in k25 and {tkeys[1], tkeys[2]} <= set(k25.tolist())
     np.testing.assert_allclose(q25[np.isin(k25, tkeys)], [30.0, 4000.0])
+    from helix.eval.denoise import PRESENCE_Q
+    assert DenoiseRows().support_min_q == PRESENCE_Q == 25.0            # the cells-3 truth's cut, the eval's label
 
 
 def test_the_transform_needs_tokens_and_cells(sample):
@@ -265,6 +267,10 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
         dd = cfg.data[split]
         assert tuple(dd["modalities"]) == ("coeff", "cells") and dd["holdout"] == cfg.HOLDOUT
         assert [t["type"] for t in dd["transform"]] == ["CoeffTokenize", "DenoiseRows", "CoeffCollect"]
+        # presence = q > 25 e-, the cells-3 truth's cut: the labels, the transform's own default and the
+        # evaluation agree
+        from helix.eval.denoise import PRESENCE_Q
+        assert dd["transform"][1]["support_min_q"] == DenoiseRows().support_min_q == PRESENCE_Q
     assert cfg.data["val"]["transform"][1]["seed"] == 0 and "seed" not in cfg.data["train"]["transform"][1]
     hooks = [h["type"] for h in cfg.hooks]
     assert hooks.index("DenoiseEvaluator") < hooks.index("CheckpointSaver")
