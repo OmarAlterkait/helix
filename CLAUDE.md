@@ -29,20 +29,23 @@ probe, denoising) against simulation truth on a fine cell grid.
 numpy/h5py/PyWavelets/scipy. `tests/test_boundary.py` enforces it with five
 complementary checks — read its docstring before moving code between
 subpackages. One of them runs the other way: `helix.data` MAY import pimm-data,
-but `bins` and `identity` inside it must not, or a login node cannot load the
+but `bins`, `verify`, `cells` and `denoise` inside it must not, or a login node cannot load the
 training config.
 
 Only two directories import an external package. `helix/data/*` reaches
 pimm-data through a few public symbols (`ShardReaderBase`, `ShardEventDataset`,
-the registries, `Compose`); `helix/integrations/*` reaches pimm through its
-registries. Nothing else imports either (`helix.model.tokenize` defers its one
+the registries); `helix/integrations/*` reaches pimm through its registries. Nothing else
+imports either (`helix.build.SimSource` defers pimm-data's `densify`, which is why it is not in
+`helix.tpc`; `helix.model.tokenize` defers its one
 registration import).
 
 ## Commands
 
-Everything runs in one container, and NOTHING names it. The runtime, image,
-in-image interpreter and binds are site facts declared in
-`helix/sites/<site>.yaml`; `scripts/helix_run.sh` reads them.
+Everything runs in one container, and NOTHING names it: runtime, image, in-image interpreter
+and binds are site facts in `helix/sites/<site>.yaml`, which `scripts/helix_run.sh` reads.
+The host side (`helix_env.sh`, `make_host_env.sh`, `corpus.sh`, `train.sh`) is in README's
+short path and `docs/RUNBOOK.md` §1; submitting happens on the host, because sbatch is not
+in the container.
 
 ```bash
 source scripts/helix_env.sh && $HELIX_PYTHON -m helix.paths   # FIRST: site, roots, container, scheduler
@@ -50,22 +53,10 @@ scripts/helix_run.sh python -m pytest tests -q
 scripts/helix_run.sh python -m helix.build sim --input GROUP/TASK/sensor/sim_wire_sensor_TASK.h5 --output OUT/GROUP/sim_wire --device cuda --shard-start K
 ```
 
-`helix.paths` needs only os/pathlib/yaml, so it runs outside the container too —
-run it first, always. It picks the site from `HELIX_SITE` or auto-detects
-(`$NERSC_HOST`, `/sdf`). `source scripts/helix_env.sh` exports the same values
-into a shell (roots, `HELIX_CONTAINER_*`, `HELIX_SLURM_<KIND>_*`), which is how
-`corpus.sh` and `train.sh` get their sbatch flags. On S3DF the system python3 is
-3.6 without PyYAML: `scripts/make_host_env.sh` builds `$SCRATCH/helix-host-venv`,
-which `helix_env.sh` finds by itself.
-
-`helix_run.sh` handles what used to be spelled out per call site:
-`PYTHONNOUSERSITE=1` (a bound home makes `~/.local` packages visible inside the
-image, so a green run can be yours alone), `PYTHONPATH=pimm:helix`, the site's
-own environment, and an explicit bind of both checkouts.
-
-When editing pimm-data, put its working tree ahead of the installed copy with
-`PYTHONPATH=<pimm-data>/src` — the image INSTALLS pimm-data, so a plain pytest
-tests the baked copy, not your edits.
+`helix.paths` needs only os/pathlib/yaml, so it runs outside the container too — run it
+first, always. `helix_run.sh` sets `PYTHONNOUSERSITE=1` (a bound home makes `~/.local`
+packages visible inside the image, so a green run can be yours alone) and
+`PYTHONPATH=pimm:helix`, and binds both checkouts.
 
 **Two runtimes at NERSC, and the choice is not cosmetic.** podman-hpc is
 interactive and SINGLE-NODE: it does not inject NERSC's NCCL plugin at all, and
@@ -73,18 +64,10 @@ measured 1.23 GiB/s across nodes against shifter's 4.9. shifter is the batch
 runtime. `helix_run.sh` picks podman-hpc when interactive; pass
 `HELIX_INTERACTIVE=0` to force shifter (`corpus.sh` and `train.sh` do).
 
-**Submitting does NOT happen in the container**, because sbatch is not in it.
-`scripts/corpus.sh` (corpus: plan, calibrate, build arrays) and `scripts/train.sh
-CONFIG [key=value ...]` (training: a chain of `LINKS` jobs, `--dependency=afterany`,
-each running `python -m pimm.train` in the container and resuming from the latest
-checkpoint) run on the host and need only the host Python above. pimm's own launch
-layer (`pimm submit`, launch recipes) is not used; helix needs only pimm's training
-engine.
-
-See `docs/RUNBOOK.md` for host env → corpus → verify → truth → bin grid → pretrain →
-denoiser → evaluate (S3DF and NERSC), `docs/ARCHITECTURE.md` for the modules and the
-shard formats, and `docs/DECISIONS.md` for why. `docs/archive/` holds history and study
-records only; live docs describe the code as it is.
+`docs/RUNBOOK.md` has the procedures (host env -> corpus -> verify -> truth -> bin grid ->
+pretrain -> denoiser -> evaluate), `docs/ARCHITECTURE.md` the modules and the shard formats,
+`docs/DECISIONS.md` why, `TODO.md` what is open. Retired documents and study records are at
+git tag `archive-2026-11`; live docs describe the code as it is.
 
 ## Structural patterns worth knowing
 
@@ -100,7 +83,7 @@ changeable.
 
 **Every shard says its format.** `/config` `format = "helix-coeff-2"` is written by
 `helix.core.coeff_io` and required by every reader; there are no legacy read paths.
-An unstamped corpus is rebuilt (the migration script is at tag `archive-2026-11`).
+An unstamped corpus is rebuilt.
 
 **Configs state intent.** `configs/pimm/fm.py` plus `fm_cooldown`,
 `fm_smoke`, and `denoise` (the supervised denoiser on an FM run, same trainer); no config carries a step count (warmup and cadence are `"auto"`, filled
@@ -153,7 +136,8 @@ planes are contiguous). For a second modality those four roles separate; see
   means a test that merely LOADS configs must tell "absent at this site" apart
   from "broken" — catch `SiteError` and skip. Two tests already do.
 - **The global batch IS the rank count.** The FM takes one event per rank (no
-  event separation — `docs/archive/MULTI_EVENT_BATCHING.md`), and `FMTrainer`
+  event separation — `docs/ARCHITECTURE.md` §8; the design for it is MULTI_EVENT_BATCHING at the
+  archive tag), and `FMTrainer`
   raises unless `batch_size // world_size == 1`. It is derived from `WORLD_SIZE`, never written
   down; a literal is right at exactly one GPU count.
 - **GPFS does not support the locks HDF5 and uv take.** Every real-shard read at

@@ -48,7 +48,7 @@ class FMTrainer(Trainer):
 
         It is easy to hit by accident, because the correct global value tracks
         the GPU count: ``batch_size = 4`` is right on 4 ranks and wrong on 1.
-        See docs/archive/MULTI_EVENT_BATCHING.md.
+        See docs/ARCHITECTURE.md §8.
         """
         per_gpu = self.cfg.batch_size // comm.get_world_size()
         if per_gpu != 1:
@@ -159,9 +159,9 @@ def resolve_tokenizer(data, tokenizer):
 @SCHEDULERS.register_module()
 class WarmupCosineLR(_LambdaLR):
     """Linear warmup over ``warmup`` steps, then a cosine from 1 to ``floor`` at ``total_steps``
-    (pimm injects it: ``iters_per_epoch * epoch``). The denoiser's schedule (docs/archive/DENOISE.md:
-    1,000 warmup steps at d768, floor 0.02); ``warmup="auto"`` is resolved by FMTrainer. A
-    LambdaLR, so each param group keeps its own LR (muP's ratios, the head's own LR)."""
+    (pimm injects it: ``iters_per_epoch * epoch``). The denoiser's schedule (DENOISE, at tag
+    archive-2026-11: 1,000 warmup steps at d768, floor 0.02); ``warmup="auto"`` is resolved by
+    FMTrainer. A LambdaLR, so each param group keeps its own LR (muP's ratios, the head's own LR)."""
 
     def __init__(self, optimizer, total_steps, warmup=0, floor=0.02, last_epoch=-1):
         def f(s):

@@ -1,8 +1,10 @@
 # Decisions
 
-Standing decisions live here; the measurements behind the older ones are in
-`docs/archive/SCIENCE.md`, and the shape of the code they apply to is in
-`docs/ARCHITECTURE.md`. The newest round is first (the 2026-10 consolidation, then
+Standing decisions live here; the measurements behind the older ones are in SCIENCE.md and
+the other retired documents and study records cited by name below (PERFORMANCE, DENOISE,
+ENCODER_POOLING, NEXT, ...), which are at git tag `archive-2026-11` under `docs/archive/`
+(`git show archive-2026-11:docs/archive/SCIENCE.md`). The shape of the code they apply to is
+in `docs/ARCHITECTURE.md`. The newest round is first (the 2026-11 handoff, the 2026-10 consolidation, then
 §0); the sections after them are older and name the corpora and scripts of their time
 (r1, the retired launchers); where a later entry supersedes one, it says so. Two documents referenced by older entries --
 `RESEARCH_EXTRACTION_MAP.md` (the research-tree extraction map) and
@@ -17,6 +19,71 @@ A decision without a measurement next to it is a preference, and several entries
 here started as preferences that the measurement then contradicted. Those are
 marked **RETRACTED** rather than deleted — knowing which way a question was
 answered wrongly is worth as much as the answer.
+
+---
+
+## State at the 2026-11 handoff (2026-11-06)
+
+What existed when the work moved to NERSC (helix-nersc); the choices it left open are in
+`TODO.md`.
+
+| | |
+|---|---|
+| corpus | `coeff_tpc_d1m/j000000`: 1000 `helix-coeff-2` shards x 200 = 200k events + 1000 `helix-cells-3` truth shards, 480 GB (~283 GB coefficients + `_calib/`, ~197 GB truth); no clean shards, nothing optical |
+| basis_digest | `0dd4f3a223909fd7d8150f54854111ce6e7c89f030227a20113aabf2a27c9457` (built at 1317c04, RTX 2080 Ti) |
+| bin grid | `coeff_bins_d1m_j000000_noisy` (K = 128, 120 events of j000000; digests in `helix/data/data/reference_bins.json`) |
+| runs | `$HELIX_EXP/fm` (stable, 115,488 steps = 3 epochs, 4 A100, LR 2.2e-3), `$HELIX_EXP/fm_cooldown` (9,386 steps) |
+| eval | `eval2_last.json` in each run dir, `helix.eval` at 8e7b3eb, `--weights last`, 4113 probe events |
+
+| metric | reference (no fit) | fm (stable) | fm_cooldown |
+|---|---|---|---|
+| floor eff @1% FPR/view, < 0.1 MeV | amplitude 0.08 | 0.35 | 0.40 |
+| floor, 0.1-0.2 MeV | 0.18 | 0.55 | 0.62 |
+| floor, 0.2-0.5 MeV | 0.84 | 0.95 | 0.97 |
+| floor, > 0.5 MeV | 0.99 | 0.99 | 0.99 |
+| uprobe within-group R^2 (U / V / Y) | geometry 0.03 | 0.52 | 0.53 (0.56 / 0.56 / 0.49) |
+| labels motif, balanced accuracy | token layout 0.29 | 0.80 | 0.80 |
+| labels pid, balanced accuracy | 0.24 | 0.65 | 0.65 |
+| recon var_expl | -- | 0.645 | 0.693 |
+
+pid recall per class (cooldown): electron 0.40, photon 0.48, muon 0.78, proton 0.92. What
+these do not show (helix-nersc, on r1): one seed moves the floor by 0.03-0.04 at d768, so
+stable vs cooldown below that is unresolved; validation loss rank-correlates 0.15 with the
+probes; nothing compares pretrained against from-scratch. fm's column read raw `last`
+weights of a WSD stable phase, so it probably understates fm (score it with `--weights ema`).
+
+**The data, as built.** `/ident` is (run = campaign group, source_file = the sensor file,
+event = the campaign's `event_id`); the noise is added once, at build, from the event's
+identity (blake2b seed), and training reads that one realisation every epoch. Basis: coif3,
+level 4, periodization, D1 dropped; the coherent gate on 64-wire blocks (kgate = ksig = 3,
+npass 2, tau 0.05, global sigc); threshold kappa 1.0, floor 2.0, sigma per plane; values
+rounded to a power of two <= sigma/16 (input), sigma/32 (target). Same basis as r1 but a
+different chain (r1's digest is `8c4542b6...`), so no r1 number transfers. Training drops
+events above `max_event_size = 600_000` rows (the fraction on d1m is unmeasured); the split is
+0.95 / 0.03 / 0.02 by identity hash (4113 probe events in j000000).
+
+**The truth is hits truth, not complete.** cells-3 `q` is the hits file's electrons
+(pre-response), and JAXTPC f0d2ed39 writes hits after its own cuts (`threshold: 25.0`:
+samples <= 1 e- per group x wire x tick dropped in box compaction, <= 25 e- at the CSR
+encode), which drops each deposit group's diffusion tails, ~1.6% of in-window charge,
+growing with drift (complete / hits = 1.0155-1.0161 on r1). Fine for the particle labels,
+centroids and track splits; for charge targets see TODO C13. A track lies in one fragment
+(labl's ~1 in 10^6 override groups are not read); a cell's class is its dominant track's; a
+particle's energy is its whole track's step energy (Spearman 0.94-0.96 per view against window
+charge, ~20k e/MeV).
+
+**Measured then, standing now.** One GPU type per corpus (turing and A100 differ on 0.016% of
+kept coefficients). The value step is harmless (added variance <= 1.6e-4 sigma^2 at dc6ae8b,
+input moves <= 0.013 against bins 0.08-0.11 wide). `dec_frac` and `n_masks` were deleted
+(model section below). The evaluation's definitions are the entry "The evaluation's
+definitions" below.
+
+**Operational, learned in that round.** A job must not run from a tree being edited (shards
+record `code.git` and the dirty flag): every job ran from a worktree frozen at its commit. S3DF
+CPU partitions are preemptable for every account (truth builds were preempted three times on
+milano); `ampere` CPU-only jobs run at normal QOS. `exp/helix/report/` (S3DF) holds the
+studies behind the evaluation's definitions (`checks.py`, `checks_analyze.py`); they import
+helix internals as of 8e7b3eb's parent and are records, not re-runnable.
 
 ---
 
@@ -59,9 +126,8 @@ an error.
 ## The 2026-10 consolidation: noisy-only, one code path (2026-10-27 .. 28)
 
 origin/main's denoising research was merged into this line and then consolidated. The
-studies behind these entries are records only, all on the r1 corpus:
-`docs/archive/DENOISE.md`, `docs/archive/ENCODER_POOLING.md`, `docs/archive/SCIENCE.md`
-§§10-11 and `docs/archive/PERFORMANCE.md` §11.
+studies behind these entries are records only, all on the r1 corpus: DENOISE,
+ENCODER_POOLING, SCIENCE §§10-11 and PERFORMANCE §11 (at the archive tag).
 
 **Training is noisy-only.** The tokenizer's target is its own normalised input (`tgt`
 differs from `inp` only where `dead_frac` blanks the input); no training config, dataset
@@ -95,7 +161,7 @@ needs sm80+, so training and evaluation run on `ampere` (A100) at S3DF, not `tur
   (PERFORMANCE §11);
 * the MSE / NLL heads (`nll`, `loss_fused`, `alpha` / `beta` / `varb`, the tokenizer's row
   `target`) and `no_bce`: the categorical head is calibrated (PIT mean 0.512, std 0.289:
-  SCIENCE's header, `docs/archive/NEXT.md` §1) and no config used them;
+  SCIENCE's header, NEXT §1) and no config used them;
 * `vis_frac` (visible tokens decoded): needs clean targets, and gave no floor change even
   with them (SCIENCE §11);
 * encoder pooling (`band_pool`, `pool_skip`, `pool_sub`, `mask_cell`, location masks):

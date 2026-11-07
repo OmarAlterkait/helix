@@ -6,7 +6,7 @@ production `CoeffShardWriter`/`CoeffTPCReader` implement the *same* documented
 layout independently (standalone h5py, no helix import) — kept in sync by a
 cross-repo golden.
 
-Layout (one modality per file, flat columnar — see docs/archive/COEFF_CORPUS_DESIGN.md §3):
+Layout (one modality per file, flat columnar — see docs/ARCHITECTURE.md §6):
 
     /config   attrs: format ("helix-coeff-2"), n_events, dataset_name, file_index, global_event_offset,
                      readout_type, wavelet, dwt_level, dwt_mode, n_ticks_raw, pad,

@@ -234,7 +234,7 @@ Environment: `LINKS` (1), `NAME`, `GPUS` (4, one node), `TIME` (24:00:00), `MEM`
   cancels preempted jobs, NERSC requeues them; `afterany` continues either way.
 * fm_smoke reads its bins from `$HELIX_ARCHIVE/coeff_bins_K32_smoke.pt`.
 * **The denoiser** (`configs/pimm/denoise.py`) is an FM run plus a head: `model.fm=<run dir>`
-  (default `$HELIX_EXP/fm`, the stable phase) gives the encoder's architecture, tokenizer
+  (default `$HELIX_EXP/fm_cooldown`, the cooled FM) gives the encoder's architecture, tokenizer
   and (`model.pretrained`, default True) EMA weights; `model.freeze_encoder=True` trains the head only. It reads the `cells` truth
   (section 7: `scripts/build_truth.py` first). Its length is epochs like the FM's: a
   label subset (`data.train.n_events`) needs a larger `epoch` for the same step count. The

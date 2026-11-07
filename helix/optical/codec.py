@@ -22,7 +22,7 @@ Per event and system:
      |d - light's d| >= residual sigma_j (5: a noise coefficient ~6e-7; a wrong response on big
      pulses, artefacts that are not light).
 Decoding is the exact inverse: a stored difference is exact, a missing one splits its block's sum
-evenly. Validation against injected truth: docs/OPTICAL.md.
+evenly. Validation against injected truth: docs/ARCHITECTURE.md §5.
 
 Batching: windows of one length class are one batch - lengths within 25% padding of the
 batch's longest (Haar and baseline blocks round them up); rows are padded to a power of two

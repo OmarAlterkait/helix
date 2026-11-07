@@ -40,7 +40,7 @@ DEFAULT_GROUP_SIZE = 64
 #: ``add_intrinsic_noise(..., incoherent=True)`` without a spectrum would give flat
 #: noise. The measured spectrum concentrates power in 10-490 kHz and has NONE above
 #: 500 kHz, so white misplaces noise across every wavelet band
-#: (docs/archive/NOISE_BANDS.md).
+#: (NOISE_BANDS at tag archive-2026-11).
 #:
 #: Pass ``series_spectrum=None`` for white — still available, but now an explicit
 #: choice rather than what you get by saying nothing.

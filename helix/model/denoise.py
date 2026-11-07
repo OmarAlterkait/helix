@@ -15,7 +15,7 @@ baseline), ``freeze_encoder`` keeps them fixed. The FM's decoder, heads and mask
 train (``encode`` does not reach them, and a parameter DDP never sees a gradient for would stall
 the all-reduce).
 
-``cond_charge`` selects the product: off (M6d, docs/archive/DENOISE.md) regresses charge on every queried
+``cond_charge`` selects the product: off (M6d, DENOISE at tag archive-2026-11) regresses charge on every queried
 cell -- detection and maps; on (M6dc) regresses it on charged cells only, a charge conditional on
 presence -- calorimetry.
 """
@@ -38,7 +38,7 @@ class CellDecoder(nn.Module):
     (band, neighbour slot) and a learned null key so a cell with no token anywhere near still
     has one. (A per-band covering-token MLP predicts a 2-wire x 16-tick cell from one vector per
     16-wire x 128-tick patch, cannot compare the cell with the patch beside it, and spreads
-    probability over the whole patch near activity: docs/archive/DENOISE.md, "Output model".)
+    probability over the whole patch near activity: DENOISE at tag archive-2026-11, "Output model".)
     """
 
     def __init__(self, d, n_bands=4, n_nbr=9, n_slot=128, proj=128, heads=4, layers=2, hidden=512):

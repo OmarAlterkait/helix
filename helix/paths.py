@@ -312,7 +312,7 @@ def world_size(default: int = 4) -> int:
 
     It is load-bearing for the coefficient FM specifically: the model takes
     exactly ONE event per rank (it has no event separation, so two events in a
-    forward would attend across each other -- docs/archive/MULTI_EVENT_BATCHING.md), so the
+    forward would attend across each other -- docs/ARCHITECTURE.md §8), so the
     global batch is *defined* as the rank count and
     ``helix.integrations.pimm.trainer`` raises when they disagree.
 

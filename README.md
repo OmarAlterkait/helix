@@ -66,12 +66,11 @@ The bin grid the configs read is `$HELIX_ARCHIVE/coeff_bins_d1m_j000000_noisy.pt
 
 | | |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | modules, data flow, the shard format |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | modules, data flow, the shard formats, the optical codec |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | procedures as commands |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | standing decisions and the evidence behind them |
-| [docs/OPTICAL.md](docs/OPTICAL.md) | the optical codec |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | standing decisions and the evidence behind them; the state at the 2026-11 handoff |
 | [TODO.md](TODO.md) | what is open |
-| `docs/archive/` | retired documents and study records (design notes, measurements, the denoising and encoder-pooling studies, handover), kept unchanged |
+| tag `archive-2026-11` | retired documents and study records (design notes, measurements, the denoising and encoder-pooling studies, handovers) under `docs/archive/`: `git show archive-2026-11:docs/archive/<NAME>.md` |
 
 ## Install
 

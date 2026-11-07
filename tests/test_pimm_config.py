@@ -178,7 +178,7 @@ def test_example_config_declares_the_custom_import():
         pytest.skip(f"config needs a root this site does not configure: {exc}")
     assert "helix.integrations.pimm" in cfg.custom_imports["imports"]
     from helix.paths import world_size
-    # one event per rank: the FM has no event separation (docs/archive/MULTI_EVENT_BATCHING.md)
+    # one event per rank: the FM has no event separation (docs/ARCHITECTURE.md §8)
     assert cfg.batch_size == world_size()
     assert cfg.model["type"] == "Coeff-FM"
     assert cfg.data["train"]["type"] == "CoeffTPCDataset"
@@ -304,7 +304,7 @@ def test_derived_fields_really_are_derived():
 
 def test_batch_size_is_one():
     """The FM needs batch_size_per_gpu == 1: it has no event separation, so a rank holding
-    two events would attend across them (docs/archive/MULTI_EVENT_BATCHING.md). pimm's ``batch_size`` is
+    two events would attend across them (docs/ARCHITECTURE.md §8). pimm's ``batch_size`` is
     GLOBAL, so the base config sets it to the world size, and a variant to 1 or not at all."""
     for path in sorted(pathlib.Path(CONFIG).parent.glob("fm*.py")):
         tree = ast.parse(path.read_text())

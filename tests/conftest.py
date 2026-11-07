@@ -40,7 +40,7 @@ def pytest_configure(config):
 
         PYTHONPATH=<pimm-checkout>:<helix> HELIX_REQUIRE_PIMM=1 pytest
 
-    See docs/archive/TESTING.md for the full incantation per container.
+    See docs/RUNBOOK.md §2 for the full incantation per container.
     """
     # Site environment BEFORE anything opens a file. HDF5_USE_FILE_LOCKING=FALSE
     # is the one that matters: GPFS does not support the locks h5py takes by

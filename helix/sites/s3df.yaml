@@ -23,7 +23,7 @@ roots:
   # pimm-data's supera_labl of the campaign's supera_wire stage, written here. doraemon
   # belongs to a DIFFERENT group. A handover target will not have read access, so
   # neither the corpus nor its truth (read by scripts/build_truth.py) can be rebuilt
-  # from there (docs/archive/INVENTORY.md).
+  # from there (INVENTORY.md, at git tag archive-2026-11).
   HELIX_SIM_ROOT:      /sdf/data/neutrino/omara/doraemon_2026_1M_lartpc/data/jaxtpc_wire
   HELIX_ARCHIVE:       /sdf/data/neutrino/omara/archive
   HELIX_EXP:           /sdf/data/neutrino/omara/exp/helix
