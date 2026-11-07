@@ -111,7 +111,7 @@ PYSNAP
 cat /tmp/nvidia_before.txt
 
 "$UV" pip install --python "$VENV/bin/python" \
-    PyWavelets pytest pytest-benchmark
+    PyWavelets pytest
 
 "$VENV/bin/python" - <<'PYSNAP' > /tmp/nvidia_after.txt
 import importlib.metadata as m

@@ -76,7 +76,7 @@ The bin grid the configs read is `$HELIX_ARCHIVE/coeff_bins_d1m_j000000_noisy.pt
 ## Install
 
     pip install -e .                 # base: numpy, h5py, PyWavelets, scipy, PyYAML
-    pip install -e ".[gpu]"          # + torch (the TPC chain and the optical codec run in torch)
+    pip install -e ".[torch]"        # + torch (the TPC chain and the optical codec run in torch)
     pip install -e ".[pimm]"         # + pimm-data, for the corpus reader and training
     pip install -e ".[probe]"        # + hdf5plugin and torch: the truth step and helix.eval
 

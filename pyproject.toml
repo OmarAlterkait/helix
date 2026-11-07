@@ -24,48 +24,32 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# torch is optional at install: the DSP (helix.core.wavelet, the TPC chain, the optical codec)
+# and the model import it when they run, never at `import helix`. CPU wheels:
+# pip install --index-url https://download.pytorch.org/whl/cpu
+torch = ["torch>=2.0"]
+
 # The truth step (scripts/build_truth.py, helix.data.cells) reads the doraemon hits/step
 # shards, which are written with a compression plugin. Without this h5py raises
 # "can't open directory /usr/local/hdf5/lib/plugin" on read. torch: helix.eval's probes.
 probe = ["hdf5plugin>=4.0", "torch>=2.0"]
 
-# Lazy imports that raise a clear error when absent, so they are opt-in rather
-# than base dependencies — but they were declared NOWHERE, which made them
-# undiscoverable. Nothing in helix reads a .safetensors file any more (runs are
-# read from pimm's own torch checkpoints, helix.model.checkpoint).
-export = ["safetensors>=0.4"]
-
 # helix.data and helix.integrations are the ONLY subpackages that may import
-# pimm_data (7 modules do). helix.core and helix.tpc must never touch it, and
-# tests/test_boundary.py enforces that by importing each in a clean subprocess.
+# pimm_data. helix.core and helix.tpc must never touch it (tests/test_boundary.py).
 #
 # That asymmetry is why this is an extra and not a dependency: pimm-data
 # requires torch>=2.5 and hdf5plugin UNCONDITIONALLY, while helix's base install
-# is numpy/h5py/PyWavelets/scipy and torch is optional. Making pimm-data a hard
-# dependency would drag torch into every DSP-only install — including the
-# corpus-builder container, which deliberately has pywt and torch but NO
-# pimm-data, while the training container has pimm-data but NO pywt.
+# is numpy/h5py/PyWavelets/scipy/PyYAML and torch is optional.
 #
-# pimm-data is not on PyPI. It resolves from whatever git source or editable
-# checkout the consumer configures (see pimm-fm's uv.lock, or
-# `pip install -e ../pimm-data`), so no URL is pinned here — a URL in this file
-# would be a second place to get the revision wrong.
+# pimm-data is not on PyPI; [tool.uv.sources] below pins its revision, and that
+# line is the only place the revision is named (tests/test_lockstep_pin.py).
 # NOTE this covers the DATA layer only. helix/integrations/pimm/* also imports
-# the `pimm` training framework itself (7 modules do), which is not declared
-# here because it is not on PyPI either and its version is pinned by pimm-fm's
-# uv.lock, not by helix. Installing this extra does NOT give you a working
-# training integration; use the container (docs/ARCHITECTURE.md section 10).
+# the `pimm` training framework itself, which is not declared here because it is
+# not on PyPI either; installing this extra does NOT give you a working training
+# integration. Use the container (docs/ARCHITECTURE.md section 10).
 pimm = ["pimm-data>=0.4.0"]
 
-# torch is optional at install: the DSP (helix.core.wavelet, the TPC chain, the optical
-# codec) imports it when it runs. NumPy (base dep) is always available.
-torch-cpu = ["torch>=2.0"]          # CPU wheels: pip install --index-url https://download.pytorch.org/whl/cpu
-cpu = ["torch>=2.0"]
-gpu = ["torch>=2.0"]
-dev = [
-    "pytest>=7.0",
-    "pytest-benchmark",
-]
+dev = ["pytest>=7.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
