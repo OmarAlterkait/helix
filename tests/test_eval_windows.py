@@ -1,4 +1,4 @@
-"""helix.eval.windows and the fine-grid join in helix.data.cells.
+"""The evaluation windows (helix.eval.events) and the fine-grid join in helix.data.cells.
 
 Synthetic events, CPU, numpy only. Each test pins one property the metrics must have for a
 patch-size comparison to mean anything: keys round-trip, a perfect prediction finds every
@@ -12,7 +12,7 @@ import pytest
 
 from helix.data import cells as C
 from helix.data.denoise import near_windows
-from helix.eval import windows as W
+from helix.eval import events as W
 
 
 def test_keys_round_trip_including_negative_ticks():

@@ -12,12 +12,12 @@ Metrics:
 
   recon    masked reconstruction (:mod:`helix.eval.recon`, the training run's own validation
            metric, CoeffFMEvaluator): loss, bce, val, var_expl, charge_closure, charge_resid
-  floor    the detection floor (:mod:`helix.eval.floor`): a probe on frozen features predicts
+  floor    the detection floor (:class:`helix.eval.probe.Floor`): a probe on frozen features predicts
            per-cell charge; efficiency at a 1% false-positive rate per view, by energy; the
            trained arm against the fit-free coefficient amplitude
-  uprobe   the along-wire probe (:mod:`helix.eval.uprobe`): within-group R^2 of ``u`` per
+  uprobe   the along-wire probe (:class:`helix.eval.probe.UProbe`): within-group R^2 of ``u`` per
            patch, per view; trained against the geometry columns alone
-  labels   the particle probe (:mod:`helix.eval.labels`): each signal cell's motif and pid,
+  labels   the particle probe (:class:`helix.eval.probe.Labels`): each signal cell's motif and pid,
            balanced accuracy; trained against the token layout alone
   denoise  a denoiser's per-cell charge on the floor's windows (:mod:`helix.eval.denoise`)
 
@@ -56,11 +56,8 @@ def evaluate(path, metrics=("recon", "floor", "uprobe", "labels"), *, weights="e
     """Score the run at ``path`` on ``metrics``; returns the results as one JSON-able dict."""
     from helix.eval.denoise import Denoise, load_denoiser
     from helix.eval.events import dataset, events
-    from helix.eval.floor import Floor
-    from helix.eval.labels import Labels
-    from helix.eval.probe import split_events
+    from helix.eval.probe import Floor, Labels, UProbe, split_events
     from helix.eval.recon import Recon
-    from helix.eval.uprobe import UProbe
     from helix.integrations._bootstrap import provenance
     from helix.model.checkpoint import load_run
 

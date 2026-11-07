@@ -18,7 +18,7 @@ pytest.importorskip("hdf5plugin")
 from _coeff_fixture import write_coeff_shard  # noqa: E402
 from _sim_fixture import write_task  # noqa: E402
 from helix.data import cells as C  # noqa: E402
-from helix.eval import windows as Wn  # noqa: E402
+from helix.eval import events as Wn  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

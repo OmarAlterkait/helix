@@ -1,6 +1,6 @@
 """The ``denoise`` metric: a denoiser's per-cell charge, scored on the floor's windows.
 
-The same scored events, windows and numbers (:class:`helix.eval.floor.Scored`) as ``floor`` --
+The same scored events, windows and numbers (:class:`helix.eval.probe.Scored`) as ``floor`` --
 only the per-cell prediction comes from a trained denoiser instead of a probe on frozen
 features, so the numbers are directly comparable with the floor's ``trained`` and ``amplitude``
 arms. Cells no token covers are predicted 0.
@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 
 from helix.data.cells import Q0, cell_inputs, cell_neighbors
-from helix.eval.floor import Scored
+from helix.eval.probe import Scored
 
 
 def load_denoiser(path, device=None):

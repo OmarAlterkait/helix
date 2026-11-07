@@ -40,7 +40,7 @@ CLEAN = ["helix", "helix.core", "helix.tpc", "helix.model.tokenize",
          "helix.integrations",
          # reading a run and the window metrics need neither: torch is imported when a
          # model is built, pimm_data when events are read
-         "helix.model.checkpoint", "helix.eval", "helix.eval.windows"]
+         "helix.model.checkpoint", "helix.eval", "helix.eval.events"]
 
 #: Modules that are ALLOWED to pull pimm_data in, each with the packages that
 #: must be installed for the check to mean anything. Listed so that a module

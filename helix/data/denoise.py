@@ -126,7 +126,7 @@ class DenoiseRows:
             g, w, t = unkey(rng.choice(sig, n, replace=True))
             parts.append(fkey(g, np.maximum(w + rng.integers(-8, 9, n), 0), np.maximum(t + rng.integers(-8, 9, n), 0)))
         if self.win_near_per_event > 0:
-            from helix.eval.windows import window_cells
+            from helix.eval.events import window_cells
             for g, w0, t0 in near_windows(tkeys, np.where(sup, tq, 0.0), rng, n=self.win_near_per_event):
                 parts.append(window_cells(g, w0, t0))
         keys = np.unique(np.concatenate(parts).astype(np.int64))
@@ -141,7 +141,7 @@ class DenoiseRows:
         """Every cell of up to ``win_per_event`` charge-free windows (WW x WT), each centred on a
         kept coefficient with no charged cell within the padding the evaluation's noise windows
         keep empty (16 wires, 128 ticks). The floor scores the MAX over such a window."""
-        from helix.eval.windows import WT, WW
+        from helix.eval.events import WT, WW
         tg, tw, tt = unkey(charged)
         by_plane = {int(g): (tw[tg == g], tt[tg == g]) for g in np.unique(tg)}
         pw_, pt_ = 16 // FW, 128 // FT
@@ -167,7 +167,7 @@ def near_windows(keys, q, rng, n=60, margin=1, pad=(8, 8)):
     noise windows must keep EMPTY. ``keys``/``q``: the event's fine cells and charge. Up to ``n``
     windows, shared equally over the planes that carry charge.
     """
-    from helix.eval.windows import WT, WW
+    from helix.eval.events import WT, WW
     keys = np.asarray(keys, np.int64)[np.asarray(q) > 0]
     if not len(keys):
         return []

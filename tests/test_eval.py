@@ -234,7 +234,7 @@ def test_recon_is_the_evaluators_metric(synth):
 
 
 def test_floor_learns_what_the_features_carry(synth):
-    from helix.eval.floor import Floor
+    from helix.eval.probe import Floor
     d, ds = synth
     run = load_run(d, device="cpu")
     m = Floor(_ctx(run, len(ds)))
@@ -254,7 +254,7 @@ def test_floor_learns_what_the_features_carry(synth):
 
 
 def test_uprobe_learns_u_and_geometry_alone_does_not(synth):
-    from helix.eval.uprobe import UProbe, u_of
+    from helix.eval.probe import UProbe, u_of
     d, ds = synth
     run = load_run(d, device="cpu")
     m = UProbe(_ctx(run, len(ds)))
@@ -270,7 +270,7 @@ def test_uprobe_learns_u_and_geometry_alone_does_not(synth):
 
 
 def test_labels_learn_the_class_the_features_carry(synth):
-    from helix.eval.labels import Labels
+    from helix.eval.probe import Labels
     d, ds = synth
     run = load_run(d, device="cpu")
     m = Labels(_ctx(run, len(ds)))
@@ -286,7 +286,7 @@ def test_labels_learn_the_class_the_features_carry(synth):
 
 
 def test_patch_rows_label_is_the_dominant_cells_charge_weighted_u():
-    from helix.eval.uprobe import patch_rows, u_of
+    from helix.eval.probe import patch_rows, u_of
     cells = dict(key=C.fkey([0, 0, 0, 1], [1, 2, 3, 1], [5, 5, 5, 5]), q=np.array([1.0, 3.0, 5.0, 2.0]),
                  dom_frac=np.array([0.9, 0.8, 0.2, 1.0]), dom_y=np.array([0.0, 1000.0, 50.0, 0.0]),
                  dom_z=np.zeros(4))
@@ -322,7 +322,7 @@ def test_a_perfect_denoiser_scores_perfectly(synth):
 
 def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
     from helix.eval.probe import fit_probe
-    from helix.eval.windows import group_r2
+    from helix.eval.events import group_r2
 
     def r(p, y, g):
         _, sse, sst = group_r2(p, y, g)
@@ -378,9 +378,9 @@ def test_fit_probe_uses_extra_columns_in_any_units_beside_many_features():
 
 def test_the_probes_fit_on_a_budget_and_keep_no_features_of_a_scored_event(synth, monkeypatch):
     import helix.eval.probe as P
-    from helix.eval.floor import Floor
-    from helix.eval.labels import Labels
-    from helix.eval.uprobe import UProbe
+    from helix.eval.probe import Floor
+    from helix.eval.probe import Labels
+    from helix.eval.probe import UProbe
     rng = lambda: np.random.default_rng(3)                                             # noqa: E731
     assert np.array_equal(P.fit_rows(5, 4, rng()), np.arange(5))
     monkeypatch.setattr(P, "FIT_ROWS", 3000)         # 500 rows per training event: binds
