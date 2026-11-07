@@ -51,7 +51,7 @@ On data, late light correlated with each photon (argon's slow component) trades 
 tail: one pass from the previous response. The X-ARAPUCA response (16 ns, short self-triggered
 windows, few isolated photons) is not recovered reliably and stays the mean isolated pulse.
 
-## Validation (`helix.optical.validate`)
+## Validation (`helix.optical.validate`, at tag `archive-2026-11`)
 
 Known light — single photons, and 100 / 500-photon flashes (30% 6 ns, 70% 1.5 us) — injected on
 real light-free windows (SBND) or on goop's exact noise model; error = signal dropped + noise

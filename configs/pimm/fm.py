@@ -114,7 +114,7 @@ transform = [
     dict(type="CoeffCollect", part="coeff"),
 ]
 # The split hashes each event's identity, so it does not depend on the corpus's build,
-# shard layout or run list (scripts/write_holdout.py writes it out for inspection).
+# shard layout or run list.
 HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
 _common = dict(type="CoeffTPCDataset", data_root=CORPUS, split=RUNS, dataset_name="sim_wire",
                modalities=("coeff",), transform=transform, holdout=HOLDOUT)

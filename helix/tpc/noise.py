@@ -12,10 +12,10 @@ Two additive components:
   which is what the chain's coherent gate (on the readout's groups, the same ``wire // group_size``)
   removes.
 
-The same functions build the simulation corpus (``scripts/build_sim.py``) and add fresh noise at
-load time (:class:`helix.data.transforms.AddNoise`). Realisations come from per-event torch generators
-(seeded by the caller): reproducible on one device type, not across devices, and statistically, not
-bit-, equal to JAXTPC's numpy (tests/_noise_reference.py, the numpy port, is the check).
+The simulation corpus is built with these functions (``scripts/build_sim.py``). Realisations come
+from per-event torch generators (seeded by the caller): reproducible on one device type, not across
+devices, and statistically, not bit-, equal to JAXTPC's numpy (tests/_noise_reference.py,
+the numpy port, is the check).
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 # ── Defaults: JAXTPC config/noise_spectrum.npz and its simulation.coherent_noise block
-#    (tests/test_forward_noise.py, tests/test_dense_chain.py). ──
+#    (tests/test_forward_noise.py). ──
 # (white_x [ADC], series_y [ADC], series_z [ADC/m]); wire length L is in METERS.
 DEFAULT_ENC = (0.90, 0.79, 0.22)
 DEFAULT_SAMPLING_RATE_HZ = 2.0e6  # 2 MHz (0.5 us / tick)
@@ -37,7 +37,7 @@ DEFAULT_GROUP_SIZE = 64
 
 #: Sentinel for the MEASURED series spectrum shipped in ``data/``. It is the
 #: default because white is the wrong answer and is silently easy to get:
-#: ``AddNoise(coherent=True, incoherent=True)`` without a spectrum would give flat
+#: ``add_intrinsic_noise(..., incoherent=True)`` without a spectrum would give flat
 #: noise. The measured spectrum concentrates power in 10-490 kHz and has NONE above
 #: 500 kHz, so white misplaces noise across every wavelet band
 #: (docs/archive/NOISE_BANDS.md).

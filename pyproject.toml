@@ -88,8 +88,8 @@ include = ["helix*"]
 # by REVISION rather than by branch, for the same reason pimm's own coeff-fm
 # branch pins it: an unpinned git dependency follows whatever the default branch
 # happens to be, and `uv lock` records the result in a file nobody reads. It had
-# already settled on a revision predating the boundary move, which still defines
-# AddNoise/Digitize -- transforms helix registers now -- and that pair raises
+# already settled on a revision predating the boundary move, which still defined
+# AddNoise/Digitize -- transforms helix then registered too -- and that pair raised
 # KeyError on the second registration.
 #
 # THIS REVISION IS LOCKSTEP WITH helix. It must equal PIMM_DATA_REV in

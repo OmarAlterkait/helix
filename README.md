@@ -16,7 +16,7 @@ waveforms into shards beside the TPC ones (not yet fed to the model).
 | `helix/core` | wavelet transform, robust statistics, hysteresis, the shard format (`coeff_io`), provenance, training cadence |
 | `helix/tpc` | the TPC chain (`chain`), coherent gate, thresholding, noise model, readouts, JAXTPC and SBND readers |
 | `helix/optical` | the optical codec, response calibration, optical shards and tokens |
-| `helix/data` | corpus reader, dataset and verifier; load-time transforms; bin grid; the `cells` truth; the denoiser's labels; identity guard |
+| `helix/data` | corpus reader, dataset and verifier; bin grid; the `cells` truth; the denoiser's labels; identity guard |
 | `helix/model` | the FM: tokenizer, blocks, masking, loss, muP; the denoiser on it; reading a run (`checkpoint.load_run`) |
 | `helix/eval` | evaluating a run: `python -m helix.eval RUN --metrics recon,floor,uprobe,labels,denoise` |
 | `helix/integrations/pimm` | adapters into pimm's trainer |

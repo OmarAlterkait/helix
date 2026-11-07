@@ -96,8 +96,8 @@ class CoeffTPCReader(ShardReaderBase):
             return np.array_equal(np.asarray(a), np.asarray(b))
 
         for path, fmt in self._bad_format.items():
-            raise ValueError(f"{path}: format {fmt!r}, not {FORMAT!r}; rebuild it or migrate it "
-                             f"(scripts/migrate_format.py)")
+            raise ValueError(f"{path}: format {fmt!r}, not {FORMAT!r}; rebuild it "
+                             f"(scripts/migrate_format.py at tag archive-2026-11 migrated the format-1 corpora)")
         for path, (rows, uniq) in self._dup_ident.items():
             raise ValueError(
                 f"{path}: /ident does not uniquely identify its events — {rows} rows "

@@ -249,7 +249,8 @@ duplicated it outside the repo that owns the format.
 without `/ident`, without `coord_digest`, and the flat JAXTPC sensor schema are removed.
 *Why:* each fallback was a branch that only old data exercised, and a reader that
 accepts anything cannot say what it read. Corpora built before the stamp are migrated in
-place (`scripts/migrate_format.py`: metadata only, old attributes backed up); r2 and SBND
+place (`scripts/migrate_format.py`, now at tag `archive-2026-11`: metadata only, old attributes
+backed up); r2 and SBND
 v1, the production corpora, were migrated so and verify against their plans; pre-tau `coeff_tpc` and r1 are retired and unreadable.
 
 **Configs state intent; step counts are derived at run time.** `configs/pimm/fm.py` is

@@ -18,7 +18,7 @@ probe, denoising) against simulation truth on a fine cell grid.
 | `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP; the denoiser; reading a run |
 | `helix.eval` | no (events read through `helix.data`) | evaluating a run: `python -m helix.eval` (recon, floor, uprobe, labels, denoise) |
 | `helix.optical` | no | the optical codec — written beside the TPC shards, not yet fed to the FM |
-| `helix.data` | **pimm-data** | coeff corpus reader/dataset/verifier, registered transforms, bin grid, `cells` truth, denoiser labels, identity guard |
+| `helix.data` | **pimm-data** | coeff corpus reader/dataset/verifier, bin grid, `cells` truth, denoiser labels, identity guard |
 | `helix.integrations.pimm` | **pimm** | adapters into the training framework |
 
 ## The invariant
@@ -100,7 +100,7 @@ changeable.
 
 **Every shard says its format.** `/config` `format = "helix-coeff-2"` is written by
 `helix.core.coeff_io` and required by every reader; there are no legacy read paths.
-An unstamped corpus is migrated with `scripts/migrate_format.py` or rebuilt.
+An unstamped corpus is rebuilt (the migration script is at tag `archive-2026-11`).
 
 **Configs state intent.** `configs/pimm/fm.py` plus `fm_cooldown`,
 `fm_smoke`, and `denoise` (the supervised denoiser on an FM run, same trainer); no config carries a step count (warmup and cadence are `"auto"`, filled

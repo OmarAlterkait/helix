@@ -3,7 +3,7 @@
 Procedures as commands. Run them from the helix checkout. Every path, the container
 and the scheduler come from `helix/sites/<site>.yaml` (`docs/ARCHITECTURE.md` §10), so
 the same commands run at S3DF and NERSC; the S3DF values are given where a command needs
-them, and section 11 lists what differs at NERSC. Work heavier than a quick check goes
+them, and section 10 lists what differs at NERSC. Work heavier than a quick check goes
 to Slurm: `corpus.sh` and `train.sh` submit their own jobs; for the rest an
 `sbatch --wrap` form is shown.
 
@@ -185,9 +185,7 @@ derived after the build from finished shards; `norm_sigma` before it.
 
 **The split** is not a file: `CoeffTPCDataset(holdout=...)` hashes each event's identity
 (blake2b(run/source_file) + event; fm.py's fractions 0.95 / 0.03 / 0.02 for train / val /
-probe), so a rebuilt corpus reproduces it. `scripts/write_holdout.py --corpus OUT/RUN
-[--compare OTHER/holdout.json]` writes it out as `OUT/RUN/holdout.json` for inspection;
-nothing reads that file.
+probe), so a rebuilt corpus reproduces it (`CoeffTPCDataset.holdout_manifest()` lists it).
 
 ---
 
@@ -241,8 +239,6 @@ Environment: `LINKS` (1), `NAME`, `GPUS` (4, one node), `TIME` (24:00:00), `MEM`
   label subset (`data.train.n_events`) needs a larger `epoch` for the same step count. The
   best checkpoint by validation loss is `model/model_best.pth`.
 
-Plot progress: `scripts/helix_run.sh python scripts/plot_train_progress.py label=$HELIX_EXP/fm --out fig.png`.
-
 ---
 
 ## 7. Evaluate
@@ -288,45 +284,7 @@ corpus the checkpoint trained on.
 
 ---
 
-## 8. Migrate a corpus built before the format stamp
-
-Readers require `/config` `format = "helix-coeff-2"`. A corpus built before the stamp
-is migrated in place, metadata only (r2 and SBND v1 have been: their old attributes are in
-each root's `_calib/format1_attrs.json`, and v1's run directories are now `018251`, ...):
-
-    scripts/helix_run.sh python scripts/migrate_format.py SOURCE ROOT RUN_DIR... [--events-per-task 500] [--dry-run]
-
-`RUN_DIR...` are the input runs the corpus was built from, in its order; each corpus run
-directory must be named for one of them (`<run>` or `run<run>`). Per coeff and
-coeff_clean shard it stamps `format`, rewrites `removal_json` and `basis_digest` to what
-the current chain records (the gate's readout-groups schema), drops `mode` / `backend`
-from `noise_json`, and refuses if any other basis field differs (that corpus needs a
-rebuild). Before writing it saves every shard's old attributes to
-`_calib/format1_attrs.json` and an existing `CHUNKS.txt` to `CHUNKS.txt.format1`;
-afterwards it renames `run<run>` directories to `<run>` and writes the plan files as
-`corpus.sh plan` would. Stamped shards are skipped, so a rerun finishes an interrupted
-migration.
-
-It touches every shard, so submit it (S3DF; the CPU suffices). As it was run for r2 and v1:
-
-    R=/sdf/data/neutrino/omara/coeff_tpc_r2
-    IN=$(for d in $R/run_*; do echo /sdf/data/neutrino/doraemon/wire_test_00_00_02/sensor/${d##*/}; done)
-    sbatch --account=mli:cider-ml --partition=milano --cpus-per-task=4 --mem=16G --time=04:00:00 \
-        --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/migrate_format.py sim $R $(echo $IN) --dry-run"
-    # read the log, then the same without --dry-run, then
-    #   scripts/helix_run.sh python -m helix.data.coeff_verify $R
-
-    R=/sdf/data/neutrino/omara/sbnd_data/coeff_sbnd_v1           # (before the rename: run dirs run018251, ...)
-    IN=$(for d in $R/run*; do echo /sdf/data/neutrino/omara/sbnd_data/extracted/${d##*/run}; done)
-    # ... migrate_format.py sbnd $R $IN, as above
-
-Older corpora (pre-tau `coeff_tpc`, r1) differ beyond the gate and are not readable. The
-`sim` example is historical: the build no longer reads `wire_test_00_00_02` (format 1), so a
-wire_test-built corpus can no longer be migrated or rebuilt; r2 already is migrated.
-
----
-
-## 9. Regression check
+## 8. Regression check
 
 `SBND-data-helix/jobs/regress.sh` rebuilds, with a given checkout on a 2080 Ti (the corpora's
 GPU type), one SBND shard (TPC + optical, 100 events of run 018251) and one simulation shard
@@ -344,7 +302,7 @@ Run it after any change meant to be output-neutral.
 
 ---
 
-## 10. Where things are
+## 9. Where things are
 
     $HELIX_PYTHON -m helix.paths
 
@@ -367,7 +325,7 @@ Run it after any change meant to be output-neutral.
 
 ---
 
-## 11. NERSC
+## 10. NERSC
 
 `helix/sites/nersc.yaml` is picked up by itself (`$NERSC_HOST`); the commands above are
 the same. What differs:

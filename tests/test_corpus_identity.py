@@ -135,25 +135,6 @@ def test_the_training_hook_actually_calls_the_guard():
         "silently again")
 
 
-def test_write_holdout_exists_and_is_wired():
-    """The split can be written out for inspection, not only computed.
-
-    scripts/write_holdout.py writes holdout.json from
-    CoeffTPCDataset.holdout_manifest(), so the file is the dataset's own split
-    rather than a re-implementation of the identity hash. Nothing reads it.
-    """
-    import ast, os
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = os.path.join(here, "scripts", "write_holdout.py")
-    assert os.path.exists(src), "scripts/write_holdout.py is gone; the probe cannot run"
-    tree = ast.parse(open(src, encoding="utf-8").read())
-    calls = {getattr(n.func, "attr", None) for n in ast.walk(tree)
-             if isinstance(n, ast.Call)}
-    assert "holdout_manifest" in calls, (
-        "write_holdout.py no longer calls holdout_manifest() -- it must derive the "
-        "split from the dataset, not re-implement the identity hash")
-
-
 def test_the_packaged_noise_spectrum_is_the_one_the_corpus_was_built_with():
     """helix ships its own copy of the DSP's external input. It must not drift.
 

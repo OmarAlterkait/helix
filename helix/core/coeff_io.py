@@ -72,8 +72,8 @@ def _ds(grp, name, data, comp):
 
 
 #: The on-disk format this module writes and the only one it reads. A shard without it predates
-#: the stamp (or the board-grouped gate's removal schema) and must be rebuilt or migrated
-#: (scripts/migrate_format.py).
+#: the stamp (or the board-grouped gate's removal schema) and must be rebuilt (the format-1
+#: corpora were migrated by scripts/migrate_format.py, at tag archive-2026-11).
 FORMAT = "helix-coeff-2"
 
 
@@ -86,8 +86,8 @@ def require_format(cfg, where=""):
     """Refuse a shard that is not :data:`FORMAT`."""
     got = shard_format(cfg)
     if got != FORMAT:
-        raise ValueError(f"{where or 'shard'}: format {got!r}, not {FORMAT!r}; rebuild it or migrate it "
-                         f"(scripts/migrate_format.py)")
+        raise ValueError(f"{where or 'shard'}: format {got!r}, not {FORMAT!r}; rebuild it "
+                         f"(scripts/migrate_format.py at tag archive-2026-11 migrated the format-1 corpora)")
 
 
 def _basis_from_config(cfg) -> BasisDescriptor:

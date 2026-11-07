@@ -24,7 +24,7 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
                <run>/<dataset>_cells_NNNN.h5        sim truth (helix-cells-3), scripts/build_truth.py
                _calib/  CHUNKS.txt RUNS.txt norm_sigma_global.npy
                                        |
-                     helix.data: CoeffTPCReader -> CoeffTPCDataset (+ AddNoise / Digitize)
+                     helix.data: CoeffTPCReader -> CoeffTPCDataset
                      helix.model.tokenize.CoeffTokenize -> CoeffCollect
                                        v
                      pimm.train + helix.integrations.pimm (FMTrainer, hooks, evaluator)
@@ -46,7 +46,7 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
 | `helix.model` | no (`tokenize` defers one import) | the FM, tokenizer, masking, loss, muP, reading a run |
 | `helix.eval` | no | evaluation: recon, floor, uprobe, labels, denoise |
 | `helix.build` | no (sources may) | the build pipeline |
-| `helix.data` | pimm-data | corpus reader / dataset / verifier, registered transforms, bins, identity guard |
+| `helix.data` | pimm-data | corpus reader / dataset / verifier, bins, identity guard |
 | `helix.integrations.pimm` | pimm | registry adapters into pimm's trainer |
 
 `helix.core` and `helix.tpc` never import `pimm_data`: the DSP must install with the
@@ -57,9 +57,9 @@ check that `helix.data.bins` / `helix.data.identity` stay light (`helix/data/__i
 resolves the reader and dataset lazily so they do). torch is optional at `import helix`
 time; the DSP modules import it when they run.
 
-**Lockstep with pimm-data.** helix registers the forward-model transforms `AddNoise`
-and `Digitize`; pimm-data's registry raises `KeyError` on a duplicate, so a pimm-data
-from before the move cannot run with this helix. The pimm-data revision is named once,
+**The pimm-data pin.** The forward model (noise, digitize) moved from pimm-data to helix
+(`helix.tpc.noise`); a pimm-data from before the move still registers `AddNoise` and
+`Digitize`, which the image checks are absent. The pimm-data revision is named once,
 in `pyproject.toml` (`[tool.uv.sources]`); `container/install.sh` reads it from there and
 `tests/test_lockstep_pin.py` checks that no other build file names one.
 
@@ -142,8 +142,7 @@ group's decision covers all its rows, so one GPU generation builds a corpus.
 (`DEFAULT_ENC = (0.90, 0.79, 0.22)`), plus one coherent waveform per group of 64
 contiguous wires (adjacent groups anti-correlated by `beta`, renormalised to
 `rms_adc` 2.5), then `digitize`. The same functions build the simulation corpus
-(`scripts/build_sim.py`) and add fresh noise at load time (`helix.data.transforms.AddNoise`,
-`Digitize`; recipe `configs/jaxtpc/sensor_dense_gpu.py`). Realisations come from
+(`scripts/build_sim.py`). Realisations come from
 per-event torch generators: reproducible on one device type, statistically (not
 bit-) equal to JAXTPC's numpy; `tests/_noise_reference.py` is the numpy port the tests
 compare against.
@@ -173,7 +172,7 @@ described by the system's measured single-photon response: deconvolution to phot
 amplitudes, then the integer Haar transform of the raw samples with coarse sums always
 kept and differences kept where the light (or the departure from it) reaches threshold.
 Decoding (`unhaar`) is the exact inverse of what was stored. Method, settings, response
-fitting (`helix.optical.calibrate`) and validation (`helix.optical.validate`): `docs/OPTICAL.md`.
+fitting (`helix.optical.calibrate`) and validation: `docs/OPTICAL.md`.
 
 ---
 
@@ -206,7 +205,8 @@ per-event groups):
 
 * **format** is written by every writer and required by every reader
   (`require_format` in `coeff_io`, `CoeffTPCReader`, `CoeffTPCDataset`, `audit_shard`).
-  A shard without it is refused with a pointer to `scripts/migrate_format.py`.
+  A shard without it is refused (the format-1 corpora were migrated in place by
+  `scripts/migrate_format.py`, at tag `archive-2026-11`).
 * **basis_digest** hashes the basis (wavelet, level, mode, n_ticks_raw, pad,
   band_lengths, removal, threshold, sigma_norm) and is checked against those attributes
   on read; `band_lengths` is validated against the basis.
@@ -253,8 +253,6 @@ the truth of every `helix.eval` metric (floor, uprobe, labels, denoise) come fro
     <root>/_calib/<run>.npy         per-run norm_sigma; norm_sigma_global.npy their mean
 
 The split is computed, not stored (`holdout=` on the dataset: below).
-`scripts/write_holdout.py` writes it out as `<run>/holdout.json` for inspection; nothing
-reads that file.
 
 `python -m helix.data.coeff_verify` checks a run directory (`--dataset-name`) for
 cross-shard problems (pairs, gaps, duplicates, mixed code or basis), or a whole corpus
@@ -278,8 +276,6 @@ attributes excepted).
   `coeff_clean` and `cells` out of pretraining.
 * `cells.py`: the truth format and grid (above), `Q0`, and the cell-to-token join.
 * `denoise.py`: `DenoiseRows`, the denoiser's label sampling on the `cells` truth.
-* `transforms.py`: `AddNoise`, `Digitize` (load-time forward model, per event or per
-  collated batch).
 * `bins.py`: the categorical bin grid over NOISY coefficients (uniform in asinh on each
   side of zero, one bin over the sub-threshold gap); the production grid is named in
   `helix/data/data/reference_bins.json` (`coeff_bins_d1m_j000000_noisy`, from the

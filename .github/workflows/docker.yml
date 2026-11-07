@@ -183,8 +183,8 @@ jobs:
             -e PYTHONNOUSERSITE=1 -e PYTHONPATH=/work -e HELIX_ROOT=/work \
             "$REF" /opt/pimm/.venv/bin/python -m pytest tests -q
 
-  # The step that actually proves a handover works: corpus -> verify -> holdout
-  # -> bins, on a synthetic dataset, with no production data at all. Training
+  # The step that actually proves a handover works: corpus -> verify -> bins,
+  # on a synthetic dataset, with no production data at all. Training
   # steps are the test suite's (test_pimm_step_contract, test_pimm_amp_resume_schedule).
   # It is docs/RUNBOOK.md §§3-6 at toy scale; keeping it in CI means the first
   # thing a receiving site does is the thing that is continuously tested.
@@ -228,10 +228,6 @@ jobs:
               $PY scripts/build_sim.py --input $W/sim/sensor/sim_wire_sensor_0000.h5 \
                   --output $W/corpus/run_synth/sim_wire --events-per-shard 200
               $PY -m helix.data.coeff_verify $W/corpus/run_synth --dataset-name sim_wire
-              # 95/3/2 is tuned for 158k events; over 100 the 2% part can
-              # legitimately select ZERO and write_holdout refuses, correctly.
-              $PY scripts/write_holdout.py --corpus $W/corpus/run_synth \
-                  --dataset-name sim_wire --train 0.6 --val 0.2 --probe 0.2
               # --allow-foreign-basis: the fixture is a DIFFERENT DSP generation
               # by construction, so its basis_digest cannot match the packaged
               # reference. Without the flag this step exits 2 and the documented

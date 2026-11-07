@@ -11,11 +11,6 @@ has pimm-data but no pywt. An import added to ``helix.tpc`` would make the DSP
 side undeployable in the image that builds corpora, and nothing else would
 catch it -- the developer's own environment has everything installed.
 
-Measured, not assumed: importing ``pimm_data.transform`` (to reach
-``@TRANSFORMS.register_module``) pulls 36 pimm_data modules and torch. That
-measurement is why the registered transforms live in ``helix/data/transforms.py``
-while their kernels stay in ``helix/tpc/``.
-
 A source grep cannot do this job: ``geometry.py``,
 ``io.py`` and ``noise.py`` all mention pimm_data in comments, and
 ``helix/model/tokenize.py`` documents a registration example. Only an actual
@@ -56,16 +51,11 @@ CLEAN = ["helix", "helix.core", "helix.tpc", "helix.model.tokenize",
 #: corpus-builder image can import the dataset module, but only the training
 #: image has ``pimm``, so the hooks check runs there and skips here.
 #:
-#: Each is named by its OWN module path, and the package ``helix.data`` is no
-#: longer among them (see LIGHT_INSIDE_HEAVY). ``helix.data.transforms`` was
-#: always listed separately, and for a reason worth keeping: it is reached by
-#: STRING through the transform registry, so no other test named it either. It
-#: shipped with four broken code paths and both suites stayed green. A module
-#: addressed only by string has to be imported somewhere on purpose.
+#: Each is named by its OWN module path, and the package ``helix.data`` is not
+#: among them (see LIGHT_INSIDE_HEAVY).
 MAY_IMPORT_PIMM_DATA = [
     ("helix.data.coeff_reader", ["pimm_data"]),
     ("helix.data.coeff_dataset", ["pimm_data"]),
-    ("helix.data.transforms", ["pimm_data", "torch"]),
 ]
 
 #: Modules INSIDE the heavy package that must nonetheless import clean.

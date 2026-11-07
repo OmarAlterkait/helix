@@ -36,16 +36,9 @@ in `docs/archive/`.
   config change and a retrain, not a corpus rebuild.
 * **Multi-event batching.** The FM has no event separation, so one event per rank;
   `docs/archive/MULTI_EVENT_BATCHING.md` has the design and its acceptance criterion.
-* **pimm's `MAEEvaluator` does not fit**: it passes `return_pred=` to the model's forward,
-  which `FMModel.forward` does not accept, and reads metric names the model does not
-  emit. `tests/test_pimm_step_contract.py` pins both; when it fails, delete the test and
-  this note.
 
 ## Corpus, scripts and CI
 
-* **Leftovers of removed options.** The `export` extra in `pyproject.toml` (safetensors)
-  has no reader (drop it with a `uv lock` refresh); `scripts/write_holdout.py` writes a file
-  nothing reads (kept for inspection; `tests/test_corpus_identity.py` pins it).
 * **`fm_smoke`'s bin table** (`$HELIX_ARCHIVE/coeff_bins_K32_smoke.pt`) may predate the
   noisy grid; rederive it from the corpus with K = 32 if the smoke run should resemble production.
 * **Optical tokens are not fed to the model.** `helix.optical.tokens` produces 128-slot
@@ -68,7 +61,7 @@ in `docs/archive/`.
 ## NERSC
 
 The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, container
-(shifter; podman-hpc interactive) and scheduler; RUNBOOK §11 has the commands.
+(shifter; podman-hpc interactive) and scheduler; RUNBOOK §10 has the commands.
 
 * **Stage the corpus.** Copy `coeff_tpc_d1m` with its `_calib/` to `$CFS/m5238/users/oalter/coeff_tpc_d1m`
   (`HELIX_CORPUS_DURABLE`) and stage it to `$SCRATCH/coeff_tpc_d1m`; build or copy its cells
