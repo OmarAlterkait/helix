@@ -346,6 +346,11 @@ def build_denoise(fm, *, pretrained=True, freeze_encoder=False, cond_charge=Fals
     import json
     import os
 
+    if freeze_encoder and lin_amp_scale:
+        # the channel's input columns start at zero (pad_input_columns): frozen, they stay zero and
+        # the option would silently do nothing
+        raise ValueError("freeze_encoder with lin_amp_scale > 0: the new input columns start at zero "
+                         "and would stay there; train the encoder, or set lin_amp_scale=0")
     from helix.model.checkpoint import load_run, model_config, run_dir, tokenizer_config
     from helix.model.fm import build_fm
 

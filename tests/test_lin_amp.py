@@ -68,3 +68,10 @@ def test_pad_input_columns_copies_the_old_columns_and_zeros_the_new():
     with torch.no_grad():
         torch.testing.assert_close(new.encode(B), old.encode(B), atol=1e-5, rtol=0)
     assert pad_input_columns(old, new.state_dict())["embed.weight"].shape[1] == 3 * N   # never shrinks
+
+
+def test_a_frozen_encoder_refuses_the_channel():
+    """The channel's columns start at zero; frozen they would stay zero, a silent no-op."""
+    from helix.model.denoise import build_denoise
+    with pytest.raises(ValueError, match="freeze_encoder"):
+        build_denoise("/nonexistent-run", freeze_encoder=True, lin_amp_scale=30.0)
