@@ -16,7 +16,9 @@ Protocol, the same for every arm of every metric:
   holding only its predictions;
 * the fit sees at most :data:`FIT_ROWS` rows, an equal seeded sample of each training event
   (:func:`fit_rows`), so its memory and time do not grow with the split; every scored row is
-  scored;
+  scored. The per-event budget depends only on the number of training events, so the floor's
+  ``--fit-windows`` rows come ON TOP of the same map rows -- up to twice FIT_ROWS rows, and twice
+  the features' memory;
 * inside the training events the last ~10% are held out for early stopping, scored by the
   metric the caller reports -- validation MSE; with ``group`` the pooled within-group R^2
   (:func:`helix.eval.events.group_r2`; selection by MSE halts a head that has only learned
