@@ -24,7 +24,8 @@ waveforms into shards beside the TPC ones (not yet fed to the model).
 | `scripts/corpus.sh` | a corpus on the scheduler, through `python -m helix.build` |
 | `scripts/build_truth.py` | the simulation truth (`cells`) beside a corpus run |
 | `python -m helix.data.bins` | the categorical head's bin grid |
-| `scripts/train.sh` | training (FM or denoiser) as a chain of jobs |
+| `scripts/submit.sh` | a training run (FM or denoiser) through pimm's launcher: `configs/launch/` recipes, multi-node, resumable chains |
+| `scripts/sweep.py` | a study: several arms of one config, a second stage per arm, their evaluation (`configs/sweeps/`) |
 | `configs/pimm/` | `fm.py` and its variants `fm_cooldown`, `fm_smoke`; `denoise.py`, the supervised denoiser on an FM run |
 | `container/` | the image recipe (`install.sh`) and its apptainer / Docker front-ends |
 | `tests/` | the suite |
@@ -35,7 +36,7 @@ Paths, container and scheduler come from `helix/sites/<site>.yaml`; `source
 scripts/helix_env.sh` exports them as `$HELIX_*`. The full procedures are in
 [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-    scripts/make_host_env.sh               # once per machine: a host Python with PyYAML
+    scripts/make_host_env.sh               # once per machine: a host Python for helix_env.sh and pimm submit
     source scripts/helix_env.sh            # exports HELIX_* (and HELIX_PYTHON)
     $HELIX_PYTHON -m helix.paths           # site, roots, container, scheduler
 
@@ -48,12 +49,15 @@ scripts/helix_env.sh` exports them as `$HELIX_*`. The full procedures are in
     # truth beside each run (RUNBOOK section 7; on a CPU node)
     scripts/helix_run.sh python scripts/build_truth.py --corpus $HELIX_CORPUS
 
-    # pretrain on HELIX_CORPUS's corpus: the stable phase as 8 chained jobs, then the cooldown
-    LINKS=8 scripts/train.sh fm
-    scripts/train.sh fm_cooldown
+    # pretrain on HELIX_CORPUS's corpus: the stable phase (a resumable preempt chain, 4 nodes), then the cooldown
+    scripts/submit.sh fm --resources.nnodes 4
+    scripts/submit.sh fm_cooldown --resources.nnodes 4
 
     # the denoiser on the pretrained encoder
-    LINKS=4 scripts/train.sh denoise model.fm=$HELIX_EXP/fm_cooldown
+    scripts/submit.sh denoise --resources.nnodes 4 -- model.fm=$HELIX_EXP/fm_cooldown
+
+    # a study (arms, cooldowns, evaluations) from one file
+    python scripts/sweep.py configs/sweeps/d1m_lr.yaml --dry-run
 
     # evaluate (on an A100 node: RUNBOOK section 7)
     scripts/helix_run.sh python -m helix.eval $HELIX_EXP/fm_cooldown --metrics recon,floor,uprobe,labels --out eval.json

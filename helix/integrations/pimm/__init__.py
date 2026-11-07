@@ -95,7 +95,7 @@ class CoeffDenoise:
     (:func:`helix.model.denoise.build_denoise`; ``configs/pimm/denoise.py``).
 
     ``fm`` names the FM run (architecture, tokenizer and, with ``pretrained``, weights). Not
-    pimm's ``weight=``: that loads a checkpoint of THIS model and is what ``scripts/train.sh``
+    pimm's ``weight=``: that loads a checkpoint of THIS model and is what pimm's ``scripts/train.sh``
     sets on every resumed link, so it cannot also carry the initialisation.
     """
 

@@ -121,8 +121,8 @@ scheduler:
     account: m5238_g
     constraint: gpu
     # NERSC runs PreemptMode=REQUEUE (scontrol show config), the OPPOSITE of
-    # S3DF's CANCEL. So a preempted job comes back, and scripts/train.sh's
-    # afterany chain continues either way. GraceTime on preempt/gpu_preempt is 60s -- below pimm's default
+    # S3DF's CANCEL. So a preempted job comes back: submitit requeues the
+    # chain (pimm submit) under the same job id. GraceTime on preempt/gpu_preempt is 60s -- below pimm's default
     # signal_delay_s of 120 -- so a checkpoint has one minute to land.
     qos: preempt
     # `preempt` is REJECTED without this: "Job request does not match any

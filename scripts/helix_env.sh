@@ -12,7 +12,7 @@
 #
 # Why a shell script at all, when helix.paths already exists: `#SBATCH`
 # directives cannot read shell variables, and scripts/corpus.sh and
-# scripts/train.sh build their sbatch flags from these values in a shell, before
+# scripts/submit.sh build their sbatch / pimm submit flags from these values in a shell, before
 # any Python runs. This is the one place that conversion happens.
 #
 # HELIX_SITE selects the profile; without it helix.paths auto-detects. Set it

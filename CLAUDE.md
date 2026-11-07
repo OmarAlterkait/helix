@@ -43,7 +43,7 @@ registration import).
 
 Everything runs in one container, and NOTHING names it: runtime, image, in-image interpreter
 and binds are site facts in `helix/sites/<site>.yaml`, which `scripts/helix_run.sh` reads.
-The host side (`helix_env.sh`, `make_host_env.sh`, `corpus.sh`, `train.sh`) is in README's
+The host side (`helix_env.sh`, `make_host_env.sh`, `corpus.sh`, `submit.sh`, `sweep.py`) is in README's
 short path and `docs/RUNBOOK.md` §1; submitting happens on the host, because sbatch is not
 in the container.
 
@@ -62,7 +62,7 @@ packages visible inside the image, so a green run can be yours alone) and
 interactive and SINGLE-NODE: it does not inject NERSC's NCCL plugin at all, and
 measured 1.23 GiB/s across nodes against shifter's 4.9. shifter is the batch
 runtime. `helix_run.sh` picks podman-hpc when interactive; pass
-`HELIX_INTERACTIVE=0` to force shifter (`corpus.sh` and `train.sh` do).
+`HELIX_INTERACTIVE=0` to force shifter (`corpus.sh` does; `submit.sh` jobs run under shifter through pimm's launcher).
 
 `docs/RUNBOOK.md` has the procedures (host env -> corpus -> verify -> truth -> bin grid ->
 pretrain -> denoiser -> evaluate), `docs/ARCHITECTURE.md` the modules and the shard formats,

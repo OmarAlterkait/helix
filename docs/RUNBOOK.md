@@ -4,7 +4,7 @@ Procedures as commands. Run them from the helix checkout. Every path, the contai
 and the scheduler come from `helix/sites/<site>.yaml` (`docs/ARCHITECTURE.md` §10), so
 the same commands run at S3DF and NERSC; the S3DF values are given where a command needs
 them, and section 10 lists what differs at NERSC. Work heavier than a quick check goes
-to Slurm: `corpus.sh` and `train.sh` submit their own jobs; for the rest an
+to Slurm: `corpus.sh`, `submit.sh` and `sweep.py` submit their own jobs; for the rest an
 `sbatch --wrap` form is shown.
 
 The order for a new corpus: build (§3), verify (§4), truth (§7), bin grid (§5),
@@ -192,37 +192,43 @@ probe), so a rebuilt corpus reproduces it (`CoeffTPCDataset.holdout_manifest()` 
 
 ## 6. Train
 
-    scripts/train.sh CONFIG [key=value ...]
+    scripts/submit.sh CONFIG [--recipe preempt|interactive|PATH] [pimm submit flags] [-- key=value ...]
 
-`CONFIG` is a name in `configs/pimm/` or a path. Each of `LINKS` jobs (default 1) runs
-`python -m pimm.train --config-file CONFIG` in the container as `GPUS` Slurm tasks (`srun`;
-pimm takes each rank from its task), starting
-when the previous one ends (`--dependency=afterany`), resuming from the run's latest
-complete checkpoint (`resume=True weight=<it>`) or starting the run if there is none.
-The run lives in `$HELIX_EXP/NAME` (`NAME` defaults to the config name; logs in
-`$HELIX_EXP/NAME/slurm`). The same `NAME` with a different config or options is refused.
+`CONFIG` is a name in `configs/pimm/` or a path. `submit.sh` runs `pimm submit` in the host
+environment (`scripts/make_host_env.sh`) with the site's facts as flags; pimm renders the job,
+submitit submits it and requeues it as a chain (`--chain.jobs`, default 8 for `preempt`), and
+each link runs pimm's `train.sh` in the container with torchrun on every node, resuming from
+the run's latest complete checkpoint. The run lives in `$HELIX_EXP/NAME` (`--run.name`,
+default the config name), with its Slurm logs and submitit pickles beside it. The same
+`NAME` with a different config or training overrides is refused. Recipes:
+`configs/launch/preempt.yaml` (the default: 24 h links, the site's 2 h floor) and
+`interactive.yaml` (4 h, the interactive QOS). There is no premium recipe. Nodes:
+`--resources.nnodes N` (4 GPUs each); `--dry-run` renders without submitting.
 
-Environment: `LINKS` (1), `NAME`, `GPUS` (4, one node), `TIME` (24:00:00), `MEM`
-(50G per GPU where the site asks for memory), `LOGS`. Scheduler facts:
-`scheduler.train` (S3DF: `mli:cider-ml`, ampere, QOS normal).
+    scripts/submit.sh fm --resources.nnodes 4                     # pretrain: the stable phase over HELIX_CORPUS's corpus
+    scripts/submit.sh fm_cooldown --resources.nnodes 4            # then the WSD cooldown from $HELIX_EXP/fm/model/last
+    scripts/submit.sh fm --run.name fm_pf25 -- model.plane_frac=0.25   # a variant: key=value (pimm --options), as its own run
+    scripts/submit.sh fm_smoke --recipe interactive --resources.nnodes 2 --chain.jobs 1   # wiring check: small model, 32 events
+    scripts/submit.sh denoise --resources.nnodes 4 -- model.fm=$HELIX_EXP/fm_cooldown     # the denoiser (M6d); needs the cells truth
+    scripts/submit.sh denoise --run.name denoise_m6dc -- model.fm=$HELIX_EXP/fm_cooldown model.cond_charge=True   # M6dc
+    scripts/submit.sh denoise --run.name dn_scratch_N1024 -- model.pretrained=False data.train.n_events=1024 epoch=16
 
-    LINKS=8 scripts/train.sh fm                        # pretrain: the stable phase over HELIX_CORPUS's corpus
-    scripts/train.sh fm_cooldown                       # then the WSD cooldown from $HELIX_EXP/fm/model/last
-    NAME=fm_pf25 scripts/train.sh fm model.plane_frac=0.25   # a variant: key=value (pimm --options), as its own run
-    GPUS=1 scripts/train.sh fm_smoke                   # wiring check: small model, 32 events
-    LINKS=4 scripts/train.sh denoise model.fm=$HELIX_EXP/fm_cooldown       # the denoiser (M6d) on an FM run; needs the cells truth
-    NAME=denoise_m6dc scripts/train.sh denoise model.fm=$HELIX_EXP/fm_cooldown model.cond_charge=True   # M6dc: calorimetry
-    NAME=dn_scratch_N1024 scripts/train.sh denoise model.pretrained=False data.train.n_events=1024 epoch=16   # from scratch, 1,024 labelled events
+**A study** is a file, not a script: `python scripts/sweep.py configs/sweeps/<study>.yaml
+[--dry-run] [--only A,B]` submits each arm through `submit.sh`, an optional second stage per
+arm (`then:`, e.g. the cooldown) behind it, and evaluation jobs (`after_each`, `after_all`)
+held by `--dependency=afterok` (submitit requeues a preempted chain under the same job id, so
+the dependency waits for the whole chain). `configs/sweeps/d1m_lr.yaml` is the LR and seed
+calibration.
 
 * **The corpus** is `HELIX_CORPUS`'s parent, with its runs from `_calib/RUNS.txt`
-  (S3DF default: `coeff_tpc_d1m`). `HELIX_CORPUS=<root>/<run> scripts/train.sh fm` trains
+  (S3DF default: `coeff_tpc_d1m`). `HELIX_CORPUS=<root>/<run> scripts/submit.sh fm` trains
   on another; the variable reaches the jobs.
 * **No step counts.** Warmup and the eval / checkpoint / EMA-save cadence are `"auto"`
   and resolved by `FMTrainer` from `iters_per_epoch * epoch`; the log line `cadence over
   N steps: ...` shows them. Change the length with `epoch=`.
 * **Batch = GPUs.** `batch_size` is the world size (one event per rank:
-  `helix.paths.world_size()`, Slurm's task count inside a job), in every config. One node
-  per run (`GPUS` up to 4 at S3DF): `train.sh` submits `--nodes=1`.
+  `helix.paths.world_size()`: torchrun's `WORLD_SIZE`), in every config; pimm's preflight
+  checks it at the launch's ranks. The recipe was measured at 16 GPUs (`--resources.nnodes 4`).
 * **GPU type.** The varlen attention needs sm80+ (A100 or newer): `ampere` at S3DF,
   never `turing`.
 * **The recipe** is `nz_pw16` (`configs/pimm/fm.py`: d768, LR 4.4e-3), whose LR was tuned
@@ -333,7 +339,7 @@ the same. What differs:
 
 * **Host Python.** The login nodes' `python3` is 3.6: run `scripts/make_host_env.sh` once
   (or set `HELIX_PYTHON`), then `source scripts/helix_env.sh`.
-* **Container.** shifter in batch (`train.sh`, `corpus.sh` and `HELIX_INTERACTIVE=0`
+* **Container.** shifter in batch (`submit.sh` jobs, `corpus.sh` and `HELIX_INTERACTIVE=0`
   force it), podman-hpc on an interactive TTY; `HDF5_USE_FILE_LOCKING=FALSE` comes from
   the profile. The profile's image tag predates the removal of jax: rebuild and repoint it
   before relying on it.
@@ -345,13 +351,14 @@ the same. What differs:
 * **Bin grid.** Not copied: verify it from the staged corpus (§5, `--verify`), on a GPU
   node (no CPU allocation) through `scripts/helix_run.sh`.
 * **Training** (`m5238_g`, `-C gpu`, QOS `preempt` with `--time-min 02:00:00`; preempted
-  jobs are requeued and the `afterany` chain continues):
+  jobs are requeued by submitit under the same job id; never premium):
 
-      LINKS=8 GPUS=4 scripts/train.sh fm
-      scripts/train.sh fm_cooldown
-      LINKS=4 scripts/train.sh denoise model.fm=$HELIX_EXP/fm_cooldown
+      scripts/submit.sh fm --resources.nnodes 4
+      scripts/submit.sh fm_cooldown --resources.nnodes 4
+      scripts/submit.sh denoise --resources.nnodes 4 -- model.fm=$HELIX_EXP/fm_cooldown
 
-  One node per run; multi-node training is deferred (TODO).
+  Multi-node runs under shifter with `--module gpu,nccl-plugin` (pimm's `nersc-container`
+  site). The interactive QOS (`--recipe interactive`) allows two jobs per user.
 * **Truth and evaluation** run on GPU nodes (there is no usable CPU allocation):
 
       sbatch -A $HELIX_SLURM_TRAIN_ACCOUNT -C gpu -q shared --gpus=1 -c 32 --mem=56G --time=08:00:00 \

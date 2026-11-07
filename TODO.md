@@ -186,6 +186,8 @@ The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, containe
   turing's (one GPU type per corpus).
 * **Evaluation fits a `shared` GPU job** (32 cores, 56 GB): the floor holds ~25 GB of
   features in host memory at `FIT_ROWS` = 1M.
-* **Multi-node training is deferred.** `scripts/train.sh` submits one node (`--nodes=1`);
-  multi-node needs shifter's `nccl-plugin` module (4.9 GiB/s across nodes against
-  podman-hpc's 1.23) and a launch that spans nodes.
+* **The training size cap's cost on d1m.** fm.py drops events above `max_event_size` = 600k
+  coefficients (one event per rank must fit an A100). On 32 events of the d1m sample that was
+  5 (15.6%, the 2-node smoke run, 2026-11-06) -- the busiest events, a bias, not noise. Measure
+  the fraction over the whole train split, and decide between activation checkpointing
+  (`act_ckpt`), 80 GB nodes, or a higher cap.

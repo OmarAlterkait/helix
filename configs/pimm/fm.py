@@ -10,9 +10,9 @@ A run is four choices, and only these differ between configs:
 Nothing here is a step count. Warmup, eval and checkpoint cadence are ``"auto"``: FMTrainer
 derives them from the run's own step count (pimm's ``iters_per_epoch * epoch``, i.e. the
 split, the corpus and the GPU count) through :mod:`helix.model.schedule`. Anything else is a
-``key=value`` override after the config name, e.g. ``scripts/train.sh fm model.plane_frac=0.25``.
+``key=value`` override after ``--``, e.g. ``scripts/submit.sh fm -- model.plane_frac=0.25``.
 
-    LINKS=8 scripts/train.sh fm [key=value ...]
+    scripts/submit.sh fm --resources.nnodes 4 [pimm submit flags] [-- key=value ...]
 """
 
 # helix onto sys.path before custom_imports is read (pimm executes this file first). From
@@ -26,7 +26,7 @@ _p = _os.environ.get("HELIX_ROOT")
 if not _p or not _os.path.isdir(_p):
     raise SystemExit(
         f"HELIX_ROOT is {'not set' if not _p else f'not a directory: {_p}'}.\n"
-        f"  Set it to your helix checkout (scripts/train.sh exports it from helix.paths).")
+        f"  Set it to your helix checkout (scripts/submit.sh exports it).")
 if _p not in _sys.path:
     _sys.path.insert(1, _p)
 from helix.paths import root as _root                            # noqa: E402

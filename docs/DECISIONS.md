@@ -320,7 +320,7 @@ per-event counts, so a resample costs a few bincounts, not a rebuild of ~8M rows
 quadratic in events.
 
 **The denoiser trains on pimm, like the FM.** `configs/pimm/denoise.py` (`_base_` fm.py),
-launched by `scripts/train.sh denoise model.fm=<FM run>`: `Coeff-Denoise` = the encoder of
+launched by `scripts/submit.sh denoise -- model.fm=<FM run>`: `Coeff-Denoise` = the encoder of
 the FM run (its architecture, its tokenizer and, with `pretrained=True`, its EMA weights;
 `pretrained=False` is the from-scratch baseline) plus `CellDecoder` with a presence
 logit. The default is M6d (`cond_charge=False`: detection and maps); `model.cond_charge=True`
@@ -472,6 +472,24 @@ training engine, not its launch layer, so `configs/launch/`, the launcher venv
 `afterany` continues whether a preempted job is requeued (NERSC) or cancelled (S3DF).
 Checked: a 3-link `fm_smoke` chain whose first link timed out resumed with loss and LR
 continuous.
+*Superseded* (2026-11-06): **training launches through `pimm submit` again**, by
+`scripts/submit.sh CONFIG [--recipe R] [flags] [-- key=value]` with recipes in
+`configs/launch/` and studies in `configs/sweeps/` (`scripts/sweep.py`). *Why:* `train.sh` was
+single-node (`--nodes=1`), and every recipe result was measured at 16 GPUs; pimm's launcher
+already runs multi-node under shifter with the `nccl-plugin` module (4.9 GiB/s across nodes
+against podman-hpc's 1.23), and the user wants pimm's launcher structure. The two blockers
+above are fixed in pimm-private's `helix-launch` branch: `train.sh` and `submit` accept an
+external config by absolute path (the run goes to `$HELIX_EXP/<name>`, no config group), and
+preflight reads the config with `WORLD_SIZE` set to the launch's ranks, where it had refused
+every run above 4 GPUs (it imports no torch since `import_custom_modules=False`, so the host
+needs pimm's launch dependencies and helix's base install, `scripts/make_host_env.sh`). The
+launcher no longer injects `hooks.CheckpointSaverIteration.backend=dcp` (deprecated, and
+`None` already resolves to the same format), which named a hook helix does not have and so
+killed every multi-node helix job. `train.sh`'s guard -- the same run name continues only
+the same config and overrides -- moved into `submit.sh`. Checked at NERSC: `fm_smoke` on 2
+nodes x 4 GPUs on the d1m sample (8 ranks, steps, validation, DCP checkpoint, EMA, clean
+exit). Not yet checked: a requeue across links under submitit, and S3DF (QOS normal, so no
+preemption; links end on walltime).
 
 **The production bin grid is r2's** (`coeff_bins_r2_run0027575715`, derived from r2's
 first run with r1's parameters: 120 events, K = 128). *Why:* r2's inner edges sit a
@@ -640,7 +658,7 @@ remains as `set_bins`' behaviour for a table it is not given.
 ## Operational
 
 Details and incantations live in `docs/RUNBOOK.md`; `TODO.md` is what is NOT
-done. There is one launcher, `scripts/train.sh` (§0). The decisions are:
+done. There is one launcher, `scripts/submit.sh` through `pimm submit` (§0). The decisions are:
 
 - **Corpus builds on `turing` only.** The DSP is architecture-sensitive: turing
   and A100 disagree on 0.016% of surviving coefficients and are not
@@ -660,4 +678,4 @@ done. There is one launcher, `scripts/train.sh` (§0). The decisions are:
   runs at QOS `normal` (`helix/sites/s3df.yaml`): preemptable is priority 1
   against normal's 10000, so a long job waits rather than runs, and S3DF
   preemption cancels rather than requeues. Resume needs `weight=` **and** `resume=`, which
-  `scripts/train.sh` passes from pimm's latest-checkpoint resolver.
+  pimm's `scripts/train.sh` passes from its latest-checkpoint resolver on a requeued link.

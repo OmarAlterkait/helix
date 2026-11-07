@@ -460,8 +460,11 @@ runtime) and scheduler facts per job kind (`train`, `corpus`).
   binding both checkouts, forwarding `HELIX_*`, the site's env and `HELIX_FORWARD_ENV`,
   with `PYTHONNOUSERSITE=1` and `PYTHONPATH=pimm:helix`. podman-hpc (NERSC, interactive)
   is chosen on a TTY; `HELIX_INTERACTIVE=0` forces the batch runtime.
-* `scripts/corpus.sh` and `scripts/train.sh` submit with `sbatch` from the host, with
-  the site's account / partition / QOS / constraint / extra flags.
+* `scripts/corpus.sh` submits with `sbatch` from the host; `scripts/submit.sh` submits
+  training through `pimm submit` (recipes in `configs/launch/`, submitit chains, multi-node
+  under shifter with the `nccl-plugin` module). Both pass the site's account / partition /
+  QOS / constraint as flags. `scripts/sweep.py` runs a study file (`configs/sweeps/`) through
+  `submit.sh`, with evaluation jobs held by `--dependency=afterok`.
 
 | | S3DF (`s3df.yaml`) | NERSC (`nersc.yaml`) |
 |---|---|---|

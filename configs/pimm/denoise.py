@@ -30,10 +30,10 @@ Label efficiency: ``data.train.n_events=N`` trains on a fixed, nested random sub
 split (``data.train.subset_seed``); raise ``epoch`` with it, since the length is in epochs. Full
 scoring is ``python -m helix.eval <FM run> --metrics denoise --denoiser <this run>``.
 
-    LINKS=4 scripts/train.sh denoise [key=value ...]
-    NAME=denoise_m6dc scripts/train.sh denoise model.cond_charge=True
-    NAME=denoise_gauss scripts/train.sh denoise model.cond_charge=True model.dist=gauss
-    NAME=denoise_cat scripts/train.sh denoise model.cond_charge=True model.dist=cat
+    scripts/submit.sh denoise --resources.nnodes 4 [-- key=value ...]
+    scripts/submit.sh denoise --run.name denoise_m6dc -- model.cond_charge=True
+    scripts/submit.sh denoise --run.name denoise_gauss -- model.cond_charge=True model.dist=gauss
+    scripts/submit.sh denoise --run.name denoise_cat -- model.cond_charge=True model.dist=cat
 """
 # helix is importable here because the launcher exports PYTHONPATH; the sys.path block and
 # its HelixPathBootstrap hook belong to the base.

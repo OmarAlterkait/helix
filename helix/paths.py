@@ -306,7 +306,7 @@ def container(key: str | None = None) -> Any:
 
 def world_size(default: int = 4) -> int:
     """The number of ranks this process is part of: ``WORLD_SIZE`` (torchrun), else
-    ``SLURM_NTASKS`` inside a job step (scripts/train.sh starts one task per GPU).
+    ``SLURM_NTASKS`` inside a job step (one task per GPU).
 
     An environment fact, which is why it lives here rather than in a config.
 
@@ -389,7 +389,7 @@ def scheduler(kind: str = "train", key: str | None = None) -> Any:
     These are NOT paths, which is why they were never in the roots table and
     ended up frozen into ``#SBATCH`` directives instead. ``#SBATCH`` genuinely
     cannot read shell variables, so the fix is to pass them as ``sbatch`` CLI
-    flags -- which is what ``scripts/train.sh`` and ``scripts/corpus.sh`` do.
+    flags -- which is what ``scripts/submit.sh`` (through ``pimm submit``) and ``scripts/corpus.sh`` do.
 
     Each key is overridable by ``HELIX_SLURM_<KEY>``, applied to whichever kind
     is asked for: a one-off ``HELIX_SLURM_QOS=premium`` should not need to know
