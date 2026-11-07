@@ -138,15 +138,17 @@ scheduler:
     # configs/launch/interactive.yaml's QOS (fast to grant, 4 h, two jobs per user); a site
     # without one cannot use that recipe (scripts/submit.sh says so).
     interactive_qos: interactive
-  # One-GPU jobs after training (scripts/sweep.py's after_each / after_all: helix.eval needs an
-  # A100, ~32 cores and ~25 GB of host memory at FIT_ROWS = 1M). `shared`, not preempt: a
-  # preempted evaluation starts over. Its quantum is 32 logical cores per GPU (see corpus).
+  # Jobs after training (scripts/sweep.py's after_each / after_all). helix.eval needs one A100
+  # and peaked near 56 GB of host memory at S3DF (4113 probe events; ~25 GB of floor features
+  # at FIT_ROWS = 1M) -- exactly shared's cap for one GPU (32 cores, 56G; see corpus), so two
+  # GPUs' share: 64 cores, 112G. `shared`, not preempt: a preempted evaluation starts over.
   eval:
     account: m5238_g
     constraint: gpu
     qos: shared
-    gpus: 1
-    cpus_per_task: 32
+    gpus: 2
+    cpus_per_task: 64
+    mem: 112G
   corpus:
     account: m5238_g
     constraint: gpu
