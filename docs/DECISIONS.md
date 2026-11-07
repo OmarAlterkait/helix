@@ -363,6 +363,38 @@ fine-tune (M9lin) it gained less. *Default 0* because r1 is retired and no r1 nu
 to d1m (§"The data, as built"): set 30 once a d1m run reproduces the gain (TODO). The study
 branch's physical-drift-coordinate option from the same commit is not ported.
 
+**The charge head's form is a switch, `model.dist`: `point` by default until one full-length
+comparison picks `gauss` or `cat` (TODO).** The presence head is a calibrated probability, but
+the conditional charge was a point value trained by squared error -- a Gaussian of the SAME
+width for every cell, which left a flat ~3% relative error at high charge. Two candidates
+(`helix.model.denoise`):
+* `gauss`: a log-width per cell beside the mean, trained by the Gaussian likelihood with
+  beta = 0 (on the charged rows with `cond_charge`, on every row without). *Measured on r1*
+  (M14: 6k-step fine-tunes of M10lin, paired against the point control on 48 events): hw68
+  0.71 / 0.61 / 0.59 of the point head's at 16-64k / 64-256k / >= 256k e- on Y (U 0.80 / 0.71 /
+  0.71, V 0.83 / 0.74 / 0.67), ~1% worse at 1-4k; calibrated from 4k e- up (|z| < 1 for
+  0.67-0.70, < 2 for 0.94-0.96, median width = error hw68 within ~5%), under-covered at 1-4k
+  (0.50-0.62: heavier tails than a Gaussian). beta-NLL 0.5 was worse at every bin above 4k (Y
+  64-256k 0.73 against 0.61), so beta is 0 and not a config key. It followed a whole-event
+  charge scaling less than the point head (gain response 0.76 vs 0.82), which no augmentation
+  corrects here (above). Its width layer starts at zero, so a point head's weights start it at
+  the point head; unify has no fine-tune-from-a-denoiser path, so the study's explicit warm
+  start (`init_dist_from_point`) is not ported.
+* `cat`: ONE categorical replacing both heads -- bin 0 = no charge (q <= `support_min_q`,
+  25 e-), K = 256 bins uniform in y = log1p(q / Q0) from y(25 e-) to 7.5 (3.7M e-), HL-Gauss
+  targets of width 0.75 bin (Imani & White 2018; Farebrother et al. 2024) renormalised over
+  the charged bins, a hard bin-0 target for empty rows; presence = 1 - p0, the charge the mean
+  of y given charge (the median is also exposed). Its cross-entropy is exactly the presence
+  BCE plus the charged rows' conditional cross-entropy, so it is a hurdle -- `cond_charge` --
+  by construction; `cond_charge=False` is refused rather than silently ignored. *Not measured
+  yet.* r1's binned head (M14hl, 1024 bins beside a separate presence head, 18-43% WORSE than
+  the point head when bright) was a 6k-step fine-tune warm-started from the point head, whose
+  widths stayed at their 0.05 initial value; cat trains from the FM init over a full run, so
+  that result does not decide it.
+`hlgauss` (the study's binned conditional head) is not ported. Each head's validation `loss` is
+its own objective (point mse + bce, gauss nll + bce, cat ce), so `model_best` compares
+checkpoints of one head; all three also report `mse` and `bce`.
+
 **Checkpoints load directly.** `helix.model.checkpoint.load_run` reads pimm's run directory
 (`resolved_config.json`, the WeightEMA sidecar, `model/last` or `model/model_best.pth`,
 `provenance.json`); nothing is exported. *Why:* the artifact layer (`artifact.py`,

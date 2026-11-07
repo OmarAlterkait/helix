@@ -391,8 +391,12 @@ attributes excepted).
   optionally frozen (`freeze_encoder`); `CellDecoder` cross-attends from each 2 x 16 fine cell
   to the 3 x 3 token neighbourhood per band and returns charge `log1p(q/Q0)` and a presence
   logit; `cond_charge` regresses charge on charged cells only (calorimetry) instead of on every
-  queried cell (detection, maps). `lin_amp_scale` > 0 gives the encoder the linear-amplitude
-  input channel (`FMModel`), a pretrained FM loading into it with the new columns at zero
+  queried cell (detection, maps). `dist` is the charge head's form: `point` (squared error,
+  the default), `gauss` (+ a per-cell width, Gaussian likelihood) or `cat` (one categorical
+  over no-charge + charge bins, replacing both heads; a hurdle, so `cond_charge=True`); every
+  head returns `(charge, presence_logit)` first, so `predict` and the evaluation read all three
+  alike. `lin_amp_scale` > 0 gives the encoder the linear-amplitude input channel
+  (`FMModel`), a pretrained FM loading into it with the new columns at zero
   (`pad_input_columns`). `param_groups` = the encoder's muP groups + the head at
   `lr_head`. Its labels are `helix.data.denoise.DenoiseRows`, a transform after
   `CoeffTokenize` on a `("coeff", "cells")` sample.

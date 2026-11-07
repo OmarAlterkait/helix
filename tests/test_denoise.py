@@ -7,8 +7,10 @@ full truth charge and a presence label at the support threshold, include every c
 are fixed by a seed; the model builds from an FM run with its architecture, tokenizer and (when
 pretrained) weights; ``freeze_encoder`` leaves only the head trainable; the param groups cover
 exactly the trainable parameters with the head at its own LR; ``cond_charge`` regresses charged
-cells only; a denoiser run reads back with its FM run's tokenizer; a pretrained FM loads into an
-encoder with the linear-amplitude channel.
+cells only; a denoiser run reads back with its FM run's tokenizer. The charge heads (``dist``):
+the gauss likelihood and the cat targets, presence, point estimates and loss are what their
+docstrings say; every head trains through the model; a pretrained FM loads into an encoder with
+the linear-amplitude channel.
 """
 import json
 import os
@@ -20,7 +22,9 @@ torch = pytest.importorskip("torch")
 
 from helix.data import cells as C                                   # noqa: E402
 from helix.data.denoise import KEYS, DenoiseRows, kept_coefficients  # noqa: E402
-from helix.model.denoise import ENCODER_PREFIXES, CellDecoder, build_denoise  # noqa: E402
+from helix.model.denoise import (ENCODER_PREFIXES, CellDecoder, build_denoise, calibration_stats,  # noqa: E402
+                                 cat_cdf, cat_edges, cat_loss, cat_mean, cat_median, cat_presence_logit,
+                                 cat_targets, gauss_nll_loss)
 from helix.model.tokenize import CoeffTokenize, PatchConfig, _name_hash, patch_config  # noqa: E402
 from test_eval import SMALL, TOK, _DS, _sample, _same, _write_run  # noqa: E402
 
@@ -204,6 +208,156 @@ def test_build_denoise_loads_a_pretrained_fm_into_the_amplitude_channel(fm_run, 
         torch.testing.assert_close(m.fm.encode(B), ema.eval().encode(B), atol=1e-5, rtol=0)   # starts as the FM
 
 
+# ----------------------------------------------------------------------------- distributional heads
+def _toy_head(dist, seed=0, **kw):
+    torch.manual_seed(seed)
+    head = CellDecoder(SMALL["d"], n_bands=4, n_slot=SMALL["n_slot"], proj=16, heads=4, layers=1, hidden=32,
+                       dist=dist, **kw)
+    n_tok, n = 50, 64
+    g = torch.Generator().manual_seed(1)
+    B = dict(inp=torch.randn(n_tok, SMALL["n_slot"], generator=g),
+             occ=(torch.rand(n_tok, SMALL["n_slot"], generator=g) > 0.5).float())
+    args = (torch.randn(n_tok, SMALL["d"], generator=g), torch.randint(0, n_tok, (n, 4), generator=g),
+            torch.randn(n, 52, generator=g), torch.randint(-1, n_tok, (n, 4, 9), generator=g), B)
+    return head, args
+
+
+def test_gauss_nll_is_the_gaussian_likelihood_on_the_weighted_rows():
+    mu, ls = torch.zeros(2), torch.tensor([np.log(2.0), 0.0])
+    y = torch.tensor([1.0, 5.0])
+    assert gauss_nll_loss(mu, ls, y, torch.tensor([1.0, 0.0])).item() == pytest.approx(0.5 / 4 + np.log(2.0))
+    assert gauss_nll_loss(mu, ls, y, torch.ones(2)).item() == pytest.approx((0.5 / 4 + np.log(2.0) + 12.5) / 2)
+
+
+def test_a_point_heads_weights_start_a_gauss_head_at_the_point_head():
+    point, args = _toy_head("point")
+    gauss, _ = _toy_head("gauss", seed=9)
+    missing, unexpected = gauss.load_state_dict(point.state_dict(), strict=False)
+    assert set(missing) == {"dist_out.weight", "dist_out.bias"} and not unexpected
+    with torch.no_grad():
+        y, logit = point(*args)
+        mu, glogit, ls = gauss(*args)
+    assert torch.equal(mu, y) and torch.equal(glogit, logit) and (ls == 0).all()
+
+
+def test_cat_targets_are_bin_zero_when_empty_and_a_smoothed_unit_mass_when_charged():
+    e = cat_edges(25.0, 7.5, 16)
+    assert e[0].item() == pytest.approx(np.log1p(25.0 / C.Q0)) and e[-1].item() == pytest.approx(7.5) and len(e) == 17
+    w = float(e[1] - e[0])
+    y = torch.tensor([0.0, 1.0, 3.0, 9.0])
+    t = cat_targets(y, torch.tensor([0.0, 1.0, 1.0, 1.0]), e, 0.75 * w)
+    assert t.shape == (4, 17)
+    assert torch.equal(t[0], torch.eye(17)[0])                                 # empty: all bin 0
+    assert (t[1:, 0] == 0).all()
+    torch.testing.assert_close(t[1:, 1:].sum(-1), torch.ones(3))
+    k = int(torch.searchsorted(e, torch.tensor(1.0))) - 1                     # the bin holding y = 1
+    assert int(t[1, 1:].argmax()) == k and 0 < t[1, 1 + k] < 1               # smoothed, not one-hot
+    assert int(t[3, 1:].argmax()) == 15                                        # above y_hi: clamped to the top bin
+    with pytest.raises(ValueError, match="y_hi"):
+        cat_edges(25.0, 0.001, 16)
+
+
+def test_cat_presence_is_one_minus_p0_and_its_loss_is_the_hurdles():
+    g = torch.Generator().manual_seed(0)
+    lg = torch.randn(200, 17, generator=g) * 3
+    p = lg.softmax(-1)
+    torch.testing.assert_close(torch.sigmoid(cat_presence_logit(lg)), 1 - p[:, 0])
+    e = cat_edges(25.0, 7.5, 16)
+    y, pres = torch.rand(200, generator=g) * 6, (torch.rand(200, generator=g) > 0.4).float()
+    sigma = 0.75 * float(e[1] - e[0])
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(cat_presence_logit(lg), pres)
+    cond = -(cat_targets(y, torch.ones(200), e, sigma)[:, 1:] * lg[:, 1:].log_softmax(-1)).sum(-1)
+    torch.testing.assert_close(cat_loss(lg, y, pres, e, sigma), bce + (pres * cond).mean())
+
+
+def test_cat_point_estimates_are_exact_for_a_delta():
+    e = cat_edges(25.0, 7.5, 16)
+    c = 0.5 * (e[1:] + e[:-1])
+    j = torch.tensor([0, 3, 15])
+    lg = torch.full((3, 17), -1e4)
+    lg[torch.arange(3), 1 + j] = 0.0
+    lg[1, 0] = 20.0                                                  # bin 0 does not move the charge given charge
+    torch.testing.assert_close(cat_mean(lg, c), c[j])
+    torch.testing.assert_close(cat_median(lg, e), c[j])
+    torch.testing.assert_close(cat_cdf(lg, e, c[j]), torch.full((3,), 0.5))
+    torch.testing.assert_close(cat_cdf(lg, e, e[j]), torch.zeros(3))
+    torch.testing.assert_close(cat_cdf(lg, e, e[j + 1]), torch.ones(3))
+
+
+def test_the_cat_head_learns_a_toy_fit():
+    head, args = _toy_head("cat", n_bins=32)
+    aux = args[2]
+    y = 1.0 + 3.0 * aux[:, 0].sigmoid()                             # charge set by the cell's input
+    pres = (aux[:, 1] > 0).float()
+    opt = torch.optim.Adam(head.parameters(), lr=3e-3)
+    losses = []
+    for _ in range(80):
+        loss = cat_loss(head(*args)[2], y, pres, head.edges, head.hl_sigma)
+        opt.zero_grad(); loss.backward(); opt.step()
+        losses.append(loss.item())
+    assert losses[-1] < 0.5 * losses[0]
+
+
+def test_unknown_or_unpaired_heads_are_refused(fm_run):
+    d, _ = fm_run
+    with pytest.raises(ValueError, match="dist"):
+        CellDecoder(SMALL["d"], dist="hlgauss")
+    with pytest.raises(ValueError, match="cond_charge"):
+        build_denoise(str(d), dist="cat", compile_blocks=False)    # cat is the hurdle: cond_charge=False is refused
+
+
+def test_a_calibrated_distribution_covers_its_nominal_intervals():
+    """Draw y_true from each cell's own predicted distribution: z and the PIT then cover
+    0.683 / 0.954 and 0.68 / 0.95."""
+    g = torch.Generator().manual_seed(0)
+    n = 40000
+    mu, sig = torch.rand(n, generator=g) * 4 + 1, torch.rand(n, generator=g) * 0.2 + 0.05
+    yt = mu + sig * torch.randn(n, generator=g)
+    head = CellDecoder(SMALL["d"], dist="gauss")
+    z, w = calibration_stats(head, (mu, torch.zeros(n), sig.log()), yt)
+    torch.testing.assert_close(w, sig)
+    assert (z.abs() < 1).float().mean().item() == pytest.approx(0.683, abs=0.01)
+    assert (z.abs() < 2).float().mean().item() == pytest.approx(0.954, abs=0.01)
+    cat = CellDecoder(SMALL["d"], dist="cat", n_bins=256)
+    e = cat.edges
+    mu, sig = torch.rand(n, generator=g) * 3 + 1.5, torch.full((n,), 0.3)
+    cdf = 0.5 * (1 + torch.erf((e[None, :] - mu[:, None]) / (sig[:, None] * 2 ** 0.5)))
+    lg = torch.cat([torch.full((n, 1), -30.0), (cdf[:, 1:] - cdf[:, :-1]).clamp(min=1e-30).log()], 1)
+    pit, std = calibration_stats(cat, (None, None, lg), mu + sig * torch.randn(n, generator=g))
+    assert ((pit > 0.16) & (pit < 0.84)).float().mean().item() == pytest.approx(0.68, abs=0.015)
+    assert ((pit > 0.025) & (pit < 0.975)).float().mean().item() == pytest.approx(0.95, abs=0.01)
+    assert std.median().item() == pytest.approx(0.3, rel=0.02)
+
+
+def _coeff_denoise(fm, **kw):
+    """``Coeff-Denoise`` from pimm's registry when pimm is importable, else its factory's call."""
+    try:
+        from pimm.models.builder import MODELS
+        import helix.integrations.pimm  # noqa: F401
+    except ImportError:
+        return build_denoise(fm, **kw)
+    return MODELS.build(dict(type="Coeff-Denoise", fm=fm, **kw))
+
+
+@pytest.mark.parametrize("dist,cond", [("point", True), ("gauss", False), ("gauss", True), ("cat", True)])
+def test_every_head_trains_through_coeff_denoise(fm_run, sample, dist, cond):
+    d, _ = fm_run
+    torch.manual_seed(0)
+    m = _coeff_denoise(str(d), dist=dist, cond_charge=cond, compile_blocks=False).train()
+    assert m.head.dist == dist
+    B = _batch(_rows(sample, seed=0))
+    out = m(B)
+    assert {"loss", "mse", "bce"} <= set(out) and all(torch.isfinite(v) for v in out.values())
+    assert {"gauss": {"nll"}, "cat": {"ce"}}.get(dist, set()) <= set(out)
+    out["loss"].backward()
+    assert m.head.kv.weight.grad.abs().sum() > 0 and m.fm.enc[0].qkv.weight.grad.abs().sum() > 0
+    if dist == "gauss":
+        assert m.head.dist_out.weight.grad.abs().sum() > 0
+    with torch.no_grad():
+        got = m.predict(B, B["q_idx"], B["q_aux"], B["q_nbr"])
+    assert len(got) == 2 and got[0].shape == got[1].shape == B["q_y"].shape
+
+
 # ------------------------------------------------------------------------------- reading it back
 def _write_denoise_run(d, fm_dir):
     """A denoiser run as pimm writes one: its config names the FM run and a tokenizer by
@@ -274,17 +428,17 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
     m = cfg.model
     assert m["type"] == "Coeff-Denoise" and "bins" not in m and m["pretrained"] and not m["freeze_encoder"]
     assert not m["cond_charge"] and m["lr_head"] == 1e-2 and cfg.optimizer["lr"] == 3e-3
-    assert m["lin_amp_scale"] == 0.0                                         # until measured on d1m
+    assert m["dist"] == "point" and m["lin_amp_scale"] == 0.0                # until measured on d1m
     assert cfg.scheduler["type"] == "WarmupCosineLR" and cfg.scheduler["warmup"] == "auto"
     assert cfg.train["type"] == "FMTrainer" and cfg.batch_size == cfg.batch_size_val
     for split in ("train", "val"):
         dd = cfg.data[split]
         assert tuple(dd["modalities"]) == ("coeff", "cells") and dd["holdout"] == cfg.HOLDOUT
         assert [t["type"] for t in dd["transform"]] == ["CoeffTokenize", "DenoiseRows", "CoeffCollect"]
-        # presence = q > 25 e-, the cells-3 truth's cut: the labels, the transform's own default and the
-        # evaluation agree
+        # presence = q > 25 e-, the cells-3 truth's cut: the labels, the model (cat's bin 0), the
+        # transform's own default and the evaluation agree
         from helix.eval.denoise import PRESENCE_Q
-        assert dd["transform"][1]["support_min_q"] == DenoiseRows().support_min_q == PRESENCE_Q
+        assert dd["transform"][1]["support_min_q"] == m["support_min_q"] == DenoiseRows().support_min_q == PRESENCE_Q
     assert cfg.data["val"]["transform"][1]["seed"] == 0 and "seed" not in cfg.data["train"]["transform"][1]
     hooks = [h["type"] for h in cfg.hooks]
     assert hooks.index("DenoiseEvaluator") < hooks.index("CheckpointSaver")

@@ -17,6 +17,10 @@ are at git tag `archive-2026-11` (`git show archive-2026-11:docs/archive/NEXT.md
   M10lin (S = 30) cut the bright error by up to 27% (docs/DECISIONS.md). One d1m run with
   `model.lin_amp_scale=30` against the default, scored by `helix.eval --metrics denoise`
   (`cells.by_view` resolution), before it becomes the default.
+* **The denoiser's charge head.** `model.dist` is `point` until one full-length comparison of
+  `gauss` and `cat` (both with `model.cond_charge=True`) against it picks one: resolution per
+  truth bin and `cells.dist` calibration. Then make the winner the default and remove the
+  other (DECISIONS).
 
 ## Model and evaluation
 
