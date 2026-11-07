@@ -80,29 +80,50 @@ ARGS=(--site "$PIMM_SITE" --recipe "$RECIPE" --train.config "$CFG" --run.name "$
 [ -n "${HELIX_SLURM_TRAIN_PARTITION:-}" ]  && ARGS+=(--resources.partition "$HELIX_SLURM_TRAIN_PARTITION")
 [ -n "${HELIX_SLURM_TRAIN_TIME_MIN:-}" ]   && ARGS+=(--resources.time-min "$HELIX_SLURM_TRAIN_TIME_MIN")
 [ "${HELIX_SLURM_TRAIN_GPUS_FLAG:-}" = gpus-per-node ] && ARGS+=(--resources.gpu-directive gpus-per-node)
-if [ -n "${HELIX_SLURM_TRAIN_QOS:-}" ] && ! "$PY" - "$RECIPE" <<'PY'
+# The recipe's own shape: an interactive recipe takes the site's interactive QOS, any other the
+# training QOS; its node topology is part of what a run is (below).
+read -r R_INTER R_NNODES R_NPROC < <("$PY" - "$RECIPE" <<'PY'
 import sys, yaml
-r = yaml.safe_load(open(sys.argv[1])) or {}
-raise SystemExit(0 if (r.get("resources") or {}).get("qos") else 1)
+def load(p):
+    import os
+    r = yaml.safe_load(open(p)) or {}
+    out = {}
+    for b in r.get("_base_") or []:
+        out.update(load(os.path.join(os.path.dirname(p), b)))
+    for k, v in r.items():
+        out[k] = {**out.get(k, {}), **v} if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+r = load(sys.argv[1]); res = r.get("resources") or {}
+print(int(bool(r.get("interactive"))), res.get("nnodes", 1), res.get("nproc_per_node", 4))
 PY
-then
+)
+if [ "$R_INTER" = 1 ]; then
+  : "${HELIX_SLURM_TRAIN_INTERACTIVE_QOS:?site $HELIX_SITE declares no scheduler.train.interactive_qos; use the preempt recipe}"
+  ARGS+=(--resources.qos "$HELIX_SLURM_TRAIN_INTERACTIVE_QOS")
+elif [ -n "${HELIX_SLURM_TRAIN_QOS:-}" ]; then
   ARGS+=(--resources.qos "$HELIX_SLURM_TRAIN_QOS")
 fi
 
-# What this run is: the same NAME continues only the same config and training overrides (a
-# requeued or resubmitted chain resumes from $HELIX_EXP/NAME). Scheduling flags may change.
-TRAIN=(); seen=0
-for a in "${REST[@]}"; do [ "$seen" = 1 ] && TRAIN+=("$a"); [ "$a" = "--" ] && seen=1; done
-WHAT="$CFG ${TRAIN[*]}"
+# What this run is: the same NAME continues only the same config, training overrides and node
+# topology (a requeued or resubmitted chain resumes from $HELIX_EXP/NAME, and the config derives
+# its batch and LR from the world size). Other scheduling flags may change. Recorded only once
+# pimm has accepted the submission, so a rejected one does not lock the name.
+TRAIN=(); seen=0; NN=$R_NNODES; NP=$R_NPROC; prev=
+for a in "${REST[@]}"; do
+  if [ "$seen" = 1 ]; then TRAIN+=("$a"); continue; fi
+  case "$prev" in --resources.nnodes) NN=$a ;; --resources.nproc-per-node) NP=$a ;; esac
+  case "$a" in --) seen=1 ;; --resources.nnodes=*) NN=${a#*=} ;; --resources.nproc-per-node=*) NP=${a#*=} ;; esac
+  prev=$a
+done
+WHAT="$CFG nodes=$NN x $NP ${TRAIN[*]}"
 RUN=$HELIX_EXP/$NAME
-case " ${REST[*]} " in *" --dry-run "*) ;; *)
-  if [ -s "$RUN/submit.cmd" ] && [ "$(cat "$RUN/submit.cmd")" != "$WHAT" ]; then
-    echo "submit.sh: $RUN is a run of: $(cat "$RUN/submit.cmd")" >&2
-    echo "           not of:            $WHAT  (pass --run.name for a new run)" >&2
-    exit 2
-  fi
-  mkdir -p "$RUN" && echo "$WHAT" > "$RUN/submit.cmd" ;;
-esac
+DRY=0; case " ${REST[*]} " in *" --dry-run "*) DRY=1 ;; esac
+if [ "$DRY" = 0 ] && [ -s "$RUN/submit.cmd" ] && [ "$(cat "$RUN/submit.cmd")" != "$WHAT" ]; then
+  echo "submit.sh: $RUN is a run of: $(cat "$RUN/submit.cmd")" >&2
+  echo "           not of:            $WHAT  (pass --run.name for a new run)" >&2
+  exit 2
+fi
 
 echo "submit.sh: $NAME <- $CFG, recipe $(basename "$RECIPE"), site $HELIX_SITE ($PIMM_SITE), exp $HELIX_EXP" >&2
-exec "$PY" -m pimm.cli submit "${ARGS[@]}" "${REST[@]}"
+"$PY" -m pimm.cli submit "${ARGS[@]}" "${REST[@]}" || exit $?
+if [ "$DRY" = 0 ]; then mkdir -p "$RUN" && echo "$WHAT" > "$RUN/submit.cmd"; fi

@@ -103,7 +103,7 @@ ROOTS: dict[str, str] = {
 #: Job kinds :func:`scheduler` knows. They differ at S3DF (the corpus build runs
 #: on turing under a different account than training on ampere) so the split is
 #: not cosmetic.
-JOB_KINDS = ("train", "corpus")
+JOB_KINDS = ("train", "corpus", "eval")
 
 _SITE_CACHE: dict[str, Any] | None = None
 

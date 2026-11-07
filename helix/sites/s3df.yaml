@@ -55,6 +55,15 @@ scheduler:
     partition: ampere
     qos: normal
     gpus_flag: gpus
+  # One-GPU jobs after training (scripts/sweep.py's after_each / after_all): helix.eval needs an
+  # A100 (varlen attention, sm80+), ~32 cores and ~25 GB of host memory at FIT_ROWS = 1M.
+  eval:
+    account: mli:cider-ml
+    partition: ampere
+    qos: normal
+    gpus: 1
+    cpus_per_task: 32
+    mem: 64G
   corpus:
     # A DIFFERENT account: authorisation is per partition, and mli:cider-ml does
     # not cover turing while mli:default does. The DSP is architecture-sensitive

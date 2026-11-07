@@ -23,5 +23,5 @@ then:
   submit: [--resources.nnodes, "4", --chain.jobs, "2"]
   overrides: {weight: "$HELIX_EXP/{run}/model/last"}
 after_each:
-  command: python -m helix.eval $HELIX_EXP/{run} --metrics recon,floor,uprobe,labels --weights last
+  command: python -m helix.eval $HELIX_EXP/{run} --metrics recon,floor,uprobe,labels --weights last --out $HELIX_EXP/{run}/eval.json
   time: "04:00:00"

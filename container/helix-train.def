@@ -92,7 +92,7 @@ From: ghcr.io/deeplearnphysics/pimm@sha256:c0dc5a64797d7176d8fc11c3cae5749008f5c
     One image for both halves of the helix workflow.
 
       corpus:  apptainer exec -B /sdf <img> python -m helix.build sim ...
-      train:   scripts/train.sh fm
+      train:   scripts/submit.sh fm --resources.nnodes 4   (pimm submit, from the host)
 
     pimm and helix are NOT installed here; they come from binds/PYTHONPATH.
     pimm-data IS installed, and must match helix -- the AddNoise/Digitize

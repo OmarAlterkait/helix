@@ -17,16 +17,17 @@ A study file (configs/sweeps/*.yaml) is the whole study, in place of a launcher 
       suffix: _cool                     #   its run name: <arm><suffix>
       overrides: {weight: "$HELIX_EXP/{run}/model/last"}
     after_each:                         # optional: one job per arm, once that arm has succeeded
-      command: python -m helix.eval $HELIX_EXP/{run} --metrics floor,uprobe
+      command: python -m helix.eval $HELIX_EXP/{run} --metrics floor,uprobe --out $HELIX_EXP/{run}/eval.json
       time: "02:00:00"
     after_all:                          # optional: one job once every arm has succeeded
       command: python scripts/compare.py {runs}
 
 Each arm goes through scripts/submit.sh (so through pimm's launcher, site facts and all) as run
 ``<arm>`` under $HELIX_EXP. The ``after_*`` commands run in the container (scripts/helix_run.sh) as
-one-node batch jobs on the site's training account, held by ``--dependency=afterok`` on the arm's
+one-GPU batch jobs of the site's ``eval`` job kind (helix/sites/<site>.yaml), held by ``--dependency=afterok`` on the arm's
 job: submitit requeues a preempted chain under the same job id, so the dependency waits for the
-whole chain. ``then`` is submitted the same way, behind its arm. In ``then`` overrides ``{run}`` is
+whole chain. ``then`` is submitted the same way, behind its arm, with the study's and the arm's
+overrides carried over (a cooldown keeps its arm's LR and seed) under its own. In ``then`` overrides ``{run}`` is
 the arm's first run; in ``after_*`` commands ``{run}`` is the arm's LAST run (its ``then`` run if
 there is one) and ``{runs}`` all of them, space-separated. ``$VARS`` in overrides expand from the
 site environment (scripts/helix_env.sh).
@@ -93,11 +94,17 @@ def submit_after(spec, deps, name, fmt, env, dry):
         command = command.replace("{" + k + "}", v)
     sb = ["sbatch", "--parsable", "--nodes=1", f"--time={spec.get('time', '02:00:00')}", f"--job-name={name}",
           f"--output={env.get('HELIX_EXP', '.')}/{name}-%j.out"]
+    # the site's `eval` job kind: one A100 with its cores and memory, on a QOS that does not
+    # preempt (a preempted evaluation starts over)
     for flag, key in (("account", "ACCOUNT"), ("qos", "QOS"), ("constraint", "CONSTRAINT"),
-                      ("partition", "PARTITION"), ("time-min", "TIME_MIN")):
-        v = env.get(f"HELIX_SLURM_TRAIN_{key}")
+                      ("partition", "PARTITION"), ("gpus", "GPUS"), ("cpus-per-task", "CPUS_PER_TASK"),
+                      ("mem", "MEM")):
+        v = env.get(f"HELIX_SLURM_EVAL_{key}")
         if v:
             sb.append(f"--{flag}={v}")
+    if not env.get("HELIX_SLURM_EVAL_GPUS"):
+        raise SystemExit("sweep: this site declares no scheduler.eval (helix/sites/<site>.yaml); "
+                         "evaluation jobs need a GPU")
     if deps:
         sb.append("--dependency=afterok:" + ":".join(deps))
     wrap = (f"cd {shlex.quote(H)} && HELIX_INTERACTIVE=0 HDF5_USE_FILE_LOCKING=FALSE "
@@ -129,9 +136,13 @@ def main():
         jid = submit_arm(study, tag, arm or {}, a.dry_run, env)
         then = study.get("then")
         if then:
+            # the stage continues the arm: the study's and the arm's overrides (its LR, its seed),
+            # then the stage's own on top -- without them a cooldown anneals from the config's LR
+            ov = dict(study.get("overrides") or {})
+            ov.update((arm or {}).get("overrides") or {})
+            ov.update({k: str(v).replace("{run}", tag) for k, v in (then.get("overrides") or {}).items()})
             stage = dict(config=then["config"], recipe=then.get("recipe", study.get("recipe", "preempt")),
-                         submit=then.get("submit"),
-                         overrides={k: str(v).replace("{run}", tag) for k, v in (then.get("overrides") or {}).items()})
+                         submit=then.get("submit"), overrides=ov)
             tag = tag + then.get("suffix", "_then")
             jid = submit_arm(stage, tag, {}, a.dry_run, env, after=jid)
         jobs[tag] = jid
