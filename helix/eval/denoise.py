@@ -58,7 +58,7 @@ import numpy as np
 
 from helix.data.cells import Q0, cell_inputs, cell_neighbors, unkey
 from helix.eval.events import VIEWS
-from helix.eval.probe import Scored
+from helix.eval.probe import Scored, window_flags
 
 #: Truth-charge bins of the resolution (e-); the last is open.
 TRUTH_BINS = (1e3, 4e3, 16e3, 64e3, 256e3, np.inf)
@@ -236,7 +236,7 @@ class Denoise:
         c = self.ctx
         if ev.index < c.n_train:
             return
-        tr = ev.truth(c.seed, windows=True)
+        tr = window_flags(ev, ev.truth(c.seed, windows=True), c.run.tokenizer)   # kept / tok / shtok
         y, pr = c.denoiser(ev, tr["wkey"])
         self.scored.add(ev, tr, {"charge": np.expm1(np.maximum(y, 0)) * Q0, "presence": pr})
 

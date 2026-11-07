@@ -317,6 +317,22 @@ number still under its own key, the new ones beside it):*
   `_noshtok`: token resolution if only there, the encoder's context if in both), decide what the
   haze is. `near_fpr_at_far` is not comparable across fit settings (the fit moves the far
   threshold itself); `auc_near_vs_far` is.
+  Measured on fm_cooldown (1200 events, 400 scored; 2026-11-07). **The haze has both causes.**
+  52% of near windows share a covering token with charge; the trained arm's haze AUC (P(near >
+  far), 0.5 = none) is 0.923 in those and 0.806 in the rest (presence 0.954 / 0.881; raw 0.638 /
+  0.397; amplitude 0.463 / 0.407): strongest where a token is shared (token resolution: finer
+  patches, a decoder), and large without (the encoder's context spreading charge: the
+  representation). `shtok` is by TRUTH charge, so a "non-sharing" token can still hold a track's
+  own spread coefficients (wavelet support, induction tails); the amplitude's 0.407 there -- the
+  input looks QUIETER than the far background -- says that is small, and the trained arms' 0.81-0.88
+  on those windows is the encoder's context: the MAE objective's prior that charge clusters,
+  right as a prior and costly for faint isolated deposits. The denoiser's evaluation reports the
+  same split; whether fine-tuning on near-activity windows removes the context share (and only
+  then finer patches for the shared one) is what the d1m_denoise arms answer. **The clean fit test:** the near-track negatives ON TOP (`neg`) raise
+  crowded@near at the fixed operating point (+0.041 MSE, +0.068 presence at 0.1-0.2 MeV) and MSE
+  clear (+0.053), the primary key by +0.017 [+0.004, +0.030], and leave the haze AUC where it was
+  (+0.003 presence, -0.010 MSE): a probe cannot fit the haze away. `none` stays -- fixed before
+  the ranking, which compares models, not probes.
   **The background is drawn around a kept coefficient, and that caps every arm.** Far and near
   windows are accepted only with a kept coefficient inside, so "no token, no charge" cannot win
   trivially -- right, and it makes the background harder than random noise: raw and amplitude

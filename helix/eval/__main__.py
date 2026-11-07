@@ -43,6 +43,12 @@ def compare(argv):
             raise SystemExit(f"compare: the two runs' windows differ ({k}): score them on the same events and seed")
     meta = [dict(zip(keys, (int(e), str(kd), int(g), float(E), str(c) or None)))
             for e, kd, g, E, c in zip(*(za[f"{pre}meta/{k}"] for k in keys))]
+    for k in ("kept", "tok", "shtok"):                  # the window flags, where the dump has them
+        if f"{pre}meta/{k}" in za.files:
+            if f"{pre}meta/{k}" not in zb.files or not np.array_equal(za[f"{pre}meta/{k}"], zb[f"{pre}meta/{k}"]):
+                raise SystemExit(f"compare: the two runs' windows differ ({k})")
+            for m, v in zip(meta, za[f"{pre}meta/{k}"]):
+                m[k] = bool(v)
     sa, n, counts = window_stat(za[f"{pre}score/{a.arm}"][:, None], meta)
     sb = window_stat(zb[f"{pre}score/{a.arm_b or a.arm}"][:, None], meta)[0]
     out = dict(a=a.a, b=a.b, metric=a.metric, arm=a.arm, arm_b=a.arm_b or a.arm, n_events=n, n_windows=counts,

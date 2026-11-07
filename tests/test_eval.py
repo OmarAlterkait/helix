@@ -1110,6 +1110,12 @@ def test_compare_is_paired_over_identical_windows(tmp_path):
     cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "b.npz"), "--out", str(tmp_path / "ab.json")])
     d = json.load(open(tmp_path / "ab.json"))["a_minus_b"]["floor_eff1pct_clear_0.1-0.2"]
     assert d[0] == pytest.approx(1.0 - (b[is_iso] > 1).mean()) and d[1] <= d[0] <= d[2]
+    # the window flags travel: a shared-token flag in the dumps reaches the haze keys
+    sh = dict(base, **{"floor/meta/shtok": np.zeros(len(meta), bool), "floor/meta/kept": np.ones(len(meta), bool),
+                       "floor/meta/tok": np.ones(len(meta), bool)})
+    np.savez(tmp_path / "s.npz", **sh, **{"floor/score/trained": a})
+    cli(["compare", str(tmp_path / "s.npz"), str(tmp_path / "s.npz"), "--out", str(tmp_path / "ss.json")])
+    assert "auc_near_vs_far_noshtok" in json.load(open(tmp_path / "ss.json"))["a_minus_b"]
     other = dict(base); other["floor/meta/ev"] = base["floor/meta/ev"][::-1].copy()
     np.savez(tmp_path / "c.npz", **other, **{"floor/score/trained": a})
     with pytest.raises(SystemExit, match="windows differ"):

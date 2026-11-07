@@ -250,6 +250,29 @@ def amplitude(ev, keys):
     return np.where(uk[p] == keys, amp[p], 0.0)
 
 
+def window_flags(ev, tr, cfg):
+    """``tr`` with each window's flags on its meta: ``kept`` (>= 1 kept coefficient inside: the gate's
+    cap, and the amplitude arm's; a kept coefficient is above the ~3.5 sigma threshold and the value
+    step is <= sigma/16, so none rounds to 0), ``tok`` (>= 1 cell under a covering token: a fitted
+    arm's cap, wider -- a token spans 16 wires, so one whose coefficients sit just outside still
+    covers the window) and ``shtok`` (a window cell's covering token also covers a charged cell: a
+    model reads a token's features for every cell it covers, so a near window sharing one with
+    charge cannot be told apart by them -- token resolution; a haze where none is shared is the
+    encoder's context). ``shtok`` is by TRUTH charge: a token without any can still hold a track's
+    own spread coefficients."""
+    nw = len(tr["meta"])
+    if not nw:
+        return tr
+    widx = cell_inputs(tr["wkey"], ev.cell_key, ev.band_lengths, cfg)[0]
+    tok = (widx >= 0).any(1).reshape(nw, -1).any(1)
+    kept = amplitude(ev, tr["wkey"]).reshape(nw, -1).max(1) > 0
+    ck = np.asarray(ev.cells["key"], np.int64)[np.asarray(ev.cells["q"]) > 0]
+    cidx = cell_inputs(ck, ev.cell_key, ev.band_lengths, cfg)[0] if len(ck) else np.zeros((0, 1), np.int64)
+    shtok = (np.isin(widx, np.unique(cidx[cidx >= 0])) & (widx >= 0)).any(1).reshape(nw, -1).any(1)
+    return dict(tr, meta=[dict(m, kept=bool(k), tok=bool(t), shtok=bool(s))
+                          for m, k, t, s in zip(tr["meta"], kept, tok, shtok)])
+
+
 class Scored:
     """The scored events' windows and named per-cell scores on them, scored by
     :func:`helix.eval.events.score_windows`: the floor's arms and the denoiser alike."""
@@ -292,6 +315,8 @@ class Scored:
         n = len(self.meta)
         out = {f"meta/{k}": np.array([m.get(k) if m.get(k) is not None else "" for m in self.meta])
                for k in ("ev", "kind", "g", "E", "ctx")}
+        out.update({f"meta/{k}": np.array([bool(m.get(k, d)) for m in self.meta])        # window flags
+                    for k, d in (("kept", True), ("tok", True), ("shtok", False))})
         out.update({f"score/{k}": np.concatenate(v).reshape(n, -1).max(1) for k, v in self.s.items()})
         return out
 
@@ -387,25 +412,7 @@ class Floor:
         widx, waux = cell_inputs(tr["wkey"], ev.cell_key, ev.band_lengths, c.run.tokenizer)
         ok = (widx >= 0).any(1)
         scores = dict(amplitude=amplitude(ev, tr["wkey"]))
-        # What the corpus left in each window. kept: >= 1 kept coefficient inside (the amplitude > 0;
-        # a kept coefficient is above the ~3.5 sigma threshold and the value step is <= sigma/16, so
-        # none rounds to 0) -- the gate's cap, and the amplitude arm's. tok: >= 1 window cell under a
-        # covering token -- the fitted arms' cap, wider: a token spans 16 wires, so one whose
-        # coefficients sit just outside the window still covers it
-        nw = len(tr["meta"])
-        kept = scores["amplitude"].reshape(nw, -1).max(1) > 0 if nw else np.zeros(0, bool)
-        tok = ok.reshape(nw, -1).any(1) if nw else np.zeros(0, bool)
-        # shtok: a window cell's covering token (any band) also covers a charged cell. The probes read
-        # a token's features for every cell it covers, so a near window sharing a token with charge
-        # cannot be told apart by the features alone (token resolution); a haze in near windows that
-        # share none is the encoder's context spreading it (the representation)
-        ck = np.asarray(ev.cells["key"], np.int64)[np.asarray(ev.cells["q"]) > 0]
-        cidx = cell_inputs(ck, ev.cell_key, ev.band_lengths, c.run.tokenizer)[0] if len(ck) else np.zeros((0, 1), np.int64)
-        charged_tok = np.unique(cidx[cidx >= 0])
-        sh = np.isin(widx, charged_tok) & (widx >= 0)
-        shtok = sh.any(1).reshape(nw, -1).any(1) if nw else np.zeros(0, bool)
-        tr = dict(tr, meta=[dict(m, kept=bool(k), tok=bool(t), shtok=bool(s))
-                            for m, k, t, s in zip(tr["meta"], kept, tok, shtok)])
+        tr = window_flags(ev, tr, c.run.tokenizer)                  # kept / tok / shtok per window
         for a in FLOOR_FITTED:
             X = gather(arm_features(ev, c.model, a), widx[ok]) if ok.any() else None
             for k, probe in enumerate(self.probes[a]):
