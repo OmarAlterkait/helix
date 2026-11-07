@@ -316,6 +316,19 @@ def test_a_missing_shard_and_a_stray_one_are_reported(tmp_path):
     assert "runA/cx: shard 7 is not in the plan" in probs
 
 
+def test_a_moved_corpus_resolves_its_plan_under_its_new_root(tmp_path):
+    """The plan records the absolute prefix the corpus was built at; a copy elsewhere (staged,
+    transferred) resolves each prefix under the root it is verified at, by run and dataset."""
+    import shutil
+    built = _corpus(str(tmp_path / "built"))
+    moved = str(tmp_path / "moved")
+    shutil.copytree(built, moved)
+    shutil.rmtree(built)
+    assert _fatal(verify.verify_plan(moved)) == []
+    os.remove(os.path.join(moved, "runB", "cx_coeff_0001.h5"))
+    assert "runB/cx: shard 1 missing" in " | ".join(verify.verify_plan(moved))
+
+
 def test_a_shard_with_its_own_norm_table_is_reported(tmp_path):
     root = _corpus(str(tmp_path))
     np.save(os.path.join(root, "_calib", "norm_sigma_global.npy"),

@@ -364,11 +364,19 @@ def verify_corpus(data_root, dataset_name, *, split="", expect_events=None,
 
 # ------------------------------------------------------------------------------------- plan
 def read_plan(root):
-    """[(prefix, first, count, events_per_shard, shard_start, inputs)] of ``root/_calib/CHUNKS.txt``."""
+    """[(prefix, first, count, events_per_shard, shard_start, inputs)] of ``root/_calib/CHUNKS.txt``.
+
+    The plan records each shard prefix as the absolute path it was built at
+    (``<built root>/<run>/<dataset>``). A corpus moved since -- staged to $SCRATCH, transferred
+    to another site -- keeps the plan but not the path, so a prefix whose run directory is
+    absent resolves under ``root`` by its last two components (run, dataset): every shard of
+    a d1m copy at NERSC was otherwise "missing" and nothing else was checked."""
     out = []
     for line in open(os.path.join(root, "_calib", "CHUNKS.txt")):
         if line.strip():
             p, first, count, eps, k, *inputs = line.split()
+            if not os.path.isdir(os.path.dirname(p)):
+                p = os.path.join(root, *p.rstrip("/").split("/")[-2:])
             out.append((p, int(first), int(count), int(eps), int(k), inputs))
     return out
 
