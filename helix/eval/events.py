@@ -24,6 +24,13 @@ Truth (per event, from the cells record; no tokenizer, no checkpoint):
                      answer)
                bg    kept coefficients but no truth charge within +-16 w / +-128 t; up to
                      :data:`N_BG_PLANE` per plane, so every view has its own background
+                     (the FAR background)
+               near  the NEAR background: no truth charge in the window or within one cell
+                     of it, but some within +-16 w / +-128 t -- exactly the surroundings
+                     ``bg`` must keep empty (:func:`helix.data.denoise.near_windows`, the
+                     denoiser's own training windows) -- and at least one kept coefficient
+                     inside, as every ``bg`` window has; up to :data:`N_BG_PLANE` per plane.
+                     Drawn after the others, so iso and bg are the same with or without them
 
 The number (:func:`score_windows`): a window's score is its largest cell score; an iso window
 is detected when it scores above the 99th percentile of the background windows OF ITS VIEW (U,
@@ -32,6 +39,14 @@ and one pooled threshold is set by the views with most background (measured: Y r
 under a pooled 1%). Reported as the detected fraction by the particle's deposited energy (its
 whole track's step energy; it tracks the charge in the window, Spearman 0.94-0.96 on every
 view at ~20k e/MeV), with a [16, 84]% interval over an event bootstrap.
+
+The far background alone sets that threshold, while an iso window caps foreign charge only
+INSIDE itself (5%), so a prediction that hazes charge around tracks gains iso efficiency at no
+cost on it. The near background prices the haze: the same efficiency with each view's
+threshold set on the near windows instead, and the rate at which the far threshold fires on
+them (1% if near and far look alike to the prediction). Beside them, threshold-free, the AUC
+of iso against far background (seed pairs agree to ~0.005 on it, ~0.04 on the efficiency at
+1%); and every number per view as well as pooled over views.
 
 Also here: the within-group R^2 the along-wire probe reports (:func:`group_r2`).
 
@@ -56,7 +71,17 @@ class Event:
     cell_key: np.ndarray       # per token, the tokenizer's cell key (numpy)
     batch: dict                # the FM's batch (torch, on the device)
     _feats: object = field(default=None, repr=False)
+    _raw: object = field(default=None, repr=False)
     _truth: tuple = field(default=None, repr=False)         # (seed, truth)
+
+    def raw_inputs(self):
+        """Per token, the tokenizer's own input to the encoder -- ``inp`` and ``occ``
+        (``n_slot`` each), concatenated, float32, cached: what the probes' ``raw`` arm reads in
+        place of encoder features."""
+        if self._raw is None:
+            import torch
+            self._raw = torch.cat([self.batch["inp"].float(), self.batch["occ"].float()], 1)
+        return self._raw
 
     def features(self, model):
         """``model.encode(batch)`` (all tokens visible), float32, cached: an evaluation probes
@@ -88,6 +113,48 @@ def dataset(run):
                            holdout=d.get("holdout"), split_role="probe")
 
 
+#: The simulation's per-sample charge cut (e-) of the d1m campaign's hits (JAXTPC f0d2ed39,
+#: ``threshold: 25.0``), recorded when a cells shard does not carry its own.
+D1M_TRUTH_Q_CUT = 25.0
+
+
+def identity(ds):
+    """What the evaluated shards say they are: ``basis_digest`` (the corpus's DSP identity, from
+    the coefficient shards' ``/config``; the dataset refuses shards that disagree on it, so one
+    value) and ``truth_q_cut`` (the per-sample charge cut, e-, the cells truth was built under:
+    its shards' ``label_json`` ``hits_threshold``, written by :func:`helix.data.cells.build_shard`)
+    with where that came from. ``None`` where the dataset cannot say (a plain list in tests)."""
+    out = dict(basis_digest=None, truth_q_cut=None, truth_q_cut_source=None)
+    r = getattr(ds, "coeff_reader", None)
+    if r is not None:
+        meta = getattr(r, "_meta_by_path", {})
+        dig = sorted({_text(m.get("basis_digest")) for m in meta.values()} - {None})
+        out["basis_digest"] = dig[0] if len(dig) == 1 else (dig or None)
+    c = getattr(ds, "cells_reader", None)
+    if c is not None:
+        import json
+
+        import h5py
+        cuts = set()
+        for p in c.h5_files:
+            with h5py.File(p, "r") as f:
+                cuts.add(json.loads(_text(f["config"].attrs.get("label_json")) or "{}").get("hits_threshold"))
+        cuts.discard(None)
+        if cuts:
+            cuts = sorted(cuts)
+            out.update(truth_q_cut=cuts[0] if len(cuts) == 1 else cuts,
+                       truth_q_cut_source="cells /config label_json hits_threshold")
+        else:   # TODO: a cells shard that records no cut; every d1m shard so far was built under 25 e-
+            out.update(truth_q_cut=D1M_TRUTH_Q_CUT, truth_q_cut_source="not recorded by the shards: the d1m default")
+    return out
+
+
+def _text(x):
+    if x is None:
+        return None
+    return x.decode() if isinstance(x, bytes) else str(x)
+
+
 def events(ds, tokenizer, device, max_events=None):
     """:class:`Event` for each of the first ``max_events`` events of ``ds``, in its order."""
     import torch
@@ -114,7 +181,7 @@ WW, WT = 32, 128                     # window, wires x raw ticks
 ENERGY_BINS = (0.0, 0.1, 0.2, 0.5, 1e9)                  # MeV
 #: per event: signal map rows at most, iso windows at most, bg windows per plane at most
 CAP_SIGNAL, N_ISO, N_BG_PLANE = 3000, 60, 10
-KINDS = ("iso", "bg")
+KINDS = ("iso", "bg", "near")
 VIEWS = ("U", "V", "Y")
 ENERGY_NAMES = tuple(f"{ENERGY_BINS[i]:g}-{ENERGY_BINS[i + 1]:g}" for i in range(len(ENERGY_BINS) - 1))
 
@@ -135,8 +202,8 @@ def event_truth(cells, coeff_cells, rng, windows=True):
     :func:`helix.data.cells.coeff_cells`). Returns ``mrows``/``mq`` (map rows and their truth
     charge) and, with ``windows``, ``wkey`` (window cells in window order, :func:`window_cells`'
     order inside each) and ``meta`` (one dict per window: ``kind``, ``g``, ``w0``, ``t0``, ``E``
-    -- the iso particle's energy, NaN for bg). The map rows are drawn first, so they are the
-    same with or without the windows.
+    -- the iso particle's energy, NaN for a background window, ``bg`` or ``near``). The map
+    rows are drawn first, so they are the same with or without the windows.
     """
     E = dict(enumerate(np.asarray(cells["trk_energy"], np.float64).tolist()))
     uk = np.asarray(cells["key"], np.int64)
@@ -220,15 +287,46 @@ def event_truth(cells, coeff_cells, rng, windows=True):
                 wins.append(("bg", g, w0, t0, np.nan))
                 n_b += 1
 
+    # near background: drawn last, so every window above is the same with or without it.
+    # Oversampled, then kept only with a kept coefficient inside, as every bg window has: the two
+    # backgrounds then differ in their distance to charge alone.
+    from helix.data.denoise import near_windows
+    planes = np.unique(unkey(uk[fq > 0])[0])
+    n_near = dict.fromkeys(planes.tolist(), 0)
+    for g, w0, t0 in (near_windows(uk, fq, rng, n=4 * N_BG_PLANE * len(planes)) if len(planes) and len(ck) else []):
+        if n_near[g] >= N_BG_PLANE or not np.isin(window_cells(g, w0, t0), ck).any():
+            continue
+        wins.append(("near", g, w0, t0, np.nan))
+        n_near[g] += 1
+
     wkey = np.concatenate([window_cells(g, w0, t0) for _, g, w0, t0, _ in wins]) if wins \
         else np.zeros(0, np.int64)
     meta = [dict(kind=k, g=g, w0=w0, t0=t0, E=e) for k, g, w0, t0, e in wins]
     return dict(mrows=mrows, mq=mq, wkey=wkey, meta=meta)
 
 
-def score_windows(score, meta, n_boot=200, seed=0):
-    """The floor of one per-cell ``score`` (flat over the windows' cells in window order; larger
-    = more charge): ``floor_eff1pct_<E bin>`` (each ``[point, lo, hi]``) and the window counts.
+def _ratio(a, b):
+    return float(a / b) if b else float("nan")
+
+
+def _frac(w, hit, sel):
+    return _ratio((w * hit)[sel].sum(), w[sel].sum())
+
+
+def window_stat(score, meta):
+    """``(stat, n_events, n_windows)`` of one per-cell ``score`` (flat over the windows' cells in
+    window order; larger = more charge): ``stat(m)`` the floor's numbers under per-event weights
+    ``m`` (:func:`bootstrap`), keyed by ``<E bin>`` and, where per view, ``_<view>``:
+
+      floor_eff1pct_<E>[_<V>]       iso efficiency, threshold each view's 99th percentile of its
+                                    FAR (``bg``) windows -- the floor itself
+      floor_eff1pct_<E>_ev          the same, each event's iso windows of the bin weighted
+                                    equally (pooled: an event with more windows weighs more)
+      floor_eff1pct_near_<E>[_<V>]  threshold set on the NEAR windows instead; a view without
+                                    near windows is left out
+      near_fpr_at_far[_<V>]         the fraction of near windows above the far threshold
+      auc_<E>[_<V>]                 P(iso scores above a far window of its view), ties 1/2
+
     ``meta``: one dict per window, its event as ``ev``."""
     n = len(meta)
     s = np.asarray(score, np.float64).reshape(n, -1).max(1) if n else np.zeros(0)
@@ -238,25 +336,80 @@ def score_windows(score, meta, n_boot=200, seed=0):
     eb = np.array([np.searchsorted(ENERGY_BINS, m["E"], side="right") - 1 if m["kind"] == "iso" else -1
                    for m in meta], np.int64)
     evs, we = np.unique(ev, return_inverse=True)
-    iso, bg = kind == 0, kind == 1
+    iso, bg, near = kind == 0, kind == 1, kind == 2
+    # per-event equal weights of the iso windows: 1 / (the event's iso windows in that energy bin)
+    cell = we * len(ENERGY_NAMES) + np.maximum(eb, 0)
+    cnt = np.bincount(cell[iso], minlength=len(evs) * len(ENERGY_NAMES))
+    inv_n = np.where(iso, 1.0 / np.maximum(cnt[cell], 1), 0.0)
+    # AUC: per view, the far windows in score order and where each iso score falls among them
+    # (fixed); a resample only re-weighs, so a statistic is a cumulative sum, not a sort
+    auc = []
+    for v in range(3):
+        b = np.nonzero(bg & (view == v))[0]
+        b = b[np.argsort(s[b], kind="stable")]
+        i = np.nonzero(iso & (view == v))[0]
+        auc.append((b, i, np.searchsorted(s[b], s[i], "left"), np.searchsorted(s[b], s[i], "right")))
+
+    def thresholds(w, ref):
+        thr = np.full(3, np.nan)
+        for v in range(3):
+            b = np.repeat(s[ref & (view == v)], w[ref & (view == v)])
+            if len(b):
+                thr[v] = np.quantile(b, 0.99)
+        return thr
 
     def stat(m):
         w = m[we]
-        thr = np.full(3, np.inf)
-        for v in range(3):
-            b = np.repeat(s[bg & (view == v)], w[bg & (view == v)])
-            if len(b):
-                thr[v] = np.quantile(b, 0.99)
-        det = s > thr[view]
+        far = thresholds(w, bg)
+        det = s > np.where(np.isnan(far), np.inf, far)[view]          # a view without bg: none detected
+        thr_n = thresholds(w, near)
+        has_n = ~np.isnan(thr_n)[view]
+        det_n = s > np.where(np.isnan(thr_n), np.inf, thr_n)[view]
+        # per view and iso window: the weight of far windows it beats (+1/2 the ties), and of all
+        beat, tot = np.zeros(n), np.zeros(n)
+        for b, i, lo, hi in auc:
+            cw = np.concatenate([[0.0], np.cumsum(w[b])])
+            beat[i], tot[i] = (cw[lo] + cw[hi]) / 2, cw[-1]
         out = {}
-        for i, nm in enumerate(ENERGY_NAMES):
-            sel = iso & (eb == i)
-            out[f"floor_eff1pct_{nm}"] = float((w * det)[sel].sum() / w[sel].sum()) if w[sel].sum() else float("nan")
+        for k, nm in enumerate(ENERGY_NAMES):
+            sel = iso & (eb == k)
+            out[f"floor_eff1pct_{nm}"] = _frac(w, det, sel)
+            out[f"floor_eff1pct_{nm}_ev"] = _frac(w * inv_n, det, sel)
+            out[f"floor_eff1pct_near_{nm}"] = _frac(w, det_n, sel & has_n)
+            for v in range(3):
+                sv = sel & (view == v)
+                out[f"floor_eff1pct_{nm}_{VIEWS[v]}"] = _frac(w, det, sv)
+                out[f"floor_eff1pct_near_{nm}_{VIEWS[v]}"] = _frac(w, det_n, sv & has_n)
+                out[f"auc_{nm}_{VIEWS[v]}"] = _ratio((w * beat)[sv].sum(), (w * tot)[sv].sum())
+            out[f"auc_{nm}"] = _ratio((w * beat)[sel].sum(), (w * tot)[sel].sum())
+        out["near_fpr_at_far"] = _frac(w, det, near)
+        for v in range(3):
+            out[f"near_fpr_at_far_{VIEWS[v]}"] = _frac(w, det, near & (view == v))
         return out
 
-    out = bootstrap(stat, len(evs), n_boot, seed)
-    out["n_windows"] = {f"{k}_{VIEWS[v]}": int(((kind == i) & (view == v)).sum())
-                        for i, k in enumerate(KINDS) for v in range(3)}
+    return stat, len(evs), {f"{k}_{VIEWS[v]}": int(((kind == i) & (view == v)).sum())
+                            for i, k in enumerate(KINDS) for v in range(3)}
+
+
+def score_windows(score, meta, n_boot=200, seed=0):
+    """The floor of one per-cell ``score``: :func:`window_stat`'s numbers (each ``[point, lo,
+    hi]``) and the window counts ``n_windows``."""
+    stat, n_ev, n_win = window_stat(score, meta)
+    out = bootstrap(stat, n_ev, n_boot, seed)
+    out["n_windows"] = n_win
+    return out
+
+
+def seed_spread(points):
+    """Over the probe seeds: ``{"seed_mean": {k: mean}, "seed_half_range": {k: (max - min) / 2}}``
+    of each key's point value, one dict per seed -- the fit's own variance, which the event
+    bootstrap (one fitted probe, resampled events) does not contain."""
+    out = {"seed_mean": {}, "seed_half_range": {}}
+    for k in points[0]:
+        v = np.array([p[k] for p in points], np.float64)
+        ok = v[np.isfinite(v)]
+        out["seed_mean"][k] = round(float(ok.mean()), 4) if len(ok) else float("nan")
+        out["seed_half_range"][k] = round(float(ok.max() - ok.min()) / 2, 4) if len(ok) else float("nan")
     return out
 
 

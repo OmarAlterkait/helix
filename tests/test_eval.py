@@ -464,20 +464,49 @@ def _charge(rec, keys):
     return np.where(k[p] == keys, q[p], 0.0)
 
 
+def _haze(rec, keys, value, r=8):
+    """``value`` on every cell of ``keys`` with truth charge within ``r`` cells (wire and tick, its
+    plane), else 0: what a prediction that blurs charge into the surroundings of tracks adds."""
+    g, fw, ft = C.unkey(np.asarray(rec["key"])[np.asarray(rec["q"]) > 0])
+    kg, kw, kt = C.unkey(keys)
+    out = np.zeros(len(keys))
+    for p in np.unique(kg):
+        on = g == p
+        occ = np.zeros((int(max(fw.max(initial=0), kw.max())) + 2 * r + 2,
+                        int(max(ft.max(initial=0), kt.max())) + 2 * r + 2))
+        occ[fw[on] + r, ft[on] + r] = 1
+        S = np.pad(occ.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+        m = kg == p
+        i0, i1, j0, j1 = kw[m], kw[m] + 2 * r + 1, kt[m], kt[m] + 2 * r + 1        # grid offset r
+        out[m] = np.where(S[i1, j1] - S[i0, j1] - S[i1, j0] + S[i0, j0] > 0, value, 0.0)
+    return out
+
+
 def test_truth_has_both_window_kinds_and_valid_keys():
     rec, ck = _event(np.random.default_rng(0))
     tr = W.event_truth(rec, ck, np.random.default_rng(1))
     kinds = [m["kind"] for m in tr["meta"]]
-    assert set(kinds) == {"iso", "bg"} and kinds.count("bg") <= W.N_BG_PLANE * 1      # one plane here
+    assert set(kinds) == {"iso", "bg", "near"}
+    assert kinds.count("bg") <= W.N_BG_PLANE * 1 and kinds.count("near") <= W.N_BG_PLANE    # one plane here
     assert len(tr["wkey"]) == len(tr["meta"]) * N_CELL
     q = _charge(rec, tr["wkey"])
+    near_charge = _haze(rec, tr["wkey"], 1.0) > 0                 # charge within 8 cells
     for i, m in enumerate(tr["meta"]):
         cells = slice(i * N_CELL, (i + 1) * N_CELL)
         assert np.array_equal(tr["wkey"][cells], W.window_cells(m["g"], m["w0"], m["t0"]))
         if m["kind"] == "bg":
-            assert q[cells].sum() == 0 and np.isnan(m["E"])
+            assert q[cells].sum() == 0 and np.isnan(m["E"]) and not near_charge[cells].any()
+        elif m["kind"] == "near":                                  # empty, a kept coefficient, charge beside
+            assert q[cells].sum() == 0 and np.isnan(m["E"]) and near_charge[cells].any()
+            assert np.isin(tr["wkey"][cells], ck).any()
         else:
             assert m["E"] > 0 and q[cells].sum() > 0
+    # the near windows are drawn last: iso and bg are what they were without them
+    from helix.eval import events as EV
+    import unittest.mock as um
+    with um.patch("helix.data.denoise.near_windows", lambda *a, **k: []):
+        old = EV.event_truth(rec, ck, np.random.default_rng(1))
+    assert old["meta"] == [m for m in tr["meta"] if m["kind"] != "near"]
 
 
 def test_every_plane_gets_its_own_background():
@@ -505,6 +534,77 @@ def test_a_perfect_prediction_scores_perfectly():
     effs = [v[0] for k, v in out.items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
     assert effs and all(v == 1.0 for v in effs)        # every isolated particle beats empty windows
     assert out["n_windows"]["bg_U"] > 0 and out["n_windows"]["bg_V"] == 0
+    assert out["near_fpr_at_far"][0] == 0.0 and out["n_windows"]["near_U"] > 0
+    aucs = [v[0] for k, v in out.items() if k.startswith("auc_") and v[0] == v[0]]
+    assert aucs and all(v == 1.0 for v in aucs)
+    assert np.isnan(out["floor_eff1pct_0.1-0.2_V"][0])                  # no V window: not a 0
+
+
+def test_a_haze_around_tracks_is_free_on_the_far_background_and_priced_on_the_near():
+    """A prediction that puts charge (above any particle's) on every cell within 8 cells of truth
+    detects every isolated particle against the far background, which keeps those surroundings
+    empty by construction -- and nothing against the near background, on which the far threshold
+    fires every time."""
+    rec, ck = _event(np.random.default_rng(0))
+    tr = W.event_truth(rec, ck, np.random.default_rng(1))
+    meta = [dict(m, ev=0) for m in tr["meta"]]
+    q = _charge(rec, tr["wkey"])
+    hazy = np.maximum(q, _haze(rec, tr["wkey"], 1.5 * q.max()))
+    good, bad = (W.score_windows(s, meta, n_boot=5) for s in (q, hazy))
+    E = [nm for nm in W.ENERGY_NAMES if good[f"floor_eff1pct_{nm}"][0] == good[f"floor_eff1pct_{nm}"][0]]
+    assert E
+    for nm in E:
+        assert bad[f"floor_eff1pct_{nm}"][0] == 1.0 == good[f"floor_eff1pct_{nm}"][0]           # far: blind to it
+        assert bad[f"floor_eff1pct_{nm}_U"][0] == 1.0
+        assert bad[f"floor_eff1pct_near_{nm}"][0] == 0.0 and good[f"floor_eff1pct_near_{nm}"][0] == 1.0
+        assert bad[f"floor_eff1pct_near_{nm}_U"][0] == 0.0
+    assert bad["near_fpr_at_far"][0] == 1.0 == bad["near_fpr_at_far_U"][0] and good["near_fpr_at_far"][0] == 0.0
+
+
+def test_the_auc_is_the_weighted_pair_ordering_within_a_view():
+    rng = np.random.default_rng(0)
+    meta, score = [], []
+    for g, shift in ((0, 0.5), (2, 1.0)):
+        for _ in range(80):
+            meta.append(dict(kind="bg", g=g, E=np.nan, ev=len(meta) % 10))
+            score.append(rng.random())
+        for _ in range(40):
+            meta.append(dict(kind="iso", g=g, E=0.15, ev=len(meta) % 10))
+            score.append(shift * rng.random() + 0.3 * shift)
+    score = np.round(score, 2)                                          # ties count one half
+    stat, n, _ = W.window_stat(np.repeat(score, N_CELL), meta)
+    view = np.array([m["g"] % 3 for m in meta]); kind = np.array([m["kind"] for m in meta])
+    ev = np.array([m["ev"] for m in meta])
+
+    def brute(m, views):
+        num = den = 0.0
+        for v in views:
+            i, b = np.nonzero((kind == "iso") & (view == v))[0], np.nonzero((kind == "bg") & (view == v))[0]
+            w = np.outer(m[ev[i]], m[ev[b]])
+            num += (w * ((score[i][:, None] > score[b][None]) + 0.5 * (score[i][:, None] == score[b][None]))).sum()
+            den += w.sum()
+        return num / den
+    m = rng.integers(0, 3, n)                                           # a resample's weights
+    got = stat(m)
+    assert got["auc_0.1-0.2_U"] == pytest.approx(brute(m, [0])) and got["auc_0.1-0.2_Y"] == pytest.approx(brute(m, [2]))
+    assert got["auc_0.1-0.2"] == pytest.approx(brute(m, [0, 2]))      # pooled over views: pairs within a view
+
+
+def test_the_ev_efficiency_weighs_every_event_equally():
+    """One event with 50 detected windows and four with one missed each: pooled 50/54, per event
+    1/5."""
+    meta, score = [], []
+    for e in range(5):
+        meta += [dict(kind="bg", g=0, E=np.nan, ev=e)] * 20
+        score += [0.0] * 20
+    meta += [dict(kind="iso", g=0, E=0.15, ev=0)] * 50
+    score += [1.0] * 50
+    for e in range(1, 5):
+        meta.append(dict(kind="iso", g=0, E=0.15, ev=e))
+        score.append(0.0)
+    out = W.score_windows(np.repeat(score, N_CELL), meta, n_boot=5)
+    assert out["floor_eff1pct_0.1-0.2"][0] == pytest.approx(50 / 54, abs=1e-4)
+    assert out["floor_eff1pct_0.1-0.2_ev"][0] == pytest.approx(0.2, abs=1e-4)
 
 
 def test_the_threshold_is_each_views_own():
