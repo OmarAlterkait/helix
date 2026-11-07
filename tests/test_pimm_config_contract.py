@@ -168,7 +168,7 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
 
     src = pathlib.Path(os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "helix", "integrations", "pimm", "model.py")).read_text()
+        "helix", "integrations", "pimm", "__init__.py")).read_text()
     assert "bins=None" in src, "build_coeff_fm does not accept a bins path"
     assert "helix.data.bins import load" in src, "the adapter must read bins with the one loader"
     assert "TRAINING-SET STATISTICS" in src, (
