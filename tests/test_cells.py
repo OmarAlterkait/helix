@@ -228,7 +228,7 @@ def test_reader_refuses_another_format(corpus, tmp_path):
 # ------------------------------------------------------------------------------- dataset modality
 def test_dataset_serves_cells_identity_checked(corpus, tmp_path):
     pytest.importorskip("pimm_data")
-    from helix.data.coeff_dataset import CoeffTPCDataset
+    from helix.data.dataset import CoeffTPCDataset
     ds = CoeffTPCDataset(data_root=str(corpus["run_dir"]), dataset_name="sim_wire", modalities=("coeff", "cells"))
     assert len(ds) == N_EV
     for i in range(N_EV):
@@ -244,7 +244,7 @@ def test_dataset_serves_cells_identity_checked(corpus, tmp_path):
 
 def test_dataset_refuses_cells_of_other_events(corpus, tmp_path):
     pytest.importorskip("pimm_data")
-    from helix.data.coeff_dataset import CoeffTPCDataset
+    from helix.data.dataset import CoeffTPCDataset
     d = tmp_path / RUN
     d.mkdir()
     _coeff_shard(d / "sim_wire_coeff_0000.h5", [EV0 + i for i in range(N_EV)],

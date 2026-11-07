@@ -41,7 +41,7 @@ one fragment for all but ~1 in 10^6 (labl lists those groups as overrides, not r
 ``Q0`` is the charge scale every per-cell charge target and prediction is expressed in,
 ``log1p(q / Q0)``; this is its one definition.
 
-numpy + h5py only (no pimm-data): ``helix.data.coeff_reader.CellsReader`` serves it to the
+numpy + h5py only (no pimm-data): ``helix.data.dataset.CellsReader`` serves it to the
 dataset, everything else reads :func:`read_event` directly.
 """
 from __future__ import annotations

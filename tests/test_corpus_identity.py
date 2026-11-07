@@ -14,13 +14,13 @@ import numpy as np
 import pytest
 
 h5py = pytest.importorskip("h5py")
-# identity.py itself imports no pimm_data -- it is pure h5py -- but
-# helix/data/__init__.py eagerly imports coeff_reader and coeff_dataset, which
+# helix.data.verify itself imports no pimm_data -- it is pure h5py -- but
+# helix/data/__init__.py used to import helix.data.dataset eagerly, which
 # do. So importing any helix.data submodule requires the optional [pimm] extra,
 # and without this guard the module raised at collection and failed the suite.
 pytest.importorskip("pimm_data")
 
-from helix.data.identity import corpus_identity, check_corpus_matches  # noqa: E402
+from helix.data.verify import corpus_identity, check_corpus_matches  # noqa: E402
 
 
 def _shard(tmp_path, digest, removal, name="sim_wire_coeff_0000.h5"):
@@ -92,7 +92,7 @@ def test_resuming_against_a_different_corpus_is_refused():
     """A run directory continued against a different corpus must REFUSE.
 
     The training hook records corpus identity per link; without the comparison a
-    resumed run could switch corpora silently -- the exact mismatch identity.py
+    resumed run could switch corpora silently -- the exact mismatch the identity guard
     exists to prevent, in the one place where it also costs GPU days before
     anyone sees a number.
     """
@@ -145,7 +145,7 @@ def test_the_packaged_noise_spectrum_is_the_one_the_corpus_was_built_with():
     files are byte-identical (md5 fd80df5c4df6d761264b2db95c29dfb6, verified
     2026-09-17 against the JAXTPC checkout).
 
-    Every shard records `spectrum_sha256`, and `coeff_verify` compares it, so a
+    Every shard records `spectrum_sha256`, and `helix.data.verify` compares it, so a
     divergence would be CAUGHT rather than silently producing a second
     distribution -- but it would be caught after building a corpus. This catches
     it before.

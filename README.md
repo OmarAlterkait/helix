@@ -43,7 +43,7 @@ scripts/helix_env.sh` exports them as `$HELIX_*`. The full procedures are in
     scripts/corpus.sh all sim $HELIX_CORPUS_ROOT/coeff_tpc_new $HELIX_SIM_ROOT/j00*
 
     # verify it against its plan
-    scripts/helix_run.sh python -m helix.data.coeff_verify $HELIX_CORPUS_ROOT/coeff_tpc_new
+    scripts/helix_run.sh python -m helix.data.verify $HELIX_CORPUS_ROOT/coeff_tpc_new
 
     # truth beside each run (RUNBOOK section 7; on a CPU node)
     scripts/helix_run.sh python scripts/build_truth.py --corpus $HELIX_CORPUS

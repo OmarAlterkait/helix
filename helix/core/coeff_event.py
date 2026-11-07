@@ -190,7 +190,7 @@ def code_version():
     built by two working trees a few commits apart, and no field could show it).
 
     ATOMIC: both git fields or neither. A commit recorded with no dirtiness (a timeout on the
-    second call) serialised differently from its neighbours, and coeff_verify reported
+    second call) serialised differently from its neighbours, and the verifier reported
     "shards were built by DIFFERENT helix versions" for shards of ONE commit (a 32-way array
     all running `git status` against one NFS checkout).
     """

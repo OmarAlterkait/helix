@@ -12,18 +12,18 @@ import numpy as np
 import pytest
 
 # BEFORE the helix.data imports, not after: helix/data/__init__.py eagerly
-# imports coeff_reader and coeff_dataset, both of which import pimm_data, so
+# imported helix.data.dataset, which imports pimm_data, so
 # ANY helix.data.* import needs it. Guarding afterwards collected a
 # ModuleNotFoundError instead of a skip, and pytest treats a collection error as
 # a failure -- so the whole suite refused to run without the optional [pimm]
 # extra rather than skipping the parts that need it.
 pytest.importorskip("pimm_data")          # the framework this family plugs into
 
-from helix.data.coeff_reader import CoeffTPCReader  # noqa: E402
+from helix.data.dataset import CoeffTPCReader  # noqa: E402
 from _coeff_fixture import write_coeff_shard  # noqa: E402
-from helix.data.coeff_dataset import CoeffTPCDataset  # noqa: E402
+from helix.data.dataset import CoeffTPCDataset  # noqa: E402
 from pimm_data.transform import Compose   # noqa: E402
-from helix.data.coeff_verify import verify_corpus  # noqa: E402
+from helix.data.verify import verify_corpus  # noqa: E402
 
 BAND_LENGTHS = [8, 8, 16]
 GIDS = [0, 1]
@@ -551,7 +551,7 @@ def test_identity_includes_run_so_runs_do_not_collide():
     """Every detector run restarts shard numbering at *_sensor_0000.h5, so
     (source_file, event) alone collides across runs — the design doc specifies
     (run, source_file, event). Same 20%-loss class as the within-shard collision."""
-    from helix.data.coeff_reader import _identity_ids
+    from helix.data.dataset import _identity_ids
     src = np.array([b"sim_wire_sensor_0000.h5"] * 3)
     ev = np.array([0, 1, 2], np.int64)
     a = _identity_ids(src, ev, run=np.array([b"run_A"] * 3))
@@ -634,7 +634,7 @@ def test_corpus_verifier_catches_cross_shard_damage(tmp_path):
     """audit_shard is per-file and structurally cannot see these. Each one leaves
     every individual shard valid while silently changing how much data the corpus
     holds — which is exactly what an OOM-killed build produced."""
-    from helix.data.coeff_verify import verify_corpus
+    from helix.data.verify import verify_corpus
     ns = np.full((len(GIDS), len(BAND_LENGTHS)), 2.0, np.float32)
     for k, ids in enumerate(([0, 1], [2, 3], [4, 5])):
         _write_pair(tmp_path, ids, file_index=k, norm_sigma=ns, seed=k)
@@ -791,7 +791,7 @@ def test_a_gap_is_judged_against_the_PLAN_not_assumed_to_be_a_failed_job(tmp_pat
     jobs, so the verifier is given the plan's shard numbers as evidence rather than a flag that
     would simply silence it: a gap the plan never wrote is fine, a planned shard absent is not.
     """
-    from helix.data.coeff_verify import verify_corpus
+    from helix.data.verify import verify_corpus
 
     corpus = tmp_path / "corpus"; corpus.mkdir()
     for i in (0, 1, 3):                      # shard 2 is missing

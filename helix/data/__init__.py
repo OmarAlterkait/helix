@@ -17,11 +17,11 @@ pimm-data's registry.
 WHY THE TWO NAMES BELOW ARE LAZY
 --------------------------------
 This package MAY import pimm_data. Not every module in it NEEDS to, and two do
-not: ``helix.data.bins`` (numpy) and ``helix.data.identity`` (h5py) are corpus
+not: ``helix.data.bins`` (numpy) and ``helix.data.verify`` (h5py) are corpus
 metadata, readable anywhere the corpus is readable. Python runs a package's
 ``__init__`` before any submodule of it, so this one resolves the reader and the
 dataset lazily; importing them eagerly would pull ``torch`` and ``pimm_data``
-into every import of ``bins`` or ``identity``.
+into every import of ``bins`` or ``verify``.
 
 That matters because helix's training configs read the bin table and the corpus
 run list at module scope, both from this package: a host that only loads a config
@@ -31,7 +31,7 @@ Deferring costs nothing. Both names resolve on first attribute access, so
 ``from helix.data import CoeffTPCDataset`` still works unchanged, and
 registration into pimm-data's registry is unaffected -- it happens when
 ``helix.integrations.pimm`` is imported by ``custom_imports``, which reaches
-``coeff_dataset`` by its own module path, never through this one.
+``helix.data.dataset`` by its own module path, never through this one.
 ``tests/test_boundary.py`` pins both halves of this.
 """
 import importlib
@@ -41,8 +41,8 @@ from typing import Any
 #: of ``if``s: ``__dir__`` and the error message below both read it, so adding a
 #: name here is the whole change.
 _LAZY = {
-    "CoeffTPCReader": "helix.data.coeff_reader",
-    "CoeffTPCDataset": "helix.data.coeff_dataset",
+    "CoeffTPCReader": "helix.data.dataset",
+    "CoeffTPCDataset": "helix.data.dataset",
 }
 
 __all__ = ["CoeffTPCReader", "CoeffTPCDataset"]

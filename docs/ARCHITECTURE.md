@@ -53,7 +53,7 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
 base dependencies (numpy, h5py, PyWavelets, scipy, PyYAML) while pimm-data requires
 torch and hdf5plugin unconditionally. `tests/test_boundary.py` enforces it with
 import probes in clean subprocesses, a source scan, a per-submodule sweep, and a
-check that `helix.data.bins` / `helix.data.identity` stay light (`helix/data/__init__.py`
+check that `helix.data.bins` / `helix.data.verify` stay light (`helix/data/__init__.py`
 resolves the reader and dataset lazily so they do). torch is optional at `import helix`
 time; the DSP modules import it when they run.
 
@@ -254,7 +254,7 @@ the truth of every `helix.eval` metric (floor, uprobe, labels, denoise) come fro
 
 The split is computed, not stored (`holdout=` on the dataset: below).
 
-`python -m helix.data.coeff_verify` checks a run directory (`--dataset-name`) for
+`python -m helix.data.verify` checks a run directory (`--dataset-name`) for
 cross-shard problems (pairs, gaps, duplicates, mixed code or basis), or a whole corpus
 against `_calib/CHUNKS.txt` (every planned shard present with its planned events and
 nothing else, optical shards holding their TPC shard's events, one global
@@ -265,10 +265,10 @@ attributes excepted).
 
 ## 7. Reading the corpus (`helix/data`)
 
-* `CoeffTPCReader` (`coeff_reader.py`): one shard family (`modality` `coeff` or
+* `CoeffTPCReader` (`dataset.py`): one shard family (`modality` `coeff` or
   `coeff_clean`), standalone h5py on pimm-data's `ShardReaderBase`; shards of another
   format are recorded and refused.
-* `CoeffTPCDataset` (`coeff_dataset.py`, pimm-data registry): `modalities` from `coeff`
+* `CoeffTPCDataset` (`dataset.py`, pimm-data registry): `modalities` from `coeff`
   (always), `coeff_clean` and `cells`, joined by identity; the shard tables in
   `sample['coeff']['_meta']`; the identity-hash split (`holdout`, `split_role`:
   blake2b(run/source_file) + event, so independent of the build). Training reads
@@ -280,7 +280,8 @@ attributes excepted).
   side of zero, one bin over the sub-threshold gap); the production grid is named in
   `helix/data/data/reference_bins.json` (`coeff_bins_d1m_j000000_noisy`, from the
   campaign corpus's first run; its digests are recorded).
-* `identity.py`: `corpus_runs()` reads `_calib/RUNS.txt`; `check_corpus_matches`
+* `verify.py`: the corpus verifier (`python -m helix.data.verify`, below), `corpus_runs()`
+  (reads `_calib/RUNS.txt`) and `check_corpus_matches`, which
   refuses a checkpoint whose recorded `basis_digest` differs from the corpus being read.
 
 ---

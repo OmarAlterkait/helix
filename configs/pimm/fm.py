@@ -37,7 +37,7 @@ del _os, _sys, _p
 custom_imports = dict(imports=["helix.integrations.pimm"], allow_failed_imports=False)
 
 # ---------------------------------------------------------------------------- corpus
-from helix.data.identity import corpus_runs as _corpus_runs     # noqa: E402
+from helix.data.verify import corpus_runs as _corpus_runs     # noqa: E402
 from helix.data.bins import reference_table as _reference_table  # noqa: E402
 
 CORPUS = str(_root("HELIX_CORPUS").parent)

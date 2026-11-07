@@ -369,7 +369,7 @@ def apply_site_env() -> dict[str, str]:
 
     For entry points that run helix code in-process rather than through
     ``scripts/helix_env.sh`` -- a test session, a notebook, a bare
-    ``python -m helix.data.coeff_verify``. Idempotent, and never overwrites a
+    ``python -m helix.data.verify``. Idempotent, and never overwrites a
     variable the caller set.
     """
     applied = site_env()

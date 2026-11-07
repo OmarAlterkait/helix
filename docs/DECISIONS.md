@@ -52,7 +52,7 @@ noise off) and helix's noise model and geometry are unchanged; the input differs
 generator (MPV/MPR particle bomb) and JAXTPC f0d2ed3 (diffusion kernel `num_s` 16 -> 32,
 `group_sizes` uint16).
 
-**`coeff_verify` judges a gap against the plan**, not against a sensor-file name
+**`helix.data.verify` judges a gap against the plan**, not against a sensor-file name
 (`--source-root` is gone): a gap the plan never wrote is fine, a planned shard absent is
 an error.
 
@@ -242,7 +242,7 @@ did). Not output-neutral for simulation: the trailing partial block of a 1969 / 
 plane is reduced over a padded group (ulp-level float32 changes; run_0027575715 shard 0:
 23 of 200 events differ, 2.4e-5 of the kept set). SBND coefficients byte-identical.
 
-**One corpus verifier.** `python -m helix.data.coeff_verify` checks a run, or a whole
+**One corpus verifier.** `python -m helix.data.verify` checks a run, or a whole
 corpus against its plan (`_calib/CHUNKS.txt`), and `compare`s shards byte for byte.
 *Why:* SBND-data-helix's `verify_corpora.py`, `readback.py` and `compare_shards.py`
 duplicated it outside the repo that owns the format.
@@ -454,10 +454,10 @@ done. There is one launcher, `scripts/train.sh` (§0). The decisions are:
 - **Training on `ampere`.** K=128 at full event size makes the logits ~2.4 GB for
   one event before the backward doubles it, and the varlen attention needs sm80+
   (evaluation too).
-- **Never edit the helix tree mid-build.** `coeff_verify` fails a corpus whose
+- **Never edit the helix tree mid-build.** `helix.data.verify` fails a corpus whose
   shards carry different `code.git`; it caught exactly this and 7 shards were
   rebuilt.
-- **`coeff_verify` judges a gap against the plan** (`_calib/CHUNKS.txt`): an upstream gap
+- **`helix.data.verify` judges a gap against the plan** (`_calib/CHUNKS.txt`): an upstream gap
   is not planned, so not a failure; a planned shard absent is.
 - **Arrays of at most 100 tasks** — `MaxArraySize` is 100 here, so the old
   `#SBATCH --array=0-799` was unsubmittable; `corpus.sh build` splits the plan into

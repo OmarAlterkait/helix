@@ -138,7 +138,7 @@ planes are contiguous). For a second modality those four roles separate; see
   varlen: `ampere` at S3DF, never `turing` (which builds corpora). On CPU the
   per-group SDPA reference runs instead (tests).
 - **Provenance refuses a dirty tree.** Build a corpus from an uncommitted
-  checkout and every shard records `git_dirty: True`; `coeff_verify` then
+  checkout and every shard records `git_dirty: True`; `helix.data.verify` then
   refuses it. This cost a 344 GB (r1) rebuild once.
 - **`#SBATCH` directives cannot read shell variables**, so `--account`,
   `--output` and `--partition` are literal. That is why scheduler facts live in

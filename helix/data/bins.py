@@ -168,7 +168,7 @@ def derive(corpus, *, dataset_name=DEFAULTS["dataset_name"],
     :func:`save` to write the ``.pt`` the trainer reads. ``report`` receives
     one progress line per band; pass ``print`` for the CLI's behaviour.
     """
-    from helix.data.coeff_dataset import CoeffTPCDataset
+    from helix.data.dataset import CoeffTPCDataset
     from helix.model.tokenize import sigma_for_rows
 
     say = report or (lambda _msg: None)
@@ -339,7 +339,7 @@ def check_corpus(corpus, *, dataset_name=None) -> dict[str, Any]:
 
     import os
 
-    from helix.data.identity import corpus_identity
+    from helix.data.verify import corpus_identity
 
     want = ref.get("corpus") or {}
     ident = corpus_identity(corpus, dataset_name or DEFAULTS["dataset_name"])

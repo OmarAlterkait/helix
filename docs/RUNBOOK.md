@@ -114,11 +114,11 @@ DSP; through `corpus.sh`, set `BUILD_ARGS=--keep-clean`.
   missing shards are rebuilt. At S3DF preempted tasks are also requeued (`--requeue`).
 * **One GPU type per corpus.** turing and A100 disagree on 0.016% of kept coefficients;
   the site pins `scheduler.corpus.partition` (S3DF: turing, account `mli:default`).
-* **A clean tree.** Every shard records the helix commit and dirty flag; `coeff_verify`
+* **A clean tree.** Every shard records the helix commit and dirty flag; `helix.data.verify`
   rejects a corpus built from a dirty tree or from more than one commit. Do not edit the
   checkout while a build runs.
 * **Upstream gaps are not failures.** The plan only lists input files that exist, and
-  `coeff_verify` judges a gap against the plan (the campaign has all 1000 tasks).
+  `helix.data.verify` judges a gap against the plan (the campaign has all 1000 tasks).
 * `CONFIG` must be the same for `calibrate` and `build` (the table depends on the gate).
 
 One shard by hand (a GPU node), to check the chain:
@@ -137,17 +137,17 @@ All options: `helix/build.py`'s docstring (`--first`, `--spread`, `--shard-start
 
 ## 4. Verify a corpus
 
-    scripts/helix_run.sh python -m helix.data.coeff_verify OUT                       # every run, against _calib/CHUNKS.txt
-    scripts/helix_run.sh python -m helix.data.coeff_verify OUT/RUN --dataset-name sim_wire \
+    scripts/helix_run.sh python -m helix.data.verify OUT                       # every run, against _calib/CHUNKS.txt
+    scripts/helix_run.sh python -m helix.data.verify OUT/RUN --dataset-name sim_wire \
         --modalities coeff [--expect N]
-    scripts/helix_run.sh python -m helix.data.coeff_verify compare A.h5 B.h5 [A2.h5 B2.h5 ...]
+    scripts/helix_run.sh python -m helix.data.verify compare A.h5 B.h5 [A2.h5 B2.h5 ...]
 
 Prints `corpus OK` or the problems (exit 1). On one run directory pass
 `--modalities coeff` for a corpus built without `--keep-clean`: the default,
 `coeff coeff_clean`, also requires a clean shard beside every noisy one (the whole-corpus
 form checks clean pairs only where clean shards exist). The whole-corpus check reads every
 shard's metadata: for a full corpus submit it (`sbatch ... --wrap="$HELIX_ROOT/scripts/helix_run.sh
-python -m helix.data.coeff_verify OUT"`). Against the plan, a shard gap the plan never wrote
+python -m helix.data.verify OUT"`). Against the plan, a shard gap the plan never wrote
 (an input absent upstream) is fine and a planned shard absent is an error; one run directory
 alone reports every gap. `compare` ignores only
 provenance attributes (commit, host, time).
@@ -278,7 +278,7 @@ them, so memory stays ~25 GB at any split) and score the rest as they arrive, wi
 event-bootstrap intervals; definitions in docs/DECISIONS.md ("The evaluation's definitions").
 See `helix/eval/__init__.py`.
 
-**The identity guard.** `helix.data.identity` refuses a checkpoint whose recorded
+**The identity guard.** `helix.data.verify` refuses a checkpoint whose recorded
 `basis_digest` differs from the corpus being read. Do not work around it; find the
 corpus the checkpoint trained on.
 
@@ -289,7 +289,7 @@ corpus the checkpoint trained on.
 `SBND-data-helix/jobs/regress.sh` rebuilds, with a given checkout on a 2080 Ti (the corpora's
 GPU type), one SBND shard (TPC + optical, 100 events of run 018251) and one simulation shard
 (noisy, 200 events of `run_0027575715`), and compares them byte for byte through
-`coeff_verify compare`: the SBND shard with `coeff_sbnd_v1/018251` itself, the simulation
+`helix.data.verify compare`: the SBND shard with `coeff_sbnd_v1/018251` itself, the simulation
 shard with the reference build in
 `/sdf/data/neutrino/omara/sbnd_data/SBND-data-helix/work/regress/reference/sim` (r2's own
 coefficients predate the board-grouped gate).

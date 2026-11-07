@@ -81,13 +81,13 @@ class HelixPathBootstrap(HookBase):
         this, nothing answers "on WHAT DATA". Two corpora differing only in the
         coherent-removal gate read identically and score differently, so the
         digest is what lets an evaluator refuse a mismatch instead of returning a
-        plausible number -- see helix.data.identity.
+        plausible number -- see helix.data.verify.
 
         Best-effort by design: a run must not die because provenance could not be
         read; an unstamped run is simply unchecked.
         """
         try:
-            from helix.data.identity import corpus_identity
+            from helix.data.verify import corpus_identity
             d = (self.trainer.cfg.data or {}).get("train", {})
             root, name = d.get("data_root"), d.get("dataset_name", "sim_wire")
             if not root:
@@ -133,7 +133,7 @@ class HelixPathBootstrap(HookBase):
             # run name is a literal, so pointing HELIX_EXP somewhere new while
             # leaving the name alone lands on an existing run's directory. A
             # corpus swap under a resumed run is the silent version of the very
-            # mismatch identity.py was written for.
+            # mismatch the identity guard (helix.data.verify) was written for.
             prev = next((r.get("corpus") for r in reversed(log)
                          if isinstance(r, dict) and r.get("corpus")), None)
             if prev and info.get("corpus") and not info["corpus"].get("error"):
@@ -166,7 +166,7 @@ class HelixPathBootstrap(HookBase):
 
         # OUTSIDE the handler: a corpus mismatch must reach the caller.
         if _deferred_check is not None:
-            from helix.data.identity import check_corpus_matches
+            from helix.data.verify import check_corpus_matches
             prev, actual, path = _deferred_check
             # Raises on a present-and-different basis_digest; a missing or
             # unreadable record is tolerated, exactly as at eval time.

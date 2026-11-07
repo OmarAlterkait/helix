@@ -1,4 +1,4 @@
-"""A corpus against its plan (helix.data.coeff_verify.verify_plan) and shard comparison."""
+"""A corpus against its plan (helix.data.verify.verify_plan) and shard comparison."""
 from __future__ import annotations
 
 import os
@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("torch")
 from helix.build import build                                  # noqa: E402
-from helix.data import coeff_verify                             # noqa: E402
+from helix.data import verify                                   # noqa: E402
 from _build_fixture import PlanesSource                         # noqa: E402
 from test_corpus_acceptance import _chain, _plane_fn           # noqa: E402
 
@@ -36,14 +36,14 @@ def _fatal(probs):
 
 
 def test_a_complete_corpus_passes(tmp_path):
-    assert _fatal(coeff_verify.verify_plan(_corpus(str(tmp_path)))) == []
+    assert _fatal(verify.verify_plan(_corpus(str(tmp_path)))) == []
 
 
 def test_a_missing_shard_and_a_stray_one_are_reported(tmp_path):
     root = _corpus(str(tmp_path))
     os.remove(os.path.join(root, "runB", "cx_coeff_0001.h5"))
     os.rename(os.path.join(root, "runA", "cx_coeff_0001.h5"), os.path.join(root, "runA", "cx_coeff_0007.h5"))
-    probs = " | ".join(coeff_verify.verify_plan(root))
+    probs = " | ".join(verify.verify_plan(root))
     assert "runB/cx: shard 1 missing" in probs
     assert "runA/cx: shard 7 is not in the plan" in probs
 
@@ -52,14 +52,14 @@ def test_a_shard_with_its_own_norm_table_is_reported(tmp_path):
     root = _corpus(str(tmp_path))
     np.save(os.path.join(root, "_calib", "norm_sigma_global.npy"),
             np.load(os.path.join(root, "_calib", "norm_sigma_global.npy")) * 2)
-    assert any("norm_sigma is not" in p for p in coeff_verify.verify_plan(root))
+    assert any("norm_sigma is not" in p for p in verify.verify_plan(root))
 
 
 def test_compare_sees_identical_rebuilds_and_a_changed_value(tmp_path):
     a, b = _corpus(str(tmp_path / "a")), _corpus(str(tmp_path / "b"))
     pa, pb = (os.path.join(r, "runA", "cx_coeff_0000.h5") for r in (a, b))
-    assert coeff_verify.compare(pa, pb) == []
+    assert verify.compare(pa, pb) == []
     import h5py
     with h5py.File(pb, "r+") as f:
         f["value"][0] += 1
-    assert coeff_verify.compare(pa, pb) == ["value: data differ"]
+    assert verify.compare(pa, pb) == ["value: data differ"]

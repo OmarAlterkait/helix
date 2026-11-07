@@ -169,7 +169,7 @@ def test_code_version_is_atomic_or_absent():
 
     code_version used to assign out["git"] and THEN shell out for dirtiness, so
     a timeout on the second call left the commit recorded with no dirtiness. Two
-    shards of one corpus then serialised differently and coeff_verify reported
+    shards of one corpus then serialised differently and the verifier reported
     "built by DIFFERENT helix versions" for shards built by the SAME commit --
     a false refusal whose apparent fix is rebuilding the whole corpus.
     """
@@ -181,8 +181,8 @@ def test_code_version_is_atomic_or_absent():
 
 def test_incomplete_provenance_does_not_read_as_a_mixed_build():
     pytest.importorskip("pimm_data")  # provenance() resolves it
-    """coeff_verify compares field by field, not by serialising the dict."""
-    from helix.data.coeff_verify import verify_corpus
+    """helix.data.verify compares field by field, not by serialising the dict."""
+    from helix.data.verify import verify_corpus
     import inspect
     src = inspect.getsource(verify_corpus)
     assert "json.dumps(c, sort_keys=True) for _, c in known" not in src, (

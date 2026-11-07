@@ -227,7 +227,7 @@ jobs:
                                          n_events=200, readout_type=\"wire\")"
               $PY scripts/build_sim.py --input $W/sim/sensor/sim_wire_sensor_0000.h5 \
                   --output $W/corpus/run_synth/sim_wire --events-per-shard 200
-              $PY -m helix.data.coeff_verify $W/corpus/run_synth --dataset-name sim_wire
+              $PY -m helix.data.verify $W/corpus/run_synth --dataset-name sim_wire
               # --allow-foreign-basis: the fixture is a DIFFERENT DSP generation
               # by construction, so its basis_digest cannot match the packaged
               # reference. Without the flag this step exits 2 and the documented

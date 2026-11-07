@@ -51,7 +51,7 @@ env:
   # broken, and it is invisible until something actually opens a real shard.
   # pimm's own launch/sites/nersc.yaml sets the same variable, for the same
   # reason; helix needs it outside pimm's launcher too (corpus build, tests,
-  # coeff_verify), so it is declared here rather than borrowed from there.
+  # helix.data.verify), so it is declared here rather than borrowed from there.
   HDF5_USE_FILE_LOCKING: "FALSE"
 
 container:

@@ -54,8 +54,7 @@ CLEAN = ["helix", "helix.core", "helix.tpc", "helix.model.tokenize",
 #: Each is named by its OWN module path, and the package ``helix.data`` is not
 #: among them (see LIGHT_INSIDE_HEAVY).
 MAY_IMPORT_PIMM_DATA = [
-    ("helix.data.coeff_reader", ["pimm_data"]),
-    ("helix.data.coeff_dataset", ["pimm_data"]),
+    ("helix.data.dataset", ["pimm_data"]),
 ]
 
 #: Modules INSIDE the heavy package that must nonetheless import clean.
@@ -69,15 +68,15 @@ MAY_IMPORT_PIMM_DATA = [
 #: module scope while pimm's documented launcher environment has "only YAML
 #: parsing, Tyro, and Submitit".
 #:
-#: ``bins`` needs numpy, ``identity`` and ``cells`` h5py -- all base deps, so
+#: ``bins`` needs numpy, ``verify`` and ``cells`` h5py -- all base deps, so
 #: unlike the list above this one needs no importorskip.
-LIGHT_INSIDE_HEAVY = ["helix.data", "helix.data.bins", "helix.data.identity", "helix.data.cells",
+LIGHT_INSIDE_HEAVY = ["helix.data", "helix.data.bins", "helix.data.verify", "helix.data.cells",
                       "helix.data.denoise"]
 
 # helix.integrations.pimm.hooks is deliberately in NEITHER list.
 #
 # It is ALLOWED to import pimm_data -- it lives in helix.integrations -- but it
-# does not do so eagerly: `from helix.data.identity import corpus_identity /
+# does not do so eagerly: `from helix.data.verify import corpus_identity /
 # check_corpus_matches` sit inside the two functions that use them, so a
 # module-scope import probe cannot see them and never will. CLEAN is wrong (that
 # asserts it must never), and MAY_IMPORT_PIMM_DATA is wrong (that asserts it

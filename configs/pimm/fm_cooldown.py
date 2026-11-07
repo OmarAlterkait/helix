@@ -8,7 +8,7 @@ epoch; cadence is ``"auto"`` as in the base.
 # helix is importable here because the launcher exports PYTHONPATH; the sys.path block and
 # its HelixPathBootstrap hook belong to the base.
 from helix.paths import root as _root                            # noqa: E402
-from helix.data.identity import corpus_runs as _corpus_runs     # noqa: E402
+from helix.data.verify import corpus_runs as _corpus_runs     # noqa: E402
 
 _base_ = ["./fm.py"]
 

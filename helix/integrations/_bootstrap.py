@@ -49,7 +49,7 @@ def bootstrap_block(helix_root, pimm_data_root=None):
     checkout had to WIN over site-packages, not merely be present. Both halves
     of that are now false: the image installs pimm-data at the PINNED revision
     and container/helix-train.def's %post fails the build if it is stale, and
-    `CoeffTPCDataset` is helix's (helix/data/coeff_dataset.py), not pimm-data's.
+    `CoeffTPCDataset` is helix's (helix/data/dataset.py), not pimm-data's.
     Shadowing the installed copy only meant the pin governed the image while a
     checkout governed the run -- two authorities, differing by whatever was
     uncommitted.
