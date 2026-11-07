@@ -20,7 +20,7 @@ _LAZY = {
     "FMModel": "helix.model.fm",
     "build_fm": "helix.model.fm",
     "losses_cat": "helix.model.loss",
-    "make_mask": "helix.model.mask",
+    "make_mask": "helix.model.fm",
 }
 
 __all__ = sorted(_LAZY) + ["tokenize"]

@@ -293,12 +293,12 @@ attributes excepted).
   target is the normalised input itself (training is noisy-only); it differs from the
   input only where `dead_frac` blanks it.
 * `fm.FMModel` / `build_fm` (strict: an unknown key raises): encoder blocks, cross-attention
-  decoder, a categorical head over the bin grid (`n_bins`), muP (`schedule.py`), RoPE over time
-  and wire (`layers.py`). Attention is grouped along four token orders and runs unpadded
-  through flash varlen attention (`serial.py`), which needs sm80+ (A100); on CPU / fp32
+  decoder, a categorical head over the bin grid (`n_bins`; `loss.py`), muP (`schedule.py`), RoPE over time
+  and wire (`blocks.py`). Attention is grouped along four token orders and runs unpadded
+  through flash varlen attention (also `blocks.py`), which needs sm80+ (A100); on CPU / fp32
   the same groups run one SDPA each (tests, CPU evaluation). `fused_qk` is the Triton
   QK-norm + RoPE kernel (`kernels.py`), with the unfused path taken off-GPU.
-  Masking (`mask.py`): `random` cells by default, whole planes with probability
+  Masking (`fm.make_mask`): `random` cells by default, whole planes with probability
   `plane_frac`. `plane_id` serves as FiLM index, RoPE axis, masking group and plane
   identity at once.
 * The FM has no event separation: one event per rank, and `FMTrainer` refuses any other

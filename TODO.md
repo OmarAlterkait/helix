@@ -18,7 +18,7 @@ in `docs/archive/`.
 
 ## Model and evaluation
 
-* **RoPE re-test.** With an axis disabled, `helix.model.layers.rope_tables` leaves that
+* **RoPE re-test.** With an axis disabled, `helix.model.blocks.rope_tables` leaves that
   half of every head unrotated (its docstring calls this a known defect, kept because
   changing it changes the model), so the result behind `rope_split=False` is confounded.
   A full-width single-axis path, then re-run `wire_rope=False` / `rope_split=True` against

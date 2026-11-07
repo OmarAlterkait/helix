@@ -10,7 +10,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from helix.model import build_fm                                   # noqa: E402
-from helix.model.mask import make_mask, VIEWS_PER_VOLUME           # noqa: E402
+from helix.model.fm import make_mask, VIEWS_PER_VOLUME             # noqa: E402
 
 SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1,
              heads=4, n_bins=16)

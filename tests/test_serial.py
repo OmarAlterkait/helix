@@ -20,7 +20,7 @@ torch = pytest.importorskip("torch")
 F = torch.nn.functional
 
 from helix.model import build_fm                                   # noqa: E402
-from helix.model.layers import apply_rope_tables, rope_angles, rope_tables  # noqa: E402
+from helix.model.blocks import apply_rope_tables, rope_angles, rope_tables  # noqa: E402
 from helix.model.loss import losses_cat                            # noqa: E402
 
 
@@ -281,7 +281,7 @@ def test_training_entry_point_refuses_an_unknown_model_key():
 
 def test_compile_blocks_selects_the_compiled_blocks():
     """Creating the wrappers compiles nothing; this checks only the selection."""
-    from helix.model import serial
+    from helix.model import blocks as serial
     m = _model(compile_blocks=True)
     s, c = serial._blocks(m)
     assert s is not serial.self_block and c is not serial.cross_block
@@ -340,7 +340,7 @@ def test_qk_norm_is_off_by_default_and_bounds_the_logits():
 def test_permute_backward_matches_autograd():
     """The cheap backward (gather by the inverse) is autograd's scatter-add for
     a permutation: the same gradient."""
-    from helix.model.serial import _permute
+    from helix.model.blocks import _permute
     g = torch.Generator().manual_seed(0)
     T = 37
     idx = torch.randperm(T, generator=g)

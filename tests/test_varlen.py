@@ -41,7 +41,7 @@ def test_fused_qk_needs_qk_norm_and_hd64():
 
 @cuda
 def test_flash_varlen_matches_the_per_group_reference():
-    from helix.model.serial import _vl_attn
+    from helix.model.blocks import _vl_attn
     g = torch.Generator(device="cuda").manual_seed(0)
     q, k, v = (torch.randn(300, 4, 64, device="cuda", generator=g, dtype=torch.bfloat16) for _ in range(3))
     cu = torch.tensor([0, 128, 256, 300], device="cuda", dtype=torch.int32)
@@ -85,8 +85,8 @@ def test_normrope_kernel_matches_the_reference(mode, parts):
     gradients, so the QK-norm weight gradient cannot cancel to nothing."""
     from types import SimpleNamespace
     from helix.model.kernels import normrope
-    from helix.model.serial import _qk_rope
-    from helix.model.layers import rope_tables
+    from helix.model.blocks import _qk_rope
+    from helix.model.blocks import rope_tables
     g = torch.Generator(device="cuda").manual_seed(0)
     T, d = 500, 256
     X = torch.randn(T, parts * d, device="cuda", generator=g, dtype=torch.bfloat16).requires_grad_()

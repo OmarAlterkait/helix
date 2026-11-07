@@ -2,17 +2,16 @@
 
 A masked autoencoder over patch tokens of sparse wavelet coefficients: the
 encoder runs on the visible tokens only, in grouped attention along four token
-orders (:mod:`helix.model.serial`); a CrossMAE decoder's masked queries
+orders (:mod:`helix.model.blocks`); a CrossMAE decoder's masked queries
 cross-attend the encoded visible tokens in drift-time groups; a categorical head
 predicts each slot's occupancy and its value's bin. ``forward`` implements the
 pimm Trainer contract (``model(batch) -> dict`` with a ``loss`` key).
 """
 import torch
 import torch.nn as nn
-from helix.model.layers import rope_angles, rope_tables, ResponseFiLM, Block, CrossBlock
-from helix.model.head import cat_head_sparse
-from helix.model.mask import make_mask
-from helix.model.serial import _blocks, _ckpt, _cu_chunks, _cu_even, _inverse, _permute
+from helix.model.blocks import (Block, CrossBlock, ResponseFiLM, _blocks, _ckpt, _cu_chunks,
+                                _cu_even, _inverse, _permute, rope_angles, rope_tables)
+from helix.model.loss import cat_head_sparse
 
 
 # Training-policy options: how to mask, how a step executes. They carry no
@@ -39,6 +38,60 @@ from helix.model.serial import _blocks, _ckpt, _cu_chunks, _cu_even, _inverse, _
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, compile_blocks=False, act_ckpt=False,
                    fused_qk=False)
+
+
+# ---- MAE token masking ----------------------------------------------------------------------
+# Model-owned: the mask is part of the objective, and the one-argument ``model(batch)`` contract
+# leaves nowhere to pass one in.
+
+#: Views (U, V, Y) per TPC volume. `plane_id` is the global plane gid, so
+#: ``gid // VIEWS_PER_VOLUME`` is the volume and ``gid % VIEWS_PER_VOLUME`` the
+#: view — the same decomposition tokenize and probe/designs already assume.
+VIEWS_PER_VOLUME = 3
+
+
+def make_mask(B, mode, ratio, n_planes, gen=None):
+    """mode: random | plane.
+
+    * ``random`` — ``ratio`` of tokens, drawn independently.
+    * ``plane``  — ``n_planes`` whole planes PER VOLUME; every volume punctured
+      (``ratio`` is unused).
+    """
+    n = B["n_cells"]; dev = B["plane_id"].device
+    rnd = (lambda *s: torch.rand(*s, generator=gen, device=dev)) if (gen is not None and gen.device.type == dev.type) \
+        else (lambda *s: torch.rand(*s, device=dev))
+    if mode == "random":
+        return rnd(n) < ratio
+    if mode != "plane":
+        raise ValueError(f"mask mode must be 'random' or 'plane', got {mode!r}")
+    # Cross-plane: hide whole planes. Puncturing EVERY volume, measured on a real
+    # R1 event (gids 0..5 = 2 volumes x 3 views):
+    #
+    #   n=1   32.9% of cells   every volume down to 2/3 views
+    #   n=2   66.1% of cells   every volume down to 1/3 views
+    #
+    # Difficulty is set by the views left in a punctured volume. Scored on a
+    # cooldown checkpoint, 388-event probe split:
+    #
+    #   random, 0.75   masked   var_expl 0.703
+    #   plane,  n=1    0.333    var_expl 0.506
+    #   plane,  n=2    0.665    var_expl 0.015   <- one view left: collapse
+    #
+    # Hiding a third of the cells as whole planes is far harder than hiding 75%
+    # at random: cross-plane is the hard axis, not the masked fraction.
+    #
+    # randperm takes the generator, so a fixed `gen` reproduces the mask (the
+    # evaluator relies on that).
+    gid = B["plane_id"]
+    gids = torch.unique(gid)
+    shuffle = lambda g: g[torch.randperm(len(g), generator=gen, device=dev)]
+    # volume = gid // 3, view = gid % 3: the convention across the codebase
+    # (`toff[plane_gid % 3]` in tokenize's tick transform, `vol, pl = plane // 3,
+    # plane % 3` in probe/designs).
+    vol = torch.div(gids, VIEWS_PER_VOLUME, rounding_mode="floor")
+    pick = torch.cat([shuffle(gids[vol == v])[:n_planes]
+                      for v in torch.unique(vol)])
+    return torch.isin(gid, pick)
 
 
 class FMModel(nn.Module):

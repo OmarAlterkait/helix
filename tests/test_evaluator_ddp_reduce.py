@@ -227,7 +227,7 @@ def test_eval_shard_actually_ENTERS_the_loop(monkeypatch):
         def train(self):
             pass
 
-        # Signature must track helix.model.mask.make_mask(B, mode, ratio,
+        # Signature must track helix.model.fm.make_mask(B, mode, ratio,
         # n_planes, gen). A fake that accepts less does not fail where the real
         # one would -- it fails HERE, with a TypeError that looks like a bug in
         # the evaluator. It drifted once already, when n_planes was added.
