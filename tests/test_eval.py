@@ -186,10 +186,10 @@ def _events(run, ds):
     return list(events(ds, run.tokenizer, torch.device("cpu")))
 
 
-def _ctx(run, n, n_boot=20, denoiser=None):
+def _ctx(run, n, n_boot=20, denoiser=None, probe_seeds=2):
     from helix.eval import Context
     from helix.eval.probe import split_events
-    return Context(run, run.model, split_events(n), 0, n_boot, denoiser)
+    return Context(run, run.model, split_events(n), 0, n_boot, denoiser, probe_seeds)
 
 
 def _token_feature(ev, values, d=SMALL["d"], seed=0):
@@ -291,6 +291,38 @@ def test_floor_learns_what_the_features_carry(synth):
     assert eff("trained") > eff("amplitude") + 0.2, (out["trained"], out["amplitude"])
     k = "floor_eff1pct_0.5-1e+09"
     assert out["d_over_amplitude"][k] == pytest.approx(out["trained"][k][0] - out["amplitude"][k][0], abs=1e-4)
+    # trained - raw, paired over the same resamples (the raw inputs find these particles too: here
+    # a coefficient sits under every charged cell, so occupancy alone gives them away)
+    for k in ("floor_eff1pct_0.1-0.2", "auc_0.1-0.2_Y", "near_fpr_at_far"):
+        d, lo, hi = out["d_over_raw"][k]
+        assert d == pytest.approx(out["trained"][k][0] - out["raw"][k][0], abs=1e-3) and lo <= d <= hi
+    # two fits per arm on the same rows: their mean and half-range beside the interval
+    assert out["probe_seeds"] == 2 and len(out["trained"]["val_mse_seeds"]) == 2
+    assert out["trained"]["val_mse_seeds"][0] == pytest.approx(out["val_mse"], rel=1e-5)
+    hr = out["trained"]["seed_half_range"]
+    assert set(hr) == set(out["trained"]["seed_mean"]) >= {"floor_eff1pct_0.1-0.2", "auc_0.1-0.2"}
+    assert all(v >= 0 for v in hr.values() if v == v) and "amplitude" not in out["d_over_raw_seeds"]
+    assert set(out["d_over_raw_seeds"]) == {"seed_mean", "seed_half_range"}
+
+
+def test_the_raw_arm_on_raw_features_is_the_trained_arm(synth):
+    """Fed the raw inputs as its 'encoder features', the trained arm IS the raw arm: same rows,
+    same probe, same seed -- so trained - raw is what the features add over the input, exactly."""
+    from helix.eval.probe import Floor, UProbe
+    d, ds = synth
+    run = load_run(d, device="cpu")
+    ms = [Floor(_ctx(run, len(ds), probe_seeds=1)), UProbe(_ctx(run, len(ds), probe_seeds=1))]
+    for e in _events(run, ds):
+        e._feats = e.raw_inputs()
+        assert e._feats.shape == (len(e.cell_key), 2 * SMALL["n_slot"])
+        for m in ms:
+            m.add(e)
+    fl, up = (m.result() for m in ms)
+    keys = [k for k, v in fl["trained"].items() if k.startswith(("floor_eff", "auc_", "near_fpr")) and v[0] == v[0]]
+    assert keys and all(fl["trained"][k] == fl["raw"][k] for k in keys)
+    assert all(fl["d_over_raw"][k] == [0.0, 0.0, 0.0] for k in keys)
+    assert up["trained"]["r2"] == up["raw"]["r2"] and up["d_over_raw"] == [0.0, 0.0, 0.0]
+    assert fl["trained"]["seed_half_range"]["floor_eff1pct_0.1-0.2"] == 0.0          # one seed: no spread
 
 
 def test_uprobe_learns_u_and_geometry_alone_does_not(synth):
@@ -360,6 +392,57 @@ def test_a_perfect_denoiser_scores_perfectly(synth):
         assert effs and min(effs) == 1.0
 
 
+class _Fit:                                       # a fitted probe, as far as result() reads one
+    val_score = 0.5
+
+
+def _scored(cls, n_seeds=1, **state):
+    """A probe metric in its scored state, set by hand (the rows a probe would have predicted)."""
+    from helix.eval import Context
+    m = cls.__new__(cls)
+    m.ctx = Context(None, None, 3, 0, 20, None, n_seeds)
+    m.n_fit, m.n_patch = 10, 0
+    for k, v in state.items():
+        setattr(m, k, v)
+    return m
+
+
+def test_labels_ev_recall_weighs_every_event_equally():
+    """Event 0 has 100 rows, all right; events 1-3 one row each, all wrong. Pooled the recall is
+    100/103; with every event weighing the same it is 1/4."""
+    from helix.eval.probe import LABELS_ARMS, TASKS, Labels, seed_name
+    y = np.zeros(103, np.int64)
+    e = np.concatenate([np.zeros(100, np.int64), [1, 2, 3]])
+    hit = np.concatenate([np.zeros(100, np.int64), [1, 1, 1]])          # predicted class: 0 right, 1 wrong
+    m = _scored(Labels, probes={(t, a): [_Fit()] for t in TASKS for a in LABELS_ARMS},
+                p={(t, seed_name(a, 0)): [hit] for t in TASKS for a in LABELS_ARMS},
+                y={t: [y] for t in TASKS}, e=[e])
+    out = m.result()["motif"]
+    assert out["trained"]["macro_recall"][0] == pytest.approx(100 / 103, abs=1e-4)
+    assert out["trained"]["macro_recall_ev"][0] == pytest.approx(0.25, abs=1e-4)
+    assert out["d_over_raw"][0] == 0 and out["d_over_geo_ev"][0] == 0
+
+
+def test_uprobe_ev_r2_weighs_every_group_equally():
+    """One (event, plane) group of 200 rows predicted perfectly, three of 4 rows predicted
+    backwards: the pooled R^2 follows the big group, the group-equal one the many small ones."""
+    from helix.eval.events import group_r2, plane_group
+    from helix.eval.probe import UPROBE_ARMS, UProbe, seed_name
+    rng = np.random.default_rng(0)
+    sizes = [200, 4, 4, 4]
+    grp = np.concatenate([np.full(s, plane_group(i, 0)) for i, s in enumerate(sizes)])
+    y = rng.standard_normal(len(grp)).astype(np.float32)
+    p = np.where(grp == plane_group(0, 0), y, -y)
+    m = _scored(UProbe, probes={a: [_Fit()] for a in UPROBE_ARMS},
+                p={seed_name(a, 0): [p] for a in UPROBE_ARMS}, y=[y], grp=[grp])
+    out = m.result()["trained"]
+    _, sse, sst = group_r2(p, y, grp)
+    n = np.array(sizes)
+    assert out["r2"][0] == pytest.approx(1 - sse.sum() / sst.sum(), abs=1e-4)
+    assert out["r2_ev"][0] == pytest.approx(1 - (sse / n).sum() / (sst / n).sum(), abs=1e-4)
+    assert out["r2"][0] > 0.5 > out["r2_ev"][0] and out["r2_ev_U"][0] == out["r2_ev"][0]
+
+
 def _oracle(scale=1.0, q_present=25.0):
     """A denoiser that knows the truth: ``scale`` x each covered cell's charge, presence 1 above
     ``q_present`` e-."""
@@ -412,6 +495,27 @@ def test_binary_calibration():
     assert c["log_loss"] == pytest.approx(-(0.7 * np.log(0.9) + 0.3 * np.log(0.1)), rel=1e-5)
     p = rng.random(200000)                                              # calibrated by construction
     assert binary_calibration(p, rng.random(200000) < p)["ece"] < 0.01
+
+
+def test_identity_reads_the_digest_and_the_truth_cut(tmp_path):
+    import h5py
+    from types import SimpleNamespace
+    from helix.eval.events import D1M_TRUTH_Q_CUT, identity
+    paths = []
+    for i, label in enumerate(({"hits_threshold": 25.0, "source": "hits"}, {"source": "hits"})):
+        p = tmp_path / f"c{i}.h5"
+        with h5py.File(p, "w") as f:
+            f.create_group("config").attrs["label_json"] = json.dumps(label)
+        paths.append(str(p))
+    meta = {"a": {"basis_digest": b"d1g"}, "b": {"basis_digest": "d1g"}}        # bytes or str, as h5py gives
+    ds = SimpleNamespace(coeff_reader=SimpleNamespace(_meta_by_path=meta),
+                         cells_reader=SimpleNamespace(h5_files=paths[:1]))
+    assert identity(ds) == dict(basis_digest="d1g", truth_q_cut=25.0,
+                                truth_q_cut_source="cells /config label_json hits_threshold")
+    ds.cells_reader.h5_files = paths[1:]                # a shard that records no cut: the default, said so
+    got = identity(ds)
+    assert got["truth_q_cut"] == D1M_TRUTH_Q_CUT and "default" in got["truth_q_cut_source"]
+    assert identity([]) == dict(basis_digest=None, truth_q_cut=None, truth_q_cut_source=None)
 
 
 def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
@@ -506,6 +610,12 @@ def test_the_cli_writes_one_json(synth, tmp_path, monkeypatch):
     assert main([str(d), "--metrics", "recon", "--out", str(out), "--max-events", "2"]) == 0
     res = json.load(open(out))
     assert res["n_events"] == 2 and set(res["metrics"]) == {"recon"} and res["run"]["weights"] == "ema"
+    # what was evaluated: the weights each metric read, the shards' digest, the truth's cut
+    w = res["weights"]["recon"]
+    assert set(res["weights"]) == {"recon"} and (w["run"], w["weights"], w["step"]) == (str(d), "ema", 5)
+    assert w["checkpoint"].endswith("model_ema.pth") and res["probe_seeds"] == 2
+    assert set(res["corpus"]) == {"basis_digest"} and set(res["truth"]) == {"q_cut", "q_cut_source"}
+    assert "region" in res["metrics"]["recon"]
     with pytest.raises(ValueError, match="unknown metric"):
         E.evaluate(d, ["nope"])
 

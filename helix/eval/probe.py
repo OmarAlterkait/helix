@@ -33,7 +33,18 @@ Protocol, the same for every arm of every metric:
   random arm scored 0.005 with the geometry columns that alone score 0.121). A column constant
   over the training rows is centred, not scaled, and no column is scaled by more than 1e3;
 * the budget is in EPOCHS (at least :data:`MIN_STEPS` steps), so a larger split does not train
-  the head less; seeded.
+  the head less; seeded;
+* every fitted arm is fitted ``Context.probe_seeds`` times on the same rows, seeds ``seed + k``.
+  The numbers with their bootstrap interval are seed ``seed``'s (the single fit of before);
+  beside them ``seed_mean`` / ``seed_half_range``, (max - min) / 2 over the fits -- the probe's
+  own variance, which an event bootstrap of one fitted probe leaves out;
+* beside the trained arm, the ``raw`` arm: the same probe on the covering tokens' RAW tokenizer
+  inputs (:meth:`helix.eval.events.Event.raw_inputs`: per band the token's ``inp`` and ``occ``,
+  2 x n_slot) instead of their encoder features -- what the input already carries, so
+  ``d_over_raw`` (trained - raw, bootstrapped paired) is what pretraining adds;
+* the fit takes at most ``FIT_ROWS // n_train`` rows per event but every scored row is scored,
+  so a dense event weighs more in a pooled number; each pooled number has an ``_ev`` twin in
+  which every scored event weighs the same.
 
 The three probe metrics follow it, each class documenting its own: :class:`Floor` (``floor``),
 :class:`UProbe` (``uprobe``) and :class:`Labels` (``labels``).
@@ -44,7 +55,8 @@ from __future__ import annotations
 import numpy as np
 
 from helix.data.cells import FT, FW, MOTIF_NAMES, PID_NAMES, Q0, cell_class, cell_inputs, unkey
-from helix.eval.events import VIEWS, bootstrap, group_event, group_r2, plane_group, score_windows
+from helix.eval.events import (VIEWS, bootstrap, group_event, group_r2, plane_group, score_windows, seed_spread,
+                               window_stat)
 
 #: Fraction of the evaluated events the probes are fitted on; the rest are scored.
 TRAIN_FRAC = 2 / 3
@@ -185,9 +197,30 @@ def fit_probe(X, extra, y, event, *, group=None, n_classes=None, seed=0, device=
     return probe
 
 
+def fit_seeds(ctx, X, extra, y, event, **kw):
+    """The probe fitted ``ctx.probe_seeds`` times on the same rows, seeds ``ctx.seed + k``; the
+    first is the fit every number with an interval comes from."""
+    return [fit_probe(X, extra, y, event, seed=ctx.seed + k, **kw) for k in range(max(1, int(ctx.probe_seeds)))]
+
+
+def arm_features(ev, model, arm):
+    """Per token, what arm ``arm`` reads: the encoder's features or the raw tokenizer inputs."""
+    return ev.raw_inputs() if arm == "raw" else ev.features(model)
+
+
+def seed_name(arm, k):
+    """The key of seed ``k``'s predictions of ``arm``: the arm itself for the first seed."""
+    return arm if k == 0 else f"{arm}.s{k}"
+
+
+def _diff(a, b):
+    return {k: a[k] - b[k] for k in a}
+
+
 # ---- floor -----------------------------------------------------------------------------------
 
-FLOOR_ARMS = ("trained", "amplitude")
+FLOOR_ARMS = ("trained", "raw", "amplitude")
+FLOOR_FITTED = ("trained", "raw")
 
 
 def amplitude(ev, keys):
@@ -212,10 +245,27 @@ class Scored:
         for k, s in scores.items():
             self.s.setdefault(k, []).append(np.asarray(s, np.float32))
 
-    def result(self, n_boot, seed):
+    def stat(self, name):
+        """:func:`helix.eval.events.window_stat` of score ``name``: ``(stat, n_events, n_windows)``."""
         if not self.meta:
             raise ValueError("no scored window")
-        return {k: score_windows(np.concatenate(v), self.meta, n_boot, seed) for k, v in self.s.items()}
+        return window_stat(np.concatenate(self.s[name]), self.meta)
+
+    def point(self, name):
+        """Score ``name``'s numbers with every event once (no interval)."""
+        stat, n, _ = self.stat(name)
+        return stat(np.ones(n, np.int64))
+
+    def paired(self, a, b, n_boot, seed):
+        """``a - b`` of every number, each ``[point, lo, hi]`` over the SAME resamples."""
+        sa, n, _ = self.stat(a)
+        sb = self.stat(b)[0]
+        return bootstrap(lambda m: _diff(sa(m), sb(m)), n, n_boot, seed)
+
+    def result(self, n_boot, seed, names=None):
+        if not self.meta:
+            raise ValueError("no scored window")
+        return {k: score_windows(np.concatenate(self.s[k]), self.meta, n_boot, seed) for k in (names or self.s)}
 
 
 class Floor:
@@ -232,23 +282,28 @@ class Floor:
     A probe (:func:`helix.eval.probe.fit_probe`) predicts ``log1p(q / Q0)`` per cell, fitted on the
     map rows of the first events of the split; a window's score is its largest predicted charge,
     scored on the windows of the rest (:func:`helix.eval.events.score_windows`: efficiency at a 1%
-    false-positive rate per view, by energy). Two arms:
+    false-positive rate per view on the far background, the same on the near background, the far
+    threshold's rate on the near windows and the AUC, by energy, pooled and per view). Three arms:
 
       trained    the probe on the trained encoder's features
+      raw        the same probe on the covering tokens' raw tokenizer inputs (``inp``, ``occ``)
       amplitude  no fit: a cell's largest |kept coefficient| / sigma
                  (:func:`helix.data.cells.coeff_amplitude`) -- what the compressor itself sees. The
                  reference a representation must beat. (The randomly initialised encoder under the
                  same probe scored below it at every energy up to 1 MeV, so it is no floor.)
 
+    ``d_over_amplitude`` (point differences) and ``d_over_raw`` (bootstrapped paired) are trained
+    minus each reference. The ``_ev`` efficiency weighs every scored event's iso windows equally.
+
     Memory: only the fit's rows hold features (float16, at most :data:`helix.eval.probe.FIT_ROWS`,
-    ~6 GB); a scored event keeps its window scores alone.
+    ~6 GB, and ~2 GB of raw inputs); a scored event keeps its window scores alone.
     """
     name = "floor"
 
     def __init__(self, ctx):
         self.ctx = ctx
-        self.fit = dict(X=[], A=[], y=[], e=[])         # the training events' fit rows
-        self.probe, self.n_fit = None, None
+        self.fit = dict(X={a: [] for a in FLOOR_FITTED}, A=[], y=[], e=[])     # the training events' fit rows
+        self.probes, self.n_fit = None, None
         self.scored = Scored()
 
     def add(self, ev):
@@ -260,34 +315,50 @@ class Floor:
             ok = np.nonzero((idx >= 0).any(1))[0]
             keep = ok[fit_rows(len(ok), c.n_train, np.random.default_rng([c.seed, ev.index, 1]))]
             f = self.fit
-            f["X"].append(gather(ev.features(c.model), idx[keep]).cpu()); f["A"].append(aux[keep])
+            for a in FLOOR_FITTED:
+                f["X"][a].append(gather(arm_features(ev, c.model, a), idx[keep]).cpu())
+            f["A"].append(aux[keep])
             f["y"].append(np.log1p(tr["mq"][keep] / Q0).astype(np.float32)); f["e"].append(np.full(len(keep), ev.index))
             return
-        if self.probe is None:
+        if self.probes is None:
             self._fit()
         widx, waux = cell_inputs(tr["wkey"], ev.cell_key, ev.band_lengths, c.run.tokenizer)
         ok = (widx >= 0).any(1)
-        p = np.zeros(len(widx), np.float32)
-        if ok.any():
-            p[ok] = self.probe.predict(gather(ev.features(c.model), widx[ok]), waux[ok])
-        self.scored.add(ev, tr, dict(trained=np.expm1(np.maximum(p, 0)) * Q0, amplitude=amplitude(ev, tr["wkey"])))
+        scores = dict(amplitude=amplitude(ev, tr["wkey"]))
+        for a in FLOOR_FITTED:
+            X = gather(arm_features(ev, c.model, a), widx[ok]) if ok.any() else None
+            for k, probe in enumerate(self.probes[a]):
+                p = np.zeros(len(widx), np.float32)
+                if ok.any():
+                    p[ok] = probe.predict(X, waux[ok])
+                scores[seed_name(a, k)] = np.expm1(np.maximum(p, 0)) * Q0
+        self.scored.add(ev, tr, scores)
 
     def _fit(self):
         import torch
         f, self.fit = self.fit, None
         if not f["y"]:
             raise ValueError("floor: no covered map row in any training event")
-        y = np.concatenate(f["y"])
-        self.probe = fit_probe(torch.cat(f.pop("X")), np.concatenate(f["A"]), y, np.concatenate(f["e"]),
-                               seed=self.ctx.seed)
+        y, A, e = np.concatenate(f["y"]), np.concatenate(f["A"]), np.concatenate(f["e"])
+        self.probes = {}
+        for a in FLOOR_FITTED:
+            X = torch.cat(f["X"].pop(a))
+            self.probes[a] = fit_seeds(self.ctx, X, A, y, e)
+            del X
         self.n_fit = len(y)
 
     def result(self):
         c = self.ctx
-        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, val_mse=-self.probe.val_score,
-                   **self.scored.result(c.n_boot, c.seed))
+        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, probe_seeds=len(self.probes["trained"]),
+                   val_mse=-self.probes["trained"][0].val_score,
+                   **self.scored.result(c.n_boot, c.seed, names=FLOOR_ARMS))
         out["d_over_amplitude"] = {k: round(out["trained"][k][0] - out["amplitude"][k][0], 4)
                                    for k in out["trained"] if k.startswith("floor_eff")}
+        out["d_over_raw"] = self.scored.paired("trained", "raw", c.n_boot, c.seed)
+        pts = {a: [self.scored.point(seed_name(a, k)) for k in range(len(self.probes[a]))] for a in FLOOR_FITTED}
+        for a in FLOOR_FITTED:
+            out[a].update(val_mse_seeds=[round(-p.val_score, 6) for p in self.probes[a]], **seed_spread(pts[a]))
+        out["d_over_raw_seeds"] = seed_spread([_diff(t, r) for t, r in zip(pts["trained"], pts["raw"])])
         return out
 
 
@@ -300,7 +371,7 @@ class Floor:
 ALONGWIRE = np.array([[-0.5, np.sqrt(3) / 2], [-0.5, -np.sqrt(3) / 2], [-1.0, 0.0]] * 2)
 DOM_THRESHOLD = 0.5
 WIRE_SCALE, TICK_SCALE = 2000.0, 4321.0          # the geometry columns' units
-UPROBE_ARMS = ("geo", "trained")
+UPROBE_ARMS = ("geo", "trained", "raw")
 
 
 def u_of(gid, y, z):
@@ -356,23 +427,25 @@ class UProbe:
     charge-weighted mean ``u`` over its DOMINANT cells (``dom_frac >= 0.5``); a patch with none is
     dropped, and so are cells no token covers.
 
-    Two arms, both with the geometry columns (plane one-hot, mean wire, mean tick, presence bits)
+    Three arms, all with the geometry columns (plane one-hot, mean wire, mean tick, presence bits)
     appended: ``geo`` (those alone -- the reference; it includes drift time, so any ``u`` leaking
-    through timing is already in it) and ``trained``. Scored with ``r2``: the pooled R^2 WITHIN
-    each (event, plane) (:func:`helix.eval.events.group_r2`), so the coarse between-event and
-    between-plane structure any position-only baseline reproduces is removed (97.4% of ``u``'s
-    variance is between groups) while a prediction of the wrong scale is still charged (a
-    correlation is not: geometry alone has within-group r 0.15 but R^2 0.03); also per view.
-    ``d_over_geo`` = trained - geo, bootstrapped paired.
+    through timing is already in it), ``trained`` and ``raw`` (the covering tokens' raw tokenizer
+    inputs). Scored with ``r2``: the pooled R^2 WITHIN each (event, plane)
+    (:func:`helix.eval.events.group_r2`), so the coarse between-event and between-plane structure
+    any position-only baseline reproduces is removed (97.4% of ``u``'s variance is between groups)
+    while a prediction of the wrong scale is still charged (a correlation is not: geometry alone
+    has within-group r 0.15 but R^2 0.03); also per view. ``r2_ev`` weighs every (event, plane)
+    group equally (each group's sums divided by its row count) where ``r2`` pools rows.
+    ``d_over_geo`` = trained - geo and ``d_over_raw`` = trained - raw, bootstrapped paired.
     """
     name = "uprobe"
 
     def __init__(self, ctx):
         self.ctx = ctx
         self.n_planes = int(ctx.run.config["model"]["n_plane"])
-        self.fit = dict(y=[], geo=[], grp=[], e=[], trained=[])    # the training events' fit rows
+        self.fit = dict(y=[], geo=[], grp=[], e=[], trained=[], raw=[])   # the training events' fit rows
         self.probes, self.n_fit, self.n_patch = None, None, 0
-        self.p = {a: [] for a in UPROBE_ARMS}                                        # the scored events'
+        self.p = {}                                                       # the scored events', per seed name
         self.y, self.grp = [], []
 
     def add(self, ev):
@@ -393,11 +466,13 @@ class UProbe:
             f = self.fit
             f["y"].append(pr["y"][keep]); f["geo"].append(pr["geo"][keep]); f["grp"].append(grp[keep])
             f["e"].append(np.full(len(keep), ev.index))
-            f["trained"].append(gather(ev.features(c.model), pr["tok"][keep]).cpu())
+            for a in ("trained", "raw"):
+                f[a].append(gather(arm_features(ev, c.model, a), pr["tok"][keep]).cpu())
             return
         for a in UPROBE_ARMS:
-            X = torch.zeros((n, 0)) if a == "geo" else gather(ev.features(c.model), pr["tok"])
-            self.p[a].append(self.probes[a].predict(X, pr["geo"]))
+            X = torch.zeros((n, 0)) if a == "geo" else gather(arm_features(ev, c.model, a), pr["tok"])
+            for k, probe in enumerate(self.probes[a]):
+                self.p.setdefault(seed_name(a, k), []).append(probe.predict(X, pr["geo"]))
         self.y.append(pr["y"]); self.grp.append(grp)
 
     def _fit(self):
@@ -409,7 +484,8 @@ class UProbe:
         self.probes, self.n_fit = {}, len(y)
         for a in UPROBE_ARMS:
             X = torch.zeros((len(y), 0)) if a == "geo" else torch.cat(f.pop(a))
-            self.probes[a] = fit_probe(X, geo, y, e, group=grp, seed=self.ctx.seed)
+            self.probes[a] = fit_seeds(self.ctx, X, geo, y, e, group=grp)
+            del X
 
     def result(self):
         c = self.ctx
@@ -417,34 +493,54 @@ class UProbe:
             raise ValueError("uprobe: no patch with a dominant cell in any scored event")
         y, grp = np.concatenate(self.y), np.concatenate(self.grp)
         evs = np.unique(group_event(grp))
-        terms = {}
-        for a in UPROBE_ARMS:                    # each (event, plane)'s sums once; a resample weighs its events
-            keys, sse, sst = group_r2(np.concatenate(self.p[a]), y, grp)
-            terms[a] = (sse, sst, np.searchsorted(evs, group_event(keys)), (keys % 16) % 3)
+        _, n_g = np.unique(grp, return_counts=True)            # group_r2's keys, in its order
+        terms = {}                               # each (event, plane)'s sums once; a resample weighs its events
+        for name, p in self.p.items():
+            keys, sse, sst = group_r2(np.concatenate(p), y, grp)
+            terms[name] = (sse, sst, np.searchsorted(evs, group_event(keys)), (keys % 16) % 3)
 
-        def stat(m):
-            r = {}
-            for a, (sse, sst, ge, gv) in terms.items():
-                w = m[ge]
-                r[a] = float(1 - (w * sse).sum() / (w * sst).sum())
-                for v in range(3):
-                    s = gv == v
-                    r[f"{a}_{VIEWS[v]}"] = float(1 - (w * sse)[s].sum() / (w * sst)[s].sum()) if (w * sst)[s].sum() else float("nan")
-            r["d_over_geo"] = r["trained"] - r["geo"]
-            return r
+        def r2(w, sse, sst, s=slice(None)):
+            d = (w * sst)[s].sum()
+            return float(1 - (w * sse)[s].sum() / d) if d else float("nan")
 
-        b = bootstrap(stat, len(evs), c.n_boot, c.seed)
-        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, n_patch=self.n_patch)
+        def stat_for(k):
+            def stat(m):
+                r = {}
+                for a in UPROBE_ARMS:
+                    sse, sst, ge, gv = terms[seed_name(a, k)]
+                    w, w_ev = m[ge], m[ge] / n_g
+                    r[a], r[f"{a}_ev"] = r2(w, sse, sst), r2(w_ev, sse, sst)
+                    for v in range(3):
+                        r[f"{a}_{VIEWS[v]}"] = r2(w, sse, sst, gv == v)
+                        r[f"{a}_ev_{VIEWS[v]}"] = r2(w_ev, sse, sst, gv == v)
+                for ref in ("geo", "raw"):
+                    r[f"d_over_{ref}"] = r["trained"] - r[ref]
+                    r[f"d_over_{ref}_ev"] = r["trained_ev"] - r[f"{ref}_ev"]
+                return r
+            return stat
+
+        b = bootstrap(stat_for(0), len(evs), c.n_boot, c.seed)
+        n_seeds = len(self.probes["trained"])
+        spread = seed_spread([stat_for(k)(np.ones(len(evs), np.int64)) for k in range(n_seeds)])
+        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, n_patch=self.n_patch, probe_seeds=n_seeds)
+
+        def rename(a, key):                       # the stat's key of arm a -> the reported name
+            return "r2" + key[len(a):]
         for a in UPROBE_ARMS:
-            out[a] = dict(r2=b[a], **{f"r2_{v}": b[f"{a}_{v}"] for v in VIEWS},
-                          val_r2=round(self.probes[a].val_score, 4))
-        out["d_over_geo"] = b["d_over_geo"]
+            ks = [k for k in b if k == a or k.startswith(a + "_")]
+            out[a] = dict({rename(a, k): b[k] for k in ks}, val_r2=round(self.probes[a][0].val_score, 4),
+                          val_r2_seeds=[round(p.val_score, 4) for p in self.probes[a]],
+                          **{s: {rename(a, k): spread[s][k] for k in ks} for s in spread})
+        for k in b:
+            if k.startswith("d_over_"):
+                out[k] = b[k]
+        out.update({s: {k: v for k, v in spread[s].items() if k.startswith("d_over_")} for s in spread})
         return out
 
 
 # ---- labels ----------------------------------------------------------------------------------
 
-LABELS_ARMS = ("geo", "trained")
+LABELS_ARMS = ("geo", "trained", "raw")
 TASKS = {"motif": ("trk_motif", MOTIF_NAMES), "pid": ("trk_pid", PID_NAMES)}
 
 
@@ -471,18 +567,21 @@ class Labels:
 
     A classifier probe (:func:`helix.eval.probe.fit_probe` with ``n_classes``: class-balanced
     cross-entropy) per task, inputs as the floor's (covering-token features + presence bits and
-    offsets). Two arms: ``trained`` and ``geo`` (the presence bits and offsets alone -- what the
-    token layout gives away). Scored with the balanced accuracy (``macro_recall``, the mean
-    per-class recall: the classes run from 53% of cells (le) to 0.4% (michel)), with a [16, 84]%
-    interval over an event bootstrap, and each class's recall; ``d_over_geo`` paired.
+    offsets). Three arms: ``trained``, ``geo`` (the presence bits and offsets alone -- what the
+    token layout gives away; it carries no charge at all) and ``raw`` (the covering tokens' raw
+    tokenizer inputs -- what the input carries). Scored with the balanced accuracy
+    (``macro_recall``, the mean per-class recall: the classes run from 53% of cells (le) to 0.4%
+    (michel)), with a [16, 84]% interval over an event bootstrap, and each class's recall;
+    ``macro_recall_ev`` the same with every scored event's rows weighing equally in each class's
+    recall; ``d_over_geo`` and ``d_over_raw`` paired.
     """
     name = "labels"
 
     def __init__(self, ctx):
         self.ctx = ctx
-        self.fit = dict(X=[], A=[], e=[], **{t: [] for t in TASKS})
+        self.fit = dict(X={a: [] for a in ("trained", "raw")}, A=[], e=[], **{t: [] for t in TASKS})
         self.probes, self.n_fit = None, None
-        self.p = {(t, a): [] for t in TASKS for a in LABELS_ARMS}
+        self.p = {}                                          # (task, seed name) -> the scored events' classes
         self.y, self.e = {t: [] for t in TASKS}, []
 
     def add(self, ev):
@@ -497,15 +596,19 @@ class Labels:
         if not scored:
             keep = fit_rows(len(idx), c.n_train, np.random.default_rng([c.seed, ev.index, 3]))
             f = self.fit
-            f["X"].append(gather(ev.features(c.model), idx[keep]).cpu()); f["A"].append(aux[keep])
+            for a in f["X"]:
+                f["X"][a].append(gather(arm_features(ev, c.model, a), idx[keep]).cpu())
+            f["A"].append(aux[keep])
             f["e"].append(np.full(len(keep), ev.index))
             for t in TASKS:
                 f[t].append(cls[t][keep])
             return
-        X = {"geo": torch.zeros((len(idx), 0)), "trained": gather(ev.features(c.model), idx)}
+        X = {a: torch.zeros((len(idx), 0)) if a == "geo" else gather(arm_features(ev, c.model, a), idx)
+             for a in LABELS_ARMS}
         for t in TASKS:
             for a in LABELS_ARMS:
-                self.p[(t, a)].append(self.probes[(t, a)].predict(X[a], aux))
+                for k, probe in enumerate(self.probes[(t, a)]):
+                    self.p.setdefault((t, seed_name(a, k)), []).append(probe.predict(X[a], aux))
             self.y[t].append(cls[t])
         self.e.append(np.full(len(idx), ev.index))
 
@@ -514,15 +617,16 @@ class Labels:
         f, self.fit = self.fit, None
         if not f["e"]:
             raise ValueError("labels: no labelled signal cell in any training event")
-        X, A, e = torch.cat(f.pop("X")), np.concatenate(f["A"]), np.concatenate(f["e"])
+        A, e = np.concatenate(f["A"]), np.concatenate(f["e"])
         self.probes, self.n_fit = {}, len(e)
-        for t, (_, names) in TASKS.items():
-            y = np.concatenate(f[t])
-            ok = y >= 0
-            okt = torch.from_numpy(ok)
-            for a in LABELS_ARMS:
-                Xa = torch.zeros((int(ok.sum()), 0)) if a == "geo" else X[okt]
-                self.probes[(t, a)] = fit_probe(Xa, A[ok], y[ok], e[ok], n_classes=len(names), seed=self.ctx.seed)
+        for a in LABELS_ARMS:
+            X = None if a == "geo" else torch.cat(f["X"].pop(a))
+            for t, (_, names) in TASKS.items():
+                y = np.concatenate(f[t])
+                ok = y >= 0
+                Xa = torch.zeros((int(ok.sum()), 0)) if X is None else X[torch.from_numpy(ok)]
+                self.probes[(t, a)] = fit_seeds(self.ctx, Xa, A[ok], y[ok], e[ok], n_classes=len(names))
+            del X
 
     def result(self):
         c = self.ctx
@@ -530,30 +634,48 @@ class Labels:
             raise ValueError("labels: no labelled signal cell in any scored event")
         e = np.concatenate(self.e)
         evs, we = np.unique(e, return_inverse=True)
-        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit)
+        n_seeds = len(self.probes[(next(iter(TASKS)), "trained")])
+        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, probe_seeds=n_seeds)
         for t, (_, names) in TASKS.items():
             y = np.concatenate(self.y[t])
             ok = y >= 0
-            hit = {a: np.concatenate(self.p[(t, a)])[ok] == y[ok] for a in LABELS_ARMS}
+            hit = {nm: np.concatenate(p)[ok] == y[ok] for (tt, nm), p in self.p.items() if tt == t}
             yk, wk = y[ok], we[ok]
+            inv_n = 1.0 / np.bincount(wk, minlength=len(evs))[wk]         # every event's rows weigh 1 in all
             K = len(names)
 
-            def stat(m, hit=hit, yk=yk, wk=wk, K=K):
-                w = m[wk]
-                r = {}
-                for a in LABELS_ARMS:
-                    n_c = np.bincount(yk, w, K)
-                    h_c = np.bincount(yk, w * hit[a], K)
-                    r[a] = float(np.mean(h_c[n_c > 0] / n_c[n_c > 0]))
-                r["d_over_geo"] = r["trained"] - r["geo"]
-                return r
+            def stat_for(k, hit=hit, yk=yk, wk=wk, inv_n=inv_n, K=K):
+                def recall(w, h):
+                    n_c, h_c = np.bincount(yk, w, K), np.bincount(yk, w * h, K)
+                    return float(np.mean(h_c[n_c > 0] / n_c[n_c > 0]))
 
-            b = bootstrap(stat, len(evs), c.n_boot, c.seed)
+                def stat(m):
+                    w = m[wk]
+                    r = {}
+                    for a in LABELS_ARMS:
+                        h = hit[seed_name(a, k)]
+                        r[a], r[f"{a}_ev"] = recall(w, h), recall(w * inv_n, h)
+                    for ref in ("geo", "raw"):
+                        r[f"d_over_{ref}"] = r["trained"] - r[ref]
+                        r[f"d_over_{ref}_ev"] = r["trained_ev"] - r[f"{ref}_ev"]
+                    return r
+                return stat
+
+            b = bootstrap(stat_for(0), len(evs), c.n_boot, c.seed)
+            spread = seed_spread([stat_for(k)(np.ones(len(evs), np.int64)) for k in range(n_seeds)])
             res = dict(prior={nm: round(float((yk == i).mean()), 4) for i, nm in enumerate(names)})
             for a in LABELS_ARMS:
-                res[a] = dict(macro_recall=b[a], val_macro_recall=round(self.probes[(t, a)].val_score, 4),
+                pr = self.probes[(t, a)]
+                res[a] = dict(macro_recall=b[a], macro_recall_ev=b[f"{a}_ev"],
+                              val_macro_recall=round(pr[0].val_score, 4),
+                              val_macro_recall_seeds=[round(p.val_score, 4) for p in pr],
                               recall={nm: round(float(hit[a][yk == i].mean()), 4)
-                                      for i, nm in enumerate(names) if (yk == i).any()})
-            res["d_over_geo"] = b["d_over_geo"]
+                                      for i, nm in enumerate(names) if (yk == i).any()},
+                              **{s: {"macro_recall": spread[s][a], "macro_recall_ev": spread[s][f"{a}_ev"]}
+                                 for s in spread})
+            for k in b:
+                if k.startswith("d_over_"):
+                    res[k] = b[k]
+            res.update({s: {k: v for k, v in spread[s].items() if k.startswith("d_over_")} for s in spread})
             out[t] = res
         return out

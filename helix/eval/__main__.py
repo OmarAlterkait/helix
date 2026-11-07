@@ -20,10 +20,14 @@ def main(argv=None):
                     "checkpoint of it, for --metrics denoise")
     ap.add_argument("--seed", type=int, default=0, help="window placement and probe init")
     ap.add_argument("--boot", type=int, default=200, help="event-bootstrap resamples")
+    ap.add_argument("--probe-seeds", type=int, default=2, help="fits per probe arm (seeds seed+k, same rows): "
+                    "the mean and half-range over them are reported beside the bootstrap interval")
+    ap.add_argument("--presence-q", type=float, default=25.0, help="denoise: the presence label, q > this (e-)")
     a = ap.parse_args(argv)
 
     res = evaluate(a.run, [m.strip() for m in a.metrics.split(",") if m.strip()], weights=a.weights,
-                   max_events=a.max_events, denoiser=a.denoiser, seed=a.seed, n_boot=a.boot)
+                   max_events=a.max_events, denoiser=a.denoiser, seed=a.seed, n_boot=a.boot,
+                   probe_seeds=a.probe_seeds, presence_q=a.presence_q)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     tmp = a.out + ".tmp"
     with open(tmp, "w") as fh:
