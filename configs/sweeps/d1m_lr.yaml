@@ -1,0 +1,27 @@
+# The recipe's learning rate on d1m, before any long run (TODO: "Confirm the LR at production
+# length"). fm.py's 4.4e-3 * sqrt(GPUs / 16) was tuned on r1 at 29.2k steps; the optimum falls
+# with run length, so three peak LRs at 16 GPUs -- 4.4e-3 (the recipe), 3.1e-3, 2.2e-3 (the B = 4
+# equivalents 2.2e-3, 1.55e-3, 1.1e-3) -- for 3 epochs of j000000 (~36k steps), each cooled, plus a
+# second seed of the recipe's LR: the noise floor every difference is read against (r1 d768:
+# ~0.02 loss, 0.03-0.04 floor efficiency). Judged by the probes, not the loss (rank correlation
+# 0.15 between them over 17 r1 models).
+#
+#   python scripts/sweep.py configs/sweeps/d1m_lr.yaml --dry-run
+#
+# Open (TODO C6): fm_cooldown anneals on its first COOLDOWN_RUNS runs, which on a one-run corpus is
+# a whole epoch of j000000.
+config: fm
+submit: [--resources.nnodes, "4"]
+arms:
+  lr4.4e-3:    {overrides: {optimizer.lr: 4.4e-3}}
+  lr4.4e-3_s1: {overrides: {optimizer.lr: 4.4e-3, seed: 1}}
+  lr3.1e-3:    {overrides: {optimizer.lr: 3.1e-3}}
+  lr2.2e-3:    {overrides: {optimizer.lr: 2.2e-3}}
+then:
+  config: fm_cooldown
+  suffix: _cool
+  submit: [--resources.nnodes, "4", --chain.jobs, "2"]
+  overrides: {weight: "$HELIX_EXP/{run}/model/last"}
+after_each:
+  command: python -m helix.eval $HELIX_EXP/{run} --metrics recon,floor,uprobe,labels --weights last
+  time: "04:00:00"

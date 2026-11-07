@@ -1,0 +1,11 @@
+# The default: a chain of preemptible batch jobs that resume from the last
+# checkpoint (submitit requeue). The site profile's time_min (2 h at NERSC) is
+# the guaranteed floor; 24 h is the ceiling. Nodes come from the command line:
+#   scripts/submit.sh fm --resources.nnodes 4
+_base_: [_common.yaml]
+resources:
+  time: "24:00:00"
+  nnodes: 1
+  nproc_per_node: 4
+chain:
+  jobs: 8

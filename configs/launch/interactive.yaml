@@ -1,0 +1,16 @@
+# Short allocations on the interactive QOS, chained by pimm's scron watchdog:
+# fast to grant, 4 h each. For smoke tests and runs that must start now.
+#   scripts/submit.sh fm_smoke --recipe interactive --resources.nnodes 2
+_base_: [_common.yaml]
+interactive: true
+resources:
+  time: "04:00:00"
+  qos: interactive
+  nnodes: 1
+  nproc_per_node: 4
+chain:
+  jobs: 8
+watchdog:
+  qos: cron
+  interval_min: 5
+  time: "1-00:00:00"
