@@ -242,7 +242,7 @@ class Denoise:
 
         cfg = c.run.tokenizer
         keys, q = np.asarray(ev.cells["key"], np.int64), np.asarray(ev.cells["q"], np.float64)
-        ck, cq = keys[q > 0], q[q > 0]
+        ck, cq = keys[q > self.presence_q], q[q > self.presence_q]   # charged as the training's label
         cov = (cell_inputs(ck, ev.cell_key, ev.band_lengths, cfg)[0] >= 0).any(1)
         ck, cq = ck[cov], cq[cov]
         cy, cp = np.zeros(len(ck), np.float32), np.zeros(len(ck), np.float32)
