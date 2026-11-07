@@ -47,7 +47,7 @@ class SimSource:
     def __init__(self, files, device, optical=True, geom="cubic_wireplane_geometry.json", npz=None):
         from helix.paths import packaged, resolve
         from helix.tpc import io
-        from helix.tpc.geometry import _resolve, load_plane_registry
+        from helix.tpc.readout import _resolve, load_plane_registry
         self.files, self.device = list(files), device
         self.layouts = {f: io.sensor_layout(f) for f in self.files}
         lay = self.layouts[self.files[0]]

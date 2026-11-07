@@ -112,10 +112,10 @@ corpus scheduler. One GPU type per corpus: the site pins the corpus partition.
 5. threshold (`helix.tpc.threshold_rows`): sigma per plane and band on live rows,
    hysteresis seeds at the universal threshold (`kappa`), grown through `floor` sigma; the
    finest band (D1) is dropped; stored values rounded to a power-of-two step <= sigma / q
-   (`store.step_input` 16, `store.step_target` 32; `helix.tpc.chain_coeff.quantize`).
+   (`store.step_input` 16, `store.step_target` 32; `helix.tpc.chain.quantize`).
 
 `process_event(adc, ped, present)` takes a readout (SBND); `process_planes({gid: image})`
-takes plane images (simulation). `helix.tpc.chain_coeff` turns the result into a
+takes plane images (simulation). `helix.tpc.chain.coeff_event` turns the result into a
 `CoeffEvent` and evaluates the clean target at the noisy support (`clean_coeff_event`).
 Configuration is a nested dict merged and validated by `make_config`; `SBND_DEFAULT` and
 `SIM_BASE` (via `sim_config(num_wires)`) are the two bases.

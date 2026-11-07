@@ -174,7 +174,7 @@ def _write_labl(root, group, task, ids, fh_path, seed):
 
 
 def write_geometry(path, n_volumes=2):
-    """A plane registry (helix/tpc/geometry.py) of the fixture's planes."""
+    """A plane registry (helix/tpc/readout.py) of the fixture's planes."""
     import json
     planes = {f"volume_{v}_{p}": dict(n_wires=N_WIRES[p], pedestal=PEDESTAL[p], wire_lengths_m=2.0)
               for v in range(n_volumes) for p in PLANES}

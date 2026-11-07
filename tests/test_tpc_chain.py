@@ -1,9 +1,8 @@
-"""The configurable TPC chain (helix.tpc.chain) and its CoeffEvents (helix.tpc.chain_coeff)."""
+"""The configurable TPC chain (helix.tpc.chain) and its CoeffEvents."""
 import numpy as np
 import pytest
 
 from helix.tpc import chain as ch
-from helix.tpc import chain_coeff
 from helix.tpc.readout import load_readout
 
 
@@ -83,7 +82,7 @@ def test_coeff_shard_roundtrip(tmp_path):
     """Chain results -> CoeffEvent -> coeff_io shard -> the same coefficients."""
     from helix.core import coeff_io
     chain = ch.TPCChain()
-    ces = [chain_coeff.coeff_event(chain, chain.process_event(*_event(seed=1 + e)), run="1", source_file="x.h5", event=7 + e)
+    ces = [ch.coeff_event(chain, chain.process_event(*_event(seed=1 + e)), run="1", source_file="x.h5", event=7 + e)
            for e in range(3)]
     p = tmp_path / "x.h5"
     coeff_io.write_coeff_shard(p, ces)
@@ -105,7 +104,7 @@ def test_coeff_event_physical_wires_and_validity(tmp_path):
     adc, ped, present = _event(seed=4)
     chain = ch.TPCChain()
     res = chain.process_event(adc, ped, present)
-    ce = chain_coeff.coeff_event(chain, res, run="1", source_file="s.h5", event=3)
+    ce = ch.coeff_event(chain, res, run="1", source_file="s.h5", event=3)
     y0 = int(np.where(ce.gids == 2)[0][0])
     yw = ro.wire[(ro.tpc == 0) & (ro.plane == 2)]
     assert ce.n_wires[y0] == yw.max() + 1

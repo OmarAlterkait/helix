@@ -15,7 +15,7 @@ import pytest
 import h5py
 
 from helix.tpc.chain import TPCChain, sim_config
-from helix.tpc import chain_coeff
+from helix.tpc import chain as tpc_chain
 from helix.build import normalization_table
 from _build_fixture import build_corpus  # noqa: E402
 from helix.core.coeff_io import read_coeff_event, read_coeff_shard
@@ -73,8 +73,8 @@ def test_build_corpus_matches_old_semantics(tmp_path):
     clean_bands = {g: ch.dwt_rows(cl[g]) for g in GIDS}
     exact = np.array([clean_bands[int(g)][int(b)][int(w), int(t)]
                       for g, b, w, t in zip(ce_n.plane_gid, ce_n.band, ce_n.wire, ce_n.tau)], np.float32)
-    step = chain_coeff.value_step(ce_n.sigma_threshold, ch.cfg["store"]["step_target"])
-    np.testing.assert_array_equal(ce_c.value, chain_coeff.quantize(exact, ce_n.band, ce_n.plane_gid, ce_n.gids, step))
+    step = tpc_chain.value_step(ce_n.sigma_threshold, ch.cfg["store"]["step_target"])
+    np.testing.assert_array_equal(ce_c.value, tpc_chain.quantize(exact, ce_n.band, ce_n.plane_gid, ce_n.gids, step))
 
     # (3) norm_sigma = mean of the events' sigma_threshold
     np.testing.assert_allclose(norm, normalization_table(noisy))
@@ -108,7 +108,7 @@ def test_build_corpus_is_the_chain_per_tpc(tmp_path):
     (ce,), _, _ = build_corpus([("f.h5", 7)], _plane_fn, ch, tmp_path, run="r", with_clean=False)
     noisy, _ = _plane_fn(7)
     res = [r for t in range(N_VOL) for r in ch.process_images([noisy[3 * t + p] for p in range(3)], t)]
-    ref = chain_coeff.coeff_event(ch, res, run="r", source_file="f.h5", event=7)
+    ref = tpc_chain.coeff_event(ch, res, run="r", source_file="f.h5", event=7)
     for k in ("band", "plane_gid", "wire", "tau", "value", "gids", "n_wires", "sigma_threshold"):
         np.testing.assert_array_equal(getattr(ce, k), getattr(ref, k), err_msg=k)
     assert ce.basis == ref.basis and (ce.run, ce.source_file, ce.event) == ("r", "f.h5", 7)
@@ -152,13 +152,13 @@ def test_global_norm_sigma_is_frozen_across_shards(tmp_path):
 def test_clean_geometry_mismatch_raises():
     ch = _chain()
     noisy, clean = _plane_fn(0)
-    ce = chain_coeff.coeff_event(ch, ch.process_planes(noisy))
+    ce = tpc_chain.coeff_event(ch, ch.process_planes(noisy))
     bad_clean = {g: v[: v.shape[0] // 2] for g, v in clean.items()}    # half the wires
     with pytest.raises(ValueError, match="wires"):
-        chain_coeff.clean_coeff_event(ch, ce, bad_clean)
+        tpc_chain.clean_coeff_event(ch, ce, bad_clean)
     missing = {g: clean[g] for g in GIDS[1:]}                           # drop a gid
     with pytest.raises(ValueError, match="missing gid"):
-        chain_coeff.clean_coeff_event(ch, ce, missing)
+        tpc_chain.clean_coeff_event(ch, ce, missing)
 
 
 def test_noisy_planes_must_fill_each_tpc():
@@ -173,7 +173,7 @@ def test_noisy_planes_must_fill_each_tpc():
     with pytest.raises(ValueError, match="tpc 2"):
         ch.process_planes({**noisy, 6: noisy[0], 7: noisy[1], 8: noisy[2]})
     # a whole TPC absent is fine: its gids are simply not in the event
-    ce = chain_coeff.coeff_event(ch, ch.process_planes({g: noisy[g] for g in (3, 4, 5)}))
+    ce = tpc_chain.coeff_event(ch, ch.process_planes({g: noisy[g] for g in (3, 4, 5)}))
     assert list(ce.gids) == [3, 4, 5]
 
 

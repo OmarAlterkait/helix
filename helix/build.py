@@ -147,7 +147,7 @@ def build(source, prefix, *, indices, chain=None, ochain=None, events_per_shard=
     (optical; None: TPC only) into shards at ``prefix`` (none with ``calibrate``: the path the
     normalization table of the events is saved to). ``keep_clean`` also writes the source's clean
     target, when it has one (nothing trains on it). Returns the summary dict."""
-    from helix.tpc import chain_coeff
+    from helix.tpc import chain as tpc_chain
     systems = tuple(source.systems) if ochain is not None else ()
     if chain is not None:
         source.bind(chain)
@@ -213,9 +213,9 @@ def build(source, prefix, *, indices, chain=None, ochain=None, events_per_shard=
         idn = ev["ident"]
         ce = clean = None
         if res is not None:
-            ce = chain_coeff.coeff_event(chain, res, run=idn["run"], source_file=idn["source_file"], event=idn["event"])
+            ce = tpc_chain.coeff_event(chain, res, run=idn["run"], source_file=idn["source_file"], event=idn["event"])
             if keep_clean and ev.get("clean") is not None and calibrate is None:
-                clean = chain_coeff.clean_coeff_event(chain, ce, ev["clean"])
+                clean = tpc_chain.clean_coeff_event(chain, ce, ev["clean"])
             kept.append(sum(int(r["n_kept"]) for r in res))
         if calibrate is None:
             q.put((ce, clean, ores, idn, ev.get("truth")))

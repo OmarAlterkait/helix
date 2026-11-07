@@ -185,7 +185,7 @@ def test_f0_on_a_real_built_shard(tmp_path):
     improves. The off-support RMS pins that axis so a future re-tune cannot trade it
     away invisibly.
     """
-    from helix.tpc.geometry import load_plane_registry
+    from helix.tpc.readout import load_plane_registry
     from _noise_reference import generate_noise, digitize
     from helix.tpc.io import read_event, sensor_layout
 

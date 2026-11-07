@@ -15,7 +15,7 @@ helix.tpc may not. That is the whole trick, and it is why the pin belongs here
 rather than in either package.
 
 What is deliberately NOT pinned: helix's plane-label parser
-(helix.tpc.geometry._label_gid, over helix.tpc.readout.canonical_plane_gid) and
+(helix.tpc.readout._label_gid, over helix.tpc.readout.canonical_plane_gid) and
 canonical_plane_id (pimm-data) have ALREADY diverged on purpose -- helix's is
 wire-only and raises on `volume_N_Pixel`, pimm-data's handles it, which is why
 test_canonical_plane_id_stable stayed in pimm-data during the move. A test
@@ -33,7 +33,7 @@ pytest.importorskip("torch")
 
 import torch  # noqa: E402
 import pimm_data.geometry as pd_geom  # noqa: E402
-from helix.tpc import geometry as hx_geom  # noqa: E402
+from helix.tpc import readout as hx_geom  # noqa: E402
 
 
 def _md5(path):

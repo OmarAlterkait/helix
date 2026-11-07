@@ -11,7 +11,7 @@ has pimm-data but no pywt. An import added to ``helix.tpc`` would make the DSP
 side undeployable in the image that builds corpora, and nothing else would
 catch it -- the developer's own environment has everything installed.
 
-A source grep cannot do this job: ``geometry.py``,
+A source grep cannot do this job: ``readout.py``,
 ``io.py`` and ``noise.py`` all mention pimm_data in comments, and
 ``helix/model/tokenize.py`` documents a registration example. Only an actual
 import in a clean interpreter distinguishes a mention from a dependency.
