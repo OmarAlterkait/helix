@@ -8,8 +8,9 @@
 #
 #   python scripts/sweep.py configs/sweeps/d1m_lr.yaml --dry-run
 #
-# Open (TODO C6): fm_cooldown anneals on its first COOLDOWN_RUNS runs, which on a one-run corpus is
-# a whole epoch of j000000.
+# Cooldown length (TODO C6): on a one-run corpus fm_cooldown's COOLDOWN_RUNS is a whole epoch of
+# j000000 (a third of the stable phase); max_len caps it at 57,600 events = 3.6k steps at 16 GPUs,
+# 10% of the stable phase. A file-order prefix, as C6 warns, but the same one for every arm.
 config: fm
 submit: [--resources.nnodes, "4"]
 arms:
@@ -21,7 +22,7 @@ then:
   config: fm_cooldown
   suffix: _cool
   submit: [--resources.nnodes, "4", --chain.jobs, "2"]
-  overrides: {weight: "$HELIX_EXP/{run}/model/last"}
+  overrides: {weight: "$HELIX_EXP/{run}/model/last", data.train.max_len: 57600}
 after_each:
   command: python -m helix.eval $HELIX_EXP/{run} --metrics recon,floor,uprobe,labels --weights last --out $HELIX_EXP/{run}/eval.json
   time: "04:00:00"
