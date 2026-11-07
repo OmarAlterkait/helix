@@ -9,8 +9,8 @@ pretrained) weights; ``freeze_encoder`` leaves only the head trainable; the para
 exactly the trainable parameters with the head at its own LR; ``cond_charge`` regresses charged
 cells only; a denoiser run reads back with its FM run's tokenizer. The charge heads (``dist``):
 the gauss likelihood and the cat targets, presence, point estimates and loss are what their
-docstrings say; every head trains through the model; a pretrained FM loads into an encoder with
-the linear-amplitude channel.
+docstrings say; every head trains through the model and reads back with its calibration path; a
+pretrained FM loads into an encoder with the linear-amplitude channel.
 """
 import json
 import os
@@ -359,19 +359,19 @@ def test_every_head_trains_through_coeff_denoise(fm_run, sample, dist, cond):
 
 
 # ------------------------------------------------------------------------------- reading it back
-def _write_denoise_run(d, fm_dir):
+def _write_denoise_run(d, fm_dir, **model):
     """A denoiser run as pimm writes one: its config names the FM run and a tokenizer by
-    reference; model/model_best.pth holds its weights."""
+    reference; model/model_best.pth holds its weights. ``model``: further model-section keys."""
     os.makedirs(os.path.join(d, "model"), exist_ok=True)
     cfg = {"model": {"type": "Coeff-Denoise", "fm": str(fm_dir), "pretrained": True, "freeze_encoder": False,
-                     "cond_charge": False, "lr_head": 1e-2, "compile_blocks": True},
+                     "cond_charge": False, "lr_head": 1e-2, "compile_blocks": True, **model},
            "data": {"train": {"type": "CoeffTPCDataset", "data_root": "/nowhere", "split": ["run_x"],
                               "transform": [{"type": "CoeffTokenize", "part": "coeff", "cfg": "model"},
                                             {"type": "DenoiseRows", "part": "coeff"},
                                             {"type": "CoeffCollect", "part": "coeff"}]}}}
     json.dump(cfg, open(os.path.join(d, "resolved_config.json"), "w"))
     torch.manual_seed(5)
-    m = build_denoise(str(fm_dir), compile_blocks=False)
+    m = build_denoise(str(fm_dir), **{"cond_charge": False, **model}, compile_blocks=False)
     torch.save({"state_dict": {"module." + k: v for k, v in m.state_dict().items()}},
                os.path.join(d, "model", "model_best.pth"))
     return m
@@ -398,6 +398,31 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
     assert ((pr >= 0) & (pr <= 1)).all() and (y[~ok] == 0).all() and (pr[~ok] == 0).all()
     with pytest.raises(ValueError, match="not a denoiser"):
         load_denoiser(os.path.join(d, "model", "iter_3.pth"), "cpu")
+    assert predict.dist == "point" and not hasattr(predict, "calib")
+
+
+@pytest.mark.parametrize("dist,lin", [("gauss", 0.0), ("cat", 30.0)])
+def test_a_distributional_run_reads_back_with_its_calibration_path(fm_run, sample, tmp_path, dist, lin):
+    from helix.eval.denoise import load_denoiser
+    from helix.eval.events import events
+    from helix.model.checkpoint import load_run
+
+    d, _ = fm_run
+    m = _write_denoise_run(str(tmp_path), d, dist=dist, cond_charge=True, lin_amp_scale=lin)
+    assert _same(load_run(tmp_path, "best", device="cpu").model, m)
+    predict, _ = load_denoiser(str(tmp_path), "cpu")
+    ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
+    keys = sample["cells"]["key"]
+    yt = np.log1p(sample["cells"]["q"] / C.Q0).astype(np.float32)
+    y, pr = predict(ev, keys)
+    y2, pr2, stat, width = predict.calib(ev, keys, yt)
+    np.testing.assert_allclose(y2, y, atol=1e-5)
+    np.testing.assert_allclose(pr2, pr, atol=1e-5)
+    ok = (C.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    assert predict.dist == dist and ok.any() and (width[ok] > 0).all() and np.isfinite(stat).all()
+    assert ((pr >= 0) & (pr <= 1)).all() and (stat[~ok] == 0).all()
+    if dist == "cat":
+        assert ((stat >= 0) & (stat <= 1)).all()
 
 
 def test_the_fm_run_is_required_to_be_an_fm(tmp_path, fm_run):

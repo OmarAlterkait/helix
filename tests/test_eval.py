@@ -497,6 +497,71 @@ def test_binary_calibration():
     assert binary_calibration(p, rng.random(200000) < p)["ece"] < 0.01
 
 
+def test_dist_calibration_of_calibrated_distributions():
+    """y_true drawn from each cell's own Gaussian: z covers 0.683 / 0.954 in every bin and view,
+    the median width is the error's hw68; a uniform PIT covers 0.68 / 0.95."""
+    from helix.eval.denoise import TRUTH_NAMES, dist_calibration
+    rng = np.random.default_rng(0)
+    n = 400000
+    q = np.exp(rng.uniform(np.log(1e3), np.log(1e6), n))
+    view = rng.integers(0, 3, n)
+    sig = 0.05
+    err = sig * rng.standard_normal(n)                                  # mu - y_true
+    g = dist_calibration("gauss", -err / sig, np.full(n, sig), err, q, view)
+    assert g["kind"] == "gauss"
+    for v in ("all", "U", "V", "Y"):
+        for nm in TRUTH_NAMES:
+            r = g[v][nm]
+            assert r["n"] > 1000
+            assert r["cov68"] == pytest.approx(0.683, abs=0.02) and r["cov95"] == pytest.approx(0.954, abs=0.01)
+            assert r["width_median"] == pytest.approx(sig) and r["err_hw68"] == pytest.approx(sig, rel=0.05)
+    c = dist_calibration("cat", rng.random(n), np.full(n, sig), err, q, view)["all"]
+    for nm in TRUTH_NAMES:
+        assert c[nm]["cov68"] == pytest.approx(0.68, abs=0.01) and c[nm]["cov95"] == pytest.approx(0.95, abs=0.01)
+    o = dist_calibration("gauss", -2 * err / sig, np.full(n, sig / 2), err, q, view)["all"]   # over-confident
+    assert all(o[nm]["cov68"] < 0.45 for nm in TRUTH_NAMES)
+    assert dist_calibration("gauss", [], [], [], [], [])["all"][TRUTH_NAMES[0]]["n"] == 0
+    with pytest.raises(ValueError, match="kind"):
+        dist_calibration("point", [], [], [], [], [])
+
+
+def test_the_denoise_metric_scores_a_distributional_heads_calibration(synth):
+    """A predictor with ``calib`` (a gauss head that knows the truth up to a calibrated error) adds
+    ``cells.dist``; its charge numbers come from the same call; one without it adds nothing."""
+    from helix.eval.denoise import Denoise
+    d, ds = synth
+    run = load_run(d, device="cpu")
+    base = _oracle()
+    rng = np.random.default_rng(0)
+    sig = 0.02
+
+    def predict(ev, keys):
+        return base(ev, keys)
+
+    def calib(ev, keys, y_true):
+        y, pr = base(ev, keys)
+        err = (sig * rng.standard_normal(len(keys))).astype(np.float32)
+        return y + err, pr, -err / sig, np.full(len(keys), sig, np.float32)
+
+    predict.dist, predict.calib = "gauss", calib
+    m = Denoise(_ctx(run, len(ds), denoiser=predict))
+    for e in _events(run, ds):
+        m.add(e)
+    cl = m.result()["cells"]
+    dd = cl["dist"]
+    assert dd["kind"] == "gauss"
+    rows = [r for r in dd["all"].values() if r["n"]]
+    assert sum(r["n"] for r in dd["all"].values()) <= cl["n_cells"] and rows
+    big = max(rows, key=lambda r: r["n"])
+    assert big["n"] > 500 and big["cov68"] == pytest.approx(0.683, abs=0.06) and big["width_median"] == pytest.approx(sig)
+    res = [r for r in cl["by_view"]["all"]["resolution"].values() if r["n"]]
+    assert all(r["hw68"] > 0 for r in res)                          # the charge numbers saw calib's y
+    m = Denoise(_ctx(run, len(ds), denoiser=base))
+    for e in _events(run, ds):
+        m.add(e)
+    assert "dist" not in m.result()["cells"]
+
+
 def test_identity_reads_the_digest_and_the_truth_cut(tmp_path):
     import h5py
     from types import SimpleNamespace

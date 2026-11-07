@@ -394,6 +394,9 @@ width for every cell, which left a flat ~3% relative error at high charge. Two c
 `hlgauss` (the study's binned conditional head) is not ported. Each head's validation `loss` is
 its own objective (point mse + bce, gauss nll + bce, cat ce), so `model_best` compares
 checkpoints of one head; all three also report `mse` and `bce`.
+`python -m helix.eval ... --metrics denoise` scores a distributional head's calibration as
+`cells.dist`: per truth bin and view, the coverage of |z| < 1 / 2 (gauss) or of the PIT's 68 /
+95% intervals (cat), and the median width against the error's hw68.
 
 **Checkpoints load directly.** `helix.model.checkpoint.load_run` reads pimm's run directory
 (`resolved_config.json`, the WeightEMA sidecar, `model/last` or `model/model_best.pth`,
