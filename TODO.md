@@ -177,6 +177,9 @@ The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, containe
   caps at 1.2M (every d1m event). The S3DF fm / fm_cooldown trained without that fifth of the
   data; anything compared against them carries it. Log max_memory_allocated on the first steps of
   the first uncapped production run (DDP buckets and fragmentation are not in the one-step test).
+  The denoiser is the tighter one: 28.0-28.7 GB at d1m's three largest events on a 40 GB A100
+  (23.2 GB at a median one; point, gauss and cat alike), its decoder rows growing with the event
+  (97k at the top) -- the first thing to run out on a busier corpus, ahead of the FM.
 * **An oracle for the low-energy floor.** Raw and amplitude are weak references; whether the
   model's 5-12% (presence, clear windows below 0.1 MeV, given a kept coefficient) is near what the
   input allows needs a matched filter on the waveform with the known response and noise
