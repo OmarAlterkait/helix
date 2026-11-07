@@ -97,7 +97,7 @@ def test_target_is_the_noisy_input():
     gids = np.array([0, 1, 2, 3, 4, 5])
     band, gid, wire, tau, raw, sigma = _rows()
     out = assemble(band, gid, wire, tau, raw, gids=gids, n_wires=np.full(6, 1969, np.int64),
-                   band_lengths=LENS_T, norm_sigma=sigma, cfg=PatchConfig(cell_t="grid_center"))
+                   band_lengths=LENS_T, norm_sigma=sigma, cfg=PatchConfig())
     occ = out["occ"].astype(bool)
     assert occ.any()
     np.testing.assert_array_equal(out["tgt"][occ], out["inp"][occ])

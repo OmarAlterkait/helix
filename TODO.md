@@ -23,9 +23,6 @@ in `docs/archive/`.
   changing it changes the model), so the result behind `rope_split=False` is confounded.
   A full-width single-axis path, then re-run `wire_rope=False` / `rope_split=True` against
   it (`docs/archive/NEXT.md` §2). The two switches stay until then.
-* **Score the `dec_frac` / `n_masks` arms** on the noisy recipe. They are kept as
-  switches only until scored; `dec_frac` was measured only on the pooled encoder
-  (`docs/archive/ENCODER_POOLING.md` §6). Keep or remove them after.
 * **CRPS, per-slot NLL and PIT in `CoeffFMEvaluator`.** `var_expl` was shown to
   be a Bayes limit (calibrated PIT) under CLEAN targets only, on r1; it has no ceiling for
   the noisy-only target, and loss / var_expl do not rank representations anyway (rank

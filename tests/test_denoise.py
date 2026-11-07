@@ -20,10 +20,10 @@ torch = pytest.importorskip("torch")
 from helix.data import cells as C                                   # noqa: E402
 from helix.data.denoise import KEYS, DenoiseRows, kept_coefficients  # noqa: E402
 from helix.model.denoise import ENCODER_PREFIXES, CellDecoder, build_denoise  # noqa: E402
-from helix.model.tokenize import CoeffTokenize, PatchConfig, _name_hash  # noqa: E402
+from helix.model.tokenize import CoeffTokenize, PatchConfig, _name_hash, patch_config  # noqa: E402
 from test_eval import SMALL, TOK, _DS, _sample, _same, _write_run  # noqa: E402
 
-CFG = PatchConfig(**TOK)
+CFG = patch_config(TOK)
 
 
 @pytest.fixture(scope="module")

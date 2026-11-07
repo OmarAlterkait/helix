@@ -67,7 +67,7 @@ def test_no_builtin_hash_used_for_seeding():
 def test_cell_key_round_trips():
     from helix.model.tokenize import PatchConfig, cell_key, unpack_cell_key
 
-    cfg = PatchConfig(cell_t="grid_center")
+    cfg = PatchConfig()
     rng = np.random.default_rng(3)
     gid = rng.integers(0, 6, 5000)
     band = rng.integers(0, cfg.n_bands, 5000)
@@ -90,7 +90,7 @@ def test_cell_key_agrees_with_assemble():
     """
     from helix.model.tokenize import PatchConfig, assemble, cell_key
 
-    cfg = PatchConfig(cell_t="grid_center")
+    cfg = PatchConfig()
     rng = np.random.default_rng(11)
     n = 4000
     gids = np.array([0, 1, 2], np.int64)

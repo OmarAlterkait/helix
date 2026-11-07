@@ -105,12 +105,15 @@ needs sm80+, so training and evaluation run on `ampere` (A100) at S3DF, not `tur
   random ones per step, is the plane masking in use (SCIENCE §2);
 * `d_dec` (costs map_r: ENCODER_POOLING §6b), `n_sink`, `pad_mask`, `cond` / `adaln`,
   `dec_mode`, FiLM subsets, `n_wirefeat`, `fm_names`, the centroid time coordinate and
-  `sigma_norm`: unused by any config, or superseded.
+  `sigma_norm`: unused by any config, or superseded;
+* `dec_frac` (partial decoding) and `n_masks` (several masks per step), 2026-11: `dec_frac`
+  hurt the floor on the pooled encoder (ENCODER_POOLING §6) and was seed-unstable on
+  helix-nersc's v7 probe; `n_masks` was never scored. A run that recorded either still
+  reads (`helix.model.checkpoint.RETIRED_TRAIN_OPTS`);
+* `PatchConfig.cell_t`, which accepted one value (`helix.model.tokenize.RETIRED_KEYS`).
 
 Kept as switches until measured: `rope_split` (default False, as in every config) and
-`wire_rope`, for the RoPE re-test (TODO); `dec_frac` and `n_masks` until their arms are
-scored (ENCODER_POOLING §6 has `dec_frac` 1/3 only on the pooled encoder, where it hurt
-the floor); `dead_frac`.
+`wire_rope`, for the RoPE re-test (TODO); `dead_frac`.
 
 **The bf16-weights package is removed:** `bf16_params`, `fp32_stream`, `FlatAdamW`, the
 fp32 all-reduce hook and WeightEMA's FlatAdamW-master branch; with them `ddp_bf16_grads`,

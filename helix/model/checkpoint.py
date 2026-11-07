@@ -66,11 +66,18 @@ def run_dir(path):
     raise FileNotFoundError(f"{p}: no {_CONFIG} in it or above it -- not inside a pimm run directory")
 
 
+#: Training options a run's config may carry that ``build_fm`` no longer accepts: partial
+#: decoding (``dec_frac``) and several masks per step (``n_masks``), both training-only.
+RETIRED_TRAIN_OPTS = ("dec_frac", "n_masks")
+
+
 def model_config(config):
     """``build_fm`` kwargs from a resolved config: the model section without the registry
     selector and the bins table (the bins ride in the weights), and without compilation (how the
-    run executed, not what it learned)."""
-    arch = {k: v for k, v in dict(config["model"]).items() if k not in ("type", "bins")}
+    run executed, not what it learned). A run may record a training option since removed
+    (:data:`RETIRED_TRAIN_OPTS`); it never changed the model outside training, so it is dropped."""
+    arch = {k: v for k, v in dict(config["model"]).items()
+            if k not in ("type", "bins") + RETIRED_TRAIN_OPTS}
     arch["compile_blocks"] = False
     for k, v in arch.items():
         if isinstance(v, list):                      # JSON has no tuple
@@ -82,13 +89,12 @@ def tokenizer_config(config):
     """The ``PatchConfig`` of the train split's ``CoeffTokenize`` -- what the weights saw. A
     ``cfg="model"`` (a denoiser's) is the tokenizer of the FM run its model is built on
     (``helix.integrations.pimm.trainer.resolve_tokenizer`` resolved it the same way)."""
-    from helix.model.tokenize import PatchConfig
+    from helix.model.tokenize import patch_config
     for t in (config.get("data") or {}).get("train", {}).get("transform") or []:
         if isinstance(t, dict) and t.get("type") == "CoeffTokenize":
             if t.get("cfg") == "model":
                 return tokenizer_config(_read_config(config["model"]["fm"]))
-            cfg = {k: tuple(v) if isinstance(v, list) else v for k, v in dict(t.get("cfg") or {}).items()}
-            return PatchConfig(**cfg)
+            return patch_config(t.get("cfg"))
     raise ValueError("the run's config has no CoeffTokenize in data.train.transform")
 
 

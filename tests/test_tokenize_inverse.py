@@ -26,7 +26,7 @@ GIDS = np.array([0, 1, 2, 4, 5], np.int32)          # deliberately NON-contiguou
 # the respect_valid test silently proves nothing.
 N_WIRES = np.array([70, 65, 50, 63, 45], np.int32)
 BAND_LENGTHS = np.array([20, 18, 33, 70, 130], np.int64)
-CFG = PatchConfig(cell_t="grid_center")   # what every helix config trains
+CFG = PatchConfig()   # what every helix config trains
 
 
 def _rows(seed=0, n=400):

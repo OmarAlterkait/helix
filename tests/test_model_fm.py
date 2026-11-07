@@ -91,7 +91,7 @@ def test_train_opts_are_not_constructor_params():
     that record."""
     import inspect
     params = set(inspect.signature(FMModel.__init__).parameters)
-    assert not params & {"mask_mode", "mask_ratio", "plane_frac", "dec_frac", "compile_blocks"}
+    assert not params & {"mask_mode", "mask_ratio", "plane_frac", "compile_blocks"}
     m = build_fm(dict(SMALL, mask_ratio=0.6, mask_mode="plane"))
     assert (m.mask_ratio, m.mask_mode) == (0.6, "plane")
 

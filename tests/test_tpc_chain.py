@@ -121,7 +121,7 @@ def test_coeff_event_physical_wires_and_validity(tmp_path):
     back = coeff_io.read_coeff_event(tmp_path / "c.h5", 0)
     assert np.array_equal(back.wire_valid, ce.wire_valid) and np.array_equal(back.wire, ce.wire)
     kw = dict(gids=ce.gids, n_wires=ce.n_wires, band_lengths=ce.basis.band_lengths,
-              norm_sigma=np.maximum(ce.sigma_threshold, 1e-3), cfg=PatchConfig(cell_t="grid_center"))
+              norm_sigma=np.maximum(ce.sigma_threshold, 1e-3), cfg=PatchConfig())
     a = assemble(ce.band, ce.plane_gid, ce.wire, ce.tau, ce.value, **kw)
     b = assemble(ce.band, ce.plane_gid, ce.wire, ce.tau, ce.value, wire_valid=ce.wire_valid, **kw)
     assert a["n_cells"] == b["n_cells"] and b["valid"].sum() < a["valid"].sum()

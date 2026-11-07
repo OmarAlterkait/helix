@@ -111,7 +111,7 @@ def test_jensen_gap_is_real():
 
 def test_rows_from_grid_space_argument():
     """`ratio` multiplies by sigma; `asinh` sinh-es first. They must differ."""
-    cfg = PatchConfig(cell_t="grid_center")
+    cfg = PatchConfig()
     n_cells, n_slot = 3, cfg.n_slot
     occ = np.zeros((n_cells, n_slot), bool); occ[:, :4] = True
     vals = np.full((n_cells, n_slot), 1.5, np.float32)

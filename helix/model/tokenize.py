@@ -86,23 +86,26 @@ class PatchConfig:
     lev: tuple = (4, 4, 3, 2)                         # DWT level per band
     delta: tuple = (-2.38, 0.62, 0.75, 0.50)          # per-band tick offset
     toff: tuple = (-17.4, 2.6, 5.5)                   # U,V,Y sensor->drift (pb_labels.TOFF)
-    # The RoPE time coordinate: the geometric centre of the patch's tick range,
-    # which depends only on WHICH cell it is, never on its contents. `t_phys` is
-    # the masked tokens' RoPE position, computed before masking, so a coordinate
-    # derived from the cell's own coefficients (an amplitude-weighted centroid)
-    # would leak the prediction target into it. The only accepted value; the
-    # field remains because checkpoints record it in their operating point.
-    cell_t: str = "grid_center"
 
     @property
     def n_slot(self) -> int:
         return self.pw * self.pt
 
-    def __post_init__(self):
-        if self.cell_t != "grid_center":
-            raise ValueError(
-                f"cell_t must be 'grid_center' (the only time coordinate the "
-                f"tokenizer computes), got {self.cell_t!r}")
+
+#: Keys a recorded tokenizer cfg may hold that configure nothing any more. ``cell_t`` chose the
+#: RoPE time coordinate; the only accepted value was the patch's grid centre (a coordinate from
+#: the cell's own coefficients would leak the masked target into its position), and every
+#: resolved config written before its removal records it.
+RETIRED_KEYS = ("cell_t",)
+
+
+def patch_config(cfg) -> PatchConfig:
+    """A :class:`PatchConfig` from a config dict (a run's recorded one included): lists become
+    tuples (JSON has none) and :data:`RETIRED_KEYS` are dropped."""
+    if isinstance(cfg, PatchConfig):
+        return cfg
+    return PatchConfig(**{k: tuple(v) if isinstance(v, list) else v
+                          for k, v in dict(cfg or {}).items() if k not in RETIRED_KEYS})
 
 
 def _require_cfg(cfg):
@@ -324,8 +327,9 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
         occ[ks] = False                               # killed -> not active input
         # targets/valid unchanged: the model must still predict a dead wire
 
-    # RoPE time coord: the centre of the patch's tick range (PatchConfig.cell_t),
-    # TOFF-corrected so planes share a zero.
+    # RoPE time coord: the centre of the patch's tick range, which depends only on WHICH cell it
+    # is (never on its contents: `t_phys` is the masked tokens' position), TOFF-corrected so
+    # planes share a zero.
     dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float32)
     toff = np.asarray(cfg.toff, np.float32)
     center_tau = cell_tb.astype(np.float32) * pt + pt / 2.0
@@ -612,7 +616,7 @@ class CoeffTokenize:
                  n_wires=None, band_lengths=None, norm_sigma=None):
         cfg = _require_cfg(cfg)
         self.part = part
-        self.cfg = cfg if isinstance(cfg, PatchConfig) else PatchConfig(**(cfg or {}))
+        self.cfg = patch_config(cfg)
         self.dead_frac = float(dead_frac)
         self.seed = seed
         self._override = dict(gids=gids, n_wires=n_wires,

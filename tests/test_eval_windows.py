@@ -135,7 +135,7 @@ def test_bootstrap_weighs_an_event_by_how_often_it_was_drawn():
 def test_cell_inputs_matches_the_gather_arithmetic():
     """cell_inputs: the covering tokens and offset features of the tokenizer's own pixel_cells."""
     from helix.model.tokenize import PatchConfig, pixel_cells
-    cfg = PatchConfig(cell_t="grid_center")
+    cfg = PatchConfig()
     rng = np.random.default_rng(0)
     bl = np.array([280, 280, 560, 1120])
     keys = C.fkey(rng.integers(0, 6, 400), rng.integers(0, 900, 400), rng.integers(0, 260, 400))
@@ -163,7 +163,7 @@ def test_cell_inputs_matches_the_gather_arithmetic():
 
 def test_coeff_cells_are_the_cells_under_the_kept_coefficients():
     from helix.model.tokenize import PatchConfig, tick_of_tau
-    cfg = PatchConfig(cell_t="grid_center")
+    cfg = PatchConfig()
     band, g, wire, tau = np.array([0, 3, 4, 0]), np.array([1, 2, 2, 1]), np.array([10, 11, 12, 10]), np.array([5, 9, 9, 5])
     got = C.coeff_cells(band, g, wire, tau, cfg)
     k = band < cfg.n_bands                                              # D1 is not tokenized
@@ -197,7 +197,7 @@ def test_near_windows_are_empty_but_beside_charge():
 
 def test_cell_neighbors_centre_is_the_covering_token_and_shifts_by_one_patch():
     from helix.model.tokenize import PatchConfig, cell_key, pixel_cells, unpack_cell_key
-    cfg = PatchConfig(cell_t="grid_center")
+    cfg = PatchConfig()
     bl = np.array([271, 271, 542, 1084, 2168])
     rng = np.random.default_rng(0)
     toks = []

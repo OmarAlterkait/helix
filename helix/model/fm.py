@@ -36,22 +36,9 @@ from helix.model.serial import _blocks, _ckpt, _cu_chunks, _cu_even, _inverse, _
 # fused_qk runs QK-norm + RoPE as one Triton kernel each way
 # (helix.model.kernels); the same arithmetic to ~1e-5, so it is an
 # implementation choice, not an architecture one. Needs qk_norm and head dim 64.
-#
-# dec_frac < 1 decodes only that fraction of the masked tokens in TRAINING
-# (partial reconstruction, CrossMAE); evaluation decodes all of them, so val loss
-# stays comparable. The encoder's input is unchanged. A sequence gives one
-# fraction PER BAND (e.g. (1, 1, 1/3, 1/3): every masked A4/D4 token, a third of
-# D3/D2): each band is then sampled independently and every decoded row weighted
-# 1/p in the loss, so the objective stays an estimate of the full one rather
-# than a reweighting toward the full bands.
-#
-# n_masks > 1 draws that many masks per event per step and averages their losses
-# -- more work per step where a step is fixed-cost bound. Random-mode masks are
-# COMPLEMENTARY (disjoint visible sets, as data2vec 2.0's multi-mask); a
-# plane-mode step draws its masks independently.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
                    plane_frac=0.0, compile_blocks=False, act_ckpt=False,
-                   fused_qk=False, dec_frac=1.0, n_masks=1)
+                   fused_qk=False)
 
 
 class FMModel(nn.Module):
@@ -311,21 +298,6 @@ class FMModel(nn.Module):
         n_vis = int((~tok_mask).sum())
         order = torch.argsort(tok_mask.to(torch.uint8), stable=True)
         vis_idx, mask_idx = order[:n_vis], order[n_vis:]
-        if masked_only and self.training and isinstance(self.dec_frac, (tuple, list)):
-            # Per-band partial reconstruction: each masked row kept with its band's
-            # probability (dec_weights supplies the 1/p loss weights). The count is
-            # random, so this costs one host sync; always at least one row.
-            p = torch.as_tensor(self.dec_frac, dtype=torch.float32, device=order.device)
-            keep = torch.rand(mask_idx.numel(), device=order.device) < p[B["band_id"][mask_idx]]
-            keep[0] |= ~keep.any()
-            mask_idx = mask_idx[keep]
-        elif masked_only and self.training and self.dec_frac < 1.0:
-            # Partial reconstruction (CrossMAE): decode a random subset of the
-            # masked tokens. The encoder still sees only the visible ones, so its
-            # task is unchanged; the decoder -- a third of the step -- shrinks.
-            n_m = order.numel() - n_vis                          # host ints: no sync
-            keep = torch.randperm(n_m, device=order.device)[:max(1, round(n_m * self.dec_frac))]
-            mask_idx = mask_idx[keep.sort().values]
         rows = lambda a, i: None if a is None else a[i]
         atv, awv = at[vis_idx], rows(aw, vis_idx)
         xv, _ = self._encode(B, vis_idx, atv, awv)
@@ -438,37 +410,7 @@ class FMModel(nn.Module):
         B = dict(batch)
         B.setdefault("n_cells", B["plane_id"].shape[0])
         self.require_batch_keys(B)
-        if tok_mask is None and self.training and self.n_masks > 1:
-            outs = [self._forward_one(B, m) for m in self.draw_masks(B, self.n_masks)]
-            return {k: sum(o[k] for o in outs) / len(outs) for k in outs[0]}
         return self._forward_one(B, self.make_mask(B) if tok_mask is None else tok_mask)
-
-    def draw_masks(self, B, k, gen=None):
-        """``k`` masks for one step under the model's policy. A random-mode step
-        partitions a uniform draw into ``k`` disjoint visible sets of
-        ``1 - mask_ratio`` each, so each token is visible in at most one of them;
-        a plane-mode step (``plane_frac``) draws ``k`` independent plane masks."""
-        if self.mask_mode != "random":
-            return [self.make_mask(B, gen=gen) for _ in range(k)]
-        dev = B["plane_id"].device
-        rnd = (lambda *s: torch.rand(*s, generator=gen, device=dev)) if gen is not None \
-            else (lambda *s: torch.rand(*s, device=dev))
-        if self.plane_frac > 0 and float(rnd(())) < self.plane_frac:
-            return [self.make_mask(B, mode="plane", gen=gen) for _ in range(k)]
-        v = 1.0 - self.mask_ratio
-        if k * v > 1.0 + 1e-9:
-            raise ValueError(f"n_masks={k} complementary masks need mask_ratio >= {1 - 1 / k:.3f}")
-        u = rnd(B["n_cells"])
-        return [~((u >= i * v) & (u < (i + 1) * v)) for i in range(k)]
-
-    def dec_weights(self, B, rows):
-        """Per-row loss weights 1/p for a per-band ``dec_frac`` in training, else
-        None (uniform). p is the band's keep probability, a constant, so the
-        weights follow from the decoded rows alone."""
-        if not (self.training and isinstance(self.dec_frac, (tuple, list))):
-            return None
-        p = torch.as_tensor(self.dec_frac, dtype=torch.float32, device=rows.device)
-        return 1.0 / p[B["band_id"][rows]]
 
     def _forward_one(self, B, m):
         if not getattr(self, "_bins_checked", False):
@@ -481,7 +423,7 @@ class FMModel(nn.Module):
         # Only masked rows enter the objective, so only they are decoded, and the
         # value head is evaluated only on the slots it weights.
         feat, rows = self.forward_feat(B, m, masked_only=True)
-        bce, vloss = cat_head_sparse(self, feat, B, rows, w=self.dec_weights(B, rows))
+        bce, vloss = cat_head_sparse(self, feat, B, rows)
         return {"loss": bce + vloss, "bce": bce.detach(), "val": vloss.detach(),
                 "masked_frac": m.float().mean().detach()}
 

@@ -18,8 +18,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from helix.data import cells as C                                   # noqa: E402
-from helix.model.checkpoint import load_run, run_dir                # noqa: E402
-from helix.model.tokenize import PatchConfig, tau_of_tick           # noqa: E402
+from helix.model.checkpoint import load_run, run_dir, tokenizer_config  # noqa: E402
+from helix.model.tokenize import PatchConfig, patch_config, tau_of_tick  # noqa: E402
 
 SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=2, dec_blocks=1, heads=2, n_bins=16, gp=64, gd=128)
 TOK = dict(cell_t="grid_center", pw=4, pt=2)
@@ -82,12 +82,22 @@ def test_load_run_reads_the_ema_and_the_last_checkpoint(tmp_path):
     assert _same(r.model, ema) and not r.model.training
     assert not any(p.requires_grad for p in r.model.parameters())
     assert torch.isfinite(r.model.bin_edges).all()
-    assert r.tokenizer == PatchConfig(**TOK)
+    assert r.tokenizer == patch_config(TOK)
     p = r.provenance
     assert (p["weights"], p["step"], p["run"], p["bins"]) == ("ema", 5, str(tmp_path), "/archive/bins.pt")
     assert p["corpus"]["identity"] == {"basis_digest": "abc"} and p["code"]["helix"]["commit"] == "c0ffee"
     r = load_run(tmp_path, "last", device="cpu")
     assert _same(r.model, raw) and (r.provenance["weights"], r.provenance["step"]) == ("last", 7)
+
+
+def test_a_run_recording_retired_options_still_reads():
+    """``cell_t`` (in TOK) and the training-only ``dec_frac`` / ``n_masks`` are in the resolved
+    configs of runs made before they were removed: reading such a run ignores them."""
+    from helix.model.checkpoint import model_config
+    cfg = _config()
+    cfg["model"].update(dec_frac=0.5, n_masks=2)
+    assert not {"dec_frac", "n_masks", "type", "bins"} & set(model_config(cfg))
+    assert "cell_t" in TOK and tokenizer_config(cfg) == PatchConfig(pw=4, pt=2)
 
 
 def test_load_run_takes_one_checkpoint_and_finds_its_run(tmp_path):
@@ -134,7 +144,7 @@ def _sample(rng, i, n_trk=60):
     rec.update(trk_volume=(np.arange(n_trk) % 2).astype(np.int16), trk_id=np.arange(n_trk),
                trk_energy=rng.uniform(0.01, 2.0, n_trk), trk_motif=np.arange(n_trk) % 5, trk_pid=np.arange(n_trk) % 6)
     rec = {name: np.asarray(rec[name]).astype(dt) for _, _, name, dt in C.SCHEMA}
-    cfg = PatchConfig(**TOK)
+    cfg = patch_config(TOK)
     g, fw, ft = C.unkey(rec["key"])
     n = 3000                                       # noise: coefficients in every band, like charge
     g, fw, ft = (np.concatenate([a, b]) for a, b in zip((g, fw, ft), (rng.integers(0, 6, n), rng.integers(0, 480, n),
@@ -177,7 +187,7 @@ def _ctx(run, n, n_boot=20, denoiser=None):
 def _token_feature(ev, values, d=SMALL["d"], seed=0):
     """Per-token features whose column 0 is the mean of ``values`` over the cells a token covers
     in band 0 (the rest noise): what a representation that knows ``values`` would carry."""
-    idx, _ = C.cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, PatchConfig(**TOK))
+    idx, _ = C.cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, patch_config(TOK))
     n = len(ev.cell_key)
     s, c = np.zeros(n), np.zeros(n)
     ok = idx[:, 0] >= 0

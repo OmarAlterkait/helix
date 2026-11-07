@@ -110,7 +110,7 @@ scheduler = dict(type="WSDStableLR", warmup="auto")
 
 # ---------------------------------------------------------------------------- data
 transform = [
-    dict(type="CoeffTokenize", part="coeff", cfg=dict(cell_t="grid_center")),
+    dict(type="CoeffTokenize", part="coeff", cfg=dict(pw=16, pt=8)),
     dict(type="CoeffCollect", part="coeff"),
 ]
 # The split hashes each event's identity, so it does not depend on the corpus's build,
