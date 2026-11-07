@@ -870,6 +870,23 @@ def test_the_extra_clear_windows_count_in_clear_and_nowhere_else():
     assert counts["isox"] == 10 and counts["iso_clear_U"] == 0 and counts["iso_U"] == 10
 
 
+def test_the_gate_coverage_caps_the_clear_efficiency():
+    """A clear window with no kept coefficient (``kept`` False) scores 0 and cannot be found:
+    kept_clear is the cap, and the efficiency among kept windows is what the scores do with them."""
+    meta, score = [], []
+    for e in range(10):
+        meta += [dict(kind="bg", g=0, E=np.nan, ev=e, kept=True)] * 20
+        score += [0.0] * 20
+        meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="clear", kept=True)] * 2
+        meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="clear", kept=False)] * 2
+        score += [5.0, 5.0, 0.0, 0.0]
+    stat, _, _ = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)
+    got = stat(np.ones(10, np.int64))
+    assert got["kept_clear_0.1-0.2"] == 0.5 and got["floor_eff1pct_clear_0.1-0.2"] == 0.5
+    assert got["floor_eff1pct_clear_kept_0.1-0.2"] == 1.0 and got["kept_clear_0.1-0.2_U"] == 0.5
+    assert got["tok_clear_0.1-0.2"] == 1.0 and got["floor_eff1pct_clear_tokonly_0.1-0.2"] == 0.0   # tok defaults True
+
+
 def test_the_auc_is_the_weighted_pair_ordering_within_a_view():
     rng = np.random.default_rng(0)
     meta, score = [], []

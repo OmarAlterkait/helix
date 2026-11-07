@@ -348,6 +348,15 @@ class Floor:
         widx, waux = cell_inputs(tr["wkey"], ev.cell_key, ev.band_lengths, c.run.tokenizer)
         ok = (widx >= 0).any(1)
         scores = dict(amplitude=amplitude(ev, tr["wkey"]))
+        # What the corpus left in each window. kept: >= 1 kept coefficient inside (the amplitude > 0;
+        # a kept coefficient is above the ~3.5 sigma threshold and the value step is <= sigma/16, so
+        # none rounds to 0) -- the gate's cap, and the amplitude arm's. tok: >= 1 window cell under a
+        # covering token -- the fitted arms' cap, wider: a token spans 16 wires, so one whose
+        # coefficients sit just outside the window still covers it
+        nw = len(tr["meta"])
+        kept = scores["amplitude"].reshape(nw, -1).max(1) > 0 if nw else np.zeros(0, bool)
+        tok = ok.reshape(nw, -1).any(1) if nw else np.zeros(0, bool)
+        tr = dict(tr, meta=[dict(m, kept=bool(k), tok=bool(t)) for m, k, t in zip(tr["meta"], kept, tok)])
         for a in FLOOR_FITTED:
             X = gather(arm_features(ev, c.model, a), widx[ok]) if ok.any() else None
             for k, probe in enumerate(self.probes[a]):

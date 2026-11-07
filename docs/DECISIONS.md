@@ -296,7 +296,17 @@ number still under its own key, the new ones beside it):*
   at 0.1-0.2 MeV were 0.04 / 0.35 on the clear iso windows (at the far threshold) and 0.02 / 0.16
   on the crowded ones at the near threshold; the amplitude reference's clear numbers were
   0.003 / 0.10. Quote the clear and crowded-near numbers as the floor, and say which population
-  any floor number is. A haze shows as crowded-at-far well above
+  any floor number is. Of the fitted arms, `presence` answers the detection question and is the
+  one to rank by (clear 0.35 / aucClear 0.818 against MSE's 0.30 / 0.768 at 0.1-0.2 MeV; it hazes
+  more beside tracks, crowded@near 0.105 against 0.156, a wash in AUC).
+  **The background is drawn around a kept coefficient, and that caps every arm.** Far and near
+  windows are accepted only with a kept coefficient inside, so "no token, no charge" cannot win
+  trivially -- right, and it makes the background harder than random noise: raw and amplitude
+  score clear iso windows BELOW it (aucClear 0.31-0.55), because many faint isolated deposits keep
+  no coefficient at all and score 0 on every arm. `kept_clear_<E>` is that coverage, the corpus
+  gate's share of the floor, and `floor_eff1pct_clear_kept_<E>` the efficiency among the windows
+  the gate let through. Where coverage is low, the gate threshold -- a corpus choice -- is the
+  first lever on the low-energy floor, before the model. A haze shows as crowded-at-far well above
   crowded-at-near while clear-at-far stays;
 * the threshold-free companion `auc_<E>`: P(iso above a far window of its own view). Seed
   pairs agree to ~0.005 on it against ~0.04 on the efficiency at 1%. Every window number is
@@ -361,6 +371,12 @@ trainer, launcher and checkpoint format for both models instead of
 measured the stable phase `fm` with its EMA weights against `fm_cooldown` on every probe and
 found them equal within 0.011, so either serves; the config, README, RUNBOOK and ARCHITECTURE
 all name `fm_cooldown`, and changing the default would change the recipe of record for nothing.
+*Corrected* (2026-11-07): that comparison was on the all-iso floor, which mixed windows (other
+charge in or beside the window; half of all iso windows) dominate. On the clear iso windows the
+cooldown wins: 0.299 [0.289, 0.310] against fm EMA's 0.255 [0.242, 0.270] at 0.1-0.2 MeV (full
+d1m, 400 scored events), all-iso 0.585 against 0.580. The cooldown improves faint isolated
+detection, not only recon, and the default stays `fm_cooldown` for that reason; rank pretrained
+models on cooled checkpoints and the clear-window floor.
 
 **Presence is q > 25 e-, everywhere.** `DenoiseRows(support_min_q=25)` (its default, and
 `configs/pimm/denoise.py`'s `_SUPPORT_MIN_Q`), the evaluation's `--presence-q`. *Why:* cells-3

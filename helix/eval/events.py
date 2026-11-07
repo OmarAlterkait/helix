@@ -370,6 +370,17 @@ def window_stat(score, meta):
                                     (clear among the iso windows, ``n_windows`` ``iso_clear_*``;
                                     the clear efficiency itself also scores the extra clear draws,
                                     ``isox``, which no other number includes)
+      kept_clear_<E>[_<V>]          the fraction of clear windows holding >= 1 kept coefficient:
+                                    one without scores 0 on every arm, below every bg window (each
+                                    drawn around one), so this caps every arm -- the corpus gate's
+                                    share of the floor
+      floor_eff1pct_clear_kept_<E>[_<V>]  the clear efficiency among those windows
+      tok_clear_<E>                 the fraction of clear windows with >= 1 cell under a covering
+                                    token -- the fitted arms' cap (a token's coefficients may sit
+                                    outside the window)
+      floor_eff1pct_clear_tokonly_<E>  the clear efficiency among windows covered by a token but
+                                    holding no kept coefficient: context from outside the window,
+                                    or haze leaking back in
       auc_clear_<E>, auc_crowded_near_<E>  the matched pairs threshold-free: clear iso against far,
                                     crowded iso against near windows, within each view
       (the two matched efficiencies also per view, ``_<V>``; ``n_windows`` counts each context
@@ -389,6 +400,8 @@ def window_stat(score, meta):
     # clear: the iso windows that are, plus the extra clear draws (isox); crowded and mixed are iso only
     clear = ((ctx == "clear") & iso) | isox
     crowded, mixed = (ctx == "crowded") & iso, (ctx == "mixed") & iso
+    kept = np.array([bool(m.get("kept", True)) for m in meta], bool)       # >= 1 kept coefficient inside
+    tok = np.array([bool(m.get("tok", True)) for m in meta], bool)         # >= 1 cell under a token
     # per-event equal weights of the iso windows: 1 / (the event's iso windows in that energy bin)
     cell = we * len(ENERGY_NAMES) + np.maximum(eb, 0)
     cnt = np.bincount(cell[iso], minlength=len(evs) * len(ENERGY_NAMES))
@@ -442,12 +455,20 @@ def window_stat(score, meta):
             out[f"floor_eff1pct_crowded_near_{nm}"] = _frac(w, det_n, sel & crowded & has_n)
             out[f"floor_eff1pct_crowded_{nm}"] = _frac(w, det, sel & crowded)
             out[f"floor_eff1pct_mixed_{nm}"] = _frac(w, det, sel & mixed)
+            # the corpus gate's share: how many clear windows kept any coefficient, and the clear
+            # efficiency among those (what the representation does with what the gate let through)
+            out[f"kept_clear_{nm}"] = _frac(w, kept, selc & clear)
+            out[f"floor_eff1pct_clear_kept_{nm}"] = _frac(w, det, selc & clear & kept)
+            out[f"tok_clear_{nm}"] = _frac(w, tok, selc & clear)
+            out[f"floor_eff1pct_clear_tokonly_{nm}"] = _frac(w, det, selc & clear & tok & ~kept)
             for key, m in (("clear", clear), ("crowded_near", crowded)):
                 bt, tt = ctx_beats[key]
                 out[f"auc_{key}_{nm}"] = _ratio((w * bt)[selc & m].sum(), (w * tt)[selc & m].sum())
             for v in range(3):
                 sv = sel & (view == v)
                 out[f"floor_eff1pct_clear_{nm}_{VIEWS[v]}"] = _frac(w, det, selc & (view == v) & clear)
+                out[f"kept_clear_{nm}_{VIEWS[v]}"] = _frac(w, kept, selc & (view == v) & clear)
+                out[f"floor_eff1pct_clear_kept_{nm}_{VIEWS[v]}"] = _frac(w, det, selc & (view == v) & clear & kept)
                 out[f"floor_eff1pct_crowded_near_{nm}_{VIEWS[v]}"] = _frac(w, det_n, sv & crowded & has_n)
             for v in range(3):
                 sv = sel & (view == v)
