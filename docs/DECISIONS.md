@@ -308,14 +308,15 @@ number still under its own key, the new ones beside it):*
   sign with the primary key on fm_cooldown vs fm EMA, +0.045 vs -0.007), `floor_eff1pct_crowded_
   near_<E>` and `near_fpr_at_far`. One key, so a close call is not decided after seeing it.
   **The probes fit on the map rows only (`--fit-windows none`), decided before the d1m_lr
-  ranking.** Adding the fit events' own window cells (`all`: 73% of the fit rows, positive
-  fraction 0.68 -> 0.19) or only their background windows (`neg`, the near-track negatives) made
-  every key worse, paired on fm_cooldown's same scored windows: presence clear@far 0.1-0.2 MeV
-  -0.096 [-0.108, -0.080] (all) and -0.037 (neg), crowded@near -0.057 / -0.059, and near_fpr_at_far
-  UP (+0.030 / +0.067; the MSE arm +0.102 with neg). More empty cells beside tracks did not teach
-  either probe to tell a faint deposit from a track's surroundings: the haze is not the fit
-  population's sampling prior but what the frozen features carry (a window beside a track
-  shares its covering tokens) -- a representation or token-resolution limit.
+  ranking.** A first test added the fit events' window cells within the fixed fit budget, so they
+  DISPLACED map rows (positive fraction 0.68 -> 0.19-0.24, ~3x fewer charged cells) and every key
+  got worse (presence clear@far 0.1-0.2 MeV -0.096 with all windows, -0.037 with only bg + near):
+  confounded, so it decides nothing about the haze. `--fit-windows` now adds the window rows ON
+  TOP of exactly "none"'s map rows, with their own budget; the clean rerun, and whether the haze
+  lives in near windows that share a covering token with charge (`auc_near_vs_far_shtok` /
+  `_noshtok`: token resolution if only there, the encoder's context if in both), decide what the
+  haze is. `near_fpr_at_far` is not comparable across fit settings (the fit moves the far
+  threshold itself); `auc_near_vs_far` is.
   **The background is drawn around a kept coefficient, and that caps every arm.** Far and near
   windows are accepted only with a kept coefficient inside, so "no token, no charge" cannot win
   trivially -- right, and it makes the background harder than random noise: raw and amplitude

@@ -338,7 +338,11 @@ class Floor:
         fit_win = {False: "none", True: "all"}.get(getattr(c, "fit_windows", "none"), getattr(c, "fit_windows", "none"))
         tr = ev.truth(c.seed, windows=scored or fit_win != "none")
         if not scored:
-            rows, q = tr["mrows"], tr["mq"]
+            mrows = tr["mrows"]
+            midx, _ = cell_inputs(mrows, ev.cell_key, ev.band_lengths, c.run.tokenizer)
+            mok = np.nonzero((midx >= 0).any(1))[0]
+            mkeep = mok[fit_rows(len(mok), c.n_train, np.random.default_rng([c.seed, ev.index, 1]))]
+            rows, q = mrows[mkeep], tr["mq"][mkeep]                     # exactly the rows of "none"
             src = np.zeros(len(rows), np.int8)                          # FIT_SOURCES index per row
             if fit_win != "none":
                 # the fit events' own window cells (the populations scored, at their own frequency
@@ -353,14 +357,22 @@ class Floor:
                         wk.append(tr["wkey"][i * N_WCELL:(i + 1) * N_WCELL])
                         wsrc.append(np.full(N_WCELL, FIT_SOURCES.index(m["kind"]), np.int8))
                 if wk:
-                    allk = np.concatenate([rows, *wk])
-                    alls = np.concatenate([src, *wsrc])
-                    rows, first = np.unique(allk, return_index=True)    # a map row keeps its map source
-                    src = alls[first]
-                    q = cell_charge(ev.cells, rows)
+                    # ON TOP of the map rows, with their own budget (the map rows' count again), so
+                    # the charged cells the probe sees are those of "none": a displacement would
+                    # change the class prior and the positives together with the negatives
+                    wk, ws = np.concatenate(wk), np.concatenate(wsrc)
+                    wk, first = np.unique(wk, return_index=True)
+                    ws = ws[first]
+                    new = ~np.isin(wk, rows)
+                    wk, ws = wk[new], ws[new]
+                    widx_, _ = cell_inputs(wk, ev.cell_key, ev.band_lengths, c.run.tokenizer)
+                    wok = np.nonzero((widx_ >= 0).any(1))[0]
+                    wkeep = wok[np.random.default_rng([c.seed, ev.index, 2]).permutation(len(wok))[:len(rows)]]
+                    rows = np.concatenate([rows, wk[wkeep]])
+                    src = np.concatenate([src, ws[wkeep]])
+                    q = np.concatenate([q, cell_charge(ev.cells, wk[wkeep])])
             idx, aux = cell_inputs(rows, ev.cell_key, ev.band_lengths, c.run.tokenizer)
-            ok = np.nonzero((idx >= 0).any(1))[0]
-            keep = ok[fit_rows(len(ok), c.n_train, np.random.default_rng([c.seed, ev.index, 1]))]
+            keep = np.nonzero((idx >= 0).any(1))[0]                     # every row here is covered
             f = self.fit
             f.setdefault("src", []).append(src[keep]); f.setdefault("q", []).append(q[keep])
             for a in FLOOR_FITTED:
@@ -381,7 +393,17 @@ class Floor:
         nw = len(tr["meta"])
         kept = scores["amplitude"].reshape(nw, -1).max(1) > 0 if nw else np.zeros(0, bool)
         tok = ok.reshape(nw, -1).any(1) if nw else np.zeros(0, bool)
-        tr = dict(tr, meta=[dict(m, kept=bool(k), tok=bool(t)) for m, k, t in zip(tr["meta"], kept, tok)])
+        # shtok: a window cell's covering token (any band) also covers a charged cell. The probes read
+        # a token's features for every cell it covers, so a near window sharing a token with charge
+        # cannot be told apart by the features alone (token resolution); a haze in near windows that
+        # share none is the encoder's context spreading it (the representation)
+        ck = np.asarray(ev.cells["key"], np.int64)[np.asarray(ev.cells["q"]) > 0]
+        cidx = cell_inputs(ck, ev.cell_key, ev.band_lengths, c.run.tokenizer)[0] if len(ck) else np.zeros((0, 1), np.int64)
+        charged_tok = np.unique(cidx[cidx >= 0])
+        sh = np.isin(widx, charged_tok) & (widx >= 0)
+        shtok = sh.any(1).reshape(nw, -1).any(1) if nw else np.zeros(0, bool)
+        tr = dict(tr, meta=[dict(m, kept=bool(k), tok=bool(t), shtok=bool(s))
+                            for m, k, t, s in zip(tr["meta"], kept, tok, shtok)])
         for a in FLOOR_FITTED:
             X = gather(arm_features(ev, c.model, a), widx[ok]) if ok.any() else None
             for k, probe in enumerate(self.probes[a]):

@@ -807,8 +807,10 @@ def test_a_perfect_prediction_scores_perfectly():
     assert effs and all(v == 1.0 for v in effs)        # every isolated particle beats empty windows
     assert out["n_windows"]["bg_U"] > 0 and out["n_windows"]["bg_V"] == 0
     assert out["near_fpr_at_far"][0] == 0.0 and out["n_windows"]["near_U"] > 0
-    aucs = [v[0] for k, v in out.items() if k.startswith("auc_") and v[0] == v[0]]
+    aucs = [v[0] for k, v in out.items() if k.startswith("auc_") and not k.startswith("auc_near_vs_far")
+            and v[0] == v[0]]
     assert aucs and all(v == 1.0 for v in aucs)
+    assert out["auc_near_vs_far"][0] == 0.5                              # no haze: near scores as far
     assert np.isnan(out["floor_eff1pct_0.1-0.2_V"][0])                  # no V window: not a 0
 
 
@@ -888,6 +890,25 @@ def test_the_gate_coverage_caps_the_clear_efficiency():
     assert got["kept_clear_0.1-0.2"] == 0.5 and got["floor_eff1pct_clear_0.1-0.2"] == 0.5
     assert got["floor_eff1pct_clear_kept_0.1-0.2"] == 1.0 and got["kept_clear_0.1-0.2_U"] == 0.5
     assert got["tok_clear_0.1-0.2"] == 1.0 and got["floor_eff1pct_clear_tokonly_0.1-0.2"] == 0.0   # tok defaults True
+
+
+def test_the_haze_is_split_by_whether_a_near_window_shares_a_token_with_charge():
+    """Near windows that share a covering token with charge score like it (3), the others like the
+    far background (0): the haze AUC is 1 in the first and 1/2 in the second."""
+    meta, score = [], []
+    for e in range(10):
+        meta += [dict(kind="bg", g=0, E=np.nan, ev=e)] * 20
+        score += [0.0] * 20
+        meta += [dict(kind="near", g=0, E=np.nan, ev=e, shtok=True)] * 10
+        meta += [dict(kind="near", g=0, E=np.nan, ev=e, shtok=False)] * 10
+        score += [3.0] * 10 + [0.0] * 10
+        meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="clear")]
+        score += [5.0]
+    stat, _, counts = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)
+    got = stat(np.ones(10, np.int64))
+    assert got["auc_near_vs_far_shtok"] == 1.0 and got["auc_near_vs_far_noshtok"] == 0.5
+    assert got["auc_near_vs_far"] == 0.75 and got["near_fpr_at_far_shtok"] == 1.0
+    assert got["near_fpr_at_far_noshtok"] == 0.0 and counts["near_shtok"] == 100
 
 
 def test_the_auc_is_the_weighted_pair_ordering_within_a_view():

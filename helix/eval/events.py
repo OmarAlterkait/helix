@@ -384,6 +384,11 @@ def window_stat(score, meta):
       tok_clear_<E>                 the fraction of clear windows with >= 1 cell under a covering
                                     token -- the fitted arms' cap (a token's coefficients may sit
                                     outside the window)
+      auc_near_vs_far[_shtok|_noshtok]  P(a near window scores above a far one) -- the haze
+                                    threshold-free -- in all, and in near windows that do or do not
+                                    share a covering token with charge (``shtok``): a haze only in
+                                    the sharing ones is token resolution, one in both the encoder's
+                                    context; ``near_fpr_at_far_shtok`` / ``_noshtok`` likewise
       floor_eff1pct_clear_tokonly_<E>  the clear efficiency among windows covered by a token but
                                     holding no kept coefficient: context from outside the window,
                                     or haze leaking back in
@@ -408,6 +413,7 @@ def window_stat(score, meta):
     crowded, mixed = (ctx == "crowded") & iso, (ctx == "mixed") & iso
     kept = np.array([bool(m.get("kept", True)) for m in meta], bool)       # >= 1 kept coefficient inside
     tok = np.array([bool(m.get("tok", True)) for m in meta], bool)         # >= 1 cell under a token
+    shtok = np.array([bool(m.get("shtok", False)) for m in meta], bool)   # shares a token with charge
     # per-event equal weights of the iso windows: 1 / (the event's iso windows in that energy bin)
     cell = we * len(ENERGY_NAMES) + np.maximum(eb, 0)
     cnt = np.bincount(cell[iso], minlength=len(evs) * len(ENERGY_NAMES))
@@ -424,7 +430,8 @@ def window_stat(score, meta):
             out.append((b, i, np.searchsorted(s[b], s[i], "left"), np.searchsorted(s[b], s[i], "right")))
         return out
     auc = pairs(bg, iso)
-    auc_ctx = {"clear": pairs(bg, clear), "crowded_near": pairs(near, crowded)}
+    auc_ctx = {"clear": pairs(bg, clear), "crowded_near": pairs(near, crowded),
+               "nearbg_shtok": pairs(bg, near & shtok), "nearbg_noshtok": pairs(bg, near & ~shtok)}
 
     def thresholds(w, ref):
         thr = np.full(3, np.nan)
@@ -483,6 +490,17 @@ def window_stat(score, meta):
                 out[f"auc_{nm}_{VIEWS[v]}"] = _ratio((w * beat)[sv].sum(), (w * tot)[sv].sum())
             out[f"auc_{nm}"] = _ratio((w * beat)[sel].sum(), (w * tot)[sel].sum())
         out["near_fpr_at_far"] = _frac(w, det, near)
+        # the haze threshold-free (comparable across fit settings, unlike a rate at the far
+        # threshold, which the fit moves): P(a near window scores above a far one), by whether it
+        # shares a covering token with charge
+        for key in ("shtok", "noshtok"):
+            bt, tt = ctx_beats[f"nearbg_{key}"]
+            m = near & (shtok if key == "shtok" else ~shtok)
+            out[f"auc_near_vs_far_{key}"] = _ratio((w * bt)[m].sum(), (w * tt)[m].sum())
+            out[f"near_fpr_at_far_{key}"] = _frac(w, det, m)
+        bt = ctx_beats["nearbg_shtok"][0] + ctx_beats["nearbg_noshtok"][0]
+        tt = ctx_beats["nearbg_shtok"][1] + ctx_beats["nearbg_noshtok"][1]
+        out["auc_near_vs_far"] = _ratio((w * bt)[near].sum(), (w * tt)[near].sum())
         for v in range(3):
             out[f"near_fpr_at_far_{VIEWS[v]}"] = _frac(w, det, near & (view == v))
         return out
@@ -493,6 +511,7 @@ def window_stat(score, meta):
     counts.update({f"iso_{c}_{VIEWS[v]}": int((m & (view == v)).sum()) for c, m in ctxs for v in range(3)})
     counts.update({f"iso_{c}_{nm}": int((m & (eb == k)).sum()) for c, m in ctxs for k, nm in enumerate(ENERGY_NAMES)})
     counts["isox"] = int(isox.sum())
+    counts["near_shtok"] = int((near & shtok).sum())
     return stat, len(evs), counts
 
 
