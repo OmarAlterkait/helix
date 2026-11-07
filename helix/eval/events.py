@@ -194,6 +194,18 @@ def window_cells(g, w0, t0):
     return fkey(np.full(W.size, g), W.ravel(), T.ravel())
 
 
+def cell_charge(cells, keys):
+    """The truth charge (e-) of fine cells ``keys`` from a cells record, 0 where it has none."""
+    uk, fq = np.asarray(cells["key"], np.int64), np.asarray(cells["q"], np.float64)
+    keys = np.asarray(keys, np.int64)
+    if not len(uk):
+        return np.zeros(len(keys))
+    o = np.argsort(uk)
+    uk_s, fq_s = uk[o], fq[o]
+    pos = np.clip(np.searchsorted(uk_s, keys), 0, len(uk_s) - 1)
+    return np.where(uk_s[pos] == keys, fq_s[pos], 0.0)
+
+
 def event_truth(cells, coeff_cells, rng, windows=True):
     """The map rows and windows of one event, from its cells record.
 
@@ -221,13 +233,7 @@ def event_truth(cells, coeff_cells, rng, windows=True):
     near = near[np.isin(near, ck)]
     coeff = rng.choice(ck, min(len(sig) // 2 + 1, len(ck)), replace=False) if len(ck) else ck
     mrows = np.unique(np.concatenate([sig, near, coeff]))
-    o = np.argsort(uk)
-    uk_s, fq_s = uk[o], fq[o]
-    if len(uk_s):
-        pos = np.clip(np.searchsorted(uk_s, mrows), 0, len(uk_s) - 1)
-        mq = np.where(uk_s[pos] == mrows, fq_s[pos], 0.0)
-    else:
-        mq = np.zeros(len(mrows))
+    mq = cell_charge(cells, mrows)
     if not windows:
         return dict(mrows=mrows, mq=mq)
 

@@ -60,10 +60,12 @@ class Context:
     denoiser: object = None          # predict(event, keys) -> (y, presence), for denoise
     probe_seeds: int = 2             # fits per probe arm, seeds seed + k, on the same rows
     presence_q: float = 25.0         # denoise: the presence label, q > presence_q (e-)
+    fit_windows: str = "none"        # floor: also fit on the fit events' window cells: all / neg (bg, near)
 
 
 def evaluate(path, metrics=("recon", "floor", "uprobe", "labels"), *, weights="ema", max_events=None,
-             denoiser=None, seed=0, n_boot=200, probe_seeds=2, presence_q=25.0, device=None, log=print):
+             denoiser=None, seed=0, n_boot=200, probe_seeds=2, presence_q=25.0, fit_windows="none",
+             device=None, log=print):
     """Score the run at ``path`` on ``metrics``; returns the results as one JSON-able dict."""
     from helix.eval.denoise import Denoise, load_denoiser
     from helix.eval.events import dataset, events, identity
@@ -93,7 +95,7 @@ def evaluate(path, metrics=("recon", "floor", "uprobe", "labels"), *, weights="e
             raise ValueError(f"the denoiser tokenizes with {cfg}, the run with {run.tokenizer}")
     probes = {"floor", "uprobe", "labels"} & set(metrics)
     ctx = Context(run, run.model, split_events(n) if probes or predict else n, seed, n_boot, predict,
-                  int(probe_seeds), float(presence_q))
+                  int(probe_seeds), float(presence_q), str(fit_windows))
     log(f"[helix.eval] {run.provenance['run']} weights={run.provenance['weights']} "
         f"step={run.provenance['step']} events={n} (probes fit on {ctx.n_train}) metrics={','.join(metrics)}")
 
@@ -107,7 +109,7 @@ def evaluate(path, metrics=("recon", "floor", "uprobe", "labels"), *, weights="e
     ident = identity(ds)
     dn = getattr(predict, "provenance", None) or {}
     out = dict(run=run.provenance, tokenizer=asdict(run.tokenizer), n_events=n, seed=seed,
-               n_boot=n_boot, probe_seeds=int(probe_seeds),
+               n_boot=n_boot, probe_seeds=int(probe_seeds), fit_windows=str(fit_windows),
                denoiser=None if denoiser is None else str(denoiser), code=provenance(),
                corpus=dict(basis_digest=ident["basis_digest"]),
                truth=dict(q_cut=ident["truth_q_cut"], q_cut_source=ident["truth_q_cut_source"]),

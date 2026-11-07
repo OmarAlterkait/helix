@@ -299,6 +299,15 @@ number still under its own key, the new ones beside it):*
   any floor number is. Of the fitted arms, `presence` answers the detection question and is the
   one to rank by (clear 0.35 / aucClear 0.818 against MSE's 0.30 / 0.768 at 0.1-0.2 MeV; it hazes
   more beside tracks, crowded@near 0.105 against 0.156, a wash in AUC).
+  **The primary floor key, named before any ranking (2026-11-07):** the presence arm's
+  `floor_eff1pct_clear_0.1-0.2` -- faint isolated deposits at the 1%-FPR operating point, paired
+  intervals ~+-0.01 between models scored on the same windows (`helix.eval compare`). Secondary,
+  diagnostic only: `auc_clear_<E>` (dominated by the bulk of the far background; it disagreed in
+  sign with the primary key on fm_cooldown vs fm EMA, +0.045 vs -0.007), `floor_eff1pct_crowded_
+  near_<E>` and `near_fpr_at_far`. One key, so a close call is not decided after seeing it.
+  Open: whether the probes also fit on the fit events' own window cells (`--fit-windows`), to
+  remove the map rows' over-representation of charge beside tracks; decided before the d1m_lr
+  ranking, and then fixed.
   **The background is drawn around a kept coefficient, and that caps every arm.** Far and near
   windows are accepted only with a kept coefficient inside, so "no token, no charge" cannot win
   trivially -- right, and it makes the background harder than random noise: raw and amplitude

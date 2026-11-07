@@ -55,7 +55,7 @@ from __future__ import annotations
 import numpy as np
 
 from helix.data.cells import FT, FW, MOTIF_NAMES, PID_NAMES, Q0, cell_class, cell_inputs, unkey
-from helix.eval.events import (VIEWS, bootstrap, group_event, group_r2, plane_group, score_windows, seed_spread,
+from helix.eval.events import (VIEWS, bootstrap, cell_charge, group_event, group_r2, plane_group, score_windows, seed_spread,
                                window_stat)
 
 #: Fraction of the evaluated events the probes are fitted on; the rest are scored.
@@ -229,6 +229,9 @@ def _diff(a, b):
 # ---- floor -----------------------------------------------------------------------------------
 
 FLOOR_ARMS = ("trained", "raw", "amplitude", "presence")
+#: where a fit row came from: the map rows, or (--fit-windows) a fit event's window of that kind
+FIT_SOURCES = ("map", "iso", "bg", "near", "isox")
+N_WCELL = (32 // FW) * (128 // FT)                     # cells per window (helix.eval.events.window_cells)
 FLOOR_FITTED = ("trained", "raw")
 #: the presence arm: the trained features and rows, fit as a classifier of charge above the presence
 #: threshold rather than a regression of log-charge. An MSE regression's optimum next to a track is
@@ -332,16 +335,38 @@ class Floor:
     def add(self, ev):
         c = self.ctx
         scored = ev.index >= c.n_train
-        tr = ev.truth(c.seed, windows=scored)
+        fit_win = {False: "none", True: "all"}.get(getattr(c, "fit_windows", "none"), getattr(c, "fit_windows", "none"))
+        tr = ev.truth(c.seed, windows=scored or fit_win != "none")
         if not scored:
-            idx, aux = cell_inputs(tr["mrows"], ev.cell_key, ev.band_lengths, c.run.tokenizer)
+            rows, q = tr["mrows"], tr["mq"]
+            src = np.zeros(len(rows), np.int8)                          # FIT_SOURCES index per row
+            if fit_win != "none":
+                # the fit events' own window cells (the populations scored, at their own frequency
+                # and label) beside the map rows, whose signal cells and +-8 jitter over-represent
+                # charge next to tracks -- a sampling prior that teaches "beside a track -> charged".
+                # "neg": the background windows only (bg, near), the hypothesis's negatives. Fit and
+                # scored events are disjoint, so nothing leaks.
+                kinds = ("bg", "near") if fit_win == "neg" else ("iso", "bg", "near", "isox")
+                wk, wsrc = [], []
+                for i, m in enumerate(tr["meta"]):
+                    if m["kind"] in kinds:
+                        wk.append(tr["wkey"][i * N_WCELL:(i + 1) * N_WCELL])
+                        wsrc.append(np.full(N_WCELL, FIT_SOURCES.index(m["kind"]), np.int8))
+                if wk:
+                    allk = np.concatenate([rows, *wk])
+                    alls = np.concatenate([src, *wsrc])
+                    rows, first = np.unique(allk, return_index=True)    # a map row keeps its map source
+                    src = alls[first]
+                    q = cell_charge(ev.cells, rows)
+            idx, aux = cell_inputs(rows, ev.cell_key, ev.band_lengths, c.run.tokenizer)
             ok = np.nonzero((idx >= 0).any(1))[0]
             keep = ok[fit_rows(len(ok), c.n_train, np.random.default_rng([c.seed, ev.index, 1]))]
             f = self.fit
+            f.setdefault("src", []).append(src[keep]); f.setdefault("q", []).append(q[keep])
             for a in FLOOR_FITTED:
                 f["X"][a].append(gather(arm_features(ev, c.model, a), idx[keep]).cpu())
             f["A"].append(aux[keep])
-            f["y"].append(np.log1p(tr["mq"][keep] / Q0).astype(np.float32)); f["e"].append(np.full(len(keep), ev.index))
+            f["y"].append(np.log1p(q[keep] / Q0).astype(np.float32)); f["e"].append(np.full(len(keep), ev.index))
             return
         if self.probes is None:
             self._fit()
@@ -378,6 +403,13 @@ class Floor:
         if not f["y"]:
             raise ValueError("floor: no covered map row in any training event")
         y, A, e = np.concatenate(f["y"]), np.concatenate(f["A"]), np.concatenate(f["e"])
+        src, q = np.concatenate(f["src"]), np.concatenate(f["q"])
+        pq = float(getattr(self.ctx, "presence_q", 25.0))
+        # what the probes were fit on: each source's share of the rows and its positive fraction
+        self.composition = {s: dict(frac=round(float((src == i).mean()), 4),
+                                    pos=round(float((q[src == i] > pq).mean()), 4) if (src == i).any() else None)
+                            for i, s in enumerate(FIT_SOURCES)}
+        self.composition["all"] = dict(frac=1.0, pos=round(float((q > pq).mean()), 4))
         self.probes = {}
         q_pres = np.log1p(float(getattr(self.ctx, "presence_q", 25.0)) / Q0)
         for a in FLOOR_FITTED:
@@ -390,7 +422,9 @@ class Floor:
 
     def result(self):
         c = self.ctx
-        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, probe_seeds=len(self.probes["trained"]),
+        out = dict(n_train_events=c.n_train, n_fit_rows=self.n_fit, fit_composition=self.composition,
+                   fit_windows={False: "none", True: "all"}.get(getattr(c, "fit_windows", "none"), getattr(c, "fit_windows", "none")),
+                   probe_seeds=len(self.probes["trained"]),
                    val_mse=-self.probes["trained"][0].val_score,
                    **self.scored.result(c.n_boot, c.seed, names=FLOOR_ARMS))
         out["d_over_amplitude"] = {k: round(out["trained"][k][0] - out["amplitude"][k][0], 4)

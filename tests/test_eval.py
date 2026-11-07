@@ -308,6 +308,9 @@ def test_floor_learns_what_the_features_carry(synth):
     # probability -- on features that ARE the charge it finds what the regression finds
     assert eff("presence") > eff("amplitude") + 0.2, (out["presence"], out["amplitude"])
     assert len(out["presence"]["val_bal_acc_seeds"]) == 2
+    # what the probes fit on: by default the map rows only
+    assert out["fit_windows"] == "none" and out["fit_composition"]["map"]["frac"] == 1.0
+    assert 0 < out["fit_composition"]["all"]["pos"] < 1
 
 
 def test_the_raw_arm_on_raw_features_is_the_trained_arm(synth):
@@ -1103,3 +1106,9 @@ def test_the_cli_writes_the_window_scores_beside_the_json(tmp_path, monkeypatch)
     assert "_windows" not in json.load(open(out))["metrics"]["floor"]
     z = np.load(tmp_path / "s.windows.npz")
     assert set(z.files) == {"floor/meta/ev", "floor/score/trained"}
+
+
+def test_cell_charge_reads_the_truth_and_zeros_the_rest():
+    cells = dict(key=np.array([5, 2, 9], np.int64), q=np.array([50.0, 20.0, 90.0]))
+    assert W.cell_charge(cells, [2, 3, 9, 5]).tolist() == [20.0, 0.0, 90.0, 50.0]
+    assert W.cell_charge(dict(key=np.zeros(0, np.int64), q=np.zeros(0)), [1]).tolist() == [0.0]
