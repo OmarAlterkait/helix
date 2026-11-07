@@ -10,6 +10,9 @@ is M6d of DENOISE at tag archive-2026-11, and it is the default:
   on the same architecture; ``model.freeze_encoder=True`` keeps the encoder fixed;
 * ``model.cond_charge``: False = M6d (detection, maps), True = M6dc (calorimetry: charge
   regressed on charged cells only);
+* ``model.lin_amp_scale``: 0 = the FM's input alone (asinh per slot); S > 0 (M10lin: 30) adds
+  the linear amplitude sinh(inp) / S as input columns, zero at the start (docs/DECISIONS.md:
+  0 until a d1m run confirms r1's gain);
 * presence = q > 25 e- (``_SUPPORT_MIN_Q``: the cells-3 truth's own cut, the evaluation's
   ``--presence-q``), for ``DenoiseRows``;
 * encoder LR 3e-3 (muP-scaled), head LR 1e-2 (``model.lr_head``), linear warmup ("auto") then a
@@ -45,6 +48,7 @@ model = dict(
     freeze_encoder=False,
     cond_charge=False,
     lr_head=1e-2,
+    lin_amp_scale=0.0,
     compile_blocks=True,
 )
 optimizer = dict(lr=3e-3)

@@ -13,6 +13,10 @@ are at git tag `archive-2026-11` (`git show archive-2026-11:docs/archive/NEXT.md
   16 GPUs) as sqrt(GPUs / 16); the optimum also falls with run length, so a
   production-length stable phase should be checked against a lower LR before it is trusted.
   The denoiser's 3e-3 / 1e-2 (configs/pimm/denoise.py) are M6d's, also at 16 GPUs.
+* **The denoiser's amplitude channel on d1m.** `model.lin_amp_scale` defaults to 0; r1's
+  M10lin (S = 30) cut the bright error by up to 27% (docs/DECISIONS.md). One d1m run with
+  `model.lin_amp_scale=30` against the default, scored by `helix.eval --metrics denoise`
+  (`cells.by_view` resolution), before it becomes the default.
 
 ## Model and evaluation
 

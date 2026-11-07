@@ -99,12 +99,18 @@ class FMModel(nn.Module):
     by TIME ONLY on the drift-order ones (whose groups mix planes, and wire_pos
     is a per-plane axis); False rotates by both everywhere. ``wire_rope=False``
     rotates by time only, everywhere. ``gp`` / ``gd`` are the group sizes of the
-    plane-order and the drift-order layers (and the decoder)."""
+    plane-order and the drift-order layers (and the decoder).
+
+    ``lin_amp_scale`` S > 0 adds a linear-amplitude channel: the embedding also reads each slot's
+    ``sinh(inp) / S`` (``inp`` is ``asinh(v / sigma)``, so this is the coefficient in noise units,
+    uncompressed) beside ``inp`` and ``occ``. Its ``n_slot`` input columns start at zero and every
+    other weight is drawn as at S = 0, so a new model computes what the S = 0 model of the same
+    seed does until training moves them. 0 (the default) is the model without it."""
 
     def __init__(self, n_slot, n_band, n_plane, n_bins, d=128, blocks=4, dec_blocks=2,
                  heads=4, ffn_mult=4, lam_t=(8.0, 4336.0), lam_w=(32.0, 2048.0),
                  mup=False, d_base=128, wire_rope=True, qk_norm=False,
-                 rope_split=False, gp=1024, gd=2048):
+                 rope_split=False, gp=1024, gd=2048, lin_amp_scale=0.0):
         super().__init__()
         if int(n_bins) <= 0:
             raise ValueError(f"n_bins={n_bins}: the value head is categorical and needs >= 1 bin")
@@ -163,6 +169,16 @@ class FMModel(nn.Module):
         self.val_head = nn.Linear(d, n_slot * n_bins)        # K logits per slot
         if mup:
             self._mup_init()
+        # Widened LAST, so every other parameter draws the same random numbers as at S = 0;
+        # the old columns are the S = 0 embedding's, the amplitude columns zero.
+        self.lin_amp_scale = float(lin_amp_scale)
+        if self.lin_amp_scale > 0:
+            old = self.embed
+            self.embed = nn.Linear(old.in_features + n_slot, d)
+            with torch.no_grad():
+                self.embed.weight.zero_()
+                self.embed.weight[:, :old.in_features].copy_(old.weight)
+                self.embed.bias.copy_(old.bias)
 
     # ---- muP machinery (Tensor Programs V, arXiv:2203.03466; mup pkg; EleutherAI guide) ----
     # Category map for THIS model. INPUT = fixed-fan_in maps into width-d space
@@ -270,7 +286,10 @@ class FMModel(nn.Module):
         (band, plane, wire) plus the additive band and plane identities."""
         sel = slice(None) if idx is None else idx
         band, plane = B["band_id"][sel], B["plane_id"][sel]
-        x = self.embed(torch.cat([B["inp"][sel], B["occ"][sel]], -1))
+        parts = [B["inp"][sel], B["occ"][sel]]
+        if self.lin_amp_scale > 0:                     # the amplitude, linear in the coefficient
+            parts.append(torch.sinh(B["inp"][sel].float()).to(B["inp"].dtype) / self.lin_amp_scale)
+        x = self.embed(torch.cat(parts, -1))
         g, b = self.film(band, plane, B["wirefeat"][sel])
         return g * x + b + self.band_emb(band) + self.plane_emb(plane)
 

@@ -7,7 +7,8 @@ full truth charge and a presence label at the support threshold, include every c
 are fixed by a seed; the model builds from an FM run with its architecture, tokenizer and (when
 pretrained) weights; ``freeze_encoder`` leaves only the head trainable; the param groups cover
 exactly the trainable parameters with the head at its own LR; ``cond_charge`` regresses charged
-cells only; a denoiser run reads back with its FM run's tokenizer.
+cells only; a denoiser run reads back with its FM run's tokenizer; a pretrained FM loads into an
+encoder with the linear-amplitude channel.
 """
 import json
 import os
@@ -191,6 +192,18 @@ def test_cell_decoder_survives_cells_with_no_tokens_and_is_unbounded():
     assert (y2 - y1).abs().max() > 10                               # ...must reach the output
 
 
+def test_build_denoise_loads_a_pretrained_fm_into_the_amplitude_channel(fm_run, sample):
+    d, ema = fm_run
+    m = build_denoise(str(d), lin_amp_scale=30.0, compile_blocks=False).eval()
+    n = SMALL["n_slot"]
+    w, w0 = m.fm.embed.weight, ema.embed.weight
+    assert w.shape == (w0.shape[0], 3 * n) and m.fm.lin_amp_scale == 30.0
+    assert torch.equal(w[:, :2 * n], w0.float()) and (w[:, 2 * n:] == 0).all()
+    B = _batch(_rows(sample, seed=0))
+    with torch.no_grad():
+        torch.testing.assert_close(m.fm.encode(B), ema.eval().encode(B), atol=1e-5, rtol=0)   # starts as the FM
+
+
 # ------------------------------------------------------------------------------- reading it back
 def _write_denoise_run(d, fm_dir):
     """A denoiser run as pimm writes one: its config names the FM run and a tokenizer by
@@ -261,6 +274,7 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
     m = cfg.model
     assert m["type"] == "Coeff-Denoise" and "bins" not in m and m["pretrained"] and not m["freeze_encoder"]
     assert not m["cond_charge"] and m["lr_head"] == 1e-2 and cfg.optimizer["lr"] == 3e-3
+    assert m["lin_amp_scale"] == 0.0                                         # until measured on d1m
     assert cfg.scheduler["type"] == "WarmupCosineLR" and cfg.scheduler["warmup"] == "auto"
     assert cfg.train["type"] == "FMTrainer" and cfg.batch_size == cfg.batch_size_val
     for split in ("train", "val"):

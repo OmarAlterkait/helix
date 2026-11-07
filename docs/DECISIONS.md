@@ -349,6 +349,20 @@ branch's `gain_sigma_*` / `clean_root` / `draw_gain` (origin/denoise-m14) are no
 *Cost, measured on r1:* the whole-event gain response (charge out / in when one event's charge
 is scaled) was 0.87 without the augmentation against 0.97 with it (M10lin vs M11).
 
+**The linear-amplitude input channel is an option, default off until d1m confirms it.**
+`model.lin_amp_scale=S` (`FMModel(lin_amp_scale)`) adds `sinh(inp) / S`, the coefficient in
+noise units uncompressed, as `n_slot` more embedding columns; a pretrained FM without them
+loads with the new columns at zero (`helix.model.denoise.pad_input_columns`), so the denoiser
+starts exactly at the FM. 0 is bit-identical to the model without it. *Why:* the FM reads
+`asinh(v / sigma)`, which compresses bright amplitudes, and that was the one encoder cause of
+the flat high-charge floor found (`baselines/uboone_sp/causes/results/m7_tests_results.md` on
+origin/denoise-m14). On r1, M7dc's full 40k-step recipe with the channel from step 0 (M10lin,
+S = 30) cut the per-cell hw68 against M7dc by 8 / 18 / 27% on Y (16-64k / 64-256k / >= 256k
+e-), 6 / 14 / 21% on U, 1 / 6 / 18% on V, growing with charge; added only for a 6k-step
+fine-tune (M9lin) it gained less. *Default 0* because r1 is retired and no r1 number transfers
+to d1m (§"The data, as built"): set 30 once a d1m run reproduces the gain (TODO). The study
+branch's physical-drift-coordinate option from the same commit is not ported.
+
 **Checkpoints load directly.** `helix.model.checkpoint.load_run` reads pimm's run directory
 (`resolved_config.json`, the WeightEMA sidecar, `model/last` or `model/model_best.pth`,
 `provenance.json`); nothing is exported. *Why:* the artifact layer (`artifact.py`,

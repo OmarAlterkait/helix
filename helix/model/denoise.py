@@ -13,7 +13,9 @@ architecture and tokenizer are those of the FM run ``fm`` (:func:`helix.model.ch
 load_run`); ``pretrained`` loads its weights (False: the same architecture from scratch, the
 baseline), ``freeze_encoder`` keeps them fixed. The FM's decoder, heads and mask token never
 train (``encode`` does not reach them, and a parameter DDP never sees a gradient for would stall
-the all-reduce).
+the all-reduce). ``lin_amp_scale`` > 0 gives the encoder the linear-amplitude input channel
+(``FMModel``); a pretrained FM without it loads with those columns at zero
+(:func:`pad_input_columns`).
 
 ``cond_charge`` selects the product: off (M6d, DENOISE at tag archive-2026-11) regresses charge on every queried
 cell -- detection and maps; on (M6dc) regresses it on charged cells only, a charge conditional on
@@ -144,13 +146,33 @@ class DenoiseModel(nn.Module):
         return groups + [g]
 
 
+def pad_input_columns(module, state_dict):
+    """``state_dict`` with every matrix that has FEWER input columns than ``module``'s own (an
+    encoder option such as ``lin_amp_scale`` added input features) zero-padded to fit: the old
+    columns copied, the new ones zero, so the loaded model computes exactly what the checkpoint
+    did until training moves the new weights."""
+    own = module.state_dict()
+    out = dict(state_dict)
+    for k, v in state_dict.items():
+        o = own.get(k)
+        if o is not None and o.shape != v.shape and o.dim() == 2 and v.dim() == 2 \
+                and o.shape[0] == v.shape[0] and o.shape[1] > v.shape[1]:
+            w = o.new_zeros(o.shape)
+            w[:, :v.shape[1]] = v
+            out[k] = w
+    return out
+
+
 def build_denoise(fm, *, pretrained=True, freeze_encoder=False, cond_charge=False, lr_head=1e-2,
-                  compile_blocks=True):
+                  compile_blocks=True, lin_amp_scale=0.0):
     """A :class:`DenoiseModel` on the FM run ``fm`` (a run directory, or one checkpoint of it).
 
     The encoder takes the run's architecture and tokenizer and, with ``pretrained``, its weights
     (``load_run``: the run's EMA, or the checkpoint named); otherwise it is freshly initialised.
-    ``compile_blocks`` is how the encoder executes (``torch.compile`` per block), not what it is.
+    ``lin_amp_scale`` > 0 adds the linear-amplitude input channel to that architecture (0 keeps
+    the run's own); the run's weights load into it with the new columns at zero
+    (:func:`pad_input_columns`). ``compile_blocks`` is how the encoder executes (``torch.compile``
+    per block), not what it is.
     """
     import json
     import os
@@ -161,9 +183,13 @@ def build_denoise(fm, *, pretrained=True, freeze_encoder=False, cond_charge=Fals
     config = json.load(open(os.path.join(run_dir(fm), "resolved_config.json")))
     if (config.get("model") or {}).get("type") != "Coeff-FM":
         raise ValueError(f"{fm}: not an FM run (model type {(config.get('model') or {}).get('type')!r})")
-    enc = build_fm(dict(model_config(config), compile_blocks=bool(compile_blocks)))
+    arch = dict(model_config(config), compile_blocks=bool(compile_blocks))
+    if lin_amp_scale:
+        arch["lin_amp_scale"] = float(lin_amp_scale)
+    enc = build_fm(arch)
     if pretrained:
-        enc.load_state_dict(load_run(fm, device="cpu").model.state_dict(), strict=True)
+        sd = load_run(fm, device="cpu").model.state_dict()
+        enc.load_state_dict(pad_input_columns(enc, sd), strict=True)
     head = CellDecoder(enc.d, n_bands=enc.band_emb.weight.shape[0], n_slot=enc.n_slot)
     return DenoiseModel(enc, head, tokenizer=tokenizer_config(config), freeze_encoder=freeze_encoder,
                         cond_charge=cond_charge, lr_head=lr_head)
