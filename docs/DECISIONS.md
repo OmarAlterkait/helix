@@ -279,7 +279,24 @@ number still under its own key, the new ones beside it):*
   `floor_eff1pct_clear_<E>` scores the clear ones at the far threshold,
   `floor_eff1pct_crowded_near_<E>` the crowded ones at the near threshold, and
   `floor_eff1pct_crowded_<E>` those at the far threshold for contrast; `n_windows` counts
-  `iso_clear_<V>` and `iso_crowded_<V>`. A haze shows as crowded-at-far well above
+  `iso_clear_<V>` and `iso_crowded_<V>`. `floor_eff1pct_mixed_<E>` completes the decomposition
+  (all-iso = the count-weighted sum of clear, crowded, mixed), `auc_clear_<E>` /
+  `auc_crowded_near_<E>` give the matched pairs threshold-free, the two matched efficiencies are
+  also per view, and `n_windows` counts each context per view and energy bin. Clear windows are
+  ~6% of iso ones, so extra clear iso windows (`isox`: the iso criteria plus the clear rule, one
+  try per particle without one, at most N_ISO per event) are drawn LAST, after the near windows,
+  and scored in the clear efficiency only. A `presence` floor arm fits the trained features on
+  the same rows as a classifier of q > presence_q: an MSE regression's optimum beside a track is
+  E[q | context] > 0, a haze even from a representation that localises charge exactly, so the
+  two fitted arms separate the probe's share from the features'.
+  **Which population a floor number is.** `floor_eff1pct_<E>` is still every iso window (>= 90%
+  of the particle's plane charge inside, < 5% foreign charge inside) at the far threshold -- the
+  published floor, kept so every earlier number reproduces -- and it mixes three contexts. On
+  fm_cooldown (full d1m at NERSC, 1200 probe events, 400 scored; `last`), 0.33 / 0.59 below 0.1 /
+  at 0.1-0.2 MeV were 0.04 / 0.35 on the clear iso windows (at the far threshold) and 0.02 / 0.16
+  on the crowded ones at the near threshold; the amplitude reference's clear numbers were
+  0.003 / 0.10. Quote the clear and crowded-near numbers as the floor, and say which population
+  any floor number is. A haze shows as crowded-at-far well above
   crowded-at-near while clear-at-far stays;
 * the threshold-free companion `auc_<E>`: P(iso above a far window of its own view). Seed
   pairs agree to ~0.005 on it against ~0.04 on the efficiency at 1%. Every window number is

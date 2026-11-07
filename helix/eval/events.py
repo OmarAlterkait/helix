@@ -181,7 +181,7 @@ WW, WT = 32, 128                     # window, wires x raw ticks
 ENERGY_BINS = (0.0, 0.1, 0.2, 0.5, 1e9)                  # MeV
 #: per event: signal map rows at most, iso windows at most, bg windows per plane at most
 CAP_SIGNAL, N_ISO, N_BG_PLANE = 3000, 60, 10
-KINDS = ("iso", "bg", "near")
+KINDS = ("iso", "bg", "near", "isox")
 VIEWS = ("U", "V", "Y")
 ENERGY_NAMES = tuple(f"{ENERGY_BINS[i]:g}-{ENERGY_BINS[i + 1]:g}" for i in range(len(ENERGY_BINS) - 1))
 
@@ -258,29 +258,38 @@ def event_truth(cells, coeff_cells, rng, windows=True):
     def origin(cw, ct):            # clamped at 0: a negative wire corrupts the packed key
         return max(0, int(round((cw - WW / 2) / FW)) * FW), max(0, int(round((ct - WT / 2) / FT)) * FT)
 
-    wins = []
+    def iso_window(j):
+        """Particle ``j``'s window at a jittered origin if it passes the iso criteria (>= 90% of
+        its plane charge inside, < 5% of the window foreign), else None; with ``ctx``, where it
+        sits relative to OTHER particles' charge, for the matched comparison: "clear" none in the
+        padding a far (bg) window must keep empty (its own particle may reach there, which a far
+        window never has); "crowded" none within the window and a one-cell margin but some in
+        the padding -- the near windows' own rule; "mixed" other charge in or right beside the
+        window (an iso window allows 5% inside), in neither."""
+        g = int(pu[j] >> 40)
+        w0, t0 = origin(pcw[j] + rng.uniform(-6, 6), pct[j] + rng.uniform(-32, 32))
+        idx = contents(g, w0, t0)
+        if not len(idx):
+            return None
+        mine = pinv[idx] == j
+        qin, qall = Q[idx[mine]].sum(), Q[idx].sum()
+        if qin < 0.9 * pq[j] or qall - qin > 0.05 * qall:
+            return None
+        other = lambda pw, pt: bool((pinv[contents(g, w0, t0, pw, pt)] != j).any())   # noqa: E731
+        ctx = "clear" if not other(16, 128) else "mixed" if other(FW, FT) else "crowded"
+        return g, w0, t0, E.get(int(TRK[idx[mine][0]]), 0.0), ctx
+
+    wins, has_clear = [], set()
     good = np.nonzero(pq > 0)[0]
     rng.shuffle(good)
     for j in good[:4000]:
         if len(wins) >= N_ISO:
             break
-        g = int(pu[j] >> 40)
-        w0, t0 = origin(pcw[j] + rng.uniform(-6, 6), pct[j] + rng.uniform(-32, 32))
-        idx = contents(g, w0, t0)
-        if not len(idx):
-            continue
-        mine = pinv[idx] == j
-        qin, qall = Q[idx[mine]].sum(), Q[idx].sum()
-        if qin < 0.9 * pq[j] or qall - qin > 0.05 * qall:
-            continue
-        # where the window sits relative to OTHER particles' charge, for the matched comparison:
-        # "clear" none in the padding a far (bg) window must keep empty (its own particle may
-        # reach there, which a far window never has); "crowded" none within the window and a
-        # one-cell margin but some in the padding -- the near windows' own rule; "mixed" other
-        # charge in or right beside the window (an iso window allows 5% inside), in neither
-        other = lambda pw, pt: bool((pinv[contents(g, w0, t0, pw, pt)] != j).any())
-        ctx = "clear" if not other(16, 128) else "mixed" if other(FW, FT) else "crowded"
-        wins.append(("iso", g, w0, t0, E.get(int(TRK[idx[mine][0]]), 0.0), ctx))
+        w = iso_window(j)
+        if w is not None:
+            wins.append(("iso",) + w)
+            if w[4] == "clear":
+                has_clear.add(int(j))
 
     if len(ck):
         cg = unkey(ck)[0]
@@ -307,6 +316,21 @@ def event_truth(cells, coeff_cells, rng, windows=True):
             continue
         wins.append(("near", g, w0, t0, np.nan, None))
         n_near[g] += 1
+
+    # extra CLEAR iso windows ("isox"): drawn last, so every window above is the same with or without
+    # them, and kept out of the iso numbers. Clear windows are ~6% of iso ones, too few for the
+    # matched comparison below 0.1 MeV; one more try per particle without a clear window, at most
+    # N_ISO per event.
+    n_x = 0
+    for j in good.tolist():
+        if n_x >= N_ISO:
+            break
+        if j in has_clear:
+            continue
+        w = iso_window(j)
+        if w is not None and w[4] == "clear":
+            wins.append(("isox",) + w)
+            n_x += 1
 
     wkey = np.concatenate([window_cells(g, w0, t0) for _, g, w0, t0, _, _ in wins]) if wins \
         else np.zeros(0, np.int64)
@@ -340,6 +364,16 @@ def window_stat(score, meta):
       floor_eff1pct_crowded_near_<E>  MATCHED: iso windows by the near windows' own rule (other
                                     charge in the padding, none within a cell) at the near threshold
       floor_eff1pct_crowded_<E>     those crowded iso windows at the far threshold, for contrast
+      floor_eff1pct_mixed_<E>       the mixed iso windows (other charge in or beside the window,
+                                    which a detection may be crediting) at the far threshold:
+                                    all-iso is the count-weighted sum of clear, crowded and mixed
+                                    (clear among the iso windows, ``n_windows`` ``iso_clear_*``;
+                                    the clear efficiency itself also scores the extra clear draws,
+                                    ``isox``, which no other number includes)
+      auc_clear_<E>, auc_crowded_near_<E>  the matched pairs threshold-free: clear iso against far,
+                                    crowded iso against near windows, within each view
+      (the two matched efficiencies also per view, ``_<V>``; ``n_windows`` counts each context
+      per view and per energy bin)
 
     ``meta``: one dict per window, its event as ``ev``."""
     n = len(meta)
@@ -347,24 +381,31 @@ def window_stat(score, meta):
     ev = np.array([m["ev"] for m in meta], np.int64)
     kind = np.array([KINDS.index(m["kind"]) for m in meta], np.int64)
     view = np.array([m["g"] % 3 for m in meta], np.int64)
-    eb = np.array([np.searchsorted(ENERGY_BINS, m["E"], side="right") - 1 if m["kind"] == "iso" else -1
+    eb = np.array([np.searchsorted(ENERGY_BINS, m["E"], side="right") - 1 if m["kind"] in ("iso", "isox") else -1
                    for m in meta], np.int64)
     evs, we = np.unique(ev, return_inverse=True)
-    iso, bg, near = kind == 0, kind == 1, kind == 2
-    clear = np.array([m.get("ctx") == "clear" for m in meta], bool)
-    crowded = np.array([m.get("ctx") == "crowded" for m in meta], bool)
+    iso, bg, near, isox = kind == 0, kind == 1, kind == 2, kind == 3
+    ctx = np.array([m.get("ctx") or "" for m in meta])
+    # clear: the iso windows that are, plus the extra clear draws (isox); crowded and mixed are iso only
+    clear = ((ctx == "clear") & iso) | isox
+    crowded, mixed = (ctx == "crowded") & iso, (ctx == "mixed") & iso
     # per-event equal weights of the iso windows: 1 / (the event's iso windows in that energy bin)
     cell = we * len(ENERGY_NAMES) + np.maximum(eb, 0)
     cnt = np.bincount(cell[iso], minlength=len(evs) * len(ENERGY_NAMES))
     inv_n = np.where(iso, 1.0 / np.maximum(cnt[cell], 1), 0.0)
     # AUC: per view, the far windows in score order and where each iso score falls among them
     # (fixed); a resample only re-weighs, so a statistic is a cumulative sum, not a sort
-    auc = []
-    for v in range(3):
-        b = np.nonzero(bg & (view == v))[0]
-        b = b[np.argsort(s[b], kind="stable")]
-        i = np.nonzero(iso & (view == v))[0]
-        auc.append((b, i, np.searchsorted(s[b], s[i], "left"), np.searchsorted(s[b], s[i], "right")))
+    def pairs(ref, sel):
+        """Per view: ``ref``'s windows in score order and where each ``sel`` score falls among them."""
+        out = []
+        for v in range(3):
+            b = np.nonzero(ref & (view == v))[0]
+            b = b[np.argsort(s[b], kind="stable")]
+            i = np.nonzero(sel & (view == v))[0]
+            out.append((b, i, np.searchsorted(s[b], s[i], "left"), np.searchsorted(s[b], s[i], "right")))
+        return out
+    auc = pairs(bg, iso)
+    auc_ctx = {"clear": pairs(bg, clear), "crowded_near": pairs(near, crowded)}
 
     def thresholds(w, ref):
         thr = np.full(3, np.nan)
@@ -382,19 +423,32 @@ def window_stat(score, meta):
         has_n = ~np.isnan(thr_n)[view]
         det_n = s > np.where(np.isnan(thr_n), np.inf, thr_n)[view]
         # per view and iso window: the weight of far windows it beats (+1/2 the ties), and of all
-        beat, tot = np.zeros(n), np.zeros(n)
-        for b, i, lo, hi in auc:
-            cw = np.concatenate([[0.0], np.cumsum(w[b])])
-            beat[i], tot[i] = (cw[lo] + cw[hi]) / 2, cw[-1]
+        def beats(ps):
+            bt, tt = np.zeros(n), np.zeros(n)
+            for b, i, lo, hi in ps:
+                cw = np.concatenate([[0.0], np.cumsum(w[b])])
+                bt[i], tt[i] = (cw[lo] + cw[hi]) / 2, cw[-1]
+            return bt, tt
+        beat, tot = beats(auc)
+        ctx_beats = {k: beats(ps) for k, ps in auc_ctx.items()}
         out = {}
         for k, nm in enumerate(ENERGY_NAMES):
             sel = iso & (eb == k)
             out[f"floor_eff1pct_{nm}"] = _frac(w, det, sel)
             out[f"floor_eff1pct_{nm}_ev"] = _frac(w * inv_n, det, sel)
             out[f"floor_eff1pct_near_{nm}"] = _frac(w, det_n, sel & has_n)
-            out[f"floor_eff1pct_clear_{nm}"] = _frac(w, det, sel & clear)
+            selc = (iso | isox) & (eb == k)                            # the matched sets' energy bin
+            out[f"floor_eff1pct_clear_{nm}"] = _frac(w, det, selc & clear)
             out[f"floor_eff1pct_crowded_near_{nm}"] = _frac(w, det_n, sel & crowded & has_n)
             out[f"floor_eff1pct_crowded_{nm}"] = _frac(w, det, sel & crowded)
+            out[f"floor_eff1pct_mixed_{nm}"] = _frac(w, det, sel & mixed)
+            for key, m in (("clear", clear), ("crowded_near", crowded)):
+                bt, tt = ctx_beats[key]
+                out[f"auc_{key}_{nm}"] = _ratio((w * bt)[selc & m].sum(), (w * tt)[selc & m].sum())
+            for v in range(3):
+                sv = sel & (view == v)
+                out[f"floor_eff1pct_clear_{nm}_{VIEWS[v]}"] = _frac(w, det, selc & (view == v) & clear)
+                out[f"floor_eff1pct_crowded_near_{nm}_{VIEWS[v]}"] = _frac(w, det_n, sv & crowded & has_n)
             for v in range(3):
                 sv = sel & (view == v)
                 out[f"floor_eff1pct_{nm}_{VIEWS[v]}"] = _frac(w, det, sv)
@@ -408,8 +462,10 @@ def window_stat(score, meta):
 
     counts = {f"{k}_{VIEWS[v]}": int(((kind == i) & (view == v)).sum())
               for i, k in enumerate(KINDS) for v in range(3)}
-    counts.update({f"iso_{c}_{VIEWS[v]}": int((iso & m & (view == v)).sum())
-                   for c, m in (("clear", clear), ("crowded", crowded)) for v in range(3)})
+    ctxs = (("clear", clear & iso), ("crowded", crowded), ("mixed", mixed))   # iso windows; isox apart
+    counts.update({f"iso_{c}_{VIEWS[v]}": int((m & (view == v)).sum()) for c, m in ctxs for v in range(3)})
+    counts.update({f"iso_{c}_{nm}": int((m & (eb == k)).sum()) for c, m in ctxs for k, nm in enumerate(ENERGY_NAMES)})
+    counts["isox"] = int(isox.sum())
     return stat, len(evs), counts
 
 

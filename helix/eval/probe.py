@@ -115,6 +115,15 @@ class Probe:
         return torch.cat(out).numpy() if out else np.zeros(0, np.int64 if self.n_classes else np.float32)
 
 
+    def proba(self, X, extra):
+        """A two-class probe's P(class 1): the presence arm's per-cell score."""
+        import torch
+        with torch.no_grad():
+            out = [self.net(self.inputs(X[s:s + CHUNK], extra[s:s + CHUNK])).float().softmax(1)[:, 1].cpu()
+                   for s in range(0, len(extra), CHUNK)]
+        return torch.cat(out).numpy() if out else np.zeros(0, np.float32)
+
+
 def fit_probe(X, extra, y, event, *, group=None, n_classes=None, seed=0, device=None):
     """Fit the probe head on training rows.
 
@@ -219,8 +228,12 @@ def _diff(a, b):
 
 # ---- floor -----------------------------------------------------------------------------------
 
-FLOOR_ARMS = ("trained", "raw", "amplitude")
+FLOOR_ARMS = ("trained", "raw", "amplitude", "presence")
 FLOOR_FITTED = ("trained", "raw")
+#: the presence arm: the trained features and rows, fit as a classifier of charge above the presence
+#: threshold rather than a regression of log-charge. An MSE regression's optimum next to a track is
+#: E[q | context] > 0 -- a haze even from a representation that localises charge exactly -- so the
+#: two arms together separate what the probe does from what the features carry.
 
 
 def amplitude(ev, keys):
@@ -332,6 +345,12 @@ class Floor:
                 if ok.any():
                     p[ok] = probe.predict(X, waux[ok])
                 scores[seed_name(a, k)] = np.expm1(np.maximum(p, 0)) * Q0
+            if a == "trained":
+                for k, probe in enumerate(self.probes["presence"]):
+                    p = np.zeros(len(widx), np.float32)
+                    if ok.any():
+                        p[ok] = probe.proba(X, waux[ok])
+                    scores[seed_name("presence", k)] = p
         self.scored.add(ev, tr, scores)
 
     def _fit(self):
@@ -341,9 +360,12 @@ class Floor:
             raise ValueError("floor: no covered map row in any training event")
         y, A, e = np.concatenate(f["y"]), np.concatenate(f["A"]), np.concatenate(f["e"])
         self.probes = {}
+        q_pres = np.log1p(float(getattr(self.ctx, "presence_q", 25.0)) / Q0)
         for a in FLOOR_FITTED:
             X = torch.cat(f["X"].pop(a))
             self.probes[a] = fit_seeds(self.ctx, X, A, y, e)
+            if a == "trained":
+                self.probes["presence"] = fit_seeds(self.ctx, X, A, (y > q_pres).astype(np.int64), e, n_classes=2)
             del X
         self.n_fit = len(y)
 
@@ -359,6 +381,9 @@ class Floor:
         for a in FLOOR_FITTED:
             out[a].update(val_mse_seeds=[round(-p.val_score, 6) for p in self.probes[a]], **seed_spread(pts[a]))
         out["d_over_raw_seeds"] = seed_spread([_diff(t, r) for t, r in zip(pts["trained"], pts["raw"])])
+        pres = [self.scored.point(seed_name("presence", k)) for k in range(len(self.probes["presence"]))]
+        out["presence"].update(val_bal_acc_seeds=[round(p.val_score, 6) for p in self.probes["presence"]],
+                               **seed_spread(pres))
         return out
 
 

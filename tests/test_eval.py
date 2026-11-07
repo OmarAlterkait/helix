@@ -285,7 +285,8 @@ def test_floor_learns_what_the_features_carry(synth):
     assert out["n_train_events"] == 6 and np.isfinite(out["val_mse"])
     for arm in ("trained", "amplitude"):
         r = out[arm]
-        assert len(r["floor_eff1pct_0.1-0.2"]) == 3 and min(r["n_windows"].values()) > 0
+        kinds = {k: v for k, v in r["n_windows"].items() if k.split("_")[0] in ("iso", "bg", "near") and k[-2:] in ("_U", "_V", "_Y") and k.count("_") == 1}
+        assert len(r["floor_eff1pct_0.1-0.2"]) == 3 and len(kinds) == 9 and min(kinds.values()) > 0
     # the coefficient values are noise here, so the amplitude finds nothing the features do not
     eff = lambda a: np.nanmean([v[0] for k, v in out[a].items() if k.startswith("floor_eff")])   # noqa: E731
     assert eff("trained") > eff("amplitude") + 0.2, (out["trained"], out["amplitude"])
@@ -303,6 +304,10 @@ def test_floor_learns_what_the_features_carry(synth):
     assert set(hr) == set(out["trained"]["seed_mean"]) >= {"floor_eff1pct_0.1-0.2", "auc_0.1-0.2"}
     assert all(v >= 0 for v in hr.values() if v == v) and "amplitude" not in out["d_over_raw_seeds"]
     assert set(out["d_over_raw_seeds"]) == {"seed_mean", "seed_half_range"}
+    # the presence arm: the same features and rows as a classifier of q > presence_q, scored by its
+    # probability -- on features that ARE the charge it finds what the regression finds
+    assert eff("presence") > eff("amplitude") + 0.2, (out["presence"], out["amplitude"])
+    assert len(out["presence"]["val_bal_acc_seeds"]) == 2
 
 
 def test_the_raw_arm_on_raw_features_is_the_trained_arm(synth):
@@ -747,7 +752,7 @@ def test_truth_has_both_window_kinds_and_valid_keys():
     rec, ck = _event(np.random.default_rng(0))
     tr = W.event_truth(rec, ck, np.random.default_rng(1))
     kinds = [m["kind"] for m in tr["meta"]]
-    assert set(kinds) == {"iso", "bg", "near"}
+    assert {"iso", "bg", "near"} <= set(kinds) <= {"iso", "bg", "near", "isox"}
     assert kinds.count("bg") <= W.N_BG_PLANE * 1 and kinds.count("near") <= W.N_BG_PLANE    # one plane here
     assert len(tr["wkey"]) == len(tr["meta"]) * N_CELL
     q = _charge(rec, tr["wkey"])
@@ -762,12 +767,15 @@ def test_truth_has_both_window_kinds_and_valid_keys():
             assert np.isin(tr["wkey"][cells], ck).any()
         else:
             assert m["E"] > 0 and q[cells].sum() > 0
-    # the near windows are drawn last: iso and bg are what they were without them
+            if m["kind"] == "isox":                                # the extra draws are clear ones
+                assert m["ctx"] == "clear"
+    # near, then the extra clear windows, are drawn last: iso and bg are what they were without them
     from helix.eval import events as EV
     import unittest.mock as um
     with um.patch("helix.data.denoise.near_windows", lambda *a, **k: []):
         old = EV.event_truth(rec, ck, np.random.default_rng(1))
-    assert old["meta"] == [m for m in tr["meta"] if m["kind"] != "near"]
+    keep = lambda meta: [m for m in meta if m["kind"] in ("iso", "bg")]          # noqa: E731
+    assert keep(old["meta"]) == keep(tr["meta"])
 
 
 def test_every_plane_gets_its_own_background():
@@ -840,6 +848,26 @@ def test_the_matched_floor_compares_iso_and_background_at_the_same_distance_from
     assert got["floor_eff1pct_crowded_0.1-0.2"] == 1.0
     assert got["floor_eff1pct_crowded_near_0.1-0.2"] == 0.0
     assert counts["iso_clear_U"] == 30 == counts["iso_crowded_U"] and counts["iso_U"] == 60
+    assert counts["iso_clear_0.1-0.2"] == 30
+    assert got["auc_clear_0.1-0.2"] == 1.0                   # 5 above every far window (0)
+    assert got["auc_crowded_near_0.1-0.2"] == 0.5            # 3 ties every near window (3)
+    assert got["floor_eff1pct_clear_0.1-0.2_U"] == 1.0
+    assert np.isnan(got["floor_eff1pct_mixed_0.1-0.2"]) and counts["iso_mixed_U"] == 0 and counts["isox"] == 0
+
+
+def test_the_extra_clear_windows_count_in_clear_and_nowhere_else():
+    """isox windows (extra clear draws) score in the clear efficiency only: the iso floor is the
+    iso windows' alone."""
+    meta, score = [], []
+    for e in range(10):
+        meta += [dict(kind="bg", g=0, E=np.nan, ev=e)] * 20
+        score += [0.0] * 20
+        meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="crowded"), dict(kind="isox", g=0, E=0.15, ev=e, ctx="clear")]
+        score += [0.0, 5.0]
+    stat, _, counts = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)
+    got = stat(np.ones(10, np.int64))
+    assert got["floor_eff1pct_0.1-0.2"] == 0.0 and got["floor_eff1pct_clear_0.1-0.2"] == 1.0
+    assert counts["isox"] == 10 and counts["iso_clear_U"] == 0 and counts["iso_U"] == 10
 
 
 def test_the_auc_is_the_weighted_pair_ordering_within_a_view():
