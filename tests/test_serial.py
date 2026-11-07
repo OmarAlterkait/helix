@@ -274,7 +274,7 @@ def test_fm_keys_names_every_option_build_fm_consumes():
 def test_training_entry_point_refuses_an_unknown_model_key():
     """A key build_fm would ignore must fail the training build, not train the default."""
     pytest.importorskip("pimm")
-    from helix.integrations.pimm.model import build_coeff_fm
+    from helix.integrations.pimm import build_coeff_fm
     with pytest.raises(TypeError, match="fast_path"):
         build_coeff_fm(**SMALL, fast_path=True)
 
