@@ -59,7 +59,9 @@ level 4, periodization, D1 dropped; the coherent gate on 64-wire blocks (kgate =
 npass 2, tau 0.05, global sigc); threshold kappa 1.0, floor 2.0, sigma per plane; values
 rounded to a power of two <= sigma/16 (input), sigma/32 (target). Same basis as r1 but a
 different chain (r1's digest is `8c4542b6...`), so no r1 number transfers. Training drops
-events above `max_event_size = 600_000` rows (the fraction on d1m is unmeasured); the split is
+events above `max_event_size = 600_000` rows -- measured later at 18.9% of d1m's events (27% of
+coefficients), the busiest; the cap is 1.2M since 2026-11-07 (every d1m event; the largest needs
+13.9 GB in a d768 step), and the S3DF fm / fm_cooldown trained without that fifth; the split is
 0.95 / 0.03 / 0.02 by identity hash (4113 probe events in j000000).
 
 **The truth is hits truth, not complete.** cells-3 `q` is the hits file's electrons

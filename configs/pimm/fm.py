@@ -118,8 +118,13 @@ transform = [
 HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
 _common = dict(type="CoeffTPCDataset", data_root=CORPUS, split=RUNS, dataset_name="sim_wire",
                modalities=("coeff",), transform=transform, holdout=HOLDOUT)
+# The size cap is a guard against an outlier event, not a filter: d1m's largest event (1,066,152
+# coefficients, 48k tokens) peaks at 13.9 GB in one d768 training step (4.7-6.7 GB with act_ckpt),
+# within a 40 GB A100, where 600k -- from the padded-attention era -- dropped 18.9% of d1m's events,
+# the busiest (2026-11-07). Training is A100-only (varlen attention needs sm80+), so no smaller GPU
+# trains from this file.
 data = dict(
-    train=dict(**_common, split_role="train", max_event_size=600_000),
+    train=dict(**_common, split_role="train", max_event_size=1_200_000),
     val=dict(**_common, split_role="val"),
     test=dict(**_common, split_role="val"),
 )

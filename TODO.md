@@ -172,10 +172,15 @@ The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, containe
   turing's (one GPU type per corpus).
 * **Evaluation fits a `shared` GPU job** (32 cores, 56 GB): the floor holds ~25 GB of
   features in host memory at `FIT_ROWS` = 1M.
-* **The training size cap drops 18.9% of d1m.** fm.py drops events above `max_event_size` = 600k
-  coefficients (one event per rank must fit a 40 GB A100). Measured over all 200,000 events of
-  j000000 (2026-11-07): 37,762 dropped, 18.9% of events and 27.0% of coefficients -- the busiest
-  -- against 0.12% on r1 (sizes: median 471k, p90 658k, p95 711k, p99 807k). Every d1m model so far
-  (S3DF fm / fm_cooldown, the d1m_lr and d1m_denoise studies) trained without them, while
-  helix.eval scores them. Fix before a production run, after a largest-event memory test: a cap
-  near 850k on 80 GB nodes (`--resources.constraint "gpu&hbm80g"`) and/or `act_ckpt`.
+* **The training size cap (resolved 2026-11-07).** 600k dropped 18.9% of d1m's events (27% of
+  coefficients, the busiest); d1m's largest event needs 13.9 GB in a d768 training step, so fm.py
+  caps at 1.2M (every d1m event). The S3DF fm / fm_cooldown trained without that fifth of the
+  data; anything compared against them carries it. Log max_memory_allocated on the first steps of
+  the first uncapped production run (DDP buckets and fragmentation are not in the one-step test).
+* **An oracle for the low-energy floor.** Raw and amplitude are weak references; whether the
+  model's 5-12% (presence, clear windows below 0.1 MeV, given a kept coefficient) is near what the
+  input allows needs a matched filter on the waveform with the known response and noise
+  covariance, on the same windows -- as r1's bound (0.48 at deposit SNR 5-7, 0.86 at 7-10; the
+  archive's DENOISE). Also: whether "tokonly" detections (covered, no kept coefficient inside)
+  are the deposit's own coefficients just outside the window (efficiency falling with distance
+  over the level-4 support) or haze (flat).
