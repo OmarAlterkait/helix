@@ -822,6 +822,26 @@ def test_a_haze_around_tracks_is_free_on_the_far_background_and_priced_on_the_ne
     assert bad["near_fpr_at_far"][0] == 1.0 == bad["near_fpr_at_far_U"][0] and good["near_fpr_at_far"][0] == 0.0
 
 
+def test_the_matched_floor_compares_iso_and_background_at_the_same_distance_from_charge():
+    """A predictor that hazes charge near activity: far windows score 0, near windows 3. Iso
+    windows with clear padding score 5 and are all found at the far threshold; crowded iso
+    windows score like the near windows (3, the haze alone), so the matched near threshold finds
+    none of them while the far threshold finds them all."""
+    meta, score = [], []
+    for e in range(10):
+        meta += [dict(kind="bg", g=0, E=np.nan, ev=e)] * 20 + [dict(kind="near", g=0, E=np.nan, ev=e)] * 20
+        score += [0.0] * 20 + [3.0] * 20
+        meta += [dict(kind="iso", g=0, E=0.15, ev=e, clear=True)] * 3
+        meta += [dict(kind="iso", g=0, E=0.15, ev=e, clear=False)] * 3
+        score += [5.0] * 3 + [3.0] * 3
+    stat, _, counts = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)
+    got = stat(np.ones(10, np.int64))
+    assert got["floor_eff1pct_clear_0.1-0.2"] == 1.0
+    assert got["floor_eff1pct_crowded_0.1-0.2"] == 1.0
+    assert got["floor_eff1pct_crowded_near_0.1-0.2"] == 0.0
+    assert counts["iso_clear_U"] == 30 and counts["iso_U"] == 60
+
+
 def test_the_auc_is_the_weighted_pair_ordering_within_a_view():
     rng = np.random.default_rng(0)
     meta, score = [], []

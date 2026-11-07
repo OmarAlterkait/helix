@@ -271,6 +271,13 @@ number still under its own key, the new ones beside it):*
   on the near windows, and the far threshold fires on 19% of them (raw arm 1.8%, amplitude
   3.3%). One run and 142 events: that the probe predicts a haze around activity is the reading
   this suggests, not yet shown cell by cell;
+* the MATCHED comparison that tests that reading: an iso window is `clear` when no other
+  particle's charge lies in the same +-16 w / +-128 t padding a far window must keep empty.
+  `floor_eff1pct_clear_<E>` scores the clear iso windows at the far threshold (both sides far
+  from other charge), `floor_eff1pct_crowded_near_<E>` the others at the near threshold (both
+  sides near charge), and `floor_eff1pct_crowded_<E>` those at the far threshold for contrast;
+  `n_windows` counts `iso_clear_<V>`. A haze shows as crowded-at-far well above
+  crowded-at-near while clear-at-far stays;
 * the threshold-free companion `auc_<E>`: P(iso above a far window of its own view). Seed
   pairs agree to ~0.005 on it against ~0.04 on the efficiency at 1%. Every window number is
   also reported per view (`_U`, `_V`, `_Y`), since a pooled one hides a view;

@@ -202,7 +202,9 @@ def event_truth(cells, coeff_cells, rng, windows=True):
     :func:`helix.data.cells.coeff_cells`). Returns ``mrows``/``mq`` (map rows and their truth
     charge) and, with ``windows``, ``wkey`` (window cells in window order, :func:`window_cells`'
     order inside each) and ``meta`` (one dict per window: ``kind``, ``g``, ``w0``, ``t0``, ``E``
-    -- the iso particle's energy, NaN for a background window, ``bg`` or ``near``). The map
+    -- the iso particle's energy, NaN for a background window, ``bg`` or ``near``; ``clear`` --
+    for an iso window, no other particle's charge within the far windows' +-16 w / +-128 t
+    padding, None otherwise). The map
     rows are drawn first, so they are the same with or without the windows.
     """
     E = dict(enumerate(np.asarray(cells["trk_energy"], np.float64).tolist()))
@@ -271,7 +273,10 @@ def event_truth(cells, coeff_cells, rng, windows=True):
         qin, qall = Q[idx[mine]].sum(), Q[idx].sum()
         if qin < 0.9 * pq[j] or qall - qin > 0.05 * qall:
             continue
-        wins.append(("iso", g, w0, t0, E.get(int(TRK[idx[mine][0]]), 0.0)))
+        # clear: no other particle's charge in the padding a far (bg) window must keep empty --
+        # the iso windows that compare like for like with the far background
+        clear = bool((pinv[contents(g, w0, t0, 16, 128)] == j).all())
+        wins.append(("iso", g, w0, t0, E.get(int(TRK[idx[mine][0]]), 0.0), clear))
 
     if len(ck):
         cg = unkey(ck)[0]
@@ -284,7 +289,7 @@ def event_truth(cells, coeff_cells, rng, windows=True):
                 w0, t0 = max(0, fw * FW - WW // 2), max(0, ft * FT - WT // 2)
                 if len(contents(g, w0, t0, 16, 128)):
                     continue
-                wins.append(("bg", g, w0, t0, np.nan))
+                wins.append(("bg", g, w0, t0, np.nan, None))
                 n_b += 1
 
     # near background: drawn last, so every window above is the same with or without it.
@@ -296,12 +301,12 @@ def event_truth(cells, coeff_cells, rng, windows=True):
     for g, w0, t0 in (near_windows(uk, fq, rng, n=4 * N_BG_PLANE * len(planes)) if len(planes) and len(ck) else []):
         if n_near[g] >= N_BG_PLANE or not np.isin(window_cells(g, w0, t0), ck).any():
             continue
-        wins.append(("near", g, w0, t0, np.nan))
+        wins.append(("near", g, w0, t0, np.nan, None))
         n_near[g] += 1
 
-    wkey = np.concatenate([window_cells(g, w0, t0) for _, g, w0, t0, _ in wins]) if wins \
+    wkey = np.concatenate([window_cells(g, w0, t0) for _, g, w0, t0, _, _ in wins]) if wins \
         else np.zeros(0, np.int64)
-    meta = [dict(kind=k, g=g, w0=w0, t0=t0, E=e) for k, g, w0, t0, e in wins]
+    meta = [dict(kind=k, g=g, w0=w0, t0=t0, E=e, clear=c) for k, g, w0, t0, e, c in wins]
     return dict(mrows=mrows, mq=mq, wkey=wkey, meta=meta)
 
 
@@ -326,6 +331,11 @@ def window_stat(score, meta):
                                     near windows is left out
       near_fpr_at_far[_<V>]         the fraction of near windows above the far threshold
       auc_<E>[_<V>]                 P(iso scores above a far window of its view), ties 1/2
+      floor_eff1pct_clear_<E>       MATCHED: the iso windows with clear padding (``clear``) at
+                                    the far threshold -- both sides far from other charge
+      floor_eff1pct_crowded_near_<E>  MATCHED: the other iso windows (other charge in the
+                                    padding) at the near threshold -- both sides near charge
+      floor_eff1pct_crowded_<E>     those crowded iso windows at the far threshold, for contrast
 
     ``meta``: one dict per window, its event as ``ev``."""
     n = len(meta)
@@ -337,6 +347,7 @@ def window_stat(score, meta):
                    for m in meta], np.int64)
     evs, we = np.unique(ev, return_inverse=True)
     iso, bg, near = kind == 0, kind == 1, kind == 2
+    clear = np.array([bool(m.get("clear")) for m in meta], bool)
     # per-event equal weights of the iso windows: 1 / (the event's iso windows in that energy bin)
     cell = we * len(ENERGY_NAMES) + np.maximum(eb, 0)
     cnt = np.bincount(cell[iso], minlength=len(evs) * len(ENERGY_NAMES))
@@ -376,6 +387,9 @@ def window_stat(score, meta):
             out[f"floor_eff1pct_{nm}"] = _frac(w, det, sel)
             out[f"floor_eff1pct_{nm}_ev"] = _frac(w * inv_n, det, sel)
             out[f"floor_eff1pct_near_{nm}"] = _frac(w, det_n, sel & has_n)
+            out[f"floor_eff1pct_clear_{nm}"] = _frac(w, det, sel & clear)
+            out[f"floor_eff1pct_crowded_near_{nm}"] = _frac(w, det_n, sel & ~clear & has_n)
+            out[f"floor_eff1pct_crowded_{nm}"] = _frac(w, det, sel & ~clear)
             for v in range(3):
                 sv = sel & (view == v)
                 out[f"floor_eff1pct_{nm}_{VIEWS[v]}"] = _frac(w, det, sv)
@@ -387,8 +401,10 @@ def window_stat(score, meta):
             out[f"near_fpr_at_far_{VIEWS[v]}"] = _frac(w, det, near & (view == v))
         return out
 
-    return stat, len(evs), {f"{k}_{VIEWS[v]}": int(((kind == i) & (view == v)).sum())
-                            for i, k in enumerate(KINDS) for v in range(3)}
+    counts = {f"{k}_{VIEWS[v]}": int(((kind == i) & (view == v)).sum())
+              for i, k in enumerate(KINDS) for v in range(3)}
+    counts.update({f"iso_clear_{VIEWS[v]}": int((iso & clear & (view == v)).sum()) for v in range(3)})
+    return stat, len(evs), counts
 
 
 def score_windows(score, meta, n_boot=200, seed=0):
