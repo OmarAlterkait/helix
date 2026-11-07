@@ -216,12 +216,13 @@ dumps (`dump_probe_truth`, `dump_resolution_truth`, `build_denoise_truth`, ...).
 
 **One evaluation command.** `python -m helix.eval RUN --metrics recon,floor,uprobe,labels,denoise
 --out FILE` scores a run from its pimm directory: `recon` (the training evaluator's
-metric code), `floor` (the detection floor on frozen features against the fit-free
-coefficient amplitude), `uprobe` (the along-wire probe against the geometry columns),
-`labels` (each signal cell's particle class against the token layout), `denoise` (a
-denoiser on the floor's windows). *Why:* sixteen scripts (`eval_resolution`,
-`eval_checkpoint`, `eval_denoise`, `run_probe`, ...) each read the model and the truth
-their own way. `Q0` is defined once (`helix.data.cells.Q0`).
+metric code, under the random and the region mask), `floor` (the detection floor on frozen
+features against the raw inputs and the fit-free coefficient amplitude), `uprobe` (the
+along-wire probe against the raw inputs and the geometry columns), `labels` (each signal
+cell's particle class against the raw inputs and the token layout), `denoise` (a denoiser on
+the floor's windows, and its charge on every charged cell). *Why:* sixteen scripts
+(`eval_resolution`, `eval_checkpoint`, `eval_denoise`, `run_probe`, ...) each read the model
+and the truth their own way. `Q0` is defined once (`helix.data.cells.Q0`).
 
 **The evaluation's definitions, and why they scale.** Shared by every metric (`helix.eval.Context`):
 one encoder, one fit/score split, and per event one truth draw (`Event.truth`).
@@ -234,7 +235,8 @@ four: `exp/helix/report/checks.py`, 600 events of fm / fm_cooldown):
   (U and V: 5.3k / 5.9k windows against Y's 0.8k), ran Y at 2.4-3.2% and raised the faint
   efficiency 0.35 -> 0.41;
 * every probe arm has a reference that is not a probe of another encoder: the floor's is the
-  fit-free coefficient amplitude, uprobe's the geometry columns, labels' the token layout.
+  fit-free coefficient amplitude, uprobe's the geometry columns, labels' the token layout
+  (and every probe has the raw-input arm beside them, below).
   The randomly initialised encoder was the control until measured: under the same probe it
   scored BELOW the amplitude at every energy up to 1 MeV (0.06 vs 0.08 below 0.1 MeV, 0.52
   vs 0.83 at 0.2-0.5) and below geometry along the wire (within-group R^2 -0.02 vs 0.03) --
@@ -253,6 +255,64 @@ four: `exp/helix/report/checks.py`, 600 events of fm / fm_cooldown):
   near-signal and noise rows was a choice, not a population), localisation (averaged over
   windows the probe never detected, it measured noise centroids), pair separation, RankMe,
   energy bins above 0.5 MeV (every arm is at 0.97-0.99 there), and the random-init arm.
+*Added after an audit of this package (2026-11-06; each confirmed in the code, every earlier
+number still under its own key, the new ones beside it):*
+* a NEAR background beside the far one. The far (`bg`) windows must hold no truth within
+  +-16 w / +-128 t, while an iso window caps foreign charge only INSIDE itself (5%), so a
+  prediction that hazes charge around tracks gained iso efficiency at no false-positive cost.
+  `near` windows (`helix.data.denoise.near_windows`, the denoiser's own training windows:
+  empty with a one-cell margin, charge inside the padding; kept only with a kept coefficient
+  inside, as every `bg` window has; drawn after iso and bg, which stay as they were) give
+  `floor_eff1pct_near_<E>` (the threshold set on them) and `near_fpr_at_far` (the far
+  threshold's rate on them; 1% if the prediction cannot tell them apart). The far efficiency is
+  unchanged and still the floor; measured on fm_cooldown (`last`, the 142 scored events of the
+  NERSC j000000 sample; far numbers identical to the previous code on the same events): the
+  trained arm's 0.44 / 0.64 below 0.1 / at 0.1-0.2 MeV fall to 0.04 / 0.15 with the threshold
+  on the near windows, and the far threshold fires on 19% of them (raw arm 1.8%, amplitude
+  3.3%). One run and 142 events: that the probe predicts a haze around activity is the reading
+  this suggests, not yet shown cell by cell;
+* the threshold-free companion `auc_<E>`: P(iso above a far window of its own view). Seed
+  pairs agree to ~0.005 on it against ~0.04 on the efficiency at 1%. Every window number is
+  also reported per view (`_U`, `_V`, `_Y`), since a pooled one hides a view;
+* a `raw` arm in floor, uprobe and labels: the same probe (rows, MLP, standardisation,
+  selection) on the covering tokens' raw tokenizer inputs (`inp` and `occ`, 2 x n_slot per
+  band) instead of encoder features, and `d_over_raw` = trained - raw, bootstrapped paired.
+  The existing references bound the probe, not pretraining: labels' token layout carries no
+  charge at all (0.29 / 0.24 balanced accuracy against chance 0.20 / 0.17). The predecessor
+  (`scripts/eval_resolution.py`, origin/main) had this arm. On fm_cooldown (as above) trained -
+  raw is +0.38 / +0.53 floor efficiency below 0.1 / at 0.1-0.2 MeV, +0.53 uprobe R^2 and
+  +0.30 / +0.21 motif / pid balanced accuracy (raw 0.50 / 0.43). Raw scores BELOW geometry along
+  the wire (R^2 -0.01 vs 0.02): its 1024 columns drown the geometry, the known weakness of the
+  probe;
+* every probe arm is fitted `--probe-seeds` (default 2) times on the same rows (seeds
+  `seed + k`), reported as `seed_mean` / `seed_half_range` ((max - min) / 2) beside the
+  interval, which comes from the first fit: the event bootstrap resamples events under ONE
+  fitted probe and leaves the fit's own variance out. On fm_cooldown the trained arm's
+  half-range is 0.003-0.011 on the efficiency, <= 0.002 on the AUC and R^2;
+* per-event weighting beside the pooled numbers (`_ev`): the fit takes at most
+  `FIT_ROWS // n_train` rows per event but scoring pooled every row, so dense events set the
+  score. Floor: each event's iso windows of a bin weigh 1 in all; uprobe: each (event, plane)
+  group's sums divided by its rows (groups weigh equally; a mean of per-group R^2 would be set
+  by the groups with least variance); labels: each event's rows weigh 1 in all in every
+  per-class recall. Recon stays token-pooled on purpose (its own docstring: the per-event mean
+  is ~0.09 nats optimistic);
+* recon is also scored under the predecessor's REGION mask (`region`: 75% of (plane, 32 wire,
+  128 tick) regions hidden whole, chosen by crc32 of the region key, the same in every event),
+  beside the model's random mask: the predecessor's 0.31-0.39 var_expl against this package's
+  ~0.69 is the gap between interpolating from neighbouring tokens and reconstructing what no
+  neighbour shows; fm_cooldown (`last`): 0.693 random, 0.297 region;
+* the denoise metric also scores CHARGE, which detection does not: on every truth-charged
+  covered cell, per view, the median and hw68 of log(pred / true) per truth bin (1-4k ...
+  >=256k e-), the median true / pred per predicted-charge bin (linearity), the per-event plane
+  total sum pred / sum true (median over events; on charged cells, so haze is the near
+  window's to price), and the presence probability's ECE (15 bins), Brier and log-loss against
+  q > 25 e- (the training's presence label, `--presence-q`) on the covered cells of the charged
+  set and of the windows -- every covered cell of an event is millions of cells. One noise
+  realisation, the corpus's own, as on real data;
+* the JSON records what it scored: `corpus.basis_digest` (from the evaluated shards, not the
+  training run's record), `truth.q_cut` (the cells shards' `hits_threshold`, 25 e- on d1m:
+  cells-3 `q` is hits truth, cut per sample) and `weights` per metric -- the audit found the
+  floor read `last` while the denoiser's encoder starts from EMA, which the JSON did not say.
 *Scaling:* probes fit on at most `FIT_ROWS` = 1M rows and score each later event as it
 arrives (holding predictions only); every bootstrap statistic is a weighted function of
 per-event counts, so a resample costs a few bincounts, not a rebuild of ~8M rows. The
