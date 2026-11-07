@@ -115,7 +115,7 @@ for a in "${REST[@]}"; do
   case "$a" in --) seen=1 ;; --resources.nnodes=*) NN=${a#*=} ;; --resources.nproc-per-node=*) NP=${a#*=} ;; esac
   prev=$a
 done
-WHAT="$CFG nodes=$NN x $NP ${TRAIN[*]}"
+WHAT="${CFG#"$H"/} nodes=$NN x $NP ${TRAIN[*]}"       # relative: a frozen run tree's path is not the run's identity
 RUN=$HELIX_EXP/$NAME
 DRY=0; case " ${REST[*]} " in *" --dry-run "*) DRY=1 ;; esac
 if [ "$DRY" = 0 ] && [ -s "$RUN/submit.cmd" ] && [ "$(cat "$RUN/submit.cmd")" != "$WHAT" ]; then
