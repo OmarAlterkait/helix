@@ -360,6 +360,60 @@ def test_a_perfect_denoiser_scores_perfectly(synth):
         assert effs and min(effs) == 1.0
 
 
+def _oracle(scale=1.0, q_present=25.0):
+    """A denoiser that knows the truth: ``scale`` x each covered cell's charge, presence 1 above
+    ``q_present`` e-."""
+    def predict(ev, keys):
+        q = dict(zip(ev.cells["key"].tolist(), ev.cells["q"].tolist()))
+        idx, _ = C.cell_inputs(keys, ev.cell_key, ev.band_lengths, patch_config(TOK))
+        t = np.array([q.get(k, 0.0) for k in keys.tolist()]) * ((idx >= 0).any(1))
+        return np.log1p(scale * t / C.Q0).astype(np.float32), (t > q_present).astype(np.float32)
+    return predict
+
+
+def test_the_denoise_charge_numbers_are_exact_for_the_truth_and_see_a_scale(synth):
+    from helix.eval.denoise import Denoise, PRED_NAMES, TRUTH_NAMES
+    d, ds = synth
+    run = load_run(d, device="cpu")
+    outs = {}
+    for scale in (1.0, 1.1):
+        m = Denoise(_ctx(run, len(ds), denoiser=_oracle(scale)))
+        for e in _events(run, ds):
+            m.add(e)
+        outs[scale] = m.result()
+    for scale, out in outs.items():
+        cl = out["cells"]
+        assert cl["n_cells"] > 0 and cl["presence_q"] == 25.0
+        for v in ("all", "U", "V", "Y"):
+            bv = cl["by_view"][v]
+            res = [r for r in bv["resolution"].values() if r["n"]]
+            assert len(res) >= 2 and sum(r["n"] for r in bv["resolution"].values()) > 0
+            for r in res:                                       # log(pred / true) = log(scale), no spread
+                assert r["median"] == pytest.approx(np.log(scale), abs=1e-4) and r["hw68"] == pytest.approx(0, abs=1e-4)
+                assert r["frac_zero"] == 0
+            lin = [r for r in bv["linearity"].values() if r["n"]]
+            assert lin and all(r["median_true_over_pred"] == pytest.approx(1 / scale, rel=1e-4) for r in lin)
+            assert bv["closure"]["median"] == pytest.approx(scale, rel=1e-4) and bv["closure"]["n_events"] == 3
+            cal = cl["calibration"]["presence"][v]                   # presence is right either way
+            assert cal["n"] > cl["by_view"][v]["resolution"][TRUTH_NAMES[0]]["n"] and 0 < cal["frac_true"] < 1
+            assert cal["ece"] == 0 and cal["brier"] == 0 and cal["log_loss"] < 1e-6
+        assert set(cl["by_view"]["all"]["linearity"]) == set(PRED_NAMES)
+        assert "floor_eff1pct_near_0.1-0.2" in out["charge"] and "near_fpr_at_far" in out["presence"]
+
+
+def test_binary_calibration():
+    from helix.eval.denoise import binary_calibration
+    rng = np.random.default_rng(0)
+    y = np.arange(1000) < 700                                           # 70% true
+    c = binary_calibration(np.full(1000, 0.7), y)
+    assert c["ece"] == pytest.approx(0, abs=1e-9) and c["brier"] == pytest.approx(0.21) and c["frac_true"] == 0.7
+    c = binary_calibration(np.full(1000, 0.9), y)                       # over-confident by 0.2
+    assert c["ece"] == pytest.approx(0.2)
+    assert c["log_loss"] == pytest.approx(-(0.7 * np.log(0.9) + 0.3 * np.log(0.1)), rel=1e-5)
+    p = rng.random(200000)                                              # calibrated by construction
+    assert binary_calibration(p, rng.random(200000) < p)["ece"] < 0.01
+
+
 def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
     from helix.eval.probe import fit_probe
     from helix.eval.events import group_r2
