@@ -1,0 +1,17 @@
+# What every helix launch recipe shares. Recipes are pimm launch YAML
+# (`pimm submit --recipe`); scripts/submit.sh is the one way they are used.
+#
+# Nothing here names a path, an account or an image: launch YAML cannot read
+# the environment (its {placeholders} resolve against the launch config only,
+# and `env:` values are shell-quoted), so site facts reach pimm as CLI flags
+# from scripts/submit.sh, which reads them from helix/sites/<site>.yaml.
+#
+# `setup:` is the one seam that IS shell, evaluated inside the job: it puts
+# helix and pimm on PYTHONPATH there. pimm's code snapshot copies only its own
+# scripts/ tools/ pimm/, so helix must come from the environment.
+setup:
+  - 'export PYTHONPATH="${HELIX_ROOT:?HELIX_ROOT did not reach the job; submit with scripts/submit.sh}:${HELIX_PIMM_ROOT:?HELIX_PIMM_ROOT did not reach the job}${PYTHONPATH:+:$PYTHONPATH}"'
+run:
+  timestamp: false            # the run dir is $HELIX_EXP/<name>, which other configs name (fm_cooldown, denoise)
+chain:
+  wandb_mode: fork
