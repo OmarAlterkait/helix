@@ -20,6 +20,8 @@ def _pimm_importable():
 
 
 pytestmark = pytest.mark.skipif(not _pimm_importable(), reason="pimm not importable")
+# the finite guard is imported at module scope below, so without pimm skip before it
+pytest.importorskip("pimm")
 
 import logging
 
