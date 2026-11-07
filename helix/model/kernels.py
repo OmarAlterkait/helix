@@ -13,7 +13,7 @@ backward. It reads straight out of a fused projection output X (T, P*d):
 Outputs are (T, H, 64). The backward recomputes the norm from X (alive anyway for
 v), so nothing extra is saved, and writes all of dX in one buffer. Replaces the
 four-to-six inductor kernels per block the unfused path compiles to; matches it
-to ~1e-5 relative (tests/test_serial.py).
+to ~1e-5 relative (tests/test_attention.py).
 """
 import torch, triton, triton.language as tl
 

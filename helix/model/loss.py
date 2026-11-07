@@ -11,7 +11,7 @@ zero: 4.8 GiB at a 32k-cell event, half the step's peak memory.
 :func:`cat_head_sparse` computes the same sums over the same pairs: group the active pairs by slot,
 pad each group to the largest, and do one ``baddbmm`` plus one
 ``cross_entropy``. Only the fp32 summation order differs from ``losses_cat``
-(the loss moves by < 1e-5 relative; tests/test_serial.py).
+(the loss moves by < 1e-5 relative; tests/test_attention.py).
 """
 import torch
 import torch.nn.functional as F

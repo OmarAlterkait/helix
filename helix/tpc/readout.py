@@ -18,7 +18,7 @@ what densify / noise / digitize consume::
     geom = load_plane_registry("cubic_wireplane_geometry.json")   # ships in data/
 
 It DUPLICATES ``pimm_data.geometry``: a byte-identical loader and a byte-identical bundled
-``cubic_wireplane_geometry.json``, pinned by ``tests/test_cross_repo_duplication.py``. The
+``cubic_wireplane_geometry.json``, pinned by ``tests/test_boundary.py``. The
 duplication is deliberate and is the same arrangement as the shard codec: pimm-data must run
 with no helix installed (it serves every detector), and helix must build a corpus with no
 pimm-data installed, so the shared concern is mirrored and pinned by a test instead of imported.

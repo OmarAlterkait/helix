@@ -46,7 +46,7 @@ in `docs/archive/`.
   `Densify`.
 * **History in comments.** Some docstrings and test docstrings still narrate how a bug was
   found rather than the current why (e.g. `helix/data/bins.py`, `helix/paths.py`,
-  `tests/test_regressions.py`). Trim them with the next code change in each file.
+  `tests/test_tokenize.py`). Trim them with the next code change in each file.
 
 ## Upstream
 

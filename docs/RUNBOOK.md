@@ -58,7 +58,7 @@ tests the installed copy. Put the working tree first:
     HELIX_FORWARD_ENV=PYTHONPATH PYTHONPATH=<pimm-data>/src scripts/helix_run.sh python -m pytest -q
     ... python -c "import pimm_data; print(pimm_data.__file__)"     # check which copy ran
 
-`tests/test_cross_repo_duplication.py` needs the same `PYTHONPATH` to see your edits.
+`tests/test_boundary.py` (its duplication tests) needs the same `PYTHONPATH` to see your edits.
 helix itself is not installed in the image, so its suite always tests the checkout.
 
 **Clean room** (before a handover): fresh clones of helix, pimm-data and pimm, nothing

@@ -20,7 +20,7 @@ false at import time, and left the tokenizer one heavy or broken import in
 
 Two invariants this must preserve, both already enforced by tests:
 ``import helix`` must pull in neither ``pimm`` nor ``torch``
-(``tests/test_integration_pimm.py``), and ``helix.model.tokenize`` must stay
+(``tests/test_pimm_config.py``), and ``helix.model.tokenize`` must stay
 torch-free (``tests/test_tokenize.py``, checked in a subprocess). Laziness
 strengthens both — the model names below resolve only when touched.
 

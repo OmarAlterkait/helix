@@ -132,7 +132,7 @@ planes are contiguous). For a second modality those four roles separate; see
 
 - **Training is noisy-only.** No training config or module may name `coeff_clean`
   or `cells` (simulation-only data that real detector data lacks);
-  `tests/test_noisy_training.py` scans for both strings. Clean shards exist only
+  `tests/test_boundary.py` scans for both strings. Clean shards exist only
   with `--keep-clean`; `cells` is for the denoiser and evaluation.
 - **Training and evaluation need sm80+.** The FM's only attention path is flash
   varlen: `ampere` at S3DF, never `turing` (which builds corpora). On CPU the

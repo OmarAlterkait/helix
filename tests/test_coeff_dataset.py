@@ -20,7 +20,7 @@ import pytest
 pytest.importorskip("pimm_data")          # the framework this family plugs into
 
 from helix.data.dataset import CoeffTPCReader  # noqa: E402
-from _coeff_fixture import write_coeff_shard  # noqa: E402
+from _fixtures import write_coeff_shard  # noqa: E402
 from helix.data.dataset import CoeffTPCDataset  # noqa: E402
 from pimm_data.transform import Compose   # noqa: E402
 from helix.data.verify import verify_corpus  # noqa: E402

@@ -12,7 +12,7 @@ import pytest
 #
 # Two reasons, both measured. Speed: these tests run many tiny models, where 20
 # threads cost far more in coordination than they save — 381s -> 66s across
-# test_model_fm.py + test_training_parity.py. Determinism: CPU float reductions
+# test_model.py (then test_model_fm.py + test_training_parity.py). Determinism: CPU float reductions
 # split across threads, so the sum order (and the last bits) depend on the thread
 # count, which depends on machine load. That is what made the goldens fail
 # intermittently before they pinned it themselves.
@@ -26,7 +26,7 @@ except ImportError:
 def pytest_configure(config):
     """Refuse to pretend the pimm seam was checked when pimm is absent.
 
-    Seven test modules gate themselves on `_pimm_importable()` and skip when it
+    Several test modules gate themselves on `_pimm_importable()` and skip when it
     is False. That is correct for a DSP-only environment -- but the skip is
     silent, and it hid FORTY tests, including every test of the pimm-facing
     evaluator, launcher and WeightEMA code. They had never run: the containers
@@ -90,15 +90,15 @@ def pytest_report_header(config):
     was actually able to reach.
     """
     from helix import paths
-    # `import _paths`, not `import tests._paths`. helix's tests/ has no
+    # `import _fixtures`, not `import tests._fixtures`. helix's tests/ has no
     # __init__.py, so `tests` is only ever a NAMESPACE package -- and a
     # namespace package loses to any regular `tests` package on sys.path.
     # The pimm checkout ships one, and helix_run.sh puts that checkout on
     # PYTHONPATH, so inside the container this line resolved to pimm's
     # tests and died with ModuleNotFoundError before a single test ran.
-    # Every test module in this directory already says `from _paths import
+    # Every test module in this directory already says `from _fixtures import
     # ...`; these two lines were the only ones that did not.
-    import _paths as tp
+    import _fixtures as tp
 
     site = paths.site_name() or "NONE (nothing selected or detected)"
     present = [n for n, v in (("corpus", tp.CORPUS), ("sim", tp.SIM_ROOT),
@@ -125,7 +125,7 @@ def _require_data():
     """
     if os.environ.get("HELIX_REQUIRE_DATA") != "1":
         return
-    import _paths as tp          # see pytest_report_header for why not tests._paths
+    import _fixtures as tp          # see pytest_report_header for why not tests._fixtures
     from helix import paths
 
     missing = {n: v for n, v in (("HELIX_CORPUS", tp.CORPUS),

@@ -1,28 +1,39 @@
-"""The helix/pimm-data boundary, enforced rather than documented.
-
-The invariant: ``helix.core`` and ``helix.tpc`` must NEVER import ``pimm_data``.
-``helix.data`` and ``helix.integrations`` may, and do.
-
-This is not style. pimm-data requires ``torch>=2.5`` and ``hdf5plugin``
-unconditionally; helix's base install is numpy/h5py/PyWavelets/scipy with torch
-optional. The whole two-container split rests on the asymmetry: the
-corpus-builder image has pywt and torch but no pimm-data, and the training image
-has pimm-data but no pywt. An import added to ``helix.tpc`` would make the DSP
-side undeployable in the image that builds corpora, and nothing else would
-catch it -- the developer's own environment has everything installed.
-
-A source grep cannot do this job: ``readout.py``,
-``io.py`` and ``noise.py`` all mention pimm_data in comments, and
-``helix/model/tokenize.py`` documents a registration example. Only an actual
-import in a clean interpreter distinguishes a mention from a dependency.
-"""
-
+"""Package boundaries, enforced: what may import pimm-data, what helix and pimm-data duplicate
+(pinned so it cannot drift), and that pretraining never names the simulation-only data."""
 import os
 import re
 import subprocess
 import sys
+import hashlib
+import io
+import tokenize as pytok
+from pathlib import Path
 
 import pytest
+import numpy as np
+
+from helix.tpc import readout as hx_geom  # noqa: E402
+
+
+# ---- the helix / pimm-data boundary ------------------------------------------------------
+
+# The helix/pimm-data boundary, enforced rather than documented.
+#
+# The invariant: ``helix.core`` and ``helix.tpc`` must NEVER import ``pimm_data``.
+# ``helix.data`` and ``helix.integrations`` may, and do.
+#
+# This is not style. pimm-data requires ``torch>=2.5`` and ``hdf5plugin``
+# unconditionally; helix's base install is numpy/h5py/PyWavelets/scipy with torch
+# optional. The whole two-container split rests on the asymmetry: the
+# corpus-builder image has pywt and torch but no pimm-data, and the training image
+# has pimm-data but no pywt. An import added to ``helix.tpc`` would make the DSP
+# side undeployable in the image that builds corpora, and nothing else would
+# catch it -- the developer's own environment has everything installed.
+#
+# A source grep cannot do this job: ``readout.py``,
+# ``io.py`` and ``noise.py`` all mention pimm_data in comments, and
+# ``helix/model/tokenize.py`` documents a registration example. Only an actual
+# import in a clean interpreter distinguishes a mention from a dependency.
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -216,3 +227,184 @@ def test_no_submodule_of_core_or_tpc_imports_pimm_data(mod):
         f"{mod} imports pimm_data. Only helix.data and helix.integrations may -- "
         f"the corpus-builder container has no pimm-data at all."
     )
+
+
+# ---- what helix and pimm-data duplicate --------------------------------------------------
+
+# What helix and pimm-data duplicate, pinned so it cannot drift.
+#
+# Some duplication between the two packages is FORCED by the boundary: helix.core
+# and helix.tpc must import with no pimm_data present (docs/ARCHITECTURE.md §2),
+# so they cannot import a shared helper, and pimm-data must run with no helix
+# present. Where both genuinely need the same thing, both carry it.
+#
+# The old `tests/test_forward_mirror.py` held those copies together and was deleted
+# with the forward-model move -- correctly for the parts that stopped being
+# mirrored, WRONGLY for the parts that did not. Geometry never moved: it is still
+# duplicated, and from that deletion until this file it was pinned by nothing.
+#
+# This file can exist because a TEST may import both packages even though
+# helix.tpc may not. That is the whole trick, and it is why the pin belongs here
+# rather than in either package.
+#
+# What is deliberately NOT pinned: helix's plane-label parser
+# (helix.tpc.readout._label_gid, over helix.tpc.readout.canonical_plane_gid) and
+# canonical_plane_id (pimm-data) have ALREADY diverged on purpose -- helix's is
+# wire-only and raises on `volume_N_Pixel`, pimm-data's handles it, which is why
+# test_canonical_plane_id_stable stayed in pimm-data during the move. A test
+# asserting they agree would be wrong.
+
+@pytest.fixture
+def pd_geom():
+    """pimm-data's geometry module (these tests skip without pimm-data: a TEST may import both
+    packages, helix.tpc may not)."""
+    pytest.importorskip("torch")
+    return pytest.importorskip("pimm_data.geometry")
+
+
+def _md5(path):
+    with open(path, "rb") as fh:
+        return hashlib.md5(fh.read()).hexdigest()
+
+
+def _bundled(mod, name="cubic_wireplane_geometry.json"):
+    return os.path.join(os.path.dirname(mod.__file__), "data", name)
+
+
+# ── the detector description ────────────────────────────────────────────────
+
+def test_bundled_geometry_json_is_byte_identical(pd_geom):
+    """Both packages ship the same 153 kB JAXTPC export.
+
+    It is an exported artifact, authored by neither, and in both the bundled copy
+    is only a fallback (`_resolve` takes any path). But two copies of a detector
+    description drift as silently as two copies of code.
+    """
+    a, b = _bundled(hx_geom), _bundled(pd_geom)
+    assert os.path.exists(a) and os.path.exists(b)
+    assert _md5(a) == _md5(b), (
+        "the bundled plane geometry differs between helix and pimm-data; "
+        "densify would size grids from one and the DSP from the other")
+
+
+def test_both_loaders_agree_on_every_plane(pd_geom):
+    """Not just the file -- the parsed registries must match field by field."""
+    h = hx_geom.load_plane_registry(_bundled(hx_geom))
+    p = pd_geom.load_plane_registry(_bundled(pd_geom))
+    assert set(h) == set(p), "different plane ids"
+    for gid in sorted(h):
+        for key in ("label", "n_wires", "n_ticks", "pedestal"):
+            assert h[gid][key] == p[gid][key], f"plane {gid} disagrees on {key}"
+        assert np.array_equal(np.asarray(h[gid]["wire_lengths"]),
+                              np.asarray(p[gid]["wire_lengths"])), \
+            f"plane {gid} disagrees on wire_lengths"
+
+
+# ── the one duplicated function ─────────────────────────────────────────────
+
+
+# ---- training is noisy-only --------------------------------------------------------------
+
+# Training never reads simulated clean data or simulation truth.
+#
+# Real detector data has no noise-free counterpart, so a recipe that trains on the
+# simulated ``coeff_clean`` modality -- as a target, a bin grid, or a validation
+# reference -- cannot be run on it. The same holds for the ``cells`` modality, the
+# simulation truth (helix/data/cells.py). Simulation truth is for downstream tasks and
+# evaluation only. These checks pin that: no config loads either modality, no
+# training module names them, the tokenizer's target is the noisy input, and the bin
+# grid has no clean mode.
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _code_without_comments(path):
+    """Source with comments removed (strings kept: a literal is what loads data)."""
+    out = []
+    for tok in pytok.generate_tokens(io.StringIO(path.read_text()).readline):
+        if tok.type != pytok.COMMENT:
+            out.append(tok.string)
+    return " ".join(out)
+
+
+def test_no_config_loads_the_clean_modality():
+    hits = [str(p.relative_to(ROOT)) for p in sorted((ROOT / "configs").rglob("*.py"))
+            if "coeff_clean" in _code_without_comments(p)]
+    assert not hits, f"configs that load simulated clean data: {hits}"
+
+
+def _string_literals(path):
+    import ast
+    out = set()
+    for tok in pytok.generate_tokens(io.StringIO(path.read_text()).readline):
+        if tok.type == pytok.STRING:
+            try:
+                out.add(ast.literal_eval(tok.string))
+            except (ValueError, SyntaxError):          # f-strings
+                pass
+    return out
+
+
+#: The downstream configs: supervised on the simulation truth by design (the denoiser).
+DOWNSTREAM = ("configs/pimm/denoise.py",)
+
+
+#: Pretraining code: the configs and the modules that build and train the FM.
+def _pretraining_sources():
+    return [p for p in sorted((ROOT / "configs").rglob("*.py")) if str(p.relative_to(ROOT)) not in DOWNSTREAM] + \
+        sorted((ROOT / "helix" / "model").glob("*.py")) + sorted((ROOT / "helix" / "integrations" / "pimm").glob("*.py"))
+
+
+def test_no_config_or_training_module_loads_the_truth_modality():
+    """``'cells'`` as a string is the modality name ("n_cells" and the like are not). Only the
+    downstream configs name it, and they do (so the exemption cannot outlive its reason)."""
+    hits = [str(p.relative_to(ROOT)) for p in _pretraining_sources() if "cells" in _string_literals(p)]
+    assert not hits, f"pretraining code that names the simulation-truth modality: {hits}"
+    assert all("cells" in _string_literals(ROOT / p) for p in DOWNSTREAM)
+
+
+def test_no_training_module_names_the_clean_modality():
+    mods = sorted((ROOT / "helix" / "model").glob("*.py")) + \
+        sorted((ROOT / "helix" / "integrations" / "pimm").glob("*.py"))
+    hits = [str(p.relative_to(ROOT)) for p in mods if "coeff_clean" in p.read_text()]
+    assert not hits, f"training modules that reference coeff_clean: {hits}"
+
+
+def _default_of(path, cls, arg):
+    """A constructor default read from source -- the pimm adapter imports pimm,
+    which the CI image does not carry, so it is parsed, not imported."""
+    import ast
+    tree = ast.parse(path.read_text())
+    fn = next(n for c in ast.walk(tree) if isinstance(c, ast.ClassDef) and c.name == cls
+              for n in c.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    names = [a.arg for a in fn.args.args]
+    defaults = dict(zip(names[len(names) - len(fn.args.defaults):], fn.args.defaults))
+    return ast.literal_eval(defaults[arg])
+
+
+def test_defaults_load_no_clean_data():
+    import inspect
+    from helix.model.tokenize import CoeffTokenize, assemble
+    assert "clean_part" not in inspect.signature(CoeffTokenize.__init__).parameters
+    assert "value_clean" not in inspect.signature(assemble).parameters
+    wrapper = ROOT / "helix" / "integrations" / "pimm" / "data.py"
+    assert _default_of(wrapper, "CoeffTPCDataset", "modalities") == ("coeff",)
+
+
+def test_target_is_the_noisy_input():
+    from helix.model.tokenize import PatchConfig, assemble
+    from test_tokenize import LENS_T, _rows
+    gids = np.array([0, 1, 2, 3, 4, 5])
+    band, gid, wire, tau, raw, sigma = _rows()
+    out = assemble(band, gid, wire, tau, raw, gids=gids, n_wires=np.full(6, 1969, np.int64),
+                   band_lengths=LENS_T, norm_sigma=sigma, cfg=PatchConfig())
+    occ = out["occ"].astype(bool)
+    assert occ.any()
+    np.testing.assert_array_equal(out["tgt"][occ], out["inp"][occ])
+
+
+def test_bin_grid_has_no_clean_mode():
+    import inspect
+    from helix.data import bins
+    assert "target" not in inspect.signature(bins.derive).parameters
+    assert "target" not in bins.reference()["params"]

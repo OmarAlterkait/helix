@@ -185,7 +185,7 @@ jobs:
 
   # The step that actually proves a handover works: corpus -> verify -> bins,
   # on a synthetic dataset, with no production data at all. Training
-  # steps are the test suite's (test_pimm_step_contract, test_pimm_amp_resume_schedule).
+  # steps are the test suite's (tests/test_pimm_train.py).
   # It is docs/RUNBOOK.md §§3-6 at toy scale; keeping it in CI means the first
   # thing a receiving site does is the thing that is continuously tested.
   #

@@ -6,7 +6,7 @@ the along-wire probe and the particle labels -- built once from the simulation's
 ``step``, for deposited energy and 3D position, and pysupera's ``labl``, for each track's class),
 separately from the corpus build: labels change more often than the corpus. Same events, same order as ``{name}_coeff_<k>.h5``; joined to it by identity
 (``/ident``) as the dataset modality ``cells`` (``CoeffTPCDataset(modalities=("coeff",
-"cells"))``). Pretraining never opens it (tests/test_noisy_training.py).
+"cells"))``). Pretraining never opens it (tests/test_boundary.py).
 
 Grid: ``FW`` = 2 wires x ``FT`` = 16 raw ticks, finer than any patch under test, so models
 with different tokenizers are scored on the same cells. Every quantity the evaluation uses is

@@ -35,7 +35,7 @@ pytest.importorskip("pimm_data")
 
 from helix.data import bins as binlib                            # noqa: E402
 
-from _paths import CORPUS                                        # noqa: E402
+from _fixtures import CORPUS                                        # noqa: E402
 
 
 def _table(seed=0, K=8, n_bands=2, corpus="/somewhere/run_1", events=120):

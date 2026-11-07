@@ -1,29 +1,246 @@
-"""The shipped pimm config must define everything pimm's Trainer reads.
-
-A config is only discovered to be incomplete when a launch crashes, usually
-after the data has loaded. The first version of the pimm config
-defined 8 of the 24 fields the Trainer touches — no `hooks`, no `optimizer`, no
-`scheduler`, no `epoch` — and nothing said so, because a config is just a Python
-file that executes fine.
-
-This derives the required set from `pimm/engines/train.py` ITSELF (every
-`self.cfg.<name>` it mentions) and checks the config against it. Deriving rather
-than hardcoding means the test tracks pimm: a field added upstream shows up here
-as a failure rather than as a launch-time surprise.
-
-The config is deliberately self-contained (no `_base_`), because `_base_` paths
-resolve relative to the config file and inheriting pimm's default_runtime from a
-config living in helix would need a brittle cross-repository relative path.
-"""
-
-import ast
+"""The pimm config contract: helix's configs, the registry adapters and the sys.path bootstrap
+against what pimm reads, and the integration's import boundaries."""
+import importlib.util
 import os
+from pathlib import Path
+import ast
 import pathlib
 import re
+import importlib.util as _ilu                                    # noqa: E402
 
 import pytest
 
-from _paths import PIMM_ROOT as PIMM                           # noqa: E402
+from _fixtures import PIMM_ROOT as PIMM                           # noqa: E402
+
+
+# ---- the integration's import boundaries -------------------------------------------------
+
+# The pimm adapter must register helix's names — without pimm knowing helix.
+#
+# ``helix/integrations/pimm/`` is how a pimm config reaches the coefficient FM.
+# It lives here rather than inside pimm-private so the dependency points one way:
+# helix knows how to plug into pimm, pimm knows nothing about helix. A pimm config
+# pulls it in with mmcv's standard ``custom_imports`` hook, which pimm's
+# ``Config.fromfile`` already honours.
+#
+# These tests skip when pimm is not importable — which includes environments that
+# have pimm checked out but not its dependencies.
+
+def _pimm_importable():
+    """pimm present AND importable. Its package __init__ pulls optional deps
+    (pyarrow, addict), so find_spec succeeding is not enough."""
+    try:
+        if importlib.util.find_spec("pimm") is None:
+            return False
+        import pimm.datasets.builder  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def test_tokenizer_does_not_drag_in_the_tpc_stack():
+    """`helix.model.tokenize` runs in every DataLoader worker; it must stay light.
+
+    The umbrella used to import helix.tpc.{config,pipeline,io} eagerly, so
+    importing the tokenizer — or anything in helix.core — pulled in the whole
+    wire-plane HDF5 stack: 1.07s and h5py, for a module that needs neither. It
+    also left the tokenizer one heavy or broken import in helix.tpc away from
+    failing in every worker, and made helix.core's "detector-agnostic" claim
+    false at import time.
+
+    Checked in a subprocess so it measures a cold interpreter, not whatever the
+    test session happens to have imported already.
+    """
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import helix.model.tokenize, sys; "
+         "print(sorted(m for m in sys.modules if m.startswith('helix.tpc')), "
+         "[m for m in ('pywt','scipy','h5py') if m in sys.modules])"],
+        capture_output=True, text=True, cwd=root,
+        env={**os.environ, "PYTHONPATH": root})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "[] []", (
+        f"tokenize pulled in {r.stdout.strip()} — the umbrella is eager again")
+
+
+def test_umbrella_exposes_the_codec_and_the_model():
+    """The names two sibling repos actually consume must be reachable.
+
+    The umbrella exported six 2025 DSP names while pimm-data imported
+    helix.core.* and the pimm configs imported helix.model.* — every real
+    consumer bypassed it. These resolve lazily, so naming them costs nothing.
+    """
+    import helix
+    for name in ("CoeffEvent", "write_coeff_shard", "read_coeff_event",
+                 "audit_shard", "coord_digest", "build",
+                 "TPCChain", "sim_config"):
+        assert hasattr(helix, name), name
+        assert name in dir(helix)
+    with pytest.raises(AttributeError, match="no attribute"):
+        helix.definitely_not_a_real_name
+
+
+pimm_required = pytest.mark.skipif(
+    not _pimm_importable(), reason="pimm (and its dependencies) not importable")
+
+
+def test_importing_helix_does_not_import_pimm():
+    """The whole point of the integrations/ split: `import helix` must not drag
+    in a downstream framework. This one runs everywhere."""
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import helix, helix.model.tokenize, sys; "
+         "print('pimm' in sys.modules, 'torch' in sys.modules)"],
+        capture_output=True, text=True, cwd=root,
+        env={**os.environ, "PYTHONPATH": root})
+    assert r.returncode == 0, r.stderr
+    pimm_loaded, torch_loaded = r.stdout.split()
+    assert pimm_loaded == "False", "importing helix pulled in pimm"
+    assert torch_loaded == "False", "importing helix.model.tokenize pulled in torch"
+
+
+@pimm_required
+def test_the_pimm_facing_surface_adds_no_dsp_dependency_of_its_own():
+    """The direction of the dependency: helix knows about pimm, never the reverse.
+
+    pimm is detector- and transform-agnostic infrastructure; WAVELETS are
+    helix's concern, and `PyWavelets` is declared in helix's own pyproject, not
+    pimm's. So a pimm environment is CORRECT to have no pywt, and
+    `helix.integrations.pimm` — the module pimm loads through `custom_imports`,
+    in every rank of every run — must import cleanly there.
+
+    It does today, but nothing pinned it, and the leak would be silent exactly
+    where it matters: helix's dev image HAS pywt, so an accidental `helix.core`
+    import at module scope would pass every local test and then fail at job
+    start on a pimm-only image, after the queue wait.
+
+    Measured as a DELTA against pimm's own imports, not as an absolute. pimm
+    itself pulls scipy and h5py (torch_geometric and its dataset stack), so
+    asserting an empty set would fail for a reason helix does not control and
+    cannot fix — it would be a test of pimm's dependency tree wearing helix's
+    name. What helix controls is what it ADDS, and that must be nothing.
+
+    `test_tokenizer_does_not_drag_in_the_tpc_stack` above asserts the same
+    invariant for `helix.model.tokenize`, which runs in DataLoader workers.
+    This is the other surface pimm actually loads.
+    """
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; "
+         "WATCH = ('pywt', 'scipy', 'h5py'); "
+         "import pimm.datasets.builder; "
+         "base = {m for m in WATCH if m in sys.modules}; "
+         "import helix.integrations.pimm; "
+         "print(sorted({m for m in WATCH if m in sys.modules} - base))"],
+        capture_output=True, text=True, cwd=root,
+        env={**os.environ,
+             "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "[]", (
+        f"helix.integrations.pimm pulled in {r.stdout.strip()} on top of pimm — "
+        f"the pimm-facing surface acquired a helix-side DSP dependency, and will "
+        f"now fail to import on any pimm environment that lacks it")
+
+
+@pimm_required
+def test_adapter_registers_all_three():
+    import helix.integrations.pimm  # noqa: F401
+    from pimm.datasets.builder import DATASETS
+    from pimm.datasets.transform.common import TRANSFORMS
+    from pimm.models.builder import MODELS
+
+    assert "CoeffTokenize" in TRANSFORMS
+    assert "CoeffTPCDataset" in DATASETS
+    assert "Coeff-FM" in MODELS
+
+
+@pimm_required
+def test_example_config_declares_the_custom_import():
+    """The config is the only place that names the adapter; if the declaration
+    drifts, every `type` in it fails to resolve with an unhelpful error."""
+    from pimm.utils.config import Config
+    from helix.paths import SiteError
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        cfg = Config.fromfile(os.path.join(root, "configs", "pimm", "fm_smoke.py"))
+    except (SiteError, FileNotFoundError) as exc:
+        # the configs resolve the corpus's run list at module scope
+        pytest.skip(f"config needs a root this site does not configure: {exc}")
+    assert "helix.integrations.pimm" in cfg.custom_imports["imports"]
+    from helix.paths import world_size
+    # one event per rank: the FM has no event separation (docs/archive/MULTI_EVENT_BATCHING.md)
+    assert cfg.batch_size == world_size()
+    assert cfg.model["type"] == "Coeff-FM"
+    assert cfg.data["train"]["type"] == "CoeffTPCDataset"
+
+
+def test_dataset_wrapper_forwards_every_inner_parameter():
+    """The helix wrapper re-declares pimm-data's dataset signature, and CONFIGS
+    RESOLVE THE WRAPPER. So a parameter added to the inner dataset is invisible
+    until it is forwarded here.
+
+    That has bitten twice: event_range/exclude_range, then holdout/split_role —
+    the latter failed the first real 2-GPU launch with "unexpected keyword
+    argument 'holdout'" after passing every unit test, because the tests
+    construct the INNER dataset directly.
+
+    Compared by AST so this needs neither pimm nor a built dataset.
+    """
+    import ast
+    import inspect
+
+    pimm_data = pytest.importorskip("pimm_data")
+    from helix.data.dataset import CoeffTPCDataset as Inner
+
+    src = (Path(__file__).resolve().parent.parent
+           / "helix" / "integrations" / "pimm" / "data.py").read_text()
+    wrapper = None
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ClassDef) and node.name == "CoeffTPCDataset":
+            for f in node.body:
+                if isinstance(f, ast.FunctionDef) and f.name == "__init__":
+                    wrapper = {a.arg for a in f.args.args} | {
+                        a.arg for a in f.args.kwonlyargs}
+    assert wrapper, "could not find the wrapper's __init__"
+
+    inner = set(inspect.signature(Inner.__init__).parameters)
+    # ignore_index is a base-class concern the wrapper deliberately does not expose
+    missing = inner - wrapper - {"ignore_index"}
+    assert not missing, (
+        f"the wrapper does not forward {sorted(missing)} — a config passing them "
+        f"raises TypeError at trainer build, which no unit test sees because "
+        f"they construct the inner dataset directly")
+
+
+# ---- the configs against pimm's trainer --------------------------------------------------
+
+# The shipped pimm config must define everything pimm's Trainer reads.
+#
+# A config is only discovered to be incomplete when a launch crashes, usually
+# after the data has loaded. The first version of the pimm config
+# defined 8 of the 24 fields the Trainer touches — no `hooks`, no `optimizer`, no
+# `scheduler`, no `epoch` — and nothing said so, because a config is just a Python
+# file that executes fine.
+#
+# This derives the required set from `pimm/engines/train.py` ITSELF (every
+# `self.cfg.<name>` it mentions) and checks the config against it. Deriving rather
+# than hardcoding means the test tracks pimm: a field added upstream shows up here
+# as a failure rather than as a launch-time surprise.
+#
+# The config is deliberately self-contained (no `_base_`), because `_base_` paths
+# resolve relative to the config file and inheriting pimm's default_runtime from a
+# config living in helix would need a brittle cross-repository relative path.
+
 TRAIN_PY = os.path.join(PIMM, "pimm/engines/train.py")
 DEFAULTS_PY = os.path.join(PIMM, "pimm/engines/defaults.py")
 CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -35,7 +252,6 @@ pimm_src = pytest.mark.skipif(
 # `pimm_src` only asserts the SOURCE is on disk, which is all the tests that read
 # it as text need. Anything that actually imports pimm needs this instead: the
 # suite's usual image has the source visible but the package not importable.
-import importlib.util as _ilu                                    # noqa: E402
 pimm_importable = pytest.mark.skipif(
     _ilu.find_spec("pimm") is None, reason="pimm not importable in this env")
 

@@ -158,7 +158,7 @@ def _import_jaxtpc():
     This used to insert JAXTPC's root at sys.path[0] and evict every cached
     `tools.*` module, then return. Both effects were permanent for the rest of
     the session, so `tools` stopped meaning helix's own `tools/` package and
-    three tests in test_model_fm.py failed with
+    three tests in test_model.py (then test_model_fm.py) failed with
     `ModuleNotFoundError: No module named 'tools.convert_fm_ckpt'` -- but only
     when the whole suite ran, and only in file order. In isolation they passed.
     (helix's own `tools/` is gone now, retired with that converter, so this
@@ -169,7 +169,7 @@ def _import_jaxtpc():
     returned module objects stay valid after being removed from sys.modules.
     """
     # HELIX_JAXTPC_ROOT, the name helix.paths declares and every other consumer
-    # uses (helix.build.SimSource, tests/test_corpus_identity.py). This
+    # uses (helix.build.SimSource, tests/test_verify.py). This
     # read a bare JAXTPC_ROOT with an S3DF literal beside it, so setting the
     # DOCUMENTED variable had no effect on this test and the literal was the only
     # thing that ever matched.

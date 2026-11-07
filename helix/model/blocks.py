@@ -18,7 +18,7 @@ the MLP and both residual adds are row-wise, so only attention cares about
 order, and a block costs one permutation composing the previous layout with this
 one instead of gathering q, k, v and scattering the output back. The decoder's
 query and key orders are the same in every block, so it is permuted once before
-the stack and back once after (tests/test_serial.py keeps the per-block
+the stack and back once after (tests/test_attention.py keeps the per-block
 formulation as the reference).
 """
 import math

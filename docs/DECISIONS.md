@@ -65,7 +65,7 @@ studies behind these entries are records only, all on the r1 corpus:
 
 **Training is noisy-only.** The tokenizer's target is its own normalised input (`tgt`
 differs from `inp` only where `dead_frac` blanks the input); no training config, dataset
-default or training module reads `coeff_clean` (`tests/test_noisy_training.py` scans
+default or training module reads `coeff_clean` (`tests/test_boundary.py` scans
 for it). *Why:* real detector data has no noise-free counterpart, so a recipe that needs
 the simulated clean target cannot be the recipe for data. It costs floor on simulation
 (SCIENCE §11: 0.45-0.61 at 1% FPR against 0.64-0.65 with clean targets; width recovers

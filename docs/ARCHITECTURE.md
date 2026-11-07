@@ -274,7 +274,7 @@ attributes excepted).
   (always), `coeff_clean` and `cells`, joined by identity; the shard tables in
   `sample['coeff']['_meta']`; the identity-hash split (`holdout`, `split_role`:
   blake2b(run/source_file) + event, so independent of the build). Training reads
-  `("coeff",)`, the denoiser `("coeff", "cells")`; `tests/test_noisy_training.py` keeps
+  `("coeff",)`, the denoiser `("coeff", "cells")`; `tests/test_boundary.py` keeps
   `coeff_clean` and `cells` out of pretraining.
 * `cells.py`: the truth format and grid (above), `Q0`, and the cell-to-token join.
 * `denoise.py`: `DenoiseRows`, the denoiser's label sampling on the `cells` truth.

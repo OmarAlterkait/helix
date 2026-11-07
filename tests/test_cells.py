@@ -1,6 +1,6 @@
 """helix.data.cells: the simulation truth on the fine grid, one file per coefficient shard.
 
-A synthetic campaign task (tests/_sim_fixture.py). Pinned: the stored record is the pixels
+A synthetic campaign task (tests/_fixtures.py). Pinned: the stored record is the pixels
 reduced (per cell, per (cell, track), per (plane, track), per track, and each cell's dominant
 group with its 3D centroid), computed here independently; each track carries its labl classes; it is complete for the evaluation's
 windows (a grid-aligned box holds per track exactly its pixels' charge); the build is resumable
@@ -15,8 +15,8 @@ import pytest
 
 pytest.importorskip("hdf5plugin")
 
-from _coeff_fixture import write_coeff_shard  # noqa: E402
-from _sim_fixture import write_task  # noqa: E402
+from _fixtures import write_coeff_shard  # noqa: E402
+from _fixtures import write_task  # noqa: E402
 from helix.data import cells as C  # noqa: E402
 from helix.eval import events as Wn  # noqa: E402
 
@@ -256,7 +256,7 @@ def test_dataset_refuses_cells_of_other_events(corpus, tmp_path):
 
 # ------------------------------------------------------------------------------------- real data
 def _real():
-    from _paths import sim_file
+    from _fixtures import sim_file
     return sim_file("hits"), sim_file("step"), sim_file("labl")
 
 

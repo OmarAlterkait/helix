@@ -1,4 +1,4 @@
-"""A run directory must say which code produced it.
+"""A run directory, and every shard, must say which code produced it.
 
 Nothing recorded this. A run directory held weights, a config and a log, and no
 statement of which helix commit produced them — so reconstructing the setup for
@@ -9,12 +9,16 @@ import json
 import os
 import subprocess
 import types
+import re
+from pathlib import Path
 
 import pytest
 
 from helix.core.coeff_event import describe_checkout
 from helix.integrations._bootstrap import provenance
 
+
+# ---- a run's provenance ------------------------------------------------------------------
 
 def _pimm_importable():
     try:
@@ -188,3 +192,27 @@ def test_incomplete_provenance_does_not_read_as_a_mixed_build():
     assert "json.dumps(c, sort_keys=True) for _, c in known" not in src, (
         "whole-dict comparison is back: a record missing an optional field "
         "will again read as a different helix version")
+
+
+# ---- the version is single-sourced -------------------------------------------------------
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def test_version_is_single_sourced():
+    """pyproject must not carry its own literal.
+
+    ``helix/core/coeff_io.py`` stamps ``helix.__version__`` into every corpus
+    shard and ``helix.data.verify`` raises on a mismatch between shards.
+    When pyproject said 0.1.0 and the module said 0.2.0, that provenance chain
+    reported a version the artifact was not built with.
+    """
+    import helix
+
+    text = (REPO / "pyproject.toml").read_text()
+    assert 'dynamic = ["version"]' in text
+    assert re.search(r'version\s*=\s*\{\s*attr\s*=\s*"helix\.__version__"\s*\}',
+                     text), "pyproject must read the version from the module"
+    assert not re.search(r'^version\s*=\s*"', text, re.M), (
+        "a literal version in [project] shadows the dynamic one")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", helix.__version__)
