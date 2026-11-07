@@ -116,51 +116,6 @@ def running_roots():
     return _root(helix), _root(pimm_data)
 
 
-def describe_checkout(root):
-    """``{root, commit, dirty, branch}`` for a git checkout, best-effort.
-
-    Never raises and never blocks: a missing git, a tarball install with no
-    ``.git``, or a slow filesystem all degrade to ``commit=None`` rather than
-    taking down a training run at step 0.
-
-    ``dirty`` is the field that matters. A commit hash alone says which code was
-    COMMITTED, not which code ran; every long run in this project so far was
-    launched from a working tree with uncommitted edits, so a hash without a
-    dirty flag would have been quietly wrong.
-    """
-    import os
-    import subprocess
-
-    out = {"root": root, "commit": None, "dirty": None, "branch": None}
-    if not os.path.isdir(root):
-        return out
-
-    def _git(*a):
-        try:
-            r = subprocess.run(("git",) + a, cwd=root, capture_output=True,
-                               text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return r.stdout.strip() if r.returncode == 0 else None
-
-    # Ask git where the repo is instead of testing for a `.git` DIRECTORY. That
-    # test was wrong twice over and produced an all-null record from a real run:
-    # A worktree's `.git` is a FILE (a gitdir pointer, as any worktree or
-    # submodule has), and a src-layout package resolves `root` to `<repo>/src`,
-    # which is inside the repo but does not contain `.git` at all. `rev-parse`
-    # answers both, and answers "not a repo" by failing.
-    top = _git("rev-parse", "--show-toplevel")
-    if not top:
-        return out
-    out["root"] = top
-    out["commit"] = _git("rev-parse", "HEAD")
-    out["branch"] = _git("rev-parse", "--abbrev-ref", "HEAD")
-    st = _git("status", "--porcelain")
-    if st is not None:
-        out["dirty"] = bool(st)
-    return out
-
-
 def provenance():
     """Everything needed to answer "what produced this run directory?".
 
@@ -171,6 +126,8 @@ def provenance():
     import os
     import platform
     import sys
+
+    from helix.core.coeff_event import describe_checkout
 
     helix_root, pimm_data_root = running_roots()
     info = {

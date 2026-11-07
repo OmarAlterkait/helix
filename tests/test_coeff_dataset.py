@@ -191,7 +191,7 @@ def _import_helix():
 @pytest.mark.skipif(not os.path.isdir(_HELIX) or not _import_helix(),
                     reason="helix (consolidation worktree) not importable")
 def test_cross_repo_golden(tmp_path):
-    from helix.core.provenance import BasisDescriptor, derive_band_lengths
+    from helix.core.coeff_event import BasisDescriptor, derive_band_lengths
     from helix.core.wavelet import SparseResult
     from helix.core.coeff_event import CoeffEvent
     from helix.core.coeff_io import write_coeff_shard as hx_write
@@ -283,7 +283,7 @@ def test_plane_gid_beyond_255(tmp_path):
 @pytest.mark.skipif(not os.path.isdir(_HELIX) or not _import_helix(),
                     reason="helix not importable")
 def test_reverse_golden_pimm_write_helix_read(tmp_path):
-    from helix.core.provenance import BasisDescriptor, derive_band_lengths
+    from helix.core.coeff_event import BasisDescriptor, derive_band_lengths
     from helix.core.coeff_io import read_coeff_event as hx_read
     bl = derive_band_lengths("db2", 2, "periodization", 32)      # == BAND_LENGTHS
     basis = BasisDescriptor(wavelet="db2", level=2, mode="periodization", n_ticks_raw=32,

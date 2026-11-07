@@ -19,7 +19,7 @@ from pimm.utils import comm
 from pimm.utils.optimizer import OPTIMIZERS
 from pimm.utils.scheduler import SCHEDULERS
 
-from helix.model.mup import param_group_ratios
+from helix.model.schedule import param_group_ratios
 
 
 @TRAINERS.register_module()
@@ -108,14 +108,14 @@ class FMTrainer(Trainer):
         return int(n) * int(self.cfg.epoch)
 
     def _resolve_cadence(self):
-        """Fill every ``"auto"`` cadence from the run's actual step count (:mod:`helix.core.cadence`).
+        """Fill every ``"auto"`` cadence from the run's actual step count (:mod:`helix.model.schedule`).
 
         A config states intent (epochs, model width), never a step count: that follows from
         the corpus, the split and the GPU count. ``"auto"`` is accepted for the scheduler's
         ``warmup`` and, in every hook, ``save_freq``, ``every_n_steps`` and ``evaluator_every_n_steps``; hooks
         are patched as config and, if pimm has built them already, as objects.
         """
-        from helix.core import cadence
+        from helix.model import schedule as cadence
         steps = self._total_steps()
         core = unwrap_model(self.model)
         fm = getattr(core, "fm", core)            # the denoiser's encoder is an FM

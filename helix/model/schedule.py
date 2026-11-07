@@ -1,5 +1,11 @@
-"""How often to warm up, evaluate and checkpoint — derived, not written down.
+"""The training schedule, derived rather than written down: warmup, evaluation and checkpoint
+cadence from the run's step count, and the muP learning-rate ratios a scheduler must keep.
 
+Pure (no torch, no pimm), so it is testable without a trainer; ``FMTrainer``
+(:mod:`helix.integrations.pimm.trainer`) applies both.
+
+CADENCE
+=======
 Applied at run time: a config writes ``"auto"`` and FMTrainer fills it from the run's own step
 count (``iters_per_epoch * epoch``), so no config carries a step count or a training-set size.
 
@@ -39,6 +45,16 @@ batch-dependent quantity is not a cadence.
 Each quantity below is derived from the thing that actually determines it, and
 none of them depends on batch size except through the step budget they are
 capped by.
+
+muP
+===
+``FMModel.param_groups`` emits AdamW groups whose per-group ``lr`` encodes muP:
+hidden weights get ``base_lr / m`` for width multiplier ``m = d / d_base``. That
+encoding is fragile in exactly one place — the scheduler. Anything that assigns a
+single LR to every group silently discards muP, and the run looks fine: the loss
+still falls, just to a worse place, and only at another width would you notice.
+The WSD schedules are ``LambdaLR``s, which scale each group's own ``lr`` and so
+keep the ratios.
 """
 from __future__ import annotations
 
@@ -125,3 +141,23 @@ def eval_every(steps, eval_seconds=EVAL_SECONDS, step_seconds=STEP_SECONDS, over
     # the run reports no curve at all.
     ceiling = max(1, steps // MIN_EVALS)
     return min(max(floor, max(1, steps // target_count)), ceiling)
+
+
+# ---- muP -------------------------------------------------------------------------------------
+
+def param_group_ratios(param_groups, base_lr):
+    """Per-group ``lr / base_lr`` — the muP ratios to preserve under a schedule.
+
+    Capture these right after building the optimizer, before any scheduler has
+    touched it.
+    """
+    if base_lr is None or base_lr == 0:
+        raise ValueError(f"base_lr must be a non-zero number, got {base_lr!r}")
+    out = []
+    for i, g in enumerate(param_groups):
+        lr = g.get("lr")
+        if lr is None:
+            raise ValueError(f"param group {i} has no 'lr'; muP ratios are undefined")
+        out.append(lr / base_lr)
+    return out
+

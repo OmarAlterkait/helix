@@ -34,7 +34,7 @@ __version__ = "0.3.0"
 _LAZY = {
     # -- codec: what pimm-data and the corpus verifier depend on -------------
     "CoeffEvent": "helix.core.coeff_event",
-    "BasisDescriptor": "helix.core.provenance",
+    "BasisDescriptor": "helix.core.coeff_event",
     "write_coeff_shard": "helix.core.coeff_io",
     "read_coeff_event": "helix.core.coeff_io",
     "audit_shard": "helix.core.coeff_io",

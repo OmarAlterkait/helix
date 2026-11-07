@@ -261,7 +261,7 @@ the whole run (corpus = `HELIX_CORPUS`'s parent and its `_calib/RUNS.txt`, the m
 architecture, the WSD stable phase); `fm_cooldown`, `fm_smoke` override only
 what differs, and anything else is `key=value`. Warmup and eval / save cadence are
 `"auto"`, filled by `FMTrainer` from pimm's `iters_per_epoch * epoch` through
-`helix.core.cadence`. *Why:* nine configs carried `N_TRAIN_EVENTS` tables and step
+`helix.model.schedule`. *Why:* nine configs carried `N_TRAIN_EVENTS` tables and step
 counts copied between them; a fix applied to one was shadowed by another. The run's
 length now follows from the corpus, the split and the GPU count, which is what it
 depends on. `HELIX_LEGACY_CORPUS` and `resolve_cooldown_subsets.py` went with them.

@@ -43,8 +43,7 @@ from pathlib import Path
 import numpy as np
 import h5py
 
-from helix.core.coeff_event import CoeffEvent
-from helix.core.provenance import BasisDescriptor
+from helix.core.coeff_event import BasisDescriptor, CoeffEvent, code_version
 
 _STR = h5py.string_dtype(encoding="utf-8")
 
@@ -146,42 +145,6 @@ def unpack_wire_valid(packed, n_wires):
 
 # ---- shard codec ----------------------------------------------------------
 
-def _code_version():
-    """Which helix produced this shard.
-
-    ``geom_sha256``/``spectrum_sha256`` pin the DSP's external INPUTS, and
-    ``basis_digest`` pins the declared basis — but nothing recorded the CODE, so
-    two shards built by different trees compared as identical. That is not
-    hypothetical: run_0027575715 was built by two working trees a few commits
-    apart, and no field in the corpus could show it.
-    """
-    import subprocess
-    import helix
-    out = {"version": getattr(helix, "__version__", "unknown")}
-    try:
-        root = os.path.dirname(os.path.dirname(os.path.abspath(helix.__file__)))
-        # ATOMIC: both fields or neither. This used to assign out["git"] and
-        # THEN run `git status`, so a timeout on the second call left the commit
-        # recorded with no dirtiness -- a PARTIAL record. Two shards of one
-        # corpus then serialised differently ({git, git_dirty} vs {git}) and
-        # coeff_verify reported "shards were built by DIFFERENT helix versions"
-        # for shards built by the SAME commit. Observed under a 32-way array all
-        # running `git status` against one NFS checkout.
-        r = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"],
-                           capture_output=True, text=True, timeout=30)
-        if r.returncode == 0:
-            d = subprocess.run(["git", "-C", root, "status", "--porcelain"],
-                               capture_output=True, text=True, timeout=30)
-            if d.returncode == 0:
-                # Only now is the pair complete. A commit without dirtiness does
-                # not describe the code, so it is not worth recording alone.
-                out["git"] = r.stdout.strip()
-                out["git_dirty"] = bool(d.stdout.strip())
-    except Exception:                       # not a checkout, no git, timeout
-        pass
-    return out
-
-
 def write_coeff_shard(
     path: str | Path,
     events: list[CoeffEvent],
@@ -263,7 +226,7 @@ def write_coeff_shard(
         cfg.attrs["has_coords"] = bool(coords)
         cfg.attrs["noise_json"] = json.dumps(noise or {}, sort_keys=True)
         _prov = dict(provenance or {})
-        _prov.setdefault("code", _code_version())     # stamped here, not by callers
+        _prov.setdefault("code", code_version())     # stamped here, not by callers
         cfg.attrs["provenance_json"] = json.dumps(_prov, sort_keys=True)
         cfg.create_dataset("band_lengths", data=np.asarray(basis.band_lengths, np.int32))
         cfg.create_dataset("gids", data=e0.gids.astype(np.int32))

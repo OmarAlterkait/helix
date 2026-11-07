@@ -478,7 +478,7 @@ def build_shard(coeff_shard, source_root, out_dir=None):
     (:func:`labl_path`) files hold campaign event ``event``.
     """
     import hdf5plugin  # noqa: F401  (hits / step use a plugin filter)
-    from helix.core.coeff_io import _code_version
+    from helix.core.coeff_event import code_version
     from helix.tpc import io
 
     out = cells_path(coeff_shard, out_dir)
@@ -517,7 +517,7 @@ def build_shard(coeff_shard, source_root, out_dir=None):
         raise ValueError(f"{coeff_shard}: hits written with different sample thresholds {sorted(threshold)}")
     label = dict(LABEL, hits_threshold=threshold.pop() if threshold else None)
     write_shard(out, ident, records, label=label,
-                provenance=dict(code=_code_version(), coeff_shard=os.path.basename(str(coeff_shard)), sim=sim))
+                provenance=dict(code=code_version(), coeff_shard=os.path.basename(str(coeff_shard)), sim=sim))
     n = sum(len(r["key"]) for r in records)
     return out, f"{len(records)} events, {n:,} cells"
 

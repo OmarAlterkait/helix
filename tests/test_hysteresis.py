@@ -1,11 +1,11 @@
-"""Hysteresis selection (helix.core.hysteresis): definition, and the flood fill == labelling
+"""Hysteresis selection (helix.core.robust): definition, and the flood fill == labelling
 the connected components (scipy.ndimage.label)."""
 import numpy as np
 import pytest
 from scipy.ndimage import label
 
 torch = pytest.importorskip("torch")
-from helix.core import hysteresis as H  # noqa: E402
+from helix.core import robust as H  # noqa: E402
 
 _STRUCT = {"8": np.ones((3, 3), bool), "1d": np.array([[0, 0, 0], [1, 1, 1], [0, 0, 0]], bool)}
 

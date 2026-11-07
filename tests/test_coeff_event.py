@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from helix.core.provenance import BasisDescriptor, derive_band_lengths
+from helix.core.coeff_event import BasisDescriptor, derive_band_lengths
 from helix.core.wavelet import SparseResult
 from helix.core.coeff_event import CoeffEvent
 from helix.core.coeff_io import write_coeff_shard, read_coeff_event, read_coeff_shard, n_events
@@ -215,7 +215,7 @@ def test_band_lengths_must_match_the_basis():
     """A plane whose band split disagrees with basis.band_lengths must raise, not
     have its coefficients silently re-tagged (same total width, different split)."""
     from helix.core.wavelet import SparseResult
-    from helix.core.provenance import BasisDescriptor
+    from helix.core.coeff_event import BasisDescriptor
 
     lens = (4, 4, 8)
     basis = BasisDescriptor(wavelet="db2", level=2, mode="periodization",

@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 
 from helix.core.coeff_event import CoeffEvent
-from helix.core.provenance import BasisDescriptor, padded_length_of
+from helix.core.coeff_event import BasisDescriptor, padded_length_of
 from helix.tpc.readout import canonical_plane_gid
 
 

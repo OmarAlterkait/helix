@@ -15,7 +15,7 @@ change the format and every golden for no functional gain. Read ``wire``/``tau``
 as ``row``/``col`` when working on another detector.
 """
 from helix.core.wavelet import SparseResult, wavedec, reconstruct
-from helix.core.provenance import BasisDescriptor, derive_band_lengths, descriptor_digest
+from helix.core.coeff_event import BasisDescriptor, derive_band_lengths, descriptor_digest
 from helix.core.coeff_event import CoeffEvent
 from helix.core.coeff_io import (
     write_coeff_shard, read_coeff_event, read_coeff_shard, n_events,

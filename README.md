@@ -13,7 +13,7 @@ waveforms into shards beside the TPC ones (not yet fed to the model).
 | path | what |
 |---|---|
 | `helix/build.py` | the build pipeline: event loop, TPC chain, optical codec, shard writer, calibration, task plan, one CLI (`main(Source)`); knows no source |
-| `helix/core` | wavelet transform, robust statistics, hysteresis, the shard format (`coeff_io`), provenance, training cadence |
+| `helix/core` | wavelet transform, robust statistics and hysteresis (`robust`), the shard format (`coeff_io`), the event and its provenance (`coeff_event`) |
 | `helix/tpc` | the TPC chain (`chain`), coherent gate, thresholding, noise model, readouts, JAXTPC and SBND readers |
 | `helix/optical` | the optical codec, response calibration, optical shards and tokens |
 | `helix/data` | corpus reader, dataset and verifier; bin grid; the `cells` truth; the denoiser's labels; identity guard |

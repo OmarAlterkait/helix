@@ -12,7 +12,8 @@ import types
 
 import pytest
 
-from helix.integrations._bootstrap import describe_checkout, provenance
+from helix.core.coeff_event import describe_checkout
+from helix.integrations._bootstrap import provenance
 
 
 def _pimm_importable():
@@ -166,14 +167,14 @@ def test_stamping_never_takes_down_a_run(tmp_path):
 def test_code_version_is_atomic_or_absent():
     """`git` and `git_dirty` are recorded together or not at all.
 
-    _code_version used to assign out["git"] and THEN shell out for dirtiness, so
+    code_version used to assign out["git"] and THEN shell out for dirtiness, so
     a timeout on the second call left the commit recorded with no dirtiness. Two
     shards of one corpus then serialised differently and coeff_verify reported
     "built by DIFFERENT helix versions" for shards built by the SAME commit --
     a false refusal whose apparent fix is rebuilding the whole corpus.
     """
-    from helix.core.coeff_io import _code_version
-    c = _code_version()
+    from helix.core.coeff_event import code_version
+    c = code_version()
     assert ("git" in c) == ("git_dirty" in c), (
         f"partial provenance record: {c}")
 

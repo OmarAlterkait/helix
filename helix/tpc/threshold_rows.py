@@ -8,7 +8,7 @@ kept (3.3 M instead of ~35 k). :func:`threshold_bands_rows`:
   * estimates sigma on ``valid`` rows only and zeroes the others;
   * optionally per group (``sigma_scope="group"``, e.g. one sigma per front-end board)
     or per row (``"channel"``: each channel's own MAD in that band);
-  * hysteresis (:mod:`helix.core.hysteresis`): the universal threshold
+  * hysteresis (:mod:`helix.core.robust`): the universal threshold
     kappa sigma sqrt(2 ln N_band) gives the seeds; every coefficient with |c| >= ``floor``
     sigma that is 8-connected (row x coefficient, within the band) to a seed through such
     coefficients is kept too. SBND (data, SBND MC and HELIX sim; SBND-data-helix study):
@@ -26,7 +26,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from helix.core.hysteresis import grow, grow_many
+from helix.core.robust import grow, grow_many
 from helix.core.robust import mad, masked_mad, q50 as _q50
 
 

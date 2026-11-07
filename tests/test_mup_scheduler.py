@@ -8,7 +8,7 @@ would reveal it.
 
 The WSD schedules are `LambdaLR`s, which scale each group's own `lr`; driving
 a real LambdaLR over muP's groups covers the behaviour that matters without
-pimm installed. `helix.model.mup.param_group_ratios` reads the ratios back.
+pimm installed. `helix.model.schedule.param_group_ratios` reads the ratios back.
 """
 
 import pytest
@@ -16,7 +16,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from helix.model import build_fm  # noqa: E402
-from helix.model.mup import param_group_ratios  # noqa: E402
+from helix.model.schedule import param_group_ratios  # noqa: E402
 
 ARCH = dict(n_slot=16, n_band=4, n_plane=6, d=64, blocks=2, dec_blocks=1,
             heads=4, mup=True, d_base=32, n_bins=16)

@@ -386,7 +386,7 @@ class OpticalChain:
                                    level=np.zeros((0, lev), np.float32)))
         import torch
         from helix.core import robust
-        from helix.core.hysteresis import window_any
+        from helix.core.robust import window_any
         buf = np.asarray(wf["buf"])
         buf = torch.as_tensor(buf.view(np.int16) if buf.dtype == np.uint16 else buf.astype(np.int32)).to(self.device)
         if buf.dtype == torch.int16:                             # 14/15-bit codes: int16 on the way, int32 here

@@ -12,7 +12,7 @@ probe, denoising) against simulation truth on a fine cell grid.
 
 | package | may import pimm-data / pimm | what it is |
 |---|---|---|
-| `helix.core` | **no** | wavelet transform, robust statistics, hysteresis, coeff IO, provenance |
+| `helix.core` | **no** | wavelet transform, robust statistics and hysteresis (`robust`), coeff IO, the event and its provenance (`coeff_event`) |
 | `helix.tpc` | **no** | LArTPC physics: TPC chain, coherent gate, forward model (noise + digitize), readouts, readers |
 | `helix.build` | **no** | the build pipeline (sources are `scripts/build_{sim,sbnd,goop}.py`) |
 | `helix.model` | no (defers one import) | the FM: tokenizer, blocks, masking, loss, muP; the denoiser; reading a run |
@@ -104,7 +104,7 @@ An unstamped corpus is rebuilt (the migration script is at tag `archive-2026-11`
 
 **Configs state intent.** `configs/pimm/fm.py` plus `fm_cooldown`,
 `fm_smoke`, and `denoise` (the supervised denoiser on an FM run, same trainer); no config carries a step count (warmup and cadence are `"auto"`, filled
-by `FMTrainer` through `helix.core.cadence`). A variant is a `key=value` override,
+by `FMTrainer` through `helix.model.schedule`). A variant is a `key=value` override,
 not a new file.
 
 **The corpus is compression; the tokenizer is interpretation.** Changing the

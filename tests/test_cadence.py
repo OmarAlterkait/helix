@@ -1,5 +1,5 @@
-"""Warmup and cadence follow the run's step count (helix.core.cadence)."""
-from helix.core import cadence
+"""Warmup and cadence follow the run's step count (helix.model.schedule)."""
+from helix.model import schedule as cadence
 
 
 def test_warmup_scales_with_width_and_is_at_most_a_fifth_of_the_run():

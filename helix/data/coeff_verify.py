@@ -189,7 +189,7 @@ def verify_corpus(data_root, dataset_name, *, split="", expect_events=None,
             probs.append(
                 f"NOTE: provenance is INCOMPLETE on some shards (missing: {missing}). "
                 f"Every field that IS recorded agrees, so this is not a mixed "
-                f"build -- helix.core.coeff_io._code_version gives up on a git "
+                f"build -- helix.core.coeff_event.code_version gives up on a git "
                 f"timeout, which happens under a wide job array on a shared "
                 f"filesystem.")
         elif any(c.get("git_dirty") for _, c in known):

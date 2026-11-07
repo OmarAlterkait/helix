@@ -200,7 +200,7 @@ def _submodules(*subpkgs):
 #: sweep imports each submodule on its own.
 #:
 #: Only pimm_data is forbidden here. torch is NOT: the DSP modules
-#: (robust, hysteresis, coherent_gate, noise, ...) import it at
+#: (robust, coherent_gate, noise, ...) import it at
 #: module scope by design, and it is a declared optional extra. The invariant this
 #: file defends is about pimm-data, not about weight of imports.
 @pytest.mark.parametrize("mod", _submodules("helix.core", "helix.tpc"))

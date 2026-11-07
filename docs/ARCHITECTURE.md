@@ -40,7 +40,7 @@ is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.
 
 | package | may import pimm-data / pimm | what it is |
 |---|---|---|
-| `helix.core` | no | wavelet transform, robust statistics, hysteresis, coeff shard IO, provenance, training cadence |
+| `helix.core` | no | wavelet transform, robust statistics and hysteresis, coeff shard IO, the event and its provenance |
 | `helix.tpc` | no | TPC chain, coherent gate, thresholding, noise model, readouts, readers |
 | `helix.optical` | no | optical codec, calibration, optical shards, tokens |
 | `helix.model` | no (`tokenize` defers one import) | the FM, tokenizer, masking, loss, muP, reading a run |
@@ -292,7 +292,7 @@ attributes excepted).
   target is the normalised input itself (training is noisy-only); it differs from the
   input only where `dead_frac` blanks it.
 * `fm.FMModel` / `build_fm` (strict: an unknown key raises): encoder blocks, cross-attention
-  decoder, a categorical head over the bin grid (`n_bins`), muP (`mup.py`), RoPE over time
+  decoder, a categorical head over the bin grid (`n_bins`), muP (`schedule.py`), RoPE over time
   and wire (`layers.py`). Attention is grouped along four token orders and runs unpadded
   through flash varlen attention (`serial.py`), which needs sm80+ (A100); on CPU / fp32
   the same groups run one SDPA each (tests, CPU evaluation). `fused_qk` is the Triton
@@ -334,7 +334,7 @@ registers:
 
 **Cadence is derived at run time:** a config writes `warmup="auto"`, `save_freq="auto"`, `every_n_steps="auto"`;
 `FMTrainer._resolve_cadence` fills them from pimm's `iters_per_epoch * epoch` through
-`helix.core.cadence` (`warmup_steps`, `eval_every`, `save_every`).
+`helix.model.schedule` (`warmup_steps`, `eval_every`, `save_every`).
 
 `configs/pimm/fm.py` is the whole run: corpus = `HELIX_CORPUS`'s parent with its
 `_calib/RUNS.txt`, the reference bin grid, the `nz_pw16` recipe (d 768, 12 + 4 blocks, 12
