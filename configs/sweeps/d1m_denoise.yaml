@@ -1,0 +1,25 @@
+# The denoiser's open choices on d1m, at full length (configs/pimm/denoise.py: 4 epochs, ~38k
+# steps at 16 GPUs), on the S3DF-trained fm_cooldown encoder, calorimetry form (cond_charge):
+#   point_l0    the current default: point charge head, no linear-amplitude input
+#   point_l30   + the linear-amplitude input channel (r1, M10lin: -19 to -27% bright error)
+#   gauss_l30   + a Gaussian charge head with a learned per-cell width (r1, M14 fine-tunes:
+#               0.59-0.71 of the point head's error from 16 k e- up; never run at full length)
+#   cat_l30     a categorical over charge with a zero bin, replacing presence + charge (new)
+# One noise realisation, no augmentation (the user's decision). Each is scored by
+# `helix.eval --metrics denoise`: detection (far and near background, matched), per-bin bias and
+# resolution, linearity, closure, presence calibration, and the head's own calibration.
+#
+#   python scripts/sweep.py configs/sweeps/d1m_denoise.yaml --dry-run
+config: denoise
+submit: [--resources.nnodes, "4"]
+overrides:
+  model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown
+  model.cond_charge: true
+arms:
+  point_l0:  {overrides: {model.dist: point}}
+  point_l30: {overrides: {model.dist: point, model.lin_amp_scale: 30.0}}
+  gauss_l30: {overrides: {model.dist: gauss, model.lin_amp_scale: 30.0}}
+  cat_l30:   {overrides: {model.dist: cat, model.lin_amp_scale: 30.0}}
+after_each:
+  command: python -m helix.eval /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown --metrics denoise --denoiser $HELIX_EXP/{run} --out $HELIX_EXP/{run}/eval_denoise.json
+  time: "04:00:00"
