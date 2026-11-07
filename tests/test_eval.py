@@ -1043,3 +1043,46 @@ def test_cell_neighbors_centre_is_the_covering_token_and_shifts_by_one_patch():
         _, _, wb, tb = unpack_cell_key(ck[nbr[:, :, j][hit]])
         _, _, wb0, tb0 = unpack_cell_key(pc[hit])
         assert np.array_equal(wb, wb0 + dw) and np.array_equal(tb, tb0 + dt)
+
+
+def test_compare_is_paired_over_identical_windows(tmp_path):
+    """Two runs scored on the same windows: A - B over shared resamples, zero for identical
+    scores and exact for a known difference; different windows are refused."""
+    from helix.eval.__main__ import main as cli
+    rng = np.random.default_rng(0)
+    meta = []
+    for e in range(20):
+        meta += [dict(ev=e, kind="bg", g=0, E=np.nan, ctx="")] * 30
+        meta += [dict(ev=e, kind="iso", g=0, E=0.15, ctx="clear")] * 5
+    arr = lambda k: np.array([m[k] for m in meta])                              # noqa: E731
+    base = {f"floor/meta/{k}": arr(k) for k in ("ev", "kind", "g", "E", "ctx")}
+    s_bg = rng.random(len(meta))
+    is_iso = arr("kind") == "iso"
+    a = np.where(is_iso, 2.0, s_bg)                      # every iso window above every bg: found
+    b = np.where(is_iso, np.where(np.arange(len(meta)) % 2 == 0, 2.0, 0.0), s_bg)   # half of them
+    np.savez(tmp_path / "a.npz", **base, **{"floor/score/trained": a})
+    np.savez(tmp_path / "b.npz", **base, **{"floor/score/trained": b})
+    cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "a.npz"), "--out", str(tmp_path / "aa.json")])
+    import json
+    same = json.load(open(tmp_path / "aa.json"))["a_minus_b"]
+    assert same["floor_eff1pct_0.1-0.2"] == [0.0, 0.0, 0.0]
+    cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "b.npz"), "--out", str(tmp_path / "ab.json")])
+    d = json.load(open(tmp_path / "ab.json"))["a_minus_b"]["floor_eff1pct_clear_0.1-0.2"]
+    assert d[0] == pytest.approx(1.0 - (b[is_iso] > 1).mean()) and d[1] <= d[0] <= d[2]
+    other = dict(base); other["floor/meta/ev"] = base["floor/meta/ev"][::-1].copy()
+    np.savez(tmp_path / "c.npz", **other, **{"floor/score/trained": a})
+    with pytest.raises(SystemExit, match="windows differ"):
+        cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "c.npz"), "--out", str(tmp_path / "ac.json")])
+
+
+def test_the_cli_writes_the_window_scores_beside_the_json(tmp_path, monkeypatch):
+    """A metric's ``_windows`` arrays leave the JSON for ``<out>.windows.npz``."""
+    import helix.eval as E
+    from helix.eval.__main__ import main
+    fake = {"metrics": {"floor": {"x": 1, "_windows": {"meta/ev": np.arange(3), "score/trained": np.ones(3)}}}}
+    monkeypatch.setattr(E, "evaluate", lambda *a, **k: fake)
+    out = tmp_path / "s.json"
+    assert main(["run", "--metrics", "floor", "--out", str(out)]) == 0
+    assert "_windows" not in json.load(open(out))["metrics"]["floor"]
+    z = np.load(tmp_path / "s.windows.npz")
+    assert set(z.files) == {"floor/meta/ev", "floor/score/trained"}

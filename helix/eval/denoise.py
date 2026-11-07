@@ -276,6 +276,7 @@ class Denoise:
     def result(self):
         c = self.ctx
         out = dict(n_train_events=c.n_train, **self.scored.result(c.n_boot, c.seed))
+        out["_windows"] = self.scored.windows()          # popped by the CLI into <out>.windows.npz
         r = {k: np.concatenate(v) if v else np.zeros(0) for k, v in self.rows.items()}
         cal = {}
         for name, parts in self.cal.items():

@@ -280,6 +280,16 @@ class Scored:
             raise ValueError("no scored window")
         return {k: score_windows(np.concatenate(self.s[k]), self.meta, n_boot, seed) for k in (names or self.s)}
 
+    def windows(self):
+        """Every scored window once: its metadata as arrays and each named score's window score
+        (the max over its cells, what every number thresholds) -- written beside the results so
+        two runs scored on the SAME windows compare paired (``python -m helix.eval compare``)."""
+        n = len(self.meta)
+        out = {f"meta/{k}": np.array([m.get(k) if m.get(k) is not None else "" for m in self.meta])
+               for k in ("ev", "kind", "g", "E", "ctx")}
+        out.update({f"score/{k}": np.concatenate(v).reshape(n, -1).max(1) for k, v in self.s.items()})
+        return out
+
 
 class Floor:
     """The ``floor`` metric: how faint a deposit frozen encoder features let a probe find.
@@ -384,6 +394,7 @@ class Floor:
         pres = [self.scored.point(seed_name("presence", k)) for k in range(len(self.probes["presence"]))]
         out["presence"].update(val_bal_acc_seeds=[round(p.val_score, 6) for p in self.probes["presence"]],
                                **seed_spread(pres))
+        out["_windows"] = self.scored.windows()          # popped by the CLI into <out>.windows.npz
         return out
 
 
