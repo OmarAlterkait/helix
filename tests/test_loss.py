@@ -249,12 +249,12 @@ def test_losses_cat_uses_this_function():
 # two estimators genuinely differ on a spread posterior, so a future "simplification"
 # back to `sinh(mean)` fails here rather than in a figure nobody checks.
 
-K, N_BAND = 64, 4
+K_D = 64                                # the decode tests' bin count (the binning tests above use K)
 
 
 def _dec_edges(lo=-6.84699, hi=7.10671, open_ends=True):
     """A table shaped like a real one: uniform in arcsinh, open outer edges."""
-    inner = np.linspace(lo, hi, K - 1)
+    inner = np.linspace(lo, hi, K_D - 1)
     row = np.concatenate([[-1e18 if open_ends else lo - 1.0], inner,
                           [1e18 if open_ends else hi + 1.0]])
     return np.repeat(row[None], N_BAND, 0).astype(np.float32)
@@ -265,7 +265,7 @@ def test_closed_form_matches_numeric_integral():
     e = _dec_edges(open_ends=False)
     cent = bin_centroids_ratio(e)
     b = 0
-    for k in (0, 1, K // 3, K // 2, K - 2, K - 1):
+    for k in (0, 1, K_D // 3, K_D // 2, K_D - 2, K_D - 1):
         a_, b_ = float(e[b, k]), float(e[b, k + 1])
         grid = np.linspace(a_, b_, 20001)
         want = np.trapezoid(np.sinh(grid), grid) / (b_ - a_)
@@ -288,9 +288,9 @@ def test_open_edges_are_reflected_not_taken_literally():
 def test_measured_table_is_preferred_over_the_closed_form():
     """An empirical cent_ratio wins; a NaN one falls back."""
     e = _dec_edges()
-    fake = np.full((N_BAND, K), 3.25, np.float32)
+    fake = np.full((N_BAND, K_D), 3.25, np.float32)
     assert np.allclose(bin_centroids_ratio(e, fake), 3.25)
-    nan = np.full((N_BAND, K), np.nan, np.float32)
+    nan = np.full((N_BAND, K_D), np.nan, np.float32)
     assert np.allclose(bin_centroids_ratio(e, nan), bin_centroids_ratio(e))
 
 
@@ -298,8 +298,8 @@ def test_onehot_posterior_returns_that_bins_centroid():
     """A delta posterior must decode to exactly the bin's centroid."""
     cent = bin_centroids_ratio(_dec_edges())
     band = np.array([0, 1, 2, 3], np.int64)
-    want_k = np.array([[3, 17], [K - 1, 0], [8, 8], [40, 2]])
-    logits = np.full((4, 2, K), -30.0, np.float32)
+    want_k = np.array([[3, 17], [K_D - 1, 0], [8, 8], [40, 2]])
+    logits = np.full((4, 2, K_D), -30.0, np.float32)
     for c in range(4):
         for s in range(2):
             logits[c, s, want_k[c, s]] = 30.0
@@ -326,8 +326,8 @@ def test_jensen_gap_is_real():
     mid = 0.5 * (ee[:, :-1] + ee[:, 1:])
 
     band = np.zeros(1, np.int64)
-    x = np.linspace(-3, 3, K).astype(np.float32)      # broad posterior
-    logits = (-0.5 * x[None, None, :] ** 2).repeat(1, 0).reshape(1, 1, K)
+    x = np.linspace(-3, 3, K_D).astype(np.float32)      # broad posterior
+    logits = (-0.5 * x[None, None, :] ** 2).repeat(1, 0).reshape(1, 1, K_D)
     p = np.exp(logits - logits.max()); p /= p.sum()
 
     correct = float(decode_categorical(logits, band, cent, "mean")[0, 0])
@@ -362,7 +362,7 @@ def test_rows_from_grid_space_argument():
 def test_decode_rejects_unknown_readout():
     cent = bin_centroids_ratio(_dec_edges())
     with pytest.raises(ValueError):
-        decode_categorical(np.zeros((1, 1, K), np.float32),
+        decode_categorical(np.zeros((1, 1, K_D), np.float32),
                            np.zeros(1, np.int64), cent, readout="median")
 
 def test_mean_and_mode_differ_on_a_skewed_posterior():
@@ -376,14 +376,14 @@ def test_mean_and_mode_differ_on_a_skewed_posterior():
     cent = bin_centroids_ratio(_dec_edges())
     band = np.zeros(1, np.int64)
     # skewed: modal bin near the middle, a long heavy tail toward the top
-    w = np.zeros(K, np.float32)
-    w[K // 2] = 3.0
-    w[K - 8:] = 1.0
+    w = np.zeros(K_D, np.float32)
+    w[K_D // 2] = 3.0
+    w[K_D - 8:] = 1.0
     logits = np.log(w + 1e-9)[None, None, :].astype(np.float32)
 
     mean = float(decode_categorical(logits, band, cent, "mean")[0, 0])
     mode = float(decode_categorical(logits, band, cent, "mode")[0, 0])
-    assert mode == pytest.approx(float(cent[0, K // 2]), rel=1e-5)
+    assert mode == pytest.approx(float(cent[0, K_D // 2]), rel=1e-5)
     assert abs(mean - mode) / max(abs(mean), 1e-9) > 0.5, (
         f"mean {mean:.4g} and mode {mode:.4g} are too close for this test to "
         f"distinguish the two read-outs")

@@ -59,16 +59,10 @@ are at git tag `archive-2026-11` (`git show archive-2026-11:docs/archive/NEXT.md
 Open at the handoff to helix-nersc (2026-11-06; the state it described is in DECISIONS,
 "State at the 2026-11 handoff"). Each with the recommendation made then.
 
-* **C1. The base and what to merge.** This line is the base (it contains origin/main to
-  039f3ee). From helix-nersc's origin `denoise-m14` (tip 8a84597) take 494a8f6, 3dfc02e
-  (truth label), 8cfd2cf (linear-amplitude input), e68fe7e (charge-scale augmentation; not
-  its volume-aware drift layouts as a default), 23bd7f8 (FM into an encoder with added input
-  columns), 2a8533e + 975218f (record, read together); skip 42f6188 (charge-weight power:
-  biases faint cells) and the NERSC launchers 5f70a66 / e0eb082. The distributional heads
-  (5edce72: `CellDecoder(dist=point|gauss|hlgauss)`, `forward()` returning 3 values) wait
-  for M15. **Port:** the denoiser there reads `helix.probe.resolution` (`cell_inputs`,
-  `cell_neighbors`, `set_cell`); here those are `helix.data.cells` / `helix.data.denoise` /
-  `helix.eval`. 3dfc02e's label is complete truth, not cells-3's `q` (C13).
+* **C1. The base and what to merge.** Done on `unify` (2026-11-06): consolidated is the base; the
+  denoiser's linear-amplitude input and distributional heads (`model.dist` point|gauss|cat) are
+  ported; charge-scale augmentation is not (it needs clean shards; one noise realisation, as on
+  data -- the user's decision); presence is q > 25 e- everywhere.
 * **C2. How much corpus.** One group (200k) or all five (1M: ~176 more turing GPU-hours,
   ~0.9 TB). Calibrate the recipe on j000000 first (C5); build more when a model size or
   length needs it.
@@ -93,15 +87,11 @@ Open at the handoff to helix-nersc (2026-11-06; the state it described is in DEC
   >= 256k e Y cells past the last finite edge on r1; not measured on d1m's grid). Extend the
   grid to the observed maximum, a continuous distributional target, or both; judged by
   frozen probes with an amplitude metric. The +-1e18 open edges go when the format changes.
-* **C8. Evaluation additions** (agreed with helix-nersc, none implemented): a threshold-free
-  companion to the floor (AUC or efficiency at 5% FPR; seed pairs agree to ~0.005 on AUC
-  against ~0.04 at 1% FPR); an amplitude metric (median and hw68 of log(pred / truth) per
-  view and per truth-charge bin 1-4k, 4-16k, 16-64k, 64-256k, >= 256k e); two seeds per arm,
-  and >= 5 fresh noise draws per test event for the denoiser (one draw understates method
-  differences ~1.7x); the pretrained-vs-scratch label-efficiency curve (64 ... 16k labelled
-  events; `data.train.n_events`, `model.pretrained=False` exist); the corpus `basis_digest`
-  in the eval JSON; optionally the bg score tail. Open: which uprobe statistic is primary
-  (R^2 here, Fisher r there).
+* **C8. Evaluation additions.** Implemented on `unify` (63aa42d..6ffced4): near-activity
+  background, AUC, per-view and per-event numbers, the raw-input arm, `--probe-seeds`, the
+  region-mask recon, the denoiser's charge resolution / linearity / closure / calibration, the
+  matched clear/crowded floor, and `basis_digest` / `q_cut` in the JSON. Not done: a
+  label-efficiency curve driver (the config switches exist), and the uprobe label's own ceiling.
 * **C9. Denoiser defaults.** Adopt linear-amplitude input and charge-scale augmentation
   (settled by helix-nersc; part of the C1 port); NLL head after M15; `cond_charge` stays a
   switch (detection vs calorimetry). The default encoder: above.
@@ -110,15 +100,11 @@ Open at the handoff to helix-nersc (2026-11-06; the state it described is in DEC
   `run_light_sim.py`), but there is no propagation or photodetector stage. goop for
   optical-only work, SBND data for real light, or a light stage added to a campaign. If
   optical enters the model, `plane_id`'s four roles must separate.
-* **C13. The charge label: hits or complete truth.** cells-3 `q` carries JAXTPC's 25 e- cut
-  (~1.6% of in-window charge, the diffusion tails). helix-nersc's complete truth
-  (`scripts/build_complete_corpus_truth.py` on their branch) gave the denoiser +0.035-0.05
-  detection, removed the bright bias (median 0.972 -> 0.995) and cut presence ECE 0.0084 ->
-  0.0031, with presence at q > 25 e-. Options: (a) an uncut `q` column in cells-3, presence at
-  25 e- (recommended: one truth format); (b) a separate family. Built at S3DF from step + hits
-  and a JAXTPC checkout (f0d2ed39), validated against the hits `q` first (`--validate`); the
-  script must use `num_s=32` for d1m (the campaign's default) and be ported to `helix.tpc.io` /
-  `helix.data.cells`. ~1,700 job-hours (~3,300 CPU worker-hours) for j000000.
+* **C13. The charge label.** Decided (the user, 2026-11-06): train and score on cells-3 `q` as
+  built, with JAXTPC's 25 e- cut (~1.6% of in-window charge, the diffusion tails), recorded as
+  `q_cut` in every result; re-simulate with a lower cut later if it turns out to matter. On r1 the
+  uncut (complete) truth gave the denoiser +0.035-0.05 detection and removed a bright bias
+  (median 0.972 -> 0.995): the size of what is left on the table.
 
 Assumed at the handoff, not measured: the noise model stands in for the detector; the five
 groups are one distribution (a grid and a `norm_sigma` from j000000 describe all); one fixed

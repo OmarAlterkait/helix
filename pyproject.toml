@@ -2,7 +2,7 @@
 name = "helix-tpc"
 # Read from helix/__init__.py rather than duplicated here. These two drifted
 # (0.1.0 vs 0.2.0) and it was not cosmetic: helix/core/coeff_io.py stamps
-# helix.__version__ into every corpus shard, and pimm_data/coeff_verify.py
+# helix.__version__ into every corpus shard, and helix/data/verify.py
 # raises "shards were built by DIFFERENT helix versions" off that field — so the
 # provenance chain read a number the packaging disagreed with. The module stays
 # the source of truth because helix must import from a plain checkout on

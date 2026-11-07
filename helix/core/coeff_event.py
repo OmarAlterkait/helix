@@ -144,7 +144,7 @@ def _git(root, *args, timeout=10):
     try:
         r = subprocess.run(("git",) + args, cwd=root, capture_output=True, text=True,
                            timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
+    except Exception:                       # no git, a timeout, an undecodable output
         return None
     return r.stdout.strip() if r.returncode == 0 else None
 
@@ -198,7 +198,10 @@ def code_version():
 
     import helix
     out = {"version": getattr(helix, "__version__", "unknown")}
-    root = os.path.dirname(os.path.dirname(os.path.abspath(helix.__file__)))
+    try:                                    # a namespace or zipped helix has no usable __file__
+        root = os.path.dirname(os.path.dirname(os.path.abspath(helix.__file__)))
+    except Exception:
+        return out
     commit = _git(root, "rev-parse", "--short", "HEAD", timeout=30)
     if commit is not None:
         dirty = _git(root, "status", "--porcelain", timeout=30)

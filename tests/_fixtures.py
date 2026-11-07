@@ -330,7 +330,7 @@ def write_coeff_shard(path, events, *, band_lengths, gids, n_wires, basis_attrs,
     shards built with different noise are distinguishable after the fact.
 
     ``provenance`` writes ``/config@provenance_json`` — the ``code`` block and the
-    ``geom``/``spectrum`` hashes that :mod:`pimm_data.coeff_verify` compares
+    ``geom``/``spectrum`` hashes that :mod:`helix.data.verify` compares
     across a corpus. This writer omitted it entirely, so no shard it produced
     could exercise those checks, and every fixture-based test of the verifier was
     silently testing the legacy path.

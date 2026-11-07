@@ -37,10 +37,11 @@ GIDS = list(range(3 * N_VOL))              # gid = volume * 3 + plane
 NT = 102                                   # not a multiple of 4 → pad to 104
 
 
-def _chain(**overrides):
+def _chain(device=None, **overrides):
+    """The simulation chain for this toy layout (db2 L2, so 102 ticks pad to 104)."""
     o = {"dwt": {"wavelet": "db2", "level": 2}}
     o.update(overrides)
-    return TPCChain(sim_config([NW] * N_VOL, o))
+    return TPCChain(sim_config([NW] * N_VOL, o), device=device)
 
 
 def _plane_fn(ev):
@@ -229,33 +230,6 @@ def test_clean_target_is_written_only_when_asked(tmp_path):
 #   1. degenerate-field audit  — catches all-zero / constant / out-of-range content
 #   2. physics acceptance (F0) — reconstruct a built shard vs the clean truth projected
 #                                onto the bands the chain keeps
-
-NW = [8, 6, 5]                             # U, V, Y wires of each volume
-N_VOL = 2
-GIDS = list(range(3 * N_VOL))
-NT = 102
-
-
-def _chain(device=None):
-    """The simulation chain for this toy layout (db2 L2 so 102 ticks pad to 104)."""
-    return TPCChain(sim_config([NW] * N_VOL, {"dwt": {"wavelet": "db2", "level": 2}}), device=device)
-
-
-def _plane_fn(ev):
-    rng = np.random.default_rng(1000 + ev)
-    clean, noisy = {}, {}
-    for gid in GIDS:
-        w = NW[gid % 3]
-        c = np.zeros((w, NT), np.float32)
-        for _ in range(3):
-            c[rng.integers(w), rng.integers(NT)] = rng.uniform(20, 40)
-        clean[gid] = c
-        nb = (w + 64 - 1) // 64
-        coh = (rng.standard_normal((nb, NT)).astype(np.float32) * 2.0)[
-            np.minimum(np.arange(w) // 64, nb - 1)]
-        noisy[gid] = (c + coh + rng.standard_normal((w, NT)).astype(np.float32) * .5)
-    return noisy, clean
-
 
 # ---- 1. degenerate-field audit --------------------------------------------
 
@@ -555,3 +529,21 @@ def test_every_source_has_what_build_needs(name):
 def test_an_unknown_source_is_refused():
     with pytest.raises(SystemExit, match="unknown source"):
         source("nope")
+
+
+def test_no_script_names_a_retired_entry_point():
+    """The builders are ``python -m helix.build SOURCE`` (they replaced build_coeff_corpus.py,
+    helix.tpc.sbnd_run, helix.optical.goop_run and then scripts/build_{sim,sbnd,goop}.py, with the
+    --backend / --mode flags), the verifier is ``helix.data.verify``, the bin grid ``python -m
+    helix.data.bins`` and training ``scripts/submit.sh``: a shipped script or study still naming
+    a retired one fails at its first task."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    retired = ("build_coeff_corpus.py", "helix.tpc.sbnd_run", "helix.optical.goop_run", "--backend",
+               "--mode serial", "scripts/build_sim.py", "scripts/build_sbnd.py", "scripts/build_goop.py",
+               "scripts/train.sh", "helix.data.coeff_verify", "derive_coeff_bins.py")
+    files = [*(root / "scripts").glob("*.sh"), *(root / "scripts").glob("*.py"), *(root / "configs").rglob("*.yaml")]
+    for p in sorted(files):
+        code = [ln for ln in p.read_text().splitlines() if not ln.strip().startswith("#")]
+        used = [ln for ln in code if any(r in ln for r in retired)]
+        assert not used, f"{p.relative_to(root)}: {used}"
