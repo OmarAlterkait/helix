@@ -336,6 +336,14 @@ number still under its own key, the new ones beside it):*
     paired comparison, and no account of the floor or the haze. A fine-tuned evaluation sees full
     density anyway. Groups sized by physical span would make training and inference match by
     construction, as a pretraining choice.
+  - *d1m_lr: training-seed noise exceeds the LR effect* (paired presence clear@far 0.1-0.2 MeV,
+    each cooled arm minus fm_cooldown on identical windows): lr4.4e-3 seed 0 -0.049, seed 1
+    -0.005 (n.s.), lr3.1e-3 -0.009, lr2.2e-3 -0.036. The two seeds of ONE recipe differ by
+    +0.044 [+0.038, +0.051], every view agreeing, as much as any LR pair. A paired interval
+    (~+-0.006) is event-sampling noise only; between training runs the noise is ~0.04. So the
+    LR is not decided by d1m_lr, and no pretraining choice is decided by one training seed per
+    arm: two or three are needed. Final cooldown losses order the arms by LR (2.2e-3 lowest),
+    not by the probe.
   - *The loss against its best case* (fm_cooldown, 200 events, masked slots by token class
     against each class's own per-band marginal): far tokens sit 3% below that context-free floor
     on both terms, so noise is not being learnt. Signal tokens carry 87% of the value term and
