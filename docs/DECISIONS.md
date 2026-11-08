@@ -342,8 +342,15 @@ number still under its own key, the new ones beside it):*
     +0.044 [+0.038, +0.051], every view agreeing, as much as any LR pair. A paired interval
     (~+-0.006) is event-sampling noise only; between training runs the noise is ~0.04. So the
     LR is not decided by d1m_lr, and no pretraining choice is decided by one training seed per
-    arm: two or three are needed. Final cooldown losses order the arms by LR (2.2e-3 lowest),
-    not by the probe.
+    arm. Final cooldown losses order the arms by LR (2.2e-3 lowest), not by the probe.
+    Checked before reading it as seed noise: the probe-fit seed half-range is 0.009 / 0.005
+    (s0 / s1; on fit-seed means the gap is 0.058); the resolved configs differ in `seed` alone
+    (same commit, cap, events, cooldown length, `last`); s0's one mid-run preemption seam
+    reproduces the per-step losses (3.4226 / 3.4247, 3.4653 / 3.4603). One pair gives a per-run
+    SD of ~0.03; the five cooled d768 runs (four arms + fm_cooldown) spread SD ~0.02 if LR is
+    flat. Decision: LR is flat over 2.2-4.4e-3 at this length; the recipe keeps 4.4e-3. Training
+    seeds are spent only on choices expected to move the key by more than ~0.05 (tokenizer
+    geometry, the objective), not on settling LR.
   - *The loss against its best case* (fm_cooldown, 200 events, masked slots by token class
     against each class's own per-band marginal): far tokens sit 3% below that context-free floor
     on both terms, so noise is not being learnt. Signal tokens carry 87% of the value term and
