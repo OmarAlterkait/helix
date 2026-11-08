@@ -35,10 +35,12 @@ def _coeff_shard(path, events, run=RUN, source=SOURCE):
     rng = np.random.default_rng(1)
     evs = [dict(band=np.zeros(4, np.uint8), plane_gid=np.zeros(4, np.int32), wire=rng.integers(0, 4, 4),
                 tau=rng.integers(0, 8, 4), value=rng.standard_normal(4).astype(np.float32),
-                sigma_threshold=rng.random((1, 3)).astype(np.float32), run=run, source_file=source, event=e)
+                sigma_threshold=rng.random((2, 3)).astype(np.float32), run=run, source_file=source, event=e)
            for e in events]
-    write_coeff_shard(path, evs, band_lengths=[8, 8, 16], gids=[0], n_wires=[4], basis_attrs=BASIS,
-                      dataset_name="sim_wire")
+    # a stand-in for the identity join, but its planes must hold the cells' truth: the dataset drops
+    # an event whose truth lies off its coeff shard's planes (helix.data.cells.valid_cells)
+    write_coeff_shard(path, evs, band_lengths=[8, 8, 16], gids=list(range(6)), n_wires=[1 << 16] * 6,
+                      basis_attrs=BASIS, dataset_name="sim_wire")
 
 
 @pytest.fixture(scope="module")
@@ -302,3 +304,43 @@ def test_a_volume_with_no_deposit_adds_nothing(tmp_path):
     np.testing.assert_allclose(rec["q"].sum(), q, rtol=1e-5)
     full, _ = C.open_event(out, 0)
     assert set(full["trk_volume"].tolist()) == {0, 1}
+
+
+def test_a_cell_off_the_plane_is_dropped_and_the_track_split_renumbered():
+    """A negative key (a fine wire below 0) is not a cell: it goes, with its cell_track rows, and
+    the remaining ct_cell indices follow their cells."""
+    from helix.data.cells import fkey, valid_cells
+    keys = np.array([fkey(0, 3, 5), fkey(1, -1, 5), fkey(1, 4, 6)], np.int64)
+    assert keys[1] < 0
+    rec = dict(key=keys, q=np.array([1.0, 2.0, 3.0], np.float32), dom_frac=np.ones(3, np.float32),
+               dom_y=np.zeros(3, np.float32), dom_z=np.zeros(3, np.float32),
+               ct_cell=np.array([0, 1, 2, 2], np.int32), ct_track=np.array([7, 8, 9, 10], np.int32),
+               ct_q=np.array([1.0, 2.0, 2.5, 0.5], np.float32))
+    out = valid_cells(rec)
+    assert out["key"].tolist() == [keys[0], keys[2]] and out["q"].tolist() == [1.0, 3.0]
+    assert out["ct_cell"].tolist() == [0, 1, 1] and out["ct_track"].tolist() == [7, 9, 10]
+    assert valid_cells(dict(rec, key=np.abs(keys)))["key"].shape == (3,)     # nothing to drop: untouched
+
+
+def test_cell_truth_drops_samples_off_the_plane():
+    """A sample below wire 0 (or before tick 0) is not a cell: it goes, not onto the edge."""
+    from helix.data.cells import cell_truth, unkey
+    g = np.array([0, 0, 0]); w = np.array([4, -1, 5]); t = np.array([32, 32, 33])
+    q = np.array([1.0, 9.0, 2.0]); trk = np.array([0, 0, 1]); grp = np.array([0, 0, 1])
+    rec = cell_truth(g, w, t, q, trk, grp, np.zeros((3, 2)))
+    assert (np.asarray(rec["key"]) >= 0).all() and np.asarray(rec["q"]).sum() == 3.0
+    assert set(unkey(rec["key"])[1].tolist()) == {2}                 # wires 4 and 5 share fine wire 2
+
+
+def test_valid_cells_keeps_only_the_events_planes_wires_and_ticks():
+    """With the event's planes: a cell beyond its plane's last wire, on a plane the event lacks, or
+    outside [0, n_ticks) goes."""
+    from helix.data.cells import FT, FW, fkey, valid_cells
+    keys = np.array([fkey(0, 10, 5), fkey(0, 500 // FW, 5), fkey(3, 1, 5), fkey(1, 2, 4352 // FT),
+                     fkey(1, 2, 1)], np.int64)
+    rec = dict(key=keys, q=np.arange(5, dtype=np.float32), dom_frac=np.ones(5, np.float32),
+               dom_y=np.zeros(5, np.float32), dom_z=np.zeros(5, np.float32),
+               ct_cell=np.arange(5, dtype=np.int32), ct_track=np.arange(5, dtype=np.int32),
+               ct_q=np.ones(5, np.float32))
+    out = valid_cells(rec, gids=[0, 1], n_wires=[400, 300], n_ticks=4336)
+    assert out["key"].tolist() == [keys[0], keys[4]] and out["ct_cell"].tolist() == [0, 1]

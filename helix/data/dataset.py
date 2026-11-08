@@ -446,6 +446,25 @@ def _identity_ids(source_file, event, run=None):
 
 # ---- dataset ---------------------------------------------------------------------------------
 
+def _offplane_share(before, after):
+    """The largest share of any plane's truth charge (and of the event's, for keys too broken to name
+    a plane) that :func:`helix.data.cells.valid_cells` took from ``before`` to ``after``."""
+    import numpy as _np
+    from helix.data.cells import unkey
+    kb, qb = _np.asarray(before["key"]), _np.asarray(before["q"], _np.float64)
+    ka, qa = _np.asarray(after["key"]), _np.asarray(after["q"], _np.float64)
+    tot = qb.sum()
+    if tot <= 0 or len(kb) == len(ka):
+        return 0.0
+    worst = qb[kb < 0].sum() / tot                              # no plane to charge it to
+    gb, ga = unkey(_np.where(kb < 0, 0, kb))[0], unkey(ka)[0]
+    for g in _np.unique(gb[kb >= 0]):
+        qg = qb[(gb == g) & (kb >= 0)].sum()
+        if qg > 0:
+            worst = max(worst, 1.0 - qa[ga == g].sum() / qg)
+    return float(worst)
+
+
 @DATASETS.register_module()
 class CoeffTPCDataset(ShardEventDataset):
     """Flat-columnar wavelet-coefficient corpus (noisy ``coeff`` + optional
@@ -638,7 +657,20 @@ class CoeffTPCDataset(ShardEventDataset):
         sizes = _np.asarray(r.event_sizes(), dtype=_np.int64)
         return sizes[_np.asarray(self.data_list, dtype=_np.int64)]
 
+    #: an event whose truth loses more than this share of any plane's charge to valid_cells is not
+    #: trained or scored on (its truth for that plane is not on the plane at all)
+    MAX_OFFPLANE = 1e-3
+
     def get_data(self, idx):
+        """The sample at ``idx``; an event whose truth is off its planes (:meth:`_get_data` gives
+        None) is replaced by the next one, so a DataLoader index never fails."""
+        for k in range(len(self.data_list)):
+            data = self._get_data(idx + k)
+            if data is not None:
+                return data
+        raise ValueError("no event with valid truth in this dataset")
+
+    def _get_data(self, idx):
         # data_list VALUES are event ids. Identical to `idx % len(...)` while
         # the list is range(n), and the only correct form once it is not.
         real_idx = self.data_list[idx % len(self.data_list)]
@@ -671,6 +703,24 @@ class CoeffTPCDataset(ShardEventDataset):
             if ident != raw_noisy.get('_ident'):
                 raise ValueError(f"event {real_idx}: cells are for {ident}, the coeff event is "
                                  f"{raw_noisy.get('_ident')} -- MISPAIRED coeff/cells shards.")
+            # off-plane cells go here, where the event's planes are known: the coeff shard's gids and
+            # n_wires (helix.data.cells.valid_cells; no tick upper bound -- the stored band lengths are
+            # the padded basis', and the one corrupt d1m event's late ticks sit on a plane its wires
+            # already reject)
+            from helix.data.cells import valid_cells
+            m = self._shard_meta()
+            if m.get("gids") is not None and m.get("n_wires") is not None:
+                kept = valid_cells(cells, m["gids"], m["n_wires"])
+                lost = _offplane_share(cells, kept)
+                if lost > self.MAX_OFFPLANE:
+                    # a plane's truth wholly off the plane (d1m: sim_wire_cells_0664 event 112, plane 3,
+                    # an int16 overflow of the simulation's wire index) -- training on its coefficients
+                    # against no truth would teach "signal here, no charge", so the event goes
+                    self.n_rejected = getattr(self, "n_rejected", 0) + 1
+                    logger.warning("CoeffTPCDataset: event %d rejected: %.1f%% of a plane's truth charge is "
+                                   "off its planes (%d rejected so far)", real_idx, 100 * lost, self.n_rejected)
+                    return None
+                cells = kept
             data['cells'] = cells
         return data
 

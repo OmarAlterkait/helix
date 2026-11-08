@@ -180,6 +180,18 @@ The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, containe
   The denoiser is the tighter one: 28.0-28.7 GB at d1m's three largest events on a 40 GB A100
   (23.2 GB at a median one; point, gauss and cat alike), its decoder rows growing with the event
   (97k at the top) -- the first thing to run out on a busier corpus, ahead of the FM.
+* **JAXTPC: an int16 wire-index overflow (upstream issue).** d1m event 132912 (run j000000, source
+  sim_wire_sensor_jaxtpc_wire_j000660-000664.h5, 14,195 tracks, 13.5 GeV) has its whole plane 3
+  off the plane: wire centroids spanning +-2^15, charge intact (1.192e8 e-, as its volume-mates).
+  f0d2ed39 production/save.py casts center_wires to int16 (and delta_wires to int8) unchecked, and
+  the pixel keys were already wrong upstream of the cast. helix rejects such an event (the
+  dataset's off-plane share > 1e-3); a busier sample would hit it more often.
+* **A data error should fail the job fast.** One DataLoader worker's exception (the off-plane
+  truth cells, 2026-11-07) stopped its rank, and every other rank sat in an ALLREDUCE until the
+  NCCL watchdog's 600 s timeout: ten minutes of a 4-node allocation, then a crash with the cause
+  buried in the log. Options: TORCH_NCCL_ASYNC_ERROR_HANDLING with a shorter collective timeout
+  (DCP saves and the evaluator run collectives too -- measure their longest first), or a transform
+  that logs and skips a bad event with a counter. Decide before the next long production run.
 * **An oracle for the low-energy floor.** Raw and amplitude are weak references; whether the
   model's 5-12% (presence, clear windows below 0.1 MeV, given a kept coefficient) is near what the
   input allows needs a matched filter on the waveform with the known response and noise

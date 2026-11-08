@@ -819,3 +819,18 @@ def test_n_events_is_a_fixed_nested_subset_in_corpus_order(tmp_path):
     assert other != sub[6]
     with pytest.raises(ValueError, match="n_events"):
         CoeffTPCDataset(data_root=str(tmp_path), dataset_name="cx", n_events=11)
+
+
+def test_an_event_whose_plane_truth_is_off_the_plane_is_measured_by_its_lost_share():
+    """_offplane_share: the largest share of a plane's truth charge valid_cells removed -- 0 when
+    nothing went, ~1 when a plane's truth is wholly off it (the event is then rejected)."""
+    import numpy as np
+    from helix.data.cells import fkey, valid_cells
+    from helix.data.dataset import _offplane_share
+    keys = np.array([fkey(0, 10, 5), fkey(0, 11, 5), fkey(1, 5000, 5), fkey(1, 6000, 6)], np.int64)
+    rec = dict(key=keys, q=np.array([10.0, 10.0, 7.0, 3.0], np.float32), dom_frac=np.ones(4, np.float32),
+               dom_y=np.zeros(4, np.float32), dom_z=np.zeros(4, np.float32),
+               ct_cell=np.arange(4, dtype=np.int32), ct_track=np.zeros(4, np.int32), ct_q=np.ones(4, np.float32))
+    after = valid_cells(rec, gids=[0, 1], n_wires=[400, 400], n_ticks=4336)
+    assert _offplane_share(rec, after) == 1.0                      # plane 1 lost everything
+    assert _offplane_share(rec, rec) == 0.0

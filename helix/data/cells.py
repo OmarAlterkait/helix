@@ -284,6 +284,12 @@ def cell_truth(g, w, t, q, trk, grp, grp_yz):
     G, W, T = (np.asarray(x, np.int64) for x in (g, w, t))
     Q, TRK, GRP = np.asarray(q, np.float64), np.asarray(trk, np.int64), np.asarray(grp, np.int64)
     YZ = np.asarray(grp_yz, np.float64).reshape(-1, 2)
+    # samples off the plane (charge diffused below wire 0, or before tick 0) are not cells: fkey
+    # would pack a negative key that reads as plane -1 (read_event's valid_cells drops the ones the
+    # first d1m build wrote). Dropped, not clipped: clipping would pile their charge onto the edge.
+    on = (W >= 0) & (T >= 0)
+    if not on.all():
+        G, W, T, Q, TRK, GRP, YZ = G[on], W[on], T[on], Q[on], TRK[on], GRP[on], YZ[on]
     key, inv = np.unique(fkey(G, W // FW, T // FT), return_inverse=True)
     inv = inv.astype(np.int64).ravel()
     qc = np.bincount(inv, weights=Q, minlength=len(key))
@@ -524,7 +530,8 @@ def build_shard(coeff_shard, source_root, out_dir=None):
 
 # ------------------------------------------------------------------------------------------- read
 def read_event(f, pos):
-    """Event at write position ``pos`` of an open cells file -> a record (:data:`SCHEMA` names)."""
+    """Event at write position ``pos`` of an open cells file -> a record (:data:`SCHEMA` names),
+    without cells whose key is not a real cell (:func:`valid_cells`)."""
     out = {}
     for grp in GROUPS:
         off = f[grp]["event_offset"]
@@ -532,6 +539,42 @@ def read_event(f, pos):
         for g, col, name, dt in SCHEMA:
             if g == grp:
                 out[name] = f[grp][col][a:b]
+    return valid_cells(out)
+
+
+def valid_cells(rec, gids=None, n_wires=None, n_ticks=None):
+    """``rec`` without cells that are not on a plane. Always: keys that pack a negative value -- a
+    fine wire below 0 or a tick below -4096 -- which unkey reads as plane -1 and every key consumer
+    refuses (:func:`helix.model.tokenize.cell_key`). With the event's planes (``gids`` and their
+    ``n_wires``, the raw tick span ``n_ticks``, all from the paired coeff shard): also cells on no
+    plane of the event, beyond its last wire, or outside [0, n_ticks). d1m's first truth build wrote
+    such cells in ONE event of 200,000 (sim_wire_cells_0664 event 112): 368 with negative keys, and
+    16,333 on plane 3 at fine wires up to 16,374 against 984, 12.8% of that event's charge; the
+    negative ones stopped every denoiser run that drew the event. ``ct_cell`` rows of dropped cells
+    go; the rest are renumbered."""
+    key = np.asarray(rec["key"])
+    ok = key >= 0
+    if gids is not None:
+        g, w, t = unkey(np.where(ok, key, 0))
+        gids, nw = np.asarray(gids, np.int64), np.asarray(n_wires, np.int64)
+        pos = np.searchsorted(gids, g) if np.all(np.diff(gids) > 0) else np.array([np.flatnonzero(gids == x)[0] if (gids == x).any() else len(gids) for x in g], np.int64)
+        on = pos < len(gids)
+        lim = np.where(on, nw[np.minimum(pos, len(gids) - 1)], 0)
+        on &= gids[np.minimum(pos, len(gids) - 1)] == g
+        ok &= on & (w * FW < lim) & (t >= 0)
+        if n_ticks is not None:
+            ok &= t * FT < int(n_ticks)
+    if ok.all():
+        return rec
+    out = dict(rec)
+    for name in ("key", "q", "dom_frac", "dom_y", "dom_z"):
+        out[name] = np.asarray(rec[name])[ok]
+    new = np.cumsum(ok) - 1                                     # old cell row -> new row
+    ct = np.asarray(rec["ct_cell"], np.int64)
+    keep = ok[ct]
+    out["ct_cell"] = new[ct[keep]].astype(np.asarray(rec["ct_cell"]).dtype)
+    for name in ("ct_track", "ct_q"):
+        out[name] = np.asarray(rec[name])[keep]
     return out
 
 
