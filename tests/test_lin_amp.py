@@ -75,3 +75,15 @@ def test_a_frozen_encoder_refuses_the_channel():
     from helix.model.denoise import build_denoise
     with pytest.raises(ValueError, match="freeze_encoder"):
         build_denoise("/nonexistent-run", freeze_encoder=True, lin_amp_scale=30.0)
+
+
+def test_pad_input_columns_pads_only_the_embedding():
+    """Any other widened matrix is a real architecture mismatch: left unpadded, so a strict load
+    refuses it instead of loading zeros."""
+    torch.manual_seed(1)
+    old = build_fm(dict(SMALL)).eval()
+    new = build_fm(dict(SMALL, lin_amp_scale=30.0)).eval()
+    sd = dict(old.state_dict())
+    k = next(k for k, v in sd.items() if v.dim() == 2 and k != "embed.weight")
+    sd[k] = sd[k][:, :-1].clone()                       # as if a checkpoint had a narrower layer
+    assert pad_input_columns(new, sd)[k].shape == sd[k].shape

@@ -230,11 +230,13 @@ def _diff(a, b):
 
 # ---- floor -----------------------------------------------------------------------------------
 
-FLOOR_ARMS = ("trained", "raw", "amplitude", "presence")
+FLOOR_ARMS = ("trained", "raw", "amplitude", "presence", "presence_raw")
 #: where a fit row came from: the map rows, or (--fit-windows) a fit event's window of that kind
 FIT_SOURCES = ("map", "iso", "bg", "near", "isox")
 N_WCELL = (32 // FW) * (128 // FT)                     # cells per window (helix.eval.events.window_cells)
 FLOOR_FITTED = ("trained", "raw")
+#: each fitted arm's presence classifier: ``presence_raw`` is the primary arm's raw-input reference
+PRESENCE = {"trained": "presence", "raw": "presence_raw"}
 #: the presence arm: the trained features and rows, fit as a classifier of charge above the presence
 #: threshold rather than a regression of log-charge. An MSE regression's optimum next to a track is
 #: E[q | context] > 0 -- a haze even from a representation that localises charge exactly -- so the
@@ -314,7 +316,7 @@ class Scored:
         two runs scored on the SAME windows compare paired (``python -m helix.eval compare``)."""
         n = len(self.meta)
         out = {f"meta/{k}": np.array([m.get(k) if m.get(k) is not None else "" for m in self.meta])
-               for k in ("ev", "kind", "g", "E", "ctx")}
+               for k in ("ev", "kind", "g", "E", "ctx", "w0", "t0")}
         out.update({f"meta/{k}": np.array([bool(m.get(k, d)) for m in self.meta])        # window flags
                     for k, d in (("kept", True), ("tok", True), ("shtok", False))})
         out.update({f"score/{k}": np.concatenate(v).reshape(n, -1).max(1) for k, v in self.s.items()})
@@ -420,12 +422,11 @@ class Floor:
                 if ok.any():
                     p[ok] = probe.predict(X, waux[ok])
                 scores[seed_name(a, k)] = np.expm1(np.maximum(p, 0)) * Q0
-            if a == "trained":
-                for k, probe in enumerate(self.probes["presence"]):
-                    p = np.zeros(len(widx), np.float32)
-                    if ok.any():
-                        p[ok] = probe.proba(X, waux[ok])
-                    scores[seed_name("presence", k)] = p
+            for k, probe in enumerate(self.probes[PRESENCE[a]]):
+                p = np.zeros(len(widx), np.float32)
+                if ok.any():
+                    p[ok] = probe.proba(X, waux[ok])
+                scores[seed_name(PRESENCE[a], k)] = p
         self.scored.add(ev, tr, scores)
 
     def _fit(self):
@@ -446,8 +447,7 @@ class Floor:
         for a in FLOOR_FITTED:
             X = torch.cat(f["X"].pop(a))
             self.probes[a] = fit_seeds(self.ctx, X, A, y, e)
-            if a == "trained":
-                self.probes["presence"] = fit_seeds(self.ctx, X, A, (y > q_pres).astype(np.int64), e, n_classes=2)
+            self.probes[PRESENCE[a]] = fit_seeds(self.ctx, X, A, (y > q_pres).astype(np.int64), e, n_classes=2)
             del X
         self.n_fit = len(y)
 
@@ -465,9 +465,11 @@ class Floor:
         for a in FLOOR_FITTED:
             out[a].update(val_mse_seeds=[round(-p.val_score, 6) for p in self.probes[a]], **seed_spread(pts[a]))
         out["d_over_raw_seeds"] = seed_spread([_diff(t, r) for t, r in zip(pts["trained"], pts["raw"])])
-        pres = [self.scored.point(seed_name("presence", k)) for k in range(len(self.probes["presence"]))]
-        out["presence"].update(val_bal_acc_seeds=[round(p.val_score, 6) for p in self.probes["presence"]],
-                               **seed_spread(pres))
+        for name in PRESENCE.values():
+            pres = [self.scored.point(seed_name(name, k)) for k in range(len(self.probes[name]))]
+            out[name].update(val_bal_acc_seeds=[round(p.val_score, 6) for p in self.probes[name]],
+                             **seed_spread(pres))
+        out["d_presence_over_raw"] = self.scored.paired("presence", "presence_raw", c.n_boot, c.seed)
         out["_windows"] = self.scored.windows()          # popped by the CLI into <out>.windows.npz
         return out
 

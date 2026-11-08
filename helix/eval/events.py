@@ -22,14 +22,16 @@ Truth (per event, from the cells record; no tokenizer, no checkpoint):
                      the window from anything else), placed at a RANDOM offset around it (a
                      window centred on truth would put a blurred prediction's centre on the
                      answer)
-               bg    kept coefficients but no truth charge within +-16 w / +-128 t; up to
-                     :data:`N_BG_PLANE` per plane, so every view has its own background
-                     (the FAR background)
+               bg    the FAR background: origin uniform over the plane's kept-coefficient
+                     extent, no truth charge within +-16 w / +-128 t and at least one kept
+                     coefficient inside; up to :data:`N_BG_PLANE` per plane, so every view has
+                     its own background
                near  the NEAR background: no truth charge in the window or within one cell
                      of it, but some within +-16 w / +-128 t -- exactly the surroundings
                      ``bg`` must keep empty (:func:`helix.data.denoise.near_windows`, the
                      denoiser's own training windows) -- and at least one kept coefficient
-                     inside, as every ``bg`` window has; up to :data:`N_BG_PLANE` per plane.
+                     inside, as every ``bg`` window has (both uniform in area: they differ in
+                     distance to charge alone); up to :data:`N_BG_PLANE` per plane.
                      Drawn after the others, so iso and bg are the same with or without them
 
 The number (:func:`score_windows`): a window's score is its largest cell score; an iso window
@@ -181,6 +183,7 @@ WW, WT = 32, 128                     # window, wires x raw ticks
 ENERGY_BINS = (0.0, 0.1, 0.2, 0.5, 1e9)                  # MeV
 #: per event: signal map rows at most, iso windows at most, bg windows per plane at most
 CAP_SIGNAL, N_ISO, N_BG_PLANE = 3000, 60, 10
+N_BG_TRIES = 4000                    # far-background draws per plane
 KINDS = ("iso", "bg", "near", "isox")
 VIEWS = ("U", "V", "Y")
 ENERGY_NAMES = tuple(f"{ENERGY_BINS[i]:g}-{ENERGY_BINS[i + 1]:g}" for i in range(len(ENERGY_BINS) - 1))
@@ -297,16 +300,24 @@ def event_truth(cells, coeff_cells, rng, windows=True):
             if w[4] == "clear":
                 has_clear.add(int(j))
 
+    # far background: origins UNIFORM over the plane's kept-coefficient extent (on the cell grid),
+    # kept with no truth charge within +-16 w / +-128 t and >= 1 kept coefficient inside -- the
+    # near windows' rule (uniform in area, then >= 1 kept), so the two backgrounds differ in their
+    # distance to charge alone. Centring on a random kept cell instead weights a window by its
+    # kept count, so the far tail leans to dense kept clusters.
     if len(ck):
-        cg = unkey(ck)[0]
+        cg, cw, ct = unkey(ck)
         for g in np.unique(cg).tolist():
+            m = cg == g
+            wl, wh = int(cw[m].min()) - WW // FW + 1, int(cw[m].max())
+            tl, th = int(ct[m].min()) - WT // FT + 1, int(ct[m].max())
             n_b = 0
-            for x in rng.permutation(ck[cg == g])[:500].tolist():
+            for _ in range(N_BG_TRIES):
                 if n_b >= N_BG_PLANE:
                     break
-                _, fw, ft = (int(v) for v in unkey(x))
-                w0, t0 = max(0, fw * FW - WW // 2), max(0, ft * FT - WT // 2)
-                if len(contents(g, w0, t0, 16, 128)):
+                w0, t0 = int(rng.integers(wl, wh + 1)) * FW, int(rng.integers(tl, th + 1)) * FT
+                if w0 < 0 or t0 < 0 or len(contents(g, w0, t0, 16, 128)) \
+                        or not np.isin(window_cells(g, w0, t0), ck).any():
                     continue
                 wins.append(("bg", g, w0, t0, np.nan, None))
                 n_b += 1

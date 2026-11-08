@@ -307,6 +307,40 @@ number still under its own key, the new ones beside it):*
   diagnostic only: `auc_clear_<E>` (dominated by the bulk of the far background; it disagreed in
   sign with the primary key on fm_cooldown vs fm EMA, +0.045 vs -0.007), `floor_eff1pct_crowded_
   near_<E>` and `near_fpr_at_far`. One key, so a close call is not decided after seeing it.
+  **Corrected after an independent review (2026-11-07, each read in the code):**
+  - *The two backgrounds were not drawn alike.* Far windows were centred on a random kept cell,
+    so weighted by their kept count (the 1% tail leaning to dense kept clusters); near windows
+    were uniform in area, then needed one kept coefficient. So "they differ in distance alone"
+    was false, and the haze AUC and the amplitude's 0.407 ("the input looks quieter than far")
+    may partly be that sampling. Far windows are now uniform over the plane's kept extent with
+    the same >= 1 kept rule. Far numbers change with it, so an older anchor does not pair with a
+    newer run: `compare` now checks window origins (`w0`/`t0`) and refuses mixed dumps.
+  - *The primary key is mostly Y and blind to the haze.* On fm_cooldown presence clear@far
+    0.1-0.2 is U 0.30 / V 0.23 / Y 0.54, and a reviewer read past paired gains as nearly all Y.
+    At the far threshold presence fires on 35% of near windows (MSE 18%). So a ranking now
+    takes the key paired and seed-averaged, with its per-view differences (`compare`'s `views`:
+    a gain carried by one view is not a win), and two guards that must not get worse:
+    `floor_eff1pct_crowded_near_0.1-0.2` and `auc_near_vs_far`.
+  - *The primary arm had no raw reference.* `presence_raw` (the same classifier on the raw
+    token inputs) and `d_presence_over_raw` now give it one.
+  - *Cooldown EMA.* `WeightEMA` starts from a clone of the live model, i.e. the un-annealed
+    stable weights, at decay 0.9999: after a 9.4k-step cooldown ~39% of the average is still
+    those weights (~70% after a 3.6k-step one). Read a cooldown at `last`. The d1m_denoise arms
+    load `fm_cooldown`'s EMA (the same encoder for all four).
+  - *Probe-time attention reach: small, measured.* Groups are fixed token counts (`gp`/`gd`), so
+    with every token visible a probe-time group spans ~1/4 of a training group's (25% visible).
+    Re-probed on fm_cooldown, paired against the current probe (presence; clear 0.1-0.2 / clear
+    <0.1 / crowded@near 0.1-0.2): groups x2 +0.011 / +0.014 / +0.018, x4 +0.004 (n.s.) / -0.006 /
+    +0.020, and a 4-way random partition (each token encoded once at training density, group
+    size and span) -0.008 / +0.005 (n.s.) / -0.023. At most ~0.02, shared by every arm of a
+    paired comparison, and no account of the floor or the haze. A fine-tuned evaluation sees full
+    density anyway. Groups sized by physical span would make training and inference match by
+    construction, as a pretraining choice.
+  - *The loss against its best case* (fm_cooldown, 200 events, masked slots by token class
+    against each class's own per-band marginal): far tokens sit 3% below that context-free floor
+    on both terms, so noise is not being learnt. Signal tokens carry 87% of the value term and
+    learn -29% (value) / -58% (occupancy); near tokens -19% / -24%. Validation loss is therefore
+    mostly the reconstruction of bright, dense charge, not faint detection.
   **The probes fit on the map rows only (`--fit-windows none`), decided before the d1m_lr
   ranking.** A first test added the fit events' window cells within the fixed fit budget, so they
   DISPLACED map rows (positive fraction 0.68 -> 0.19-0.24, ~3x fewer charged cells) and every key

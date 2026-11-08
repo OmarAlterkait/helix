@@ -308,6 +308,7 @@ def test_floor_learns_what_the_features_carry(synth):
     # probability -- on features that ARE the charge it finds what the regression finds
     assert eff("presence") > eff("amplitude") + 0.2, (out["presence"], out["amplitude"])
     assert len(out["presence"]["val_bal_acc_seeds"]) == 2
+    assert len(out["presence_raw"]["val_bal_acc_seeds"]) == 2 and "d_presence_over_raw" in out
     # what the probes fit on: by default the map rows only
     assert out["fit_windows"] == "none" and out["fit_composition"]["map"]["frac"] == 1.0
     assert 0 < out["fit_composition"]["all"]["pos"] < 1
@@ -765,6 +766,7 @@ def test_truth_has_both_window_kinds_and_valid_keys():
         assert np.array_equal(tr["wkey"][cells], W.window_cells(m["g"], m["w0"], m["t0"]))
         if m["kind"] == "bg":
             assert q[cells].sum() == 0 and np.isnan(m["E"]) and not near_charge[cells].any()
+            assert np.isin(tr["wkey"][cells], ck).any()
         elif m["kind"] == "near":                                  # empty, a kept coefficient, charge beside
             assert q[cells].sum() == 0 and np.isnan(m["E"]) and near_charge[cells].any()
             assert np.isin(tr["wkey"][cells], ck).any()
@@ -788,6 +790,28 @@ def test_every_plane_gets_its_own_background():
     tr = W.event_truth(rec, ck, np.random.default_rng(1))
     bg = [m["g"] for m in tr["meta"] if m["kind"] == "bg"]
     assert bg.count(0) == W.N_BG_PLANE and bg.count(2) == W.N_BG_PLANE
+
+
+def test_far_background_is_uniform_in_area_not_in_kept_count():
+    """A noise-only plane with one window-sized patch fully kept (128 cells) and one kept cell per
+    window-sized block elsewhere (100): a far window lands on the patch at about its share of the
+    AREA (a few %), not its share of the kept cells (128/228, which centring on a kept cell gave)."""
+    rec, ck = _event(np.random.default_rng(0))
+    nw, nt = W.WW // C.FW, W.WT // C.FT
+    bw, bt = np.meshgrid(np.arange(10) * nw, np.arange(10) * nt, indexing="ij")
+    sparse = C.fkey(np.full(100, 3), bw.ravel() + 3, bt.ravel() + 2)
+    pw, pt = np.meshgrid(np.arange(nw), np.arange(nt), indexing="ij")
+    patch = C.fkey(np.full(nw * nt, 3), pw.ravel() + 5 * nw, pt.ravel() + 5 * nt)
+    ck3 = np.unique(np.concatenate([ck, sparse, patch]))
+    on = 0
+    n = 0
+    for s in range(20):
+        tr = W.event_truth(rec, ck3, np.random.default_rng(s))
+        for i, m in enumerate(tr["meta"]):
+            if m["kind"] == "bg" and m["g"] == 3:
+                n += 1
+                on += np.isin(tr["wkey"][i * N_CELL:(i + 1) * N_CELL], patch).any()
+    assert n == 20 * W.N_BG_PLANE and on / n < 0.15
 
 
 def test_windows_are_not_centred_on_the_particle():
@@ -1120,6 +1144,48 @@ def test_compare_is_paired_over_identical_windows(tmp_path):
     np.savez(tmp_path / "c.npz", **other, **{"floor/score/trained": a})
     with pytest.raises(SystemExit, match="windows differ"):
         cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "c.npz"), "--out", str(tmp_path / "ac.json")])
+    # origins: a far window's kind, plane and NaN energy do not place it
+    z = np.zeros(len(meta), np.int64)
+    w = dict(base, **{"floor/meta/w0": z, "floor/meta/t0": z})
+    w2 = dict(w, **{"floor/meta/w0": np.where(is_iso, 0, 32)})
+    np.savez(tmp_path / "w.npz", **w, **{"floor/score/trained": a})
+    np.savez(tmp_path / "w2.npz", **w2, **{"floor/score/trained": a})
+    with pytest.raises(SystemExit, match="windows differ"):
+        cli(["compare", str(tmp_path / "w.npz"), str(tmp_path / "w2.npz"), "--out", str(tmp_path / "ww.json")])
+    with pytest.raises(SystemExit, match="only one run"):
+        cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "w.npz"), "--out", str(tmp_path / "aw.json")])
+    # seeds: the difference is the mean over the probe seeds both dumps carry
+    np.savez(tmp_path / "a2.npz", **base, **{"floor/score/trained": a, "floor/score/trained.s1": a})
+    np.savez(tmp_path / "b2.npz", **base, **{"floor/score/trained": b, "floor/score/trained.s1": a})
+    cli(["compare", str(tmp_path / "a2.npz"), str(tmp_path / "b2.npz"), "--out", str(tmp_path / "ab2.json")])
+    r = json.load(open(tmp_path / "ab2.json"))
+    assert r["seeds"] == [0, 1]
+    assert r["a_minus_b"]["floor_eff1pct_clear_0.1-0.2"][0] == pytest.approx(d[0] / 2, abs=1e-3)
+    assert r["seed_half_range"]["floor_eff1pct_clear_0.1-0.2"] == pytest.approx(d[0] / 2, abs=1e-3)
+
+
+def test_compare_shows_a_difference_carried_by_some_views(tmp_path):
+    """B finds every clear window on U and none on V or Y: the pooled difference is positive, its
+    views block shows U at 0 and V, Y above it, not of one sign."""
+    from helix.eval.__main__ import main as cli
+    import json
+    rng = np.random.default_rng(1)
+    meta = []
+    for e in range(30):
+        for g in range(3):
+            meta += [dict(ev=e, kind="bg", g=g, E=np.nan, ctx="")] * 20
+            meta += [dict(ev=e, kind="iso", g=g, E=0.15, ctx="clear")] * 4
+    arr = lambda k: np.array([m[k] for m in meta])                              # noqa: E731
+    base = {f"floor/meta/{k}": arr(k) for k in ("ev", "kind", "g", "E", "ctx")}
+    s_bg, iso = rng.random(len(meta)), arr("kind") == "iso"
+    a = np.where(iso, 2.0, s_bg)
+    b = np.where(iso & (arr("g") == 0), 2.0, np.where(iso, 0.0, s_bg))
+    np.savez(tmp_path / "a.npz", **base, **{"floor/score/trained": a})
+    np.savez(tmp_path / "b.npz", **base, **{"floor/score/trained": b})
+    cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "b.npz"), "--out", str(tmp_path / "ab.json")])
+    v = json.load(open(tmp_path / "ab.json"))["views"]["floor_eff1pct_clear_0.1-0.2"]
+    assert v["U"] == 0 and v["V"] > 0.9 and v["Y"] > 0.9 and not v["same_sign"]
+    assert v["mean"] == pytest.approx((v["U"] + v["V"] + v["Y"]) / 3, abs=1e-3)
 
 
 def test_the_cli_writes_the_window_scores_beside_the_json(tmp_path, monkeypatch):

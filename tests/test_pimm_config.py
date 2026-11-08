@@ -674,3 +674,21 @@ def test_bootstrap_block_deletes_its_temporaries():
     leaked = sorted(k for k, v in ns.items()
                     if not k.startswith("__") and isinstance(v, types.ModuleType))
     assert not leaked, f"bootstrap_block leaks {leaked}"
+
+
+def test_the_cooldown_has_the_base_hooks_without_the_ema():
+    """fm_cooldown.py restates fm.py's hook list (a list is replaced, not merged) minus WeightEMA:
+    a cooldown's EMA would be mostly the un-annealed stable weights. Read from the sources, so
+    the two cannot drift apart unnoticed."""
+    import ast
+    from pathlib import Path
+
+    def hooks(name):
+        src = (Path(__file__).resolve().parent.parent / "configs" / "pimm" / name).read_text()
+        node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
+                    and any(getattr(t, "id", None) == "hooks" for t in n.targets))
+        return [{kw.arg: ast.literal_eval(kw.value) for kw in h.keywords} for h in node.value.elts]
+
+    base, cool = hooks("fm.py"), hooks("fm_cooldown.py")
+    assert any(h["type"] == "WeightEMA" for h in base)
+    assert cool == [h for h in base if h["type"] != "WeightEMA"]

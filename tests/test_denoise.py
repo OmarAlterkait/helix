@@ -304,6 +304,8 @@ def test_unknown_or_unpaired_heads_are_refused(fm_run):
         CellDecoder(SMALL["d"], dist="hlgauss")
     with pytest.raises(ValueError, match="cond_charge"):
         build_denoise(str(d), dist="cat", compile_blocks=False)    # cat is the hurdle: cond_charge=False is refused
+    with pytest.raises(ValueError, match="cond_charge"):
+        build_denoise(str(d), dist="gauss", compile_blocks=False)  # a Gaussian on the empty rows' zeros
 
 
 def test_a_calibrated_distribution_covers_its_nominal_intervals():
@@ -339,7 +341,7 @@ def _coeff_denoise(fm, **kw):
     return MODELS.build(dict(type="Coeff-Denoise", fm=fm, **kw))
 
 
-@pytest.mark.parametrize("dist,cond", [("point", True), ("gauss", False), ("gauss", True), ("cat", True)])
+@pytest.mark.parametrize("dist,cond", [("point", False), ("point", True), ("gauss", True), ("cat", True)])
 def test_every_head_trains_through_coeff_denoise(fm_run, sample, dist, cond):
     d, _ = fm_run
     torch.manual_seed(0)
@@ -491,3 +493,19 @@ def test_warmup_cosine_schedule():
     f = WarmupCosineLR(opt, total_steps=110, warmup=10, floor=0.02).lr_lambdas[0]
     assert f(0) == pytest.approx(0.1) and f(9) == pytest.approx(1.0) and f(10) == pytest.approx(1.0)
     assert f(60) == pytest.approx(0.51) and f(110) == pytest.approx(0.02) and f(500) == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize("dist", ["point", "gauss"])
+def test_the_readout_is_fp32_under_bf16_autocast(fm_run, sample, dist):
+    """Under bf16 autocast the predicted charge is still fp32-resolved: values off bf16's grid
+    (whose step is 0.031 in y above y = 4, ~3% in charge)."""
+    d, _ = fm_run
+    torch.manual_seed(0)
+    m = build_denoise(str(d), dist=dist, cond_charge=True, compile_blocks=False).eval()
+    with torch.no_grad():
+        m.head.out.bias[0] = 5.0                                  # the charge readout near y = 5
+    B = _batch(_rows(sample, seed=0))
+    with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
+        y, _ = m.predict(B, B["q_idx"], B["q_aux"], B["q_nbr"])
+    assert y.dtype == torch.float32
+    assert (y - y.bfloat16().float()).abs().max() > 1e-4

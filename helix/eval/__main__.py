@@ -7,7 +7,9 @@ so their difference is paired:
     python -m helix.eval compare A.windows.npz B.windows.npz [--metric floor] [--arm trained]
         [--arm-b ARM] [--boot 200] [--seed 0] --out diff.json
 
-bootstraps ``A - B`` of every window number over the same event resamples."""
+bootstraps ``A - B`` of every window number over the same event resamples, averaged over the
+probe seeds both carry; ``views`` puts each per-view number's U / V / Y differences side by side,
+so a pooled difference carried by one view shows (``same_sign``)."""
 
 from __future__ import annotations
 
@@ -37,22 +39,48 @@ def compare(argv):
     za, zb = np.load(a.a, allow_pickle=False), np.load(a.b, allow_pickle=False)
     pre = f"{a.metric}/"
     keys = ("ev", "kind", "g", "E", "ctx")
-    for k in keys:
-        x, y = za[f"{pre}meta/{k}"], zb[f"{pre}meta/{k}"]
+    # the window identity: these, plus each window's origin and flags wherever EITHER dump has them
+    # (both must then: a far window's kind, plane and NaN energy do not say where it is)
+    opt = [k for k in ("w0", "t0", "kept", "tok", "shtok") if f"{pre}meta/{k}" in za.files or f"{pre}meta/{k}" in zb.files]
+    for k in keys + tuple(opt):
+        f = f"{pre}meta/{k}"
+        if f not in za.files or f not in zb.files:
+            raise SystemExit(f"compare: only one run's windows record {k}: score both with the same helix.eval")
+        x, y = za[f], zb[f]
         if x.shape != y.shape or not np.array_equal(x, y, equal_nan=(x.dtype.kind == "f")):
             raise SystemExit(f"compare: the two runs' windows differ ({k}): score them on the same events and seed")
     meta = [dict(zip(keys, (int(e), str(kd), int(g), float(E), str(c) or None)))
             for e, kd, g, E, c in zip(*(za[f"{pre}meta/{k}"] for k in keys))]
-    for k in ("kept", "tok", "shtok"):                  # the window flags, where the dump has them
-        if f"{pre}meta/{k}" in za.files:
-            if f"{pre}meta/{k}" not in zb.files or not np.array_equal(za[f"{pre}meta/{k}"], zb[f"{pre}meta/{k}"]):
-                raise SystemExit(f"compare: the two runs' windows differ ({k})")
+    for k in ("kept", "tok", "shtok"):
+        if k in opt:
             for m, v in zip(meta, za[f"{pre}meta/{k}"]):
                 m[k] = bool(v)
-    sa, n, counts = window_stat(za[f"{pre}score/{a.arm}"][:, None], meta)
-    sb = window_stat(zb[f"{pre}score/{a.arm_b or a.arm}"][:, None], meta)[0]
-    out = dict(a=a.a, b=a.b, metric=a.metric, arm=a.arm, arm_b=a.arm_b or a.arm, n_events=n, n_windows=counts,
-               a_minus_b=bootstrap(lambda m: _diff(sa(m), sb(m)), n, a.boot, a.seed))
+    arm_b = a.arm_b or a.arm
+    name = lambda arm, k: arm if k == 0 else f"{arm}.s{k}"                  # noqa: E731 (probe.seed_name)
+    seeds = [k for k in range(16) if f"{pre}score/{name(a.arm, k)}" in za.files
+             and f"{pre}score/{name(arm_b, k)}" in zb.files]
+    if not seeds:
+        raise SystemExit(f"compare: no score {a.arm} in A and {arm_b} in B")
+    pairs = [(window_stat(za[f"{pre}score/{name(a.arm, k)}"][:, None], meta),
+              window_stat(zb[f"{pre}score/{name(arm_b, k)}"][:, None], meta)[0]) for k in seeds]
+    n, counts = pairs[0][0][1], pairs[0][0][2]
+
+    def mean_diff(m):
+        ds = [_diff(sa(m), sb(m)) for (sa, _, _), sb in pairs]
+        return {key: float(np.mean([d[key] for d in ds])) for key in ds[0]}
+
+    diff = bootstrap(mean_diff, n, a.boot, a.seed)
+    per_seed = [_diff(sa(np.ones(n, np.int64)), sb(np.ones(n, np.int64))) for (sa, _, _), sb in pairs]
+    half = {key: round(float(np.ptp([d[key] for d in per_seed])) / 2, 4) for key in per_seed[0]}
+    views = {}
+    for key in diff:
+        base = key[:-2]
+        if key.endswith("_U") and all(base + s in diff for s in ("_V", "_Y")):
+            v = [diff[base + s][0] for s in ("_U", "_V", "_Y")]
+            views[base] = dict(U=v[0], V=v[1], Y=v[2], mean=round(float(np.mean(v)), 4),
+                               same_sign=bool(all(x > 0 for x in v) or all(x < 0 for x in v)))
+    out = dict(a=a.a, b=a.b, metric=a.metric, arm=a.arm, arm_b=arm_b, n_events=n, n_windows=counts,
+               seeds=seeds, a_minus_b=diff, seed_half_range=half, views=views)
     with open(a.out, "w") as fh:
         json.dump(out, fh, indent=1, sort_keys=True, default=str)
     print(f"[helix.eval compare] -> {a.out}", flush=True)

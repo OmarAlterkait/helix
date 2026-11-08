@@ -105,7 +105,7 @@ elif [ -n "${HELIX_SLURM_TRAIN_QOS:-}" ]; then
 fi
 
 # What this run is: the same NAME continues only the same config, training overrides and node
-# topology (a requeued or resubmitted chain resumes from $HELIX_EXP/NAME, and the config derives
+# topology (a resubmitted chain resumes from $HELIX_EXP/NAME -- below -- and the config derives
 # its batch and LR from the world size). Other scheduling flags may change. Recorded only once
 # pimm has accepted the submission, so a rejected one does not lock the name.
 TRAIN=(); seen=0; NN=$R_NNODES; NP=$R_NPROC; prev=
@@ -123,6 +123,11 @@ if [ "$DRY" = 0 ] && [ -s "$RUN/submit.cmd" ] && [ "$(cat "$RUN/submit.cmd")" !=
   echo "           not of:            $WHAT  (pass --run.name for a new run)" >&2
   exit 2
 fi
+
+# A run with a checkpoint resumes. pimm resumes a chain's later links, but its FIRST link takes the
+# config's train.resume (False), and train.sh's fresh branch then re-snapshots the code and writes
+# over model/last (pimm/launch/submit.py:234-236).
+[ -d "$RUN/model/last" ] && ARGS+=(--train.resume)
 
 echo "submit.sh: $NAME <- $CFG, recipe $(basename "$RECIPE"), site $HELIX_SITE ($PIMM_SITE), exp $HELIX_EXP" >&2
 "$PY" -m pimm.cli submit "${ARGS[@]}" "${REST[@]}" || exit $?

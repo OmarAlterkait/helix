@@ -146,11 +146,14 @@ class CellDecoder(nn.Module):
             att = torch.einsum("nhl,nlhd->nhd", a, V.view(n, L + 1, h, P // h)).reshape(n, P)
             q = q + blk["o"](att).float()
             q = q + blk["mlp"](blk["nm"](q)).float()
-        out = self.out(q).float()
-        if self.dist == "cat":
-            return cat_mean(out, self.centers), cat_presence_logit(out), out
-        if self.dist == "gauss":
-            return out[:, 0], out[:, 1], self.dist_out(q).float().squeeze(-1)
+        # The readout in fp32: under bf16 autocast a Linear's OUTPUT is bf16, and a later .float()
+        # keeps its rounding -- a 0.031 step in y above y = 4 (~110k e-), ~3% in charge.
+        with torch.autocast(q.device.type, enabled=False):
+            out = self.out(q.float())
+            if self.dist == "cat":
+                return cat_mean(out, self.centers), cat_presence_logit(out), out
+            if self.dist == "gauss":
+                return out[:, 0], out[:, 1], self.dist_out(q.float()).squeeze(-1)
         return out[:, 0], out[:, 1]
 
 
@@ -172,6 +175,10 @@ class DenoiseModel(nn.Module):
         if head.dist == "cat" and not self.cond_charge:
             raise ValueError("dist='cat' is a hurdle by construction (bin 0 is 'no charge', the charge is "
                              "conditional on the rest): set cond_charge=True")
+        if head.dist == "gauss" and not self.cond_charge:
+            # a Gaussian likelihood on the empty rows' exact zeros drives their width to the clamp,
+            # where its gradient stops and their squared error is weighted ~1e6
+            raise ValueError("dist='gauss' models the charge of charged cells: set cond_charge=True")
         for n, p in self.fm.named_parameters():
             if self.freeze_encoder or not n.startswith(ENCODER_PREFIXES):
                 p.requires_grad_(False)
@@ -313,15 +320,19 @@ def calibration_stats(head, out, y_true):
 
 
 # ---------------------------------------------------------------------------- building one
+PAD_KEYS = ("embed.weight",)         # the matrices an encoder input option widens (lin_amp_scale)
+
+
 def pad_input_columns(module, state_dict):
-    """``state_dict`` with every matrix that has FEWER input columns than ``module``'s own (an
-    encoder option such as ``lin_amp_scale`` added input features) zero-padded to fit: the old
-    columns copied, the new ones zero, so the loaded model computes exactly what the checkpoint
-    did until training moves the new weights."""
+    """``state_dict`` with the :data:`PAD_KEYS` matrices that have FEWER input columns than
+    ``module``'s own (an encoder option such as ``lin_amp_scale`` added input features)
+    zero-padded to fit: the old columns copied, the new ones zero, so the loaded model computes
+    exactly what the checkpoint did until training moves the new weights. Any other mismatch is
+    left for ``load_state_dict`` to refuse."""
     own = module.state_dict()
     out = dict(state_dict)
     for k, v in state_dict.items():
-        o = own.get(k)
+        o = own.get(k) if k in PAD_KEYS else None
         if o is not None and o.shape != v.shape and o.dim() == 2 and v.dim() == 2 \
                 and o.shape[0] == v.shape[0] and o.shape[1] > v.shape[1]:
             w = o.new_zeros(o.shape)
