@@ -17,7 +17,7 @@ A study file (configs/sweeps/*.yaml) is the whole study, in place of a launcher 
       suffix: _cool                     #   its run name: <arm><suffix>
       overrides: {weight: "$HELIX_EXP/{run}/model/last"}
     after_each:                         # optional: one job per arm, once that arm has succeeded
-      command: python -m helix.eval $HELIX_EXP/{run} --metrics floor,uprobe --out $HELIX_EXP/{run}/eval.json
+      command: python -m helix.eval --uprobe $HELIX_EXP/{run} --weights last --out $HELIX_EXP/{run}/eval.json
       time: "02:00:00"
     after_all:                          # optional: one job once every arm has succeeded
       command: python scripts/compare.py {runs}

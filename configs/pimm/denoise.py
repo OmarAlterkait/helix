@@ -27,8 +27,10 @@ is M6d of DENOISE at tag archive-2026-11, and it is the default:
   (``model/model_best.pth``) by validation loss (comparable within one ``dist`` only).
 
 Label efficiency: ``data.train.n_events=N`` trains on a fixed, nested random subset of the train
-split (``data.train.subset_seed``); raise ``epoch`` with it, since the length is in epochs. Full
-scoring is ``python -m helix.eval <FM run> --metrics denoise --denoiser <this run>``.
+split (``data.train.subset_seed``); raise ``epoch`` with it, since the length is in epochs. The
+evaluation protocol (1,024 events, 16 epochs, 4 ranks) is ``ft_eval.py`` on this base. Scoring is
+``python -m helix.eval <this run> --out e.json`` (its ``model/last``; ``--weights best`` for the
+checkpoint of the lowest validation loss).
 
     scripts/submit.sh denoise --resources.nnodes 4 [-- key=value ...]
     scripts/submit.sh denoise --run.name denoise_m6dc -- model.cond_charge=True

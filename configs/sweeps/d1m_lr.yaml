@@ -4,7 +4,8 @@
 # equivalents 2.2e-3, 1.55e-3, 1.1e-3) -- for 3 epochs of j000000 (~36k steps), each cooled, plus a
 # second seed of the recipe's LR: the noise floor every difference is read against (r1 d768:
 # ~0.02 loss, 0.03-0.04 floor efficiency). Judged by the probes, not the loss (rank correlation
-# 0.15 between them over 17 r1 models).
+# 0.15 between them over 17 r1 models): the along-wire probe (`helix.eval --uprobe`), and the
+# ft_eval fine-tune of an encoder (configs/sweeps/ft_eval.yaml).
 #
 #   python scripts/sweep.py configs/sweeps/d1m_lr.yaml --dry-run
 #
@@ -24,5 +25,5 @@ then:
   submit: [--resources.nnodes, "4", --chain.jobs, "2"]
   overrides: {weight: "$HELIX_EXP/{run}/model/last", data.train.max_len: 57600}
 after_each:
-  command: python -m helix.eval $HELIX_EXP/{run} --metrics recon,floor,uprobe,labels --weights last --out $HELIX_EXP/{run}/eval.json
+  command: python -m helix.eval --uprobe $HELIX_EXP/{run} --weights last --out $HELIX_EXP/{run}/eval.json
   time: "04:00:00"

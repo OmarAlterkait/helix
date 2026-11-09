@@ -1,0 +1,32 @@
+# The evaluation of pretrained encoders: the fixed-budget fine-tune (configs/pimm/ft_eval.py:
+# 1,024 labelled events, 4,096 steps on one 4-GPU node) per encoder, two fine-tune seeds each
+# (their spread is the resolution), and the same architecture from scratch (the floor). Scored by
+# `python -m helix.eval` on the probe split; pairs of arms by
+#   python -m helix.eval compare --a $HELIX_EXP/ft_X/eval.windows.npz $HELIX_EXP/ft_X_s1/eval.windows.npz \
+#       --b $HELIX_EXP/ft_Y/eval.windows.npz $HELIX_EXP/ft_Y_s1/eval.windows.npz --out X_vs_Y.json
+# Encoders:
+#   cool        fm_cooldown (S3DF), its `last` (the cooldown's weight)
+#   stable      fm (S3DF stable phase), its EMA
+#   lr44s1      lr4.4e-3_s1_cool (NERSC), `last`
+#   lr44s0      lr4.4e-3_cool, the same recipe's other TRAINING seed
+#   scratch     the same architecture from random init
+# The ft_rank study (2026-11-08) ran these arms under these names with the same protocol, so its
+# runs are this study's; `--only` adds or reruns single arms.
+#
+#   python scripts/sweep.py configs/sweeps/ft_eval.yaml --dry-run
+config: ft_eval
+submit: [--resources.nnodes, "1"]
+arms:
+  ft_cool:       {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last}}
+  ft_cool_s1:    {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, seed: 1}}
+  ft_stable:     {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm}}
+  ft_stable_s1:  {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm, seed: 1}}
+  ft_lr44s1:     {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_s1_cool/model/last}}
+  ft_lr44s1_s1:  {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_s1_cool/model/last, seed: 1}}
+  ft_lr44s0:     {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_cool/model/last}}
+  ft_lr44s0_s1:  {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_cool/model/last, seed: 1}}
+  ft_scratch:    {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false}}
+  ft_scratch_s1: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false, seed: 1}}
+after_each:
+  command: python -m helix.eval $HELIX_EXP/{run} --out $HELIX_EXP/{run}/eval.json
+  time: "04:00:00"
