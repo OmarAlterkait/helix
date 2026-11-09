@@ -4,58 +4,22 @@ host can read a corpus's run list and identity (``tests/test_boundary.py``).
 
 Usage::
 
+    python -m helix.data.verify <corpus_root>                  every run, against _calib/CHUNKS.txt
     python -m helix.data.verify <run_dir> --dataset-name sim_wire [--expect 1000]
-    python -m helix.data.verify <corpus_root>          every run, against _calib/CHUNKS.txt
-    python -m helix.data.verify compare A B [A2 B2 ...]   same content, byte for byte
+    python -m helix.data.verify compare A B [A2 B2 ...]        same content, byte for byte
 
-IDENTITY
-========
-What corpus is this, really?
+IDENTITY. Each corpus is internally consistent (``CoeffTPCReader`` refuses shards that disagree
+with each other), so a reader pointed at the WRONG corpus is perfectly satisfied and computes a
+plausible number against data the model never trained on. ``coeff_tpc`` and ``coeff_tpc_r1``
+share a run name and differ only in the coherent-removal gate. ``basis_digest`` hashes the whole
+DSP recipe (wavelet, level, mode, ticks, pad, band lengths, removal, threshold, sigma_norm), so
+it is the one field a run records and is checked against.
 
-A checkpoint and a corpus can be mismatched with nothing to say so. Each corpus
-is internally consistent -- ``CoeffTPCReader`` rejects shards that disagree with
-each other (:mod:`helix.data.dataset`) -- so a reader pointed at the WRONG corpus is
-perfectly satisfied, and a split check validates only that the split
-name exists. The result is a plausible number computed against data the model
-never trained on.
-
-This is not hypothetical. Two corpora live side by side under the same run name:
-
-    coeff_tpc     removal_json {... npass:2}            basis_digest 7f954a84..
-    coeff_tpc_r1  removal_json {... npass:2, tau:0.05}  basis_digest 8c4542b6..
-
-Identical wavelet, bands, gids, sigma_norm and noise model; they differ only in
-the coherent-removal gate, which changes WHICH COEFFICIENTS SURVIVE. Different
-signal, not different vintages of the same signal. Both read cleanly and both
-pass ``verify_corpus``.
-
-``basis_digest`` already hashes the full DSP identity (wavelet, level, mode,
-n_ticks_raw, pad, band_lengths, removal, threshold, sigma_norm), so it is the
-one field worth carrying: equal digests mean the same corpus recipe, and that is
-exactly the question an evaluator needs answered.
-
-INTEGRITY
-=========
-Corpus-level integrity check for a coeff corpus.
-
-``helix.core.coeff_io.audit_shard`` is thorough but strictly PER FILE — it runs
-inside the builder after every shard write and cannot see anything that spans
-shards. Every failure the build actually produced in practice is cross-file:
-
-- a job that died after writing its noisy shard, leaving no ``coeff_clean`` pair
-  (observed: an OOM-killed 1000-event build left a complete, valid, readable
-  1.36 GB noisy shard and nothing noticed);
-- a shard missing from the middle of a run (a failed array task);
-- overlapping ``--event-start`` ranges duplicating events across shards;
-- shards that disagree on the frozen ``norm_sigma`` / basis / plane set.
-
-None of these corrupt a file. Each one silently changes how much data the corpus
-contains, which no per-file audit and no training run will ever report.
-
-A whole corpus built by ``scripts/corpus.sh`` is also checked against its plan
-(``_calib/CHUNKS.txt``, :func:`helix.build.plan`): every planned shard exists with its planned
-number of events and nothing else is there, every optical shard holds its TPC shard's events,
-and every shard carries the corpus's one ``_calib/norm_sigma_global.npy``.
+INTEGRITY. ``helix.core.coeff_io.audit_shard`` checks one file as it is written; what goes wrong
+in a build spans files -- a failed task leaves a shard missing, overlapping ranges duplicate
+events, a rebuilt shard comes from another commit or another norm table. :func:`verify` checks a
+corpus against its plan (``_calib/CHUNKS.txt``, :func:`helix.build.plan`), or one run directory
+on its own.
 """
 from __future__ import annotations
 
@@ -71,12 +35,8 @@ import numpy as np
 # ---- identity --------------------------------------------------------------------------------
 
 def corpus_identity(data_root, dataset_name="sim_wire", split=None):
-    """The DSP identity of a corpus, read from the first shard's ``/config``.
-
-    Returns ``{'basis_digest', 'removal_json', 'sigma_norm', 'shard'}``, or
-    ``None`` when no shard is found -- callers distinguish "not a corpus" from
-    "a corpus that disagrees", which are different failures.
-    """
+    """``{'basis_digest', 'removal_json', 'sigma_norm', 'shard'}`` of the first shard, or ``None``
+    when there is none ("not a corpus" and "a corpus that disagrees" are different failures)."""
     roots = [os.path.join(data_root, split)] if split else [data_root]
     for r in roots:
         for pat in (f"{dataset_name}_coeff_*.h5", f"*/{dataset_name}_coeff_*.h5"):
@@ -94,17 +54,11 @@ def corpus_identity(data_root, dataset_name="sim_wire", split=None):
 
 
 def check_corpus_matches(recorded, actual, *, where=""):
-    """Refuse when a run's recorded corpus identity disagrees with the one open.
+    """Refuse when a run's recorded corpus identity disagrees with the one open; returns a note.
 
-    ``recorded`` is what the run stamped at train time (may be None for runs that
-    predate the stamp); ``actual`` is :func:`corpus_identity` of the corpus about
-    to be read. Returns a note for the caller to log.
-
-    A MISSING record is not an error -- every checkpoint trained before this
-    existed has none, and failing them would make the guard unadoptable. A
-    PRESENT record that disagrees is always an error: that is the case where a
-    number would otherwise come out plausible and wrong.
-    """
+    A MISSING record passes with a note (checkpoints trained before the stamp have none); a
+    PRESENT record that disagrees always raises -- the case where a number would otherwise come
+    out plausible and wrong."""
     if actual is None:
         raise ValueError(f"{where}: no coeff shard found — this is not a corpus")
     if not recorded or not recorded.get("basis_digest"):
@@ -165,34 +119,14 @@ def resolve_corpus(recorded_root, *, override=None, identity=None, dataset_name=
 
 
 def corpus_runs(corpus_root=None) -> list[str]:
-    """The run list, read from the corpus's own ``_calib/RUNS.txt``.
-
-    ``corpus_root`` is the GENERATION directory (the parent of the run dirs and
-    of ``_calib/``), defaulting to ``HELIX_CORPUS``'s parent.
-
-    Why this exists. The eight run ids were retyped as a literal list in
-    the eight-run training config and again (the first three) in
-    its cooldown, while the BUILD side already reads them from a
-    file: ``scripts/corpus.sh`` writes and reads ``$OUT/_calib/RUNS.txt``. So the corpus
-    ships its own manifest and the training configs ignored it.
-
-    That matters more than ordinary duplication because ``RUNS.txt`` is the
-    corpus's own list of its runs (``scripts/corpus.sh plan`` writes it from the
-    run directories it was given), and both build phases read it. It is the closest thing the corpus has
-    to a declaration of what it contains, and a copy that carries a different
-    subset would train happily on whatever the literal named.
-
-    The order is preserved as written: the split is keyed on
-    ``blake2b(run/source_file) + event`` and so is order-free, but the run list
-    also feeds ``N_TRAIN_EVENTS`` accounting and a stable order keeps two
-    readings of the same corpus comparable.
-    """
-    import os as _os
+    """The run list, in written order, from the corpus's own ``_calib/RUNS.txt`` (written by
+    ``scripts/corpus.sh plan``). ``corpus_root`` is the generation directory, defaulting to
+    ``HELIX_CORPUS``'s parent. The training configs read it rather than retyping the runs."""
     if corpus_root is None:
-        from helix.paths import root as _root
-        corpus_root = _root("HELIX_CORPUS").parent
-    manifest = _os.path.join(str(corpus_root), "_calib", "RUNS.txt")
-    if not _os.path.isfile(manifest):
+        from helix.paths import root
+        corpus_root = root("HELIX_CORPUS").parent
+    manifest = os.path.join(str(corpus_root), "_calib", "RUNS.txt")
+    if not os.path.isfile(manifest):
         raise FileNotFoundError(
             f"no run manifest at {manifest}. _calib/RUNS.txt is written by "
             f"`scripts/corpus.sh plan` (docs/RUNBOOK.md §3); a corpus "
@@ -204,215 +138,34 @@ def corpus_runs(corpus_root=None) -> list[str]:
     return runs
 
 
+#: What every shard of one corpus shares. ``basis_digest`` covers the basis, the band lengths, the
+#: removal gate, the threshold and sigma_norm; ``removal_json`` is named on its own so a message
+#: can show the gate; ``norm_sigma`` must be FROZEN across a corpus (row i normalises any event in
+#: any shard). ``CoeffTPCReader`` refuses a disagreement, :func:`verify` reports it.
+SIGNATURE = ("basis_digest", "removal_json", "gids", "n_wires", "norm_sigma")
+
+
+def shard_signature(cfg):
+    """``{name: value}`` of :data:`SIGNATURE` for an open shard's ``/config`` (lists and str, so
+    ``==`` compares them; ``None`` where absent)."""
+    out = {}
+    for k in SIGNATURE:
+        v = cfg[k][()] if k in cfg else cfg.attrs.get(k)
+        if isinstance(v, bytes):
+            v = v.decode("utf-8", "replace")
+        out[k] = v.tolist() if isinstance(v, np.ndarray) else (None if v is None else str(v))
+    return out
+
+
 # ---- integrity -------------------------------------------------------------------------------
 
-def verify_corpus(data_root, dataset_name, *, split="", expect_events=None,
-                  modalities=("coeff", "coeff_clean"), planned=None):
-    """Check a built corpus for cross-shard problems. Returns a list of problem
-    strings (empty == clean). Does not open the dataset; pure file inspection, so
-    it works on a partially built corpus too."""
-    probs = []
-    base = os.path.join(data_root, split) if split else data_root
-
-    def shards(mod):
-        pat = os.path.join(base, f"{dataset_name}_{mod}_[0-9]*.h5")
-        return sorted(glob.glob(pat))
-
-    noisy = shards("coeff")
-    if not noisy:
-        return [f"no {dataset_name}_coeff_*.h5 shards under {base}"]
-
-    def idx_of(p):
-        return int(os.path.basename(p).rsplit("_", 1)[-1][:-3])
-
-    # --- 1. pair completeness -------------------------------------------------
-    if "coeff_clean" in modalities:
-        n_idx = {idx_of(p) for p in noisy}
-        c_idx = {idx_of(p) for p in shards("coeff_clean")}
-        if n_idx - c_idx:
-            probs.append(f"coeff shards with no coeff_clean pair: {sorted(n_idx - c_idx)}")
-        if c_idx - n_idx:
-            probs.append(f"coeff_clean shards with no coeff pair: {sorted(c_idx - n_idx)}")
-
-    # --- 2. file_index contiguity --------------------------------------------
-    # A gap usually means a build job died. It can also mean there was never
-    # anything to build there (an input absent upstream), which looks identical
-    # from inside the corpus -- so `planned` (the shard numbers the corpus's plan,
-    # _calib/CHUNKS.txt, writes) is the evidence: a gap the plan never wrote is
-    # fine, a planned shard that is absent is an error.
-    have = sorted(idx_of(p) for p in noisy)
-    missing = sorted(set(range(have[0], have[-1] + 1)) - set(have))
-    if planned is not None:
-        missing = [i for i in missing if i in planned]
-    if missing:
-        probs.append(f"file_index gap — shards {missing} absent between "
-                     f"{have[0]} and {have[-1]} (a failed job leaves exactly this"
-                     + (")" if planned is not None else "; the corpus's plan says whether it was "
-                        "meant to exist: verify the corpus root)"))
-
-    # --- 3. cross-shard agreement + identity uniqueness ----------------------
-    ref = None
-    ident = Counter()
-    code = []
-    dsp = []
-    total = 0
-    for p in noisy:
-        try:
-            with h5py.File(p, "r") as f:
-                cfg = f["config"]
-                cur = dict(
-                    band_lengths=cfg["band_lengths"][:].tolist(),
-                    gids=cfg["gids"][:].tolist(),
-                    n_wires=cfg["n_wires"][:].tolist(),
-                    norm_sigma=(cfg["norm_sigma"][:].tolist()
-                                if "norm_sigma" in cfg else None),
-                    basis_digest=str(cfg.attrs.get("basis_digest", "")),
-                    noise_json=str(cfg.attrs.get("noise_json", "")),
-                )
-                # Which helix built this shard. Compared separately from the
-                # fields above because absence is LEGACY, not disagreement:
-                # shards predating the field simply have none, and flagging
-                # every one of them would bury the case this exists to catch —
-                # two shards of one corpus built by different code.
-                _prov = json.loads(str(cfg.attrs.get("provenance_json", "{}")))
-                code.append((os.path.basename(p), _prov.get("code")))
-                # The DSP's INPUTS: which geometry file and which noise spectrum
-                # produced this shard. Both hashes are already written by
-                # the sim build and were never compared — so a corpus
-                # assembled from shards built against different geometry, or
-                # against a different (or white) noise spectrum, passed clean.
-                # Handled like `code`, not like the fields above: absence is
-                # LEGACY, so only shards that carry them are compared.
-                dsp.append((os.path.basename(p),
-                            {k: _prov.get(k) for k in
-                             ("geom", "geom_sha256", "spectrum", "spectrum_sha256")}
-                            if any(k in _prov for k in
-                                   ("geom_sha256", "spectrum_sha256")) else None))
-                n = int(cfg.attrs["n_events"])
-                total += n
-                if "ident" in f:
-                    runs = f["ident"]["run"][:]
-                    srcs = f["ident"]["source_file"][:]
-                    evs = f["ident"]["event"][:]
-                    for r, s, e in zip(runs, srcs, evs):
-                        r = r.decode() if isinstance(r, bytes) else str(r)
-                        s = s.decode() if isinstance(s, bytes) else str(s)
-                        ident[(r, s, int(e))] += 1
-                else:
-                    probs.append(f"{os.path.basename(p)}: no /ident group")
-        except Exception as e:                       # unreadable/truncated
-            probs.append(f"{os.path.basename(p)}: cannot read ({type(e).__name__}: {e})")
-            continue
-        if ref is None:
-            ref, ref_p = cur, p
-        else:
-            for k in cur:
-                if cur[k] != ref[k]:
-                    probs.append(
-                        f"shards disagree on {k}: {os.path.basename(ref_p)} vs "
-                        f"{os.path.basename(p)}"
-                        + ("  (norm_sigma must be FROZEN across a corpus — build "
-                           "with --norm-sigma)" if k == "norm_sigma" else ""))
-
-    # --- 3b. code version ----------------------------------------------------
-    known = [(f, c) for f, c in code if c]
-    if not known and code:
-        # A corpus where NOTHING records its builder must fail, not pass. The
-        # guard below only compares shards that carry `code`, so a corpus with
-        # zero of them skipped the check entirely and reported clean — measured
-        # on run_0027575715: 0 of 100 shards carry it, verify_corpus said OK,
-        # and one surviving build log shows 12 shards were rebuilt from a
-        # different worktree. "Which code produced this data" is the one
-        # question a provenance check exists to answer.
-        probs.append(
-            f"NO shard records provenance['code'] ({len(code)} shards): the "
-            f"corpus cannot say which helix built it, so a mixed-tree build is "
-            f"undetectable. Rebuild with a current builder, or record the "
-            f"provenance alongside the shards.")
-    if known:
-        # Compare FIELD BY FIELD over the keys a pair of records actually share,
-        # not by serialising the whole dict. A record that omits `git_dirty`
-        # because `git status` timed out is INCOMPLETE, not DIFFERENT: it does
-        # not contradict a record that has it. Comparing json.dumps() treated
-        # {"git": X, "git_dirty": false} and {"git": X} as two versions and
-        # failed a corpus built entirely by commit X -- which is a false refusal,
-        # and the worst kind, because the fix looks like "rebuild 344 GB".
-        conflicts = {}
-        for key in {k for _, c in known for k in c}:
-            vals = {json.dumps(c[key], sort_keys=True) for _, c in known if key in c}
-            if len(vals) > 1:
-                conflicts[key] = sorted(vals)
-        if conflicts:
-            probs.append(
-                "shards were built by DIFFERENT helix versions: "
-                + "; ".join(f"{k}={' vs '.join(v)}" for k, v in sorted(conflicts.items()))
-                + "  (basis_digest and the geom/spectrum hashes pin the DSP's "
-                  "inputs, not its code, so this is the only field that shows it)")
-        elif len({frozenset(c) for _, c in known}) > 1:
-            # Same values everywhere, but some shards recorded fewer fields.
-            # Not a refusal -- nothing disagrees -- but say so, because it means
-            # provenance capture failed on some tasks and the NEXT build might
-            # lose a field that would have mattered.
-            missing = sorted({k for _, c in known for k in c}
-                             - set.intersection(*[set(c) for _, c in known]))
-            probs.append(
-                f"NOTE: provenance is INCOMPLETE on some shards (missing: {missing}). "
-                f"Every field that IS recorded agrees, so this is not a mixed "
-                f"build -- helix.core.coeff_event.code_version gives up on a git "
-                f"timeout, which happens under a wide job array on a shared "
-                f"filesystem.")
-        elif any(c.get("git_dirty") for _, c in known):
-            probs.append(
-                f"corpus was built from a DIRTY working tree "
-                f"({known[0][1].get('git')}) — the recorded commit does not "
-                f"describe the code that ran")
-        if len(known) != len(code):
-            probs.append(
-                f"{len(code) - len(known)} of {len(code)} shards predate the "
-                f"provenance 'code' field (legacy); the rest record "
-                f"{known[0][1].get('git', '?')}")
-
-    # --- 3c. DSP inputs (geometry + noise spectrum) ---------------------------
-    known_dsp = [(f, d) for f, d in dsp if d]
-    if known_dsp:
-        seen = {json.dumps(d, sort_keys=True) for _, d in known_dsp}
-        if len(seen) > 1:
-            probs.append(
-                "shards were built against DIFFERENT DSP inputs (geometry or "
-                "noise spectrum): " + "; ".join(sorted(seen))
-                + "  (a corpus mixing geometries or noise models is not one "
-                  "corpus; the coefficients are not comparable)")
-        if len(known_dsp) != len(dsp):
-            probs.append(
-                f"{len(dsp) - len(known_dsp)} of {len(dsp)} shards predate the "
-                f"geom/spectrum provenance hashes (legacy); the rest record "
-                f"geom={known_dsp[0][1].get('geom')} "
-                f"spectrum={known_dsp[0][1].get('spectrum')}")
-
-    # --- 4. duplicate events -------------------------------------------------
-    dups = [k for k, c in ident.items() if c > 1]
-    if dups:
-        probs.append(
-            f"{len(dups)} event identities appear more than once (overlapping "
-            f"--event-start ranges duplicate training data invisibly); first few: "
-            f"{dups[:5]}")
-
-    # --- 5. expected count ---------------------------------------------------
-    if expect_events is not None and total != expect_events:
-        probs.append(f"event count {total} != expected {expect_events}")
-
-    return probs
-
-
-# ------------------------------------------------------------------------------------- plan
 def read_plan(root):
     """[(prefix, first, count, events_per_shard, shard_start, inputs)] of ``root/_calib/CHUNKS.txt``.
 
     The plan records each shard prefix as the absolute path it was built at
     (``<built root>/<run>/<dataset>``). A corpus moved since -- staged to $SCRATCH, transferred
     to another site -- keeps the plan but not the path, so a prefix whose run directory is
-    absent resolves under ``root`` by its last two components (run, dataset): every shard of
-    a d1m copy at NERSC was otherwise "missing" and nothing else was checked."""
+    absent resolves under ``root`` by its last two components (run, dataset)."""
     out = []
     for line in open(os.path.join(root, "_calib", "CHUNKS.txt")):
         if line.strip():
@@ -429,49 +182,121 @@ def _ident(f):
     return [(s(r), s(sf), int(e)) for r, sf, e in zip(g["run"][:], g["source_file"][:], g["event"][:])]
 
 
-def verify_plan(root):
-    """A corpus against its plan: problems (empty == complete). Then every run dir with
-    :func:`verify_corpus`."""
-    probs, want = [], {}
-    for prefix, _, count, eps, k, _ in read_plan(root):
-        for j in range(-(-count // eps)):
-            want.setdefault(prefix, {})[k + j] = min(eps, count - j * eps)
-    g = os.path.join(root, "_calib", "norm_sigma_global.npy")
-    norm = np.load(g) if os.path.exists(g) else None
-    for prefix, shards in sorted(want.items()):
-        found = {int(p.rsplit("_", 1)[1][:-3]) for kind in ("coeff", "optical")
-                 for p in glob.glob(f"{prefix}_{kind}_[0-9]*.h5")}
-        probs += [f"{prefix}: shard {k} is not in the plan" for k in sorted(found - set(shards))]
-        for k, n in sorted(shards.items()):
-            paths = {kind: f"{prefix}_{kind}_{k:04d}.h5" for kind in ("coeff", "optical")}
-            paths = {kind: q for kind, q in paths.items() if os.path.exists(q)}
-            if not paths:
+def _index(path):
+    return int(path.rsplit("_", 1)[1][:-3])
+
+
+def verify(root, dataset_name=None, *, expect_events=None):
+    """Problems of a corpus (empty: whole); entries starting ``NOTE:`` do not fail it.
+
+    ``root`` with ``_calib/CHUNKS.txt`` (no ``dataset_name``): every planned shard is present with
+    its planned number of events and nothing else is, every optical shard holds its TPC shard's
+    events, and every coeff shard carries ``_calib/norm_sigma_global.npy``. A run directory with
+    ``dataset_name``: its ``{dataset_name}_coeff_*.h5`` (every gap reported; ``expect_events`` the
+    total). Then, over all coeff shards: one :func:`shard_signature`, one helix commit and a clean
+    tree, no event identity twice. Pure file inspection: a partial corpus can be checked too."""
+    probs, planned = [], {}
+    if dataset_name is None:
+        for prefix, _, count, eps, k, _ in read_plan(root):
+            for j in range(-(-count // eps)):
+                planned[(prefix, k + j)] = min(eps, count - j * eps)
+        g = os.path.join(root, "_calib", "norm_sigma_global.npy")
+        norm = np.load(g) if os.path.exists(g) else None
+        for prefix in sorted({p for p, _ in planned}):
+            found = {_index(q) for kind in ("coeff", "optical") for q in glob.glob(f"{prefix}_{kind}_[0-9]*.h5")}
+            probs += [f"{prefix}: shard {k} is not in the plan" for k in sorted(found - {k for p, k in planned
+                                                                                       if p == prefix})]
+        coeff, optical = [], {}
+        for (prefix, k), n in sorted(planned.items()):
+            have = {kind: q for kind in ("coeff", "optical")
+                    if os.path.exists(q := f"{prefix}_{kind}_{k:04d}.h5")}
+            if not have:
                 probs.append(f"{prefix}: shard {k} missing")
-                continue
-            ids = {}
-            for kind, q in paths.items():
+            if "coeff" in have:
+                coeff.append((have["coeff"], n))
+            if "optical" in have:
                 try:
-                    with h5py.File(q, "r") as f:
+                    with h5py.File(have["optical"], "r") as f:
                         if int(f["config"].attrs["n_events"]) != n:
-                            probs.append(f"{q}: {int(f['config'].attrs['n_events'])} events, planned {n}")
-                        ids[kind] = _ident(f)
-                        if kind == "coeff" and norm is not None and not np.array_equal(
-                                f["config/norm_sigma"][:], norm):
-                            probs.append(f"{q}: norm_sigma is not _calib/norm_sigma_global.npy")
-                except Exception as e:                          # unreadable or truncated
-                    probs.append(f"{q}: cannot read ({type(e).__name__}: {e})")
-            if len(ids) == 2 and ids["optical"] != ids["coeff"]:
-                probs.append(f"{paths['optical']}: events differ from its TPC shard")
-    # each run on its own; a file_index gap is judged against the plan
-    for prefix in sorted({p for p in want if glob.glob(f"{p}_coeff_[0-9]*.h5")}):
-        d, name = os.path.split(prefix)
-        probs += [f"{os.path.basename(d)}: {p}" for p in verify_corpus(
-            d, name, modalities=("coeff", "coeff_clean") if glob.glob(f"{prefix}_coeff_clean_*.h5")
-            else ("coeff",), planned=set(want[prefix]))]
+                            probs.append(f"{have['optical']}: {int(f['config'].attrs['n_events'])} events, "
+                                         f"planned {n}")
+                        optical[have.get("coeff")] = (have["optical"], _ident(f))
+                except Exception as e:                              # unreadable or truncated
+                    probs.append(f"{have['optical']}: cannot read ({type(e).__name__}: {e})")
+    else:
+        norm, optical = None, {}
+        paths = sorted(glob.glob(os.path.join(root, f"{dataset_name}_coeff_[0-9]*.h5")))
+        if not paths:
+            return [f"no {dataset_name}_coeff_*.h5 shards under {root}"]
+        have = [_index(p) for p in paths]
+        gap = sorted(set(range(have[0], have[-1] + 1)) - set(have))
+        if gap:
+            probs.append(f"file_index gap — shards {gap} absent (a failed job leaves exactly this; the "
+                         f"corpus's plan says whether it was meant to exist: verify the corpus root)")
+        coeff = [(p, None) for p in paths]
+
+    ref = None
+    commits, dirty, no_commit, inputs, ident, total = Counter(), [], [], set(), Counter(), 0
+    for p, want in coeff:
+        try:
+            with h5py.File(p, "r") as f:
+                cfg = f["config"]
+                sig, n = shard_signature(cfg), int(cfg.attrs["n_events"])
+                prov = json.loads(str(cfg.attrs.get("provenance_json", "{}")))
+                noise = str(cfg.attrs.get("noise_json", ""))
+                if norm is not None and not np.array_equal(cfg["norm_sigma"][:], norm):
+                    probs.append(f"{p}: norm_sigma is not _calib/norm_sigma_global.npy")
+                ids = _ident(f)
+                ident.update(ids)
+            if p in optical and optical[p][1] != ids:
+                probs.append(f"{optical[p][0]}: events differ from its TPC shard")
+        except Exception as e:                                      # unreadable or truncated
+            probs.append(f"{p}: cannot read ({type(e).__name__}: {e})")
+            continue
+        total += n
+        if want is not None and n != want:
+            probs.append(f"{p}: {n} events, planned {want}")
+        if ref is None:
+            ref, ref_p = sig, p
+        for k in SIGNATURE:
+            if sig[k] != ref[k]:
+                probs.append(f"shards disagree on {k}: {os.path.basename(ref_p)} vs {os.path.basename(p)}"
+                             + ("  (norm_sigma must be FROZEN across a corpus)" if k == "norm_sigma" else ""))
+        code = prov.get("code") or {}
+        if code.get("git"):
+            commits[code["git"]] += 1
+            if code.get("git_dirty"):
+                dirty.append(os.path.basename(p))
+        else:
+            no_commit.append(os.path.basename(p))
+        # the DSP's inputs, which basis_digest does not cover: geometry, noise spectrum, noise model
+        inputs.add(json.dumps([prov.get("geom_sha256"), prov.get("spectrum_sha256"), noise]))
+
+    if coeff and not commits:
+        probs.append(f"NO shard records the helix commit that built it ({len(coeff)} shards): "
+                     f"a mixed-tree build is undetectable")
+    if len(commits) > 1:
+        probs.append(f"shards were built by DIFFERENT helix commits: {dict(commits)}")
+    if dirty:
+        probs.append(f"corpus was built from a DIRTY working tree ({len(dirty)} shards, e.g. {dirty[0]}) "
+                     f"— the recorded commit does not describe the code that ran")
+    if commits and no_commit:
+        probs.append(f"NOTE: {len(no_commit)} shards record no commit (git timed out under a wide job "
+                     f"array?), e.g. {no_commit[0]}")
+    if len(inputs) > 1:
+        probs.append(f"shards were built against DIFFERENT DSP inputs ([geometry sha256, spectrum "
+                     f"sha256, noise]): {sorted(inputs)}")
+    dups = [k for k, c in ident.items() if c > 1]
+    if dups:
+        probs.append(f"{len(dups)} event identities appear more than once (overlapping ranges "
+                     f"duplicate training data invisibly); first few: {dups[:5]}")
+    if expect_events is not None and total != expect_events:
+        probs.append(f"event count {total} != expected {expect_events}")
     return probs
 
 
-# ------------------------------------------------------------------------------------- compare
+# ---- compare ---------------------------------------------------------------------------------
+
 SKIP_ATTRS = {"provenance_json", "created", "created_utc", "elapsed_s", "host"}
 
 
@@ -513,10 +338,8 @@ def compare(pa, pb):
 
 
 def _report(probs):
-    # "NOTE:" entries are observations that do not contradict anything -- they
-    # are printed, but they do not fail the corpus. Everything else does.
-    notes = [p for p in probs if "NOTE:" in p]
-    fatal = [p for p in probs if "NOTE:" not in p]
+    notes = [p for p in probs if p.startswith("NOTE:")]
+    fatal = [p for p in probs if not p.startswith("NOTE:")]
     for n in notes:
         print(f"  ~ {n}")
     if fatal:
@@ -540,27 +363,14 @@ def main(argv=None):
             bad += bool(d)
         return 1 if bad else 0
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("data_root", help="a run dir (with --dataset-name), or a corpus root with _calib/CHUNKS.txt")
+    ap.add_argument("data_root", help="a corpus root with _calib/CHUNKS.txt, or a run dir (with --dataset-name)")
     ap.add_argument("--dataset-name", default=None)
-    ap.add_argument("--split", default="")
-    ap.add_argument("--expect", type=int, default=None,
-                    help="expected total event count across the corpus")
-    ap.add_argument("--modalities", nargs="*", default=None,
-                    help="default: coeff, plus coeff_clean when the run has clean shards (--keep-clean)")
+    ap.add_argument("--expect", type=int, default=None, help="expected total event count (a run dir)")
+    ap.add_argument("--modalities", nargs="*", choices=["coeff"], help=argparse.SUPPRESS)   # coeff is the only one
     a = ap.parse_args(argv)
-    if a.dataset_name is None:
-        if not os.path.exists(os.path.join(a.data_root, "_calib", "CHUNKS.txt")):
-            ap.error("--dataset-name is required unless DATA_ROOT has _calib/CHUNKS.txt")
-        return _report(verify_plan(a.data_root))
-    return _report(verify_corpus(a.data_root, a.dataset_name, split=a.split,
-                                 expect_events=a.expect, modalities=_modalities(a)))
-
-
-def _modalities(a):
-    if a.modalities is not None:
-        return tuple(a.modalities)
-    clean = glob.glob(os.path.join(a.data_root, f"{a.dataset_name}_coeff_clean_*.h5"))
-    return ("coeff", "coeff_clean") if clean else ("coeff",)
+    if a.dataset_name is None and not os.path.exists(os.path.join(a.data_root, "_calib", "CHUNKS.txt")):
+        ap.error("--dataset-name is required unless DATA_ROOT has _calib/CHUNKS.txt")
+    return _report(verify(a.data_root, a.dataset_name, expect_events=a.expect))
 
 
 if __name__ == "__main__":

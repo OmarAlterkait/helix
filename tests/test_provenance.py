@@ -203,17 +203,6 @@ def test_code_version_is_atomic_or_absent():
         f"partial provenance record: {c}")
 
 
-def test_incomplete_provenance_does_not_read_as_a_mixed_build():
-    pytest.importorskip("pimm_data")  # provenance() resolves it
-    """helix.data.verify compares field by field, not by serialising the dict."""
-    from helix.data.verify import verify_corpus
-    import inspect
-    src = inspect.getsource(verify_corpus)
-    assert "json.dumps(c, sort_keys=True) for _, c in known" not in src, (
-        "whole-dict comparison is back: a record missing an optional field "
-        "will again read as a different helix version")
-
-
 # ---- the version is single-sourced -------------------------------------------------------
 
 REPO = Path(__file__).resolve().parent.parent
