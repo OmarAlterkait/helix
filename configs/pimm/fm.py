@@ -125,6 +125,7 @@ hooks = [
     dict(type="IterationTimer", warmup_iter=1),
     dict(type="InformationWriter", log_frequency=200),
     dict(type="FiniteGuard", check_every=100, max_skips=20),
+    dict(type="StepWatchdog", timeout=300),     # a stuck rank dumps its stacks before NCCL's 600 s
     dict(type="CheckpointSaverIteration", save_freq="auto"),   # model/last only, no iter_N.pth
 ]
 train = dict(type="FMTrainer")

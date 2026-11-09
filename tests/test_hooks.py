@@ -1,4 +1,4 @@
-"""The training hooks (helix.integrations.pimm.hooks): the finite-loss guard."""
+"""The training hooks (helix.integrations.pimm.hooks): the finite-loss guard and the step watchdog."""
 import importlib.util
 
 import pytest
@@ -24,7 +24,7 @@ pytest.importorskip("pimm")
 
 import logging
 
-from helix.integrations.pimm.hooks import FiniteGuard  # noqa: E402
+from helix.integrations.pimm.hooks import FiniteGuard, StepWatchdog  # noqa: E402
 
 
 # ---- the finite-loss guard ---------------------------------------------------------------
@@ -95,3 +95,34 @@ def test_non_finite_weights_stop_the_run_on_the_check_step():
         g.after_step()
     g.trainer.comm_info["iter"] = 6       # not a check step
     g.after_step()
+
+
+# ---- the step watchdog -------------------------------------------------------------------
+
+def test_the_watchdog_rearms_after_every_step_and_disarms_at_the_end(monkeypatch):
+    """Armed only from the end of a step (so step 1's compile is not timed), re-armed on every
+    step with the configured timeout and exit=True, cancelled when training ends."""
+    import faulthandler
+    calls = []
+    monkeypatch.setattr(faulthandler, "dump_traceback_later",
+                        lambda t, exit=False, file=None: calls.append((t, exit)))
+    monkeypatch.setattr(faulthandler, "cancel_dump_traceback_later", lambda: calls.append("cancel"))
+    w = StepWatchdog(timeout=42)
+    assert calls == []                                              # nothing armed before step 1
+    w.after_step()
+    w.after_step()
+    w.after_train()
+    assert calls == [(42.0, True), (42.0, True), "cancel"]
+    assert StepWatchdog().timeout == 300.0
+
+
+def test_a_stuck_step_dumps_the_stacks_and_exits():
+    """The real hook, in a subprocess: a step that never ends exits with the stuck stack."""
+    import subprocess
+    import sys
+    prog = ("import time\nfrom helix.integrations.pimm.hooks import StepWatchdog\n"
+            "StepWatchdog(timeout=0.5).after_step()\n"
+            "def stuck_in_a_collective():\n    time.sleep(120)\n"
+            "stuck_in_a_collective()\n")
+    r = subprocess.run([sys.executable, "-c", prog], capture_output=True, text=True, timeout=300)
+    assert r.returncode != 0 and "stuck_in_a_collective" in r.stderr

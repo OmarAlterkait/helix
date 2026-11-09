@@ -6,11 +6,18 @@
 # and `env:` values are shell-quoted), so site facts reach pimm as CLI flags
 # from scripts/submit.sh, which reads them from helix/sites/<site>.yaml.
 #
-# `setup:` is the one seam that IS shell, evaluated inside the job: it puts
-# helix and pimm on PYTHONPATH there. pimm's code snapshot copies only its own
-# scripts/ tools/ pimm/, so helix must come from the environment.
+# `setup:` is the one seam that IS shell, evaluated inside the job, on every link
+# of a chain: it puts helix and pimm on PYTHONPATH there. pimm's code snapshot
+# copies only its own scripts/ tools/ pimm/, so helix must come from the
+# environment; pimm's train.sh prepends the snapshot and keeps the rest, so a
+# resumed link imports helix too.
+#
+# The NCCL flight recorder: on a collective timeout every rank dumps its last
+# 2000 NCCL calls, which names the rank that stopped (the StepWatchdog hook dumps
+# that rank's Python stacks first).
 setup:
   - 'export PYTHONPATH="${HELIX_ROOT:?HELIX_ROOT did not reach the job; submit with scripts/submit.sh}:${HELIX_PIMM_ROOT:?HELIX_PIMM_ROOT did not reach the job}${PYTHONPATH:+:$PYTHONPATH}"'
+  - 'export TORCH_NCCL_DUMP_ON_TIMEOUT=1 TORCH_NCCL_TRACE_BUFFER_SIZE=2000'
 run:
   timestamp: false            # the run dir is $HELIX_EXP/<name>, which other configs name (fm_cooldown, denoise)
 chain:

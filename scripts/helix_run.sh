@@ -118,7 +118,7 @@ case "$RUNTIME" in
     ARGS=(shifter "--image=$IMAGE")
     [ -n "${HELIX_CONTAINER_MODULE:-}" ] && ARGS+=("--module=${HELIX_CONTAINER_MODULE}")
     # shifter inherits the caller's environment, so the HELIX_* set is already
-    # present; PYTHONPATH is the one thing train.sh would otherwise overwrite.
+    # present; PYTHONPATH gains the checkouts (pimm's train.sh prepends to it, never resets it).
     export PYTHONNOUSERSITE=1 PYTHONPATH="$HPP${PYTHONPATH:+:$PYTHONPATH}"
     exec "${ARGS[@]}" -- "${CMD[@]}"
     ;;

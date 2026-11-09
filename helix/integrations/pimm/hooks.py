@@ -1,4 +1,5 @@
-"""Run-lifecycle hooks: provenance (+ the corpus-mismatch refusal) and the finite guard.
+"""Run-lifecycle hooks: provenance (+ the corpus-mismatch refusal), the finite guard, the step
+watchdog.
 """
 
 from __future__ import annotations
@@ -192,3 +193,27 @@ class FiniteGuard(HookBase):
             raise RuntimeError(f"FiniteGuard: non-finite weights after iter {it} "
                                f"({self.skipped} steps skipped so far) -- stopping before "
                                f"a checkpoint is written from them")
+
+
+@HOOKS.register_module()
+class StepWatchdog(HookBase):
+    """Dump every thread's stack and exit if a training step takes longer than ``timeout`` s.
+
+    Three runs hung with no trace: one rank stuck (in a collective, a loader, a save), the
+    others waiting in NCCL until its 600 s timeout killed the job with only the collective's
+    name. Re-armed after every step -- from the end of step 1, so the first step's torch.compile
+    is not timed -- ``faulthandler`` fires on the stuck rank itself, before NCCL's timeout,
+    and its stderr shows where it was. No collectives: it cannot hang or desynchronise a run.
+    """
+
+    def __init__(self, timeout=300):
+        self.timeout = float(timeout)
+
+    def after_step(self):
+        import faulthandler
+        import sys
+        faulthandler.dump_traceback_later(self.timeout, exit=True, file=sys.__stderr__)
+
+    def after_train(self):
+        import faulthandler
+        faulthandler.cancel_dump_traceback_later()

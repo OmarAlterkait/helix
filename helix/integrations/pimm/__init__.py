@@ -29,9 +29,8 @@ model do not.
 
 The ``Coeff-FM`` and ``Coeff-Denoise`` MODELS entries are defined here. Submodules: ``data``
 (dataset + terminal transform), ``trainer`` (``FMTrainer`` + the schedules),
-``hooks`` (what a run WRITES: provenance, the finite
-guard). Importing this package registers all of them, because ``custom_imports`` names this
-path and nothing else.
+``hooks`` (provenance, the finite guard, the step watchdog). Importing this package registers
+all of them, because ``custom_imports`` names this path and nothing else.
 
 There is no in-training evaluation: validation loss does not rank representations, so a run
 is scored afterwards (``python -m helix.eval``, and a fine-tune) from its ``model/last``.
@@ -39,7 +38,8 @@ is scored afterwards (``python -m helix.eval``, and a fine-tune) from its ``mode
 
 from helix.data.denoise import DenoiseRows
 from helix.integrations.pimm.data import CoeffCollect, CoeffTPCDataset
-from helix.integrations.pimm.hooks import FiniteGuard, HelixPathBootstrap, HelixProvenance
+from helix.integrations.pimm.hooks import (FiniteGuard, HelixPathBootstrap, HelixProvenance,
+                                           StepWatchdog)
 from helix.integrations.pimm.trainer import (FMTrainer, WarmupCosineLR,
                                              WSDCooldownLR, WSDStableLR)
 from helix.model.tokenize import CoeffTokenize
@@ -48,7 +48,8 @@ from pimm.models.builder import MODELS
 __all__ = ["CoeffTokenize", "DenoiseRows", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
            "CoeffDenoise", "build_coeff_fm",
            "FMTrainer", "WarmupCosineLR",
-           "WSDStableLR", "WSDCooldownLR", "FiniteGuard", "HelixProvenance", "HelixPathBootstrap"]
+           "WSDStableLR", "WSDCooldownLR", "FiniteGuard", "StepWatchdog", "HelixProvenance",
+           "HelixPathBootstrap"]
 
 
 @MODELS.register_module("Coeff-FM")
