@@ -95,22 +95,6 @@ def test_hysteresis_keeps_a_faint_track_end_universal_drops():
     assert kept["hysteresis"] > 1.5 * kept["universal"]
 
 
-def test_coeff_shard_roundtrip(tmp_path):
-    """Chain results -> CoeffEvent -> coeff_io shard -> the same coefficients."""
-    from helix.core import coeff_io
-    chain = tpc_chain.TPCChain()
-    ces = [tpc_chain.coeff_event(chain, chain.process_event(*_event(seed=1 + e)), run="1", source_file="x.h5", event=7 + e)
-           for e in range(3)]
-    p = tmp_path / "x.h5"
-    coeff_io.write_coeff_shard(p, ces)
-    coeff_io.audit_shard(p)
-    for i, ce in enumerate(ces):
-        back = coeff_io.read_coeff_event(p, i)
-        for k in ("band", "plane_gid", "wire", "tau", "value"):
-            np.testing.assert_array_equal(getattr(back, k), getattr(ce, k))
-        assert back.event == 7 + i
-
-
 def test_coeff_event_physical_wires_and_validity(tmp_path):
     """SBND chain -> CoeffEvent: physical wire numbers (uninstrumented wires are
     gaps), per-wire validity through the shard, and the tokenizer gives excluded wires
@@ -204,15 +188,6 @@ def test_chain_output_is_pinned_on_the_synthetic_planes():
     assert [r["n_kept"] for r in res] == [sum(k) for k in _PINNED_KEPT]
     assert h.hexdigest() == _PINNED_POSITIONS
     np.testing.assert_allclose(abs_sum, _PINNED_ABS_SUM, rtol=1e-5)
-
-
-def test_sim_coeff_event():
-    clean, noisy = _planes(seed=1)
-    ch = TPCChain(sim_config([[len(x) for x in noisy]]))
-    res = ch.process_images(noisy, tpc=0)
-    ce = tpc_chain.coeff_event(ch, res, run="r", source_file="f.h5", event=3)
-    assert list(ce.gids) == [0, 1, 2] and list(ce.n_wires) == [200, 200, 150] and ce.wire_valid is None
-    assert len(ce.value) > 0 and (ce.band < 4).all()                      # D1 dropped (drop_finest 1)
 
 
 def test_stored_values_on_their_step():

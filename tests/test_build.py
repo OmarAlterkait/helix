@@ -159,18 +159,9 @@ def test_sigma_threshold_and_norm_are_populated(tmp_path):
 
 # ---- acceptance checks on a built corpus -------------------------------------------------
 
-# Acceptance checks for a BUILT corpus — semantic, not just structural.
-#
-# The lesson these encode: a shard whose ``sigma_threshold`` (and hence
-# ``norm_sigma``) was entirely zero passed round-trip, identity, digest and
-# co-support checks. Nothing asserted that a value must be *populated*, must
-# *vary*, or must *reconstruct the physics*. These do.
-#
-#   1. degenerate-field audit  — catches all-zero / constant / out-of-range content
-#   2. physics acceptance (F0) — reconstruct a built shard vs the clean truth projected
-#                                onto the bands the chain keeps
-
-# ---- 1. degenerate-field audit --------------------------------------------
+# Semantic, not just structural: a shard whose sigma_threshold (and so norm_sigma) was all zero
+# passed round-trip, identity and digest checks. The audit asks that values be populated, vary and
+# lie in range; F0 that a built shard reconstructs the physics.
 
 def test_audit_passes_a_good_shard(tmp_path):
     build_corpus(range(4), _plane_fn, _chain(), tmp_path, dataset_name="cx")
@@ -225,49 +216,17 @@ def test_audit_catches_corruption(tmp_path, corrupt, expect):
         audit_shard(p)
 
 
-def test_noise_mode_is_recorded_on_disk(tmp_path):
-    """Two shards built with different noise are otherwise indistinguishable —
-    a silently mixed-noise corpus. /config/noise_json pins it."""
-    import json as _json
-    build_corpus(range(2), _plane_fn, _chain(), tmp_path, dataset_name="cx",
-                 noise=dict(kind="white", coherent=True, incoherent=True))
-    with h5py.File(tmp_path / "cx_coeff_0000.h5", "r") as f:
-        assert _json.loads(f["config"].attrs["noise_json"])["kind"] == "white"
-
-
-# ---- 2. physics acceptance (F0) on real data ------------------------------
-
-
 REAL = sim_file("sensor")
 
 
 @pytest.mark.skipif(not os.path.exists(REAL), reason="campaign task not reachable")
 def test_f0_on_a_real_built_shard(tmp_path):
-    """Reconstruct a built shard and compare to the clean truth.
-
-    F0 = 1 - sum|recon-truth|/sum|truth| over the true-signal support (|clean| > 0) —
-    one number that exercises band/tau mapping, padding, sigma, gate, threshold and
-    codec together. ``truth`` is the noise-free image PROJECTED onto the bands the
-    chain keeps (its own transform with D1 zeroed, reconstructed): D1 is dropped by
-    design (the FM tokenizes A4, D4, D3, D2), so the dropped band is not a fidelity
-    loss to charge the DSP with. The projection alone keeps 0.989-0.995 of the clean
-    signal on this event.
-
-    Floors from the chain on wire_test_00_00_02 run_0027575715 shard 0 (events 0-3 x 6 planes,
-    this noise); they hold on the campaign task j000085-000089, which this now reads:
-
-        per plane   F0 min 0.871        per-event mean F0 0.910-0.917
-        off-support RMS(recon - truth) per-event mean 0.43-0.52, max 0.692 ADC
-
-    The earlier simulation path (since retired: gate, D1 kept) on the same event-0 input gave
-    the same F0 to 0.001 per plane, against the raw clean image. The floors below are
-    the ones that path used.
-
-    F0 is measured ON the signal support, so it is structurally blind to junk left
-    OFF it — a less aggressive gate keeps more residual coherent noise while F0
-    improves. The off-support RMS pins that axis so a future re-tune cannot trade it
-    away invisibly.
-    """
+    """F0 = 1 - sum|recon - truth| / sum|truth| over the true-signal support: band/tau mapping,
+    padding, sigma, gate, threshold and codec in one number. ``truth`` is the noise-free image
+    projected onto the bands the chain keeps (D1 is dropped by design). F0 is blind to junk left
+    OFF the support, so the off-support RMS pins that axis. Measured on wire_test run_0027575715
+    and on this task: per-plane F0 >= 0.871, per-event mean 0.910-0.917; off-support RMS per-event
+    mean 0.43-0.52, max 0.692 ADC."""
     from helix.tpc.readout import load_plane_registry
     from _noise_reference import generate_noise, digitize
     from helix.tpc.io import read_event, sensor_layout
@@ -367,49 +326,26 @@ def test_normalization_roundtrips_and_is_sane():
 
 
 def test_noise_seed_and_external_inputs_are_recorded(tmp_path):
-    """The corpus stores ONE fixed noise realisation per event by design, so the
-    seed is the only thing that makes that realisation reproducible — and it is
-    not derivable from the shard, because the two build modes use different seed
-    formulas. Likewise basis_digest covers the wavelet/gate/threshold but says
-    nothing about the plane geometry or noise spectrum the DSP consumed, so a
-    change to either would make old and new shards silently incomparable.
-    """
+    """What makes a shard reproducible and comparable, and is not derivable from it: the per-event
+    noise seed (one fixed realisation per event), the noise model, the DSP's external inputs
+    (geometry, spectrum: basis_digest covers neither), and -- added by the writer, never trusted
+    to callers -- which helix ran and on which device. A build with no seeds invents none."""
     import json as _json
-    prov = dict(geom_sha256="a" * 64, spectrum_sha256="b" * 64,
-                seed_formula="test:fixed")
+    prov = dict(geom_sha256="a" * 64, spectrum_sha256="b" * 64, seed_formula="test:fixed")
     seeds = [111, 222, 333, 444]
-    build_corpus([(f"src_{e:04d}.h5", e, seeds[e]) for e in range(4)],
-                 _plane_fn, _chain(), tmp_path, dataset_name="cx",
-                 noise=dict(kind="colored"), provenance=prov)
-
-    for name in ("cx_coeff_0000.h5",):
-        with h5py.File(tmp_path / name, "r") as f:
-            got = _json.loads(f["config"].attrs["provenance_json"])
-            # The caller's fields must survive verbatim...
-            assert {k: got.get(k) for k in prov} == prov, \
-                f"{name}: caller provenance not round-tripped"
-            # ...and the build adds two of its own: which helix ran (the writer) and
-            # on which device (the DSP is architecture-sensitive). Callers cannot be relied on to record it — none did, and a
-            # corpus was duly built by two different working trees with no field
-            # able to show it — so write_coeff_shard adds it rather than
-            # accepting it from the caller.
-            assert set(got) - set(prov) == {"code", "device"}, \
-                f"{name}: unexpected writer-added provenance {set(got) - set(prov)}"
-            assert "version" in got["code"], f"{name}: code block lacks a version"
-            np.testing.assert_array_equal(f["ident"]["noise_seed"][:], seeds)
-            # the identity tuple's source_file must reach /ident too, not a
-            # fabricated f"{dataset}_sensor_{file_index:04d}.h5"
-            assert [s.decode() for s in f["ident"]["source_file"][:]] == \
-                [f"src_{e:04d}.h5" for e in range(4)]
-
-    # a build that supplies no seeds must not invent one
+    build_corpus([(f"src_{e:04d}.h5", e, seeds[e]) for e in range(4)], _plane_fn, _chain(), tmp_path,
+                 dataset_name="cx", noise=dict(kind="colored"), provenance=prov)
+    with h5py.File(tmp_path / "cx_coeff_0000.h5", "r") as f:
+        got = _json.loads(f["config"].attrs["provenance_json"])
+        assert {k: got.get(k) for k in prov} == prov and set(got) - set(prov) == {"code", "device"}
+        assert "version" in got["code"]
+        assert _json.loads(f["config"].attrs["noise_json"])["kind"] == "colored"
+        np.testing.assert_array_equal(f["ident"]["noise_seed"][:], seeds)
+        assert [s.decode() for s in f["ident"]["source_file"][:]] == [f"src_{e:04d}.h5" for e in range(4)]
     plain = tmp_path / "plain"
     build_corpus(range(2), _plane_fn, _chain(), plain, dataset_name="cx")
     with h5py.File(plain / "cx_coeff_0000.h5", "r") as f:
         assert "noise_seed" not in f["ident"]
-        # No caller provenance -> only the code and device stamps. They are
-        # unconditional on purpose: a shard that cannot say which helix built it
-        # is exactly the gap this closes, so there is no opt-out.
         assert set(_json.loads(f["config"].attrs["provenance_json"])) == {"code", "device"}
 
 

@@ -38,81 +38,31 @@ def _pimm_importable():
         return False
 
 
-def test_tokenizer_does_not_drag_in_the_tpc_stack():
-    """`helix.model.tokenize` runs in every DataLoader worker; it must stay light.
-
-    The umbrella used to import helix.tpc.{config,pipeline,io} eagerly, so
-    importing the tokenizer — or anything in helix.core — pulled in the whole
-    wire-plane HDF5 stack: 1.07s and h5py, for a module that needs neither. It
-    also left the tokenizer one heavy or broken import in helix.tpc away from
-    failing in every worker, and made helix.core's "detector-agnostic" claim
-    false at import time.
-
-    Checked in a subprocess so it measures a cold interpreter, not whatever the
-    test session happens to have imported already.
-    """
-    import subprocess
-    import sys
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    r = subprocess.run(
-        [sys.executable, "-c",
-         "import helix.model.tokenize, sys; "
-         "print(sorted(m for m in sys.modules if m.startswith('helix.tpc')), "
-         "[m for m in ('pywt','scipy','h5py') if m in sys.modules])"],
-        capture_output=True, text=True, cwd=root,
-        env={**os.environ, "PYTHONPATH": root})
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "[] []", (
-        f"tokenize pulled in {r.stdout.strip()} — the umbrella is eager again")
-
-
-pimm_required = pytest.mark.skipif(
-    not _pimm_importable(), reason="pimm (and its dependencies) not importable")
-
-
-def test_importing_helix_does_not_import_pimm():
-    """The whole point of the integrations/ split: `import helix` must not drag
-    in a downstream framework. This one runs everywhere."""
+def test_the_tokenizer_and_helix_import_light():
+    """``helix.model.tokenize`` runs in every DataLoader worker: no wire-plane stack (it once cost
+    1.07 s and h5py), and ``import helix`` drags in no downstream framework. A cold interpreter."""
     import subprocess
     import sys
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     r = subprocess.run(
         [sys.executable, "-c",
          "import helix, helix.model.tokenize, sys; "
-         "print('pimm' in sys.modules, 'torch' in sys.modules)"],
-        capture_output=True, text=True, cwd=root,
-        env={**os.environ, "PYTHONPATH": root})
+         "print(sorted(m for m in sys.modules if m.startswith('helix.tpc') or m.split('.')[0] in "
+         "('pywt', 'scipy', 'h5py', 'pimm', 'torch')))"],
+        capture_output=True, text=True, cwd=root, env={**os.environ, "PYTHONPATH": root})
     assert r.returncode == 0, r.stderr
-    pimm_loaded, torch_loaded = r.stdout.split()
-    assert pimm_loaded == "False", "importing helix pulled in pimm"
-    assert torch_loaded == "False", "importing helix.model.tokenize pulled in torch"
+    assert r.stdout.strip() == "[]", f"helix / the tokenizer pulled in {r.stdout.strip()}"
+
+
+pimm_required = pytest.mark.skipif(
+    not _pimm_importable(), reason="pimm (and its dependencies) not importable")
 
 
 @pimm_required
 def test_the_pimm_facing_surface_adds_no_dsp_dependency_of_its_own():
-    """The direction of the dependency: helix knows about pimm, never the reverse.
-
-    pimm is detector- and transform-agnostic infrastructure; WAVELETS are
-    helix's concern, and `PyWavelets` is declared in helix's own pyproject, not
-    pimm's. So a pimm environment is CORRECT to have no pywt, and
-    `helix.integrations.pimm` — the module pimm loads through `custom_imports`,
-    in every rank of every run — must import cleanly there.
-
-    It does today, but nothing pinned it, and the leak would be silent exactly
-    where it matters: helix's dev image HAS pywt, so an accidental `helix.core`
-    import at module scope would pass every local test and then fail at job
-    start on a pimm-only image, after the queue wait.
-
-    Measured as a DELTA against pimm's own imports, not as an absolute. pimm
-    itself pulls scipy and h5py (torch_geometric and its dataset stack), so
-    asserting an empty set would fail for a reason helix does not control and
-    cannot fix — it would be a test of pimm's dependency tree wearing helix's
-    name. What helix controls is what it ADDS, and that must be nothing.
-
-    `test_tokenizer_does_not_drag_in_the_tpc_stack` above asserts the same
-    invariant for `helix.model.tokenize`, which runs in DataLoader workers.
-    This is the other surface pimm actually loads.
-    """
+    """helix.integrations.pimm (what every rank of every run loads via custom_imports) adds no DSP
+    dependency to a pimm environment, which is right to lack pywt. Measured as a DELTA against
+    pimm's own imports (pimm itself pulls scipy and h5py): what helix adds must be nothing."""
     import subprocess
     import sys
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

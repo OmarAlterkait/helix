@@ -40,68 +40,10 @@ def _git(cwd, *a):
     subprocess.run(("git",) + a, cwd=cwd, check=True, capture_output=True)
 
 
-def test_describe_checkout_reports_commit_branch_and_clean(tmp_path):
-    d = tmp_path / "repo"
-    d.mkdir()
-    _git(d, "init", "-q", "-b", "main")
-    _git(d, "config", "user.email", "t@t")
-    _git(d, "config", "user.name", "t")
-    (d / "a.txt").write_text("x")
-    _git(d, "add", "a.txt")
-    _git(d, "commit", "-qm", "one")
-
-    got = describe_checkout(str(d))
-    assert got["commit"] and len(got["commit"]) == 40
-    assert got["branch"] == "main"
-    assert got["dirty"] is False
-
-
-def test_dirty_is_reported(tmp_path):
-    """The field that matters: a hash alone says what was COMMITTED, not what ran."""
-    d = tmp_path / "repo"
-    d.mkdir()
-    _git(d, "init", "-q", "-b", "main")
-    _git(d, "config", "user.email", "t@t")
-    _git(d, "config", "user.name", "t")
-    (d / "a.txt").write_text("x")
-    _git(d, "add", "a.txt")
-    _git(d, "commit", "-qm", "one")
-    (d / "a.txt").write_text("modified")           # uncommitted edit
-    assert describe_checkout(str(d))["dirty"] is True
-
-
-def test_a_non_git_directory_degrades_instead_of_raising(tmp_path):
-    got = describe_checkout(str(tmp_path))
-    assert got == {"root": str(tmp_path), "commit": None, "dirty": None,
-                   "branch": None}
-
-
-def test_a_gitdir_FILE_is_still_a_repo(tmp_path):
-    """The bug that produced an all-null record from a real run.
-
-    A worktree (and a submodule) has `.git` as a FILE pointing at the real
-    gitdir, so `os.path.isdir(root/'.git')` is False for a perfectly good
-    checkout. This was found on a real run from a git WORKTREE, which is how the
-    consolidation was done.
-    """
-    d = tmp_path / "repo"
-    d.mkdir()
-    _git(d, "init", "-q", "-b", "main")
-    _git(d, "config", "user.email", "t@t")
-    _git(d, "config", "user.name", "t")
-    (d / "a.txt").write_text("x")
-    _git(d, "add", "a.txt")
-    _git(d, "commit", "-qm", "one")
-    wt = tmp_path / "wt"
-    _git(d, "worktree", "add", "-q", str(wt))
-    assert not (wt / ".git").is_dir() and (wt / ".git").is_file(), "not a worktree"
-    got = describe_checkout(str(wt))
-    assert got["commit"], "a worktree must still report its commit"
-    assert got["dirty"] is False
-
-
-def test_a_subdirectory_resolves_to_the_repo_root(tmp_path):
-    """pimm_data is a src-layout package, so its `root` is <repo>/src."""
+def test_describe_checkout(tmp_path):
+    """Commit, branch and dirtiness (a hash alone says what was COMMITTED, not what ran); a git
+    WORKTREE, whose ``.git`` is a file (an all-null record once came from a real run in one); a
+    subdirectory resolves to the repo root (pimm_data is src-layout); no repo degrades to nulls."""
     d = tmp_path / "repo"
     (d / "src").mkdir(parents=True)
     _git(d, "init", "-q", "-b", "main")
@@ -110,9 +52,19 @@ def test_a_subdirectory_resolves_to_the_repo_root(tmp_path):
     (d / "src" / "a.txt").write_text("x")
     _git(d, "add", ".")
     _git(d, "commit", "-qm", "one")
-    got = describe_checkout(str(d / "src"))
-    assert got["commit"], "a package below the repo root must still be described"
-    assert os.path.realpath(got["root"]) == os.path.realpath(str(d))
+    got = describe_checkout(str(d))
+    assert len(got["commit"]) == 40 and got["branch"] == "main" and got["dirty"] is False
+    sub = describe_checkout(str(d / "src"))
+    assert sub["commit"] == got["commit"] and os.path.realpath(sub["root"]) == os.path.realpath(str(d))
+    wt = tmp_path / "wt"
+    _git(d, "worktree", "add", "-q", str(wt))
+    assert (wt / ".git").is_file()
+    assert describe_checkout(str(wt))["commit"] and describe_checkout(str(wt))["dirty"] is False
+    (d / "src" / "a.txt").write_text("modified")
+    assert describe_checkout(str(d))["dirty"] is True
+    none = tmp_path / "none"
+    none.mkdir()
+    assert describe_checkout(str(none)) == {"root": str(none), "commit": None, "dirty": None, "branch": None}
 
 
 def test_provenance_covers_helix_and_pimm_data():

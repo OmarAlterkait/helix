@@ -1,22 +1,10 @@
 """The bin grid is reproducible, and a mismatch is reported as a mismatch.
 
-The grid is the objective the model's categorical head is trained against. It is
-derived from corpus statistics and cannot be recovered from a checkpoint, so for
-a long time it was treated as an irreplaceable 8 KB file that had to travel with
-345 GB of corpus.
-
-It does not. The derivation pools the FIRST ``events`` events in dataset order
-with no sampling, seed or RNG, and a table records the parameters it was derived
-with -- so the corpus reproduces it exactly. These tests pin three things:
-
-* ``compare`` actually DETECTS a difference. A verifier that always passes is
-  worse than no verifier.
-* where a real corpus is present, rederiving the production grid comes back
-  bit-identical.
-* the packaged fingerprint ships and rejects a wrong grid. That is the only
-  check available to a site that arrived WITHOUT a copy of the original -- the
-  expected case after a handover -- where deriving from the wrong run of a
-  multi-run corpus gives a self-consistent grid that nothing else would flag.
+The grid is the objective the categorical head trains against; it is derived from corpus
+statistics (the FIRST ``events`` events, no sampling) and a table records its parameters, so the
+corpus reproduces it exactly and the 8 KB file need not travel. Pinned: ``compare`` detects a
+difference; rederiving the production grid from a real corpus is bit-identical; the packaged
+fingerprint ships and rejects a wrong grid (all a site that arrived without the file can check).
 """
 
 import os
@@ -27,11 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# helix.data.__init__ imports pimm_data, so importing bins drags it in even
-# though the derivation itself is pure numpy. Skip rather than error: helix
-# advertises a DSP-only install (`pip install -e .`, numpy/h5py/PyWavelets/scipy)
-# and a collection ERROR there aborts the whole run instead of skipping one file.
-pytest.importorskip("pimm_data")
+pytest.importorskip("pimm_data")          # the derivation reads the corpus through CoeffTPCDataset
 
 from helix.data import bins as binlib                            # noqa: E402
 
@@ -48,58 +32,28 @@ def _table(seed=0, K=8, n_bands=2, corpus="/somewhere/run_1", events=120):
         K=K, n_bands=n_bands, corpus=corpus, events=events)
 
 
-def test_compare_accepts_a_table_against_itself():
-    t = _table()
-    r = binlib.compare(t, t)
-    assert r["identical"]
-    assert all(v["max_abs_diff"] == 0.0 for v in r["arrays"].values())
-
-
-def test_compare_rejects_a_single_changed_value():
-    """The point of the verifier. One edge moved is a different objective."""
+def test_compare_detects_every_kind_of_difference():
+    """A verifier that always passes is worse than none: one moved edge is a different objective,
+    another K is not the same grid, and a wrong-shaped table is reported, not raised."""
     a = _table()
+    assert binlib.compare(a, a)["identical"]
     b = {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in a.items()}
     b["edges"][0, 0] += np.float32(1e-3)
-
     r = binlib.compare(a, b)
-    assert not r["identical"]
-    assert not r["arrays"]["edges"]["identical"]
-    assert r["arrays"]["edges"]["max_abs_diff"] > 0
-    # the arrays that did not move are still reported as matching
-    assert r["arrays"]["cent_asinh"]["identical"]
-
-
-def test_compare_rejects_a_parameter_mismatch():
-    """Same arrays, different K: not the same grid, and not a value difference."""
-    a = _table(K=8)
-    b = dict(a, K=16)
-    r = binlib.compare(a, b)
-    assert not r["identical"]
-    assert r["param_mismatches"]["K"] == (8, 16)
-
-
-def test_compare_survives_a_shape_mismatch():
-    """Must report, not raise -- a wrong-shaped table is a thing users produce."""
+    assert not r["identical"] and r["arrays"]["edges"]["max_abs_diff"] > 0 and r["arrays"]["cent_asinh"]["identical"]
+    assert binlib.compare(a, dict(a, K=16))["param_mismatches"]["K"] == (8, 16)
     r = binlib.compare(_table(K=8), _table(K=16))
-    assert not r["identical"]
-    assert r["arrays"]["edges"]["max_abs_diff"] == float("inf")
+    assert not r["identical"] and r["arrays"]["edges"]["max_abs_diff"] == float("inf")
 
 
-def test_params_of_fills_percentiles_from_defaults():
-    """A table records corpus/events/K/n_bands but never the percentiles."""
+def test_params_of_fills_what_a_table_does_not_record_from_defaults():
+    """A table records corpus/events/K/n_bands, never the percentiles; an older sidecar missing
+    keys still rederives."""
     p = binlib.params_of(_table(K=8, n_bands=2, events=99, corpus="/c/run_2"))
     assert (p["K"], p["n_bands"], p["events"], p["corpus"]) == (8, 2, 99, "/c/run_2")
-    assert p["lo_pct"] == binlib.DEFAULTS["lo_pct"]
-    assert p["hi_pct"] == binlib.DEFAULTS["hi_pct"]
-    assert p["dataset_name"] == binlib.DEFAULTS["dataset_name"]
-
-
-def test_params_of_tolerates_an_older_sidecar():
-    """Missing keys fall back rather than raise, so an old table still rederives."""
+    assert all(p[k] == binlib.DEFAULTS[k] for k in ("lo_pct", "hi_pct", "dataset_name"))
     p = binlib.params_of(dict(edges=None, corpus="/c/run_3"))
-    assert p["corpus"] == "/c/run_3"
-    assert p["K"] == binlib.DEFAULTS["K"]
-    assert p["events"] == binlib.DEFAULTS["events"]
+    assert p["corpus"] == "/c/run_3" and p["K"] == binlib.DEFAULTS["K"] and p["events"] == binlib.DEFAULTS["events"]
 
 
 def test_save_load_roundtrip_is_exact(tmp_path):
