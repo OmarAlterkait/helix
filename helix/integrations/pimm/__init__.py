@@ -60,12 +60,21 @@ class CoeffFM:
     ``obj_cls(**args)``. ``__new__`` returns the ``FMModel`` itself, so a config gets a model
     rather than a wrapper.
 
-    Initialising from a checkpoint is pimm's ``weight=`` (``configs/pimm/fm_cooldown.py``);
-    reading a trained run is :func:`helix.model.checkpoint.load_run`.
+    ``init`` names an FM run (or one checkpoint of it) whose weights -- its ``model/last`` by
+    default -- are loaded into the freshly built model before training: a warm start
+    (``configs/pimm/fm_cooldown.py``, a sweep's ``then:``). Not pimm's ``weight=``, for the reason
+    on :class:`CoeffDenoise`: that is what pimm's ``scripts/train.sh`` sets on every resumed link,
+    so it cannot also carry the initialisation. A resumed link builds from ``init`` and then
+    loads its own checkpoint over it. Reading the run back ignores ``init``
+    (:func:`helix.model.checkpoint.model_config`): its weights are the run's own.
     """
 
-    def __new__(cls, bins=None, **cfg):
-        return build_coeff_fm(bins=bins, **cfg)
+    def __new__(cls, bins=None, init=None, **cfg):
+        model = build_coeff_fm(bins=bins, **cfg)
+        if init:
+            from helix.model.checkpoint import load_run
+            model.load_state_dict(load_run(init, device="cpu").model.state_dict(), strict=True)
+        return model
 
 
 def build_coeff_fm(bins=None, **cfg):

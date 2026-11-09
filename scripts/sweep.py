@@ -15,7 +15,7 @@ A study file (configs/sweeps/*.yaml) is the whole study, in place of a launcher 
     then:                               # optional: a second training run per arm, after the first
       config: fm_cooldown               #   (here the WSD cooldown of each stable phase)
       suffix: _cool                     #   its run name: <arm><suffix>
-      overrides: {weight: "$HELIX_EXP/{run}/model/last"}
+      overrides: {model.init: "$HELIX_EXP/{run}"}
     after_each:                         # optional: one job per arm, once that arm has succeeded
       command: python -m helix.eval $HELIX_EXP/{run} --metrics floor,uprobe --out $HELIX_EXP/{run}/eval.json
       time: "02:00:00"

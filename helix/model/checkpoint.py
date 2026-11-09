@@ -26,9 +26,9 @@ and a denoiser (``Coeff-Denoise``, ``configs/pimm/denoise.py``), whose model nam
 is built on. A denoiser's architecture and tokenizer are that run's, so reading a denoiser reads
 the FM run's ``resolved_config.json`` too (its weights are the denoiser's own).
 
-Starting a TRAINING run from a checkpoint is not this module's job: pimm's ``weight=`` does it
-(``configs/pimm/fm_cooldown.py``); a denoiser's model initialises its encoder from its FM run
-through this loader (:func:`helix.model.denoise.build_denoise`).
+A TRAINING run warm-starts through this loader: the ``Coeff-FM`` model key ``init``
+(``configs/pimm/fm_cooldown.py``) and a denoiser's encoder from its FM run
+(:func:`helix.model.denoise.build_denoise`) both read another run's ``last`` with it.
 
 No pimm import: pimm is needed to write a run, not to read one.
 """
@@ -75,11 +75,13 @@ RETIRED_TRAIN_OPTS = ("dec_frac", "n_masks")
 
 def model_config(config):
     """``build_fm`` kwargs from a resolved config: the model section without the registry
-    selector and the bins table (the bins ride in the weights), and without compilation (how the
-    run executed, not what it learned). A run may record a training option since removed
-    (:data:`RETIRED_TRAIN_OPTS`); it never changed the model outside training, so it is dropped."""
+    selector, the bins table (the bins ride in the weights) and the warm start ``init`` (where
+    training STARTED; reloading it would read a second run, whose weights are overwritten
+    anyway), and without compilation (how the run executed, not what it learned). A run may
+    record a training option since removed (:data:`RETIRED_TRAIN_OPTS`); it never changed the
+    model outside training, so it is dropped."""
     arch = {k: v for k, v in dict(config["model"]).items()
-            if k not in ("type", "bins") + RETIRED_TRAIN_OPTS}
+            if k not in ("type", "bins", "init") + RETIRED_TRAIN_OPTS}
     arch["compile_blocks"] = False
     for k, v in arch.items():
         if isinstance(v, list):                      # JSON has no tuple

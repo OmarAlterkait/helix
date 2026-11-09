@@ -14,8 +14,9 @@ _base_ = ["./fm.py"]
 COOLDOWN_RUNS = 3
 data = dict(train=dict(split=_corpus_runs(str(_root("HELIX_CORPUS").parent))[:COOLDOWN_RUNS]))
 
-weight = str(_root("HELIX_EXP") / "fm" / "model" / "last")
-resume = False
+# The warm start: the stable run's model/last loaded into the fresh model (Coeff-FM's ``init``).
+# Not pimm's weight=, which train.sh sets on every resumed link to the run's OWN checkpoint.
+model = dict(init=str(_root("HELIX_EXP") / "fm"))
 epoch = 1
 scheduler = dict(type="WSDCooldownLR", warmup=0, floor=1e-3)
 save_path = str(_root("HELIX_EXP") / "fm_cooldown")

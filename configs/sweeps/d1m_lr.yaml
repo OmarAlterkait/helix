@@ -22,7 +22,7 @@ then:
   config: fm_cooldown
   suffix: _cool
   submit: [--resources.nnodes, "4", --chain.jobs, "2"]
-  overrides: {weight: "$HELIX_EXP/{run}/model/last", data.train.max_len: 57600}
+  overrides: {model.init: "$HELIX_EXP/{run}", data.train.max_len: 57600}
 after_each:
   command: python -m helix.eval $HELIX_EXP/{run} --metrics recon,floor,uprobe,labels --weights last --out $HELIX_EXP/{run}/eval.json
   time: "04:00:00"

@@ -38,14 +38,16 @@ test_only = False
 seed = 0
 save_path = str(_root("HELIX_EXP") / "fm")
 
-from helix.paths import world_size as _world_size               # noqa: E402
 from helix.paths import scheduler as _scheduler                 # noqa: E402
 
-_WORLD = _world_size()
-batch_size = _WORLD                     # one event per rank: the FM has no event separation
-batch_size_val = _WORLD
-batch_size_test = _WORLD
-num_worker = int(_scheduler("train", "workers_per_gpu") or 4) * _WORLD
+# pimm's batch and workers are GLOBAL; one rank's values here. The FM takes one event per rank
+# (no event separation; FMTrainer refuses anything else), so the batch IS the world size, and
+# scripts/submit.sh appends batch_size / batch_size_val / batch_size_test / num_worker for the
+# launch's nodes x GPUs. Nothing here reads the world size.
+batch_size = 1
+batch_size_val = 1
+batch_size_test = 1
+num_worker = int(_scheduler("train", "workers_per_gpu") or 4)
 
 epoch = 3
 eval_epoch = 1
@@ -89,9 +91,10 @@ model = dict(
 )
 # The peak LR scales as sqrt(batch): 4.4e-3 at 16 events per step, the batch the recipe was
 # measured at (2.2e-3 was the measured optimum at 4 events: SCIENCE sections 5, 9, at git tag
-# archive-2026-11). muP transfers it across width only.
-optimizer = dict(type="AdamW", lr=4.4e-3 * (_WORLD / 16) ** 0.5, weight_decay=0.05, betas=(0.9, 0.95),
-                 fused=True)
+# archive-2026-11). muP transfers it across width only. ``optimizer.lr`` is the LR AT
+# ``lr_ref_world`` ranks; FMTrainer applies lr * sqrt(world / lr_ref_world) at build.
+optimizer = dict(type="AdamW", lr=4.4e-3, weight_decay=0.05, betas=(0.9, 0.95), fused=True)
+lr_ref_world = 16
 scheduler = dict(type="WSDStableLR", warmup="auto")
 
 # ---------------------------------------------------------------------------- data
@@ -126,4 +129,4 @@ hooks = [
 ]
 train = dict(type="FMTrainer")
 
-del _root, _corpus_runs, _reference_table, _world_size, _scheduler, _WORLD
+del _root, _corpus_runs, _reference_table, _scheduler

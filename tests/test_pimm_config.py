@@ -177,9 +177,8 @@ def test_example_config_declares_the_custom_import():
         # the configs resolve the corpus's run list at module scope
         pytest.skip(f"config needs a root this site does not configure: {exc}")
     assert "helix.integrations.pimm" in cfg.custom_imports["imports"]
-    from helix.paths import world_size
-    # one event per rank: the FM has no event separation (docs/ARCHITECTURE.md §8)
-    assert cfg.batch_size == world_size()
+    # one rank's batch: scripts/submit.sh appends batch_size=<nodes x GPUs> (docs/ARCHITECTURE.md §8)
+    assert cfg.batch_size == 1
     assert cfg.model["type"] == "Coeff-FM"
     assert cfg.data["train"]["type"] == "CoeffTPCDataset"
 
@@ -302,21 +301,44 @@ def test_derived_fields_really_are_derived():
             f"assigns it and the Trainer has no default for it")
 
 
-def test_batch_size_is_one():
-    """The FM needs batch_size_per_gpu == 1: it has no event separation, so a rank holding
-    two events would attend across them (docs/ARCHITECTURE.md §8). pimm's ``batch_size`` is
-    GLOBAL, so the base config sets it to the world size, and a variant to 1 or not at all."""
-    for path in sorted(pathlib.Path(CONFIG).parent.glob("fm*.py")):
-        tree = ast.parse(path.read_text())
+def test_configs_are_world_size_free():
+    """The FM needs batch_size_per_gpu == 1: it has no event separation, so a rank holding two
+    events would attend across them (docs/ARCHITECTURE.md §8). pimm's ``batch_size`` is GLOBAL;
+    the configs hold one rank's value (1) and read no world size at load -- scripts/submit.sh
+    appends the launch's batch, and FMTrainer scales the LR -- so a config means the same thing
+    on the submitting host as on the job."""
+    for path in sorted(pathlib.Path(CONFIG).parent.glob("*.py")):
+        src = path.read_text()
+        assert "world_size" not in src and "WORLD_SIZE" not in src, path.name
+        tree = ast.parse(src)
         vals = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
                 for t in n.targets if isinstance(t, ast.Name)}
         for key in ("batch_size", "batch_size_val", "batch_size_test"):
             v = vals.get(key)
             if path.name == "fm.py":
                 assert v is not None, f"fm.py does not set {key}"
-            ok = v is None or (isinstance(v, ast.Constant) and v.value == 1) or (
-                isinstance(v, ast.Name) and v.id == "_WORLD")
-            assert ok, f"{path.name}: {key} must be the world size (one event per rank) or 1"
+            assert v is None or (isinstance(v, ast.Constant) and v.value == 1), \
+                f"{path.name}: {key} must be 1 (one rank's batch) or inherited"
+
+
+def test_submit_appends_the_world_size_as_training_overrides():
+    """scripts/submit.sh turns nodes x GPUs into the batch overrides, after `--`, last."""
+    src = (pathlib.Path(CONFIG).parent.parent.parent / "scripts" / "submit.sh").read_text()
+    assert "W=$((NN * NP))" in src
+    for key in ("batch_size=$W", "batch_size_val=$W", "batch_size_test=$W", "num_worker=$((W *"):
+        assert key in src, key
+    assert 'REST+=(-- "${BATCH[@]}")' in src and 'REST+=("${BATCH[@]}")' in src
+
+
+@pimm_required
+def test_the_peak_lr_scales_as_sqrt_world_from_its_reference():
+    """fm.py's LR was ``4.4e-3 * sqrt(world / 16)`` computed in the config; FMTrainer now applies
+    the same rule, so the numbers are unchanged at every GPU count (and exact at 16)."""
+    from helix.integrations.pimm.trainer import scaled_lr
+    assert scaled_lr(4.4e-3, 16, 16) == 4.4e-3
+    for world in (1, 4, 8, 32, 64):
+        assert scaled_lr(4.4e-3, 16, world) == pytest.approx(4.4e-3 * (world / 16) ** 0.5, rel=1e-15)
+    assert scaled_lr(3e-3, None, 4) == 3e-3                        # the denoiser's: absolute
 
 
 def test_config_declares_the_custom_import():
@@ -475,3 +497,25 @@ def test_the_fm_variants_inherit_the_base_hooks():
         assert "hooks" not in _config_names(pathlib.Path(CONFIG).parent / name), name
         assert "WeightEMA" not in src
     assert "WeightEMA" not in pathlib.Path(CONFIG).read_text()
+
+
+@pimm_required
+def test_init_warm_starts_from_a_runs_last_and_is_not_reread(tmp_path):
+    """``Coeff-FM``'s ``init`` loads an FM run's ``model/last`` into the freshly built model (the
+    cooldown's warm start, in place of pimm's weight=), and reading the warm-started run back
+    builds its architecture without touching ``init`` -- whose run may be gone by then."""
+    torch = pytest.importorskip("torch")
+    from test_eval import SMALL, _config, _same, _write_run
+
+    import helix.integrations.pimm  # noqa: F401
+    from helix.model.checkpoint import model_config
+    from pimm.models.builder import MODELS
+
+    raw, ema = _write_run(tmp_path / "stable")
+    bins = dict(edges=raw.bin_edges.clone())
+    m = MODELS.build(dict(type="Coeff-FM", bins=bins, init=str(tmp_path / "stable"), **SMALL))
+    assert _same(m, raw) and not _same(m, ema)
+    cool = _config()
+    cool["model"]["init"] = str(tmp_path / "gone")
+    assert "init" not in model_config(cool)
+    assert model_config(cool) == model_config(_config())

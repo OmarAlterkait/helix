@@ -59,6 +59,7 @@ model = dict(
     compile_blocks=True,
 )
 optimizer = dict(lr=3e-3)
+lr_ref_world = None                     # the denoiser's LR is absolute (fm.py's scales with sqrt(world))
 scheduler = dict(_delete_=True, type="WarmupCosineLR", warmup="auto", floor=0.02)
 
 # ---------------------------------------------------------------------------- data
