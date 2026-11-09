@@ -31,6 +31,15 @@ BASIS = dict(wavelet="db2", dwt_level=2, dwt_mode="periodization", n_ticks_raw=3
 SOURCE = "sim_wire_sensor_jaxtpc_wire_j000085-000089.h5"
 
 
+def _event(path, pos):
+    """``(record, ident)`` of event ``pos`` of a cells shard, format-checked."""
+    with h5py.File(path, "r") as f:
+        C.require_format(f["config"], str(path))
+        ident = C.read_ident(f)
+        return C.read_event(f, pos), dict(run=ident["run"][pos], source_file=ident["source_file"][pos],
+                                          event=int(ident["event"][pos]))
+
+
 def _coeff_shard(path, events, run=RUN, source=SOURCE):
     rng = np.random.default_rng(1)
     evs = [dict(band=np.zeros(4, np.uint8), plane_gid=np.zeros(4, np.int32), wire=rng.integers(0, 4, 4),
@@ -84,7 +93,7 @@ def _pixels(hits, ev):
 def test_record_is_the_pixels_reduced(corpus):
     """Per cell charge, per (cell, track) charge, per (plane, track) pixel centroid, per track step energy."""
     G, W, T, Q, V, TID, _, _ = _pixels(corpus["hits"], 1)
-    rec, _ = C.open_event(corpus["cells"], 1)
+    rec, _ = _event(corpus["cells"], 1)
     trk = list(zip(rec["trk_volume"].tolist(), rec["trk_id"].tolist()))
     assert trk == sorted(set(trk))
     cell = C.fkey(G, W // C.FW, T // C.FT)
@@ -116,7 +125,7 @@ def test_tracks_carry_their_labl_classes_and_cells_their_dominant_tracks(corpus)
     """A track's motif is its fragment's semantic type in pimm-data's vocabulary, its pid its
     instance's sign-blind PDG (a low-energy instance -> le, another PDG -> -1), -1 for an unowned
     track; a cell takes the class of the track carrying most of its charge."""
-    rec, _ = C.open_event(corpus["cells"], 1)
+    rec, _ = _event(corpus["cells"], 1)
     motif_of_sem = {1: 0, 2: 1, 3: 3, 4: 2, 5: 4}
     pid_of_pdg = {22: 0, 11: 1, 13: 2, 211: 3, 2212: 4}
     with h5py.File(corpus["labl"], "r") as f:
@@ -142,7 +151,7 @@ def test_each_cell_records_its_dominant_group_and_its_centroid(corpus):
     """The along-wire probe's label: the largest group's share of the cell, and its deposits'
     charge-weighted (y, z)."""
     G, W, T, Q, _, _, GRP, YZ = _pixels(corpus["hits"], 0)
-    rec, _ = C.open_event(corpus["cells"], 0)
+    rec, _ = _event(corpus["cells"], 0)
     cell = C.fkey(G, W // C.FW, T // C.FT)
     pos = {int(k): i for i, k in enumerate(rec["key"])}
     per = {}
@@ -163,7 +172,7 @@ def test_each_cell_records_its_dominant_group_and_its_centroid(corpus):
 def test_grid_aligned_boxes_see_the_same_charge_per_track_as_pixels(corpus):
     """Why cells suffice: a box on the 2 x 16 grid holds, per track, exactly its pixels' charge."""
     G, W, T, Q, V, TID, _, _ = _pixels(corpus["hits"], 0)
-    rec, _ = C.open_event(corpus["cells"], 0)
+    rec, _ = _event(corpus["cells"], 0)
     cg, cw, ct = C.unkey(rec["key"][rec["ct_cell"]])
     t_of = {(v, t): i for i, (v, t) in enumerate(zip(rec["trk_volume"].tolist(), rec["trk_id"].tolist()))}
     ti = np.array([t_of[(v, t)] for v, t in zip(V.tolist(), TID.tolist())])
@@ -179,7 +188,7 @@ def test_grid_aligned_boxes_see_the_same_charge_per_track_as_pixels(corpus):
 def test_the_windows_of_a_record(corpus):
     """event_truth on a stored record: every window kind, reproducible, and no background window
     holding charge."""
-    rec, _ = C.open_event(corpus["cells"], 2)
+    rec, _ = _event(corpus["cells"], 2)
     rng = np.random.default_rng(3)
     coeff = np.concatenate([rec["key"][::3], C.fkey(rng.integers(0, 6, 400), rng.integers(0, 500, 400),
                                                     rng.integers(0, 200, 400))])
@@ -217,11 +226,11 @@ def test_reader_refuses_another_format(corpus, tmp_path):
     with h5py.File(p, "a") as f:
         f["config"].attrs["grid_ft"] = 8
     with pytest.raises(ValueError, match="grid"):
-        C.open_event(str(p), 0)
+        _event(str(p), 0)
     with h5py.File(p, "a") as f:
         f["config"].attrs["format"] = "helix-cells-1"
     with pytest.raises(ValueError, match="rebuild"):
-        C.open_event(str(p), 0)
+        _event(str(p), 0)
 
 
 # ------------------------------------------------------------------------------- dataset modality
@@ -232,10 +241,16 @@ def test_dataset_serves_cells_identity_checked(corpus, tmp_path):
     assert len(ds) == N_EV
     for i in range(N_EV):
         s = ds.get_data(i)
-        rec, ident = C.open_event(corpus["cells"], i)
+        rec, ident = _event(corpus["cells"], i)
         assert s["ident"] == ident
         for k, v in rec.items():
             np.testing.assert_array_equal(s["cells"][k], v)
+    # training reads only key and q (configs/pimm/denoise.py)
+    two = CoeffTPCDataset(data_root=str(corpus["run_dir"]), dataset_name="sim_wire", modalities=("coeff", "cells"),
+                          cells_columns=("key", "q")).get_data(1)["cells"]
+    assert set(two) == {"key", "q"}
+    for k in two:
+        np.testing.assert_array_equal(two[k], _event(corpus["cells"], 1)[0][k])
     assert "cells" not in CoeffTPCDataset(data_root=str(corpus["run_dir"]), dataset_name="sim_wire").get_data(0)
     with pytest.raises(ValueError, match="with 'coeff'"):
         CoeffTPCDataset(data_root=str(corpus["run_dir"]), dataset_name="sim_wire", modalities=("cells",))
@@ -293,13 +308,13 @@ def test_a_volume_with_no_deposit_adds_nothing(tmp_path):
     run_dir.mkdir(parents=True)
     _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", [EV0, EV0 + 1])
     out, _ = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(tmp_path / "sim"))
-    rec, _ = C.open_event(out, 1)
+    rec, _ = _event(out, 1)
     assert len(rec["key"]) and (C.unkey(rec["key"])[0] < 3).all()       # volume 0's planes only
     assert (rec["trk_volume"] == 0).all()
     with h5py.File(hits, "r") as f:
         q = sum(C.decode_hits_plane(f["entry_000001"]["volume_0"][pl])["q"].sum() for pl in C.PLANES)
     np.testing.assert_allclose(rec["q"].sum(), q, rtol=1e-5)
-    full, _ = C.open_event(out, 0)
+    full, _ = _event(out, 0)
     assert set(full["trk_volume"].tolist()) == {0, 1}
 
 

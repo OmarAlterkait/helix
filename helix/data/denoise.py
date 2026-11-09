@@ -7,9 +7,9 @@
 
     q_idx      (n, n_bands) int64       per band, the token covering the cell, -1 if none
     q_aux      (n, 13 n_bands) float32  the cell's offsets inside those tokens
-                                        (:func:`helix.data.cells.cell_inputs`)
+                                        (:func:`helix.model.cells_join.cell_inputs`)
     q_nbr      (n, n_bands, 9) int64    the 3 x 3 token neighbourhood per band
-                                        (:func:`helix.data.cells.cell_neighbors`)
+                                        (:func:`helix.model.cells_join.cell_neighbors`)
     q_y        (n,) float32             ``log1p(q / Q0)``, the cell's full charge
     q_present  (n,) float32             1 where the charge is above ``support_min_q``
 
@@ -38,7 +38,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from helix.data.cells import FT, FW, Q0, cell_inputs, cell_neighbors, coeff_cells, fkey, unkey
+from helix.data.cells import FT, FW, Q0, fkey, unkey
+from helix.model.cells_join import cell_inputs, cell_neighbors, coeff_cells
 
 #: The keys this transform adds to the token part.
 KEYS = ("q_idx", "q_aux", "q_nbr", "q_y", "q_present")

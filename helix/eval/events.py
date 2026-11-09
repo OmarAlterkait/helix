@@ -66,7 +66,7 @@ from helix.data.cells import FT, FW, fkey, unkey
 class Event:
     index: int                 # position in the evaluated sequence, 0..n-1
     cells: dict                # helix.data.cells record
-    coeff_cells: np.ndarray    # fine cells of the kept coefficients (helix.data.cells.coeff_cells)
+    coeff_cells: np.ndarray    # fine cells of the kept coefficients (helix.model.cells_join.coeff_cells)
     coeff_amp: tuple           # (those cells, their largest |coefficient| / sigma): coeff_amplitude
     band_lengths: np.ndarray
     cell_key: np.ndarray       # per token, the tokenizer's cell key (numpy)
@@ -159,7 +159,7 @@ def _text(x):
 def events(ds, tokenizer, device, max_events=None):
     """:class:`Event` for each of the first ``max_events`` events of ``ds``, in its order."""
     import torch
-    from helix.data.cells import coeff_amplitude
+    from helix.model.cells_join import coeff_amplitude
     from helix.model.tokenize import CoeffTokenize
 
     tokenize = CoeffTokenize(part="coeff", cfg=tokenizer)          # the training transform itself
@@ -213,7 +213,7 @@ def event_truth(cells, coeff_cells, rng):
 
     ``cells``: a :mod:`helix.data.cells` record (tracks numbered by row, energies in
     ``trk_energy``). ``coeff_cells``: fine-cell keys of the event's kept coefficients (any band,
-    :func:`helix.data.cells.coeff_cells`). Returns ``wkey`` (window cells in window order,
+    :func:`helix.model.cells_join.coeff_cells`). Returns ``wkey`` (window cells in window order,
     :func:`window_cells`' order inside each) and ``meta`` (one dict per window: ``kind``, ``g``,
     ``w0``, ``t0``, ``E`` -- the iso particle's energy, NaN for a background window; ``ctx`` --
     for an iso window ``clear`` / ``crowded`` / ``mixed`` by other particles' charge around it,

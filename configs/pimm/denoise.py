@@ -68,7 +68,7 @@ scheduler = dict(_delete_=True, type="WarmupCosineLR", warmup="auto", floor=0.02
 _tokenize = dict(type="CoeffTokenize", part="coeff", cfg="model")
 _collect = dict(type="CoeffCollect", part="coeff")
 data = dict(
-    train=dict(modalities=("coeff", "cells"), n_events=None, subset_seed=0,
+    train=dict(modalities=("coeff", "cells"), cells_columns=("key", "q"), n_events=None, subset_seed=0,
                transform=[_tokenize, dict(type="DenoiseRows", part="coeff", support_min_q=_SUPPORT_MIN_Q),
                           _collect]),
 )

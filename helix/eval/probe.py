@@ -42,7 +42,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from helix.data.cells import FT, FW, cell_inputs, unkey
+from helix.data.cells import FT, FW, unkey
+from helix.model.cells_join import cell_inputs
 from helix.eval.events import VIEWS, bootstrap
 
 #: Fraction of the evaluated events the probe is fitted on; the rest are scored.

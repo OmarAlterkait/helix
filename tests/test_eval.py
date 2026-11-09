@@ -12,7 +12,7 @@ import numpy as np
 from helix.data import cells as C                                   # noqa: E402
 from helix.model.checkpoint import load_run, run_dir, tokenizer_config  # noqa: E402
 from helix.model.tokenize import PatchConfig, patch_config, tau_of_tick  # noqa: E402
-from helix.data import cells as C
+from helix.model import cells_join as J
 from helix.data.denoise import near_windows
 from helix.eval import events as W
 
@@ -200,7 +200,7 @@ def _dctx(run, denoiser, n_boot=20):
 def _token_feature(ev, values, d=SMALL["d"], seed=0):
     """Per-token features whose column 0 is the mean of ``values`` over the cells a token covers
     in band 0 (the rest noise): what a representation that knows ``values`` would carry."""
-    idx, _ = C.cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, patch_config(TOK))
+    idx, _ = J.cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, patch_config(TOK))
     n = len(ev.cell_key)
     s, c = np.zeros(n), np.zeros(n)
     ok = idx[:, 0] >= 0
@@ -222,7 +222,7 @@ def test_events_are_the_training_tokens_with_their_cells(synth):
     assert f1 is e.features(run.model) and f1.shape == (len(e.cell_key), SMALL["d"])
     keys, amp = e.coeff_amp                          # norm_sigma 1: |value| itself, the largest per cell
     assert np.array_equal(keys, e.coeff_cells) and (amp > 0).all()
-    k0 = C.coeff_cells(*(ds[0]["coeff"][x][:1] for x in ("band", "plane_gid", "wire", "tau")), run.tokenizer)
+    k0 = J.coeff_cells(*(ds[0]["coeff"][x][:1] for x in ("band", "plane_gid", "wire", "tau")), run.tokenizer)
     assert amp[np.searchsorted(keys, k0[0])] >= abs(ds[0]["coeff"]["value"][0, 0]) - 1e-6
 
 
@@ -279,7 +279,7 @@ def _oracle(scale=1.0, q_present=25.0, covered_only=True):
 
     def predict(ev, keys):
         q = dict(zip(ev.cells["key"].tolist(), ev.cells["q"].tolist()))
-        idx, _ = C.cell_inputs(keys, ev.cell_key, ev.band_lengths, patch_config(TOK))
+        idx, _ = J.cell_inputs(keys, ev.cell_key, ev.band_lengths, patch_config(TOK))
         ok = (idx >= 0).any(1)
         t = np.array([q.get(k, 0.0) for k in keys.tolist()]) * (ok if covered_only else 1)
         logit = np.where(ok, np.where(t > q_present, 20.0, -20.0), UNCOVERED_LOGIT)
@@ -384,7 +384,7 @@ def test_an_uncovered_charged_cell_is_a_miss(synth):
         e.cell_key = e.cell_key[len(e.cell_key) // 2:]
         k, qq = np.asarray(e.cells["key"]), np.asarray(e.cells["q"], np.float64)
         k, qq = k[qq > 25], qq[qq > 25]
-        cov.append((C.cell_inputs(k, e.cell_key, e.band_lengths, run.tokenizer)[0] >= 0).any(1)); q.append(qq)
+        cov.append((J.cell_inputs(k, e.cell_key, e.band_lengths, run.tokenizer)[0] >= 0).any(1)); q.append(qq)
     cov, q = np.concatenate(cov), np.concatenate(q)
     assert 0.05 < cov.mean() < 0.95
     m = Denoise(_dctx(run, _oracle(covered_only=False), n_boot=5))
@@ -877,7 +877,7 @@ def test_cell_inputs_matches_the_gather_arithmetic():
     w, t = fw * C.FW, ft * C.FT + C.FT // 2
     pc = pixel_cells(g, w, t, bl, cfg)
     tok_keys = np.unique(pc[rng.random(pc.shape) < 0.5])        # a token set covering about half
-    idx, aux = C.cell_inputs(keys, tok_keys, bl, cfg)
+    idx, aux = J.cell_inputs(keys, tok_keys, bl, cfg)
     order = np.argsort(tok_keys); cks = tok_keys[order]
     pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
     ref_idx = np.where(cks[pos] == pc, order[pos], -1)
@@ -899,7 +899,7 @@ def test_coeff_cells_are_the_cells_under_the_kept_coefficients():
     from helix.model.tokenize import PatchConfig, tick_of_tau
     cfg = PatchConfig()
     band, g, wire, tau = np.array([0, 3, 4, 0]), np.array([1, 2, 2, 1]), np.array([10, 11, 12, 10]), np.array([5, 9, 9, 5])
-    got = C.coeff_cells(band, g, wire, tau, cfg)
+    got = J.coeff_cells(band, g, wire, tau, cfg)
     k = band < cfg.n_bands                                              # D1 is not tokenized
     want = np.unique(C.fkey(g[k], wire[k] // C.FW, np.floor(tick_of_tau(tau[k], g[k], band[k], cfg) / C.FT)))
     np.testing.assert_array_equal(got, want)
@@ -941,8 +941,8 @@ def test_cell_neighbors_centre_is_the_covering_token_and_shifts_by_one_patch():
                 toks.append(cell_key(1, b, wb * cfg.pw, tb * cfg.pt, cfg))
     ck = np.array(rng.permutation(toks), np.int64)
     keys = C.fkey(np.full(40, 1), rng.integers(40, 100, 40), rng.integers(20, 60, 40))
-    nbr = C.cell_neighbors(keys, ck, bl, cfg)
-    idx, _ = C.cell_inputs(keys, ck, bl, cfg)
+    nbr = J.cell_neighbors(keys, ck, bl, cfg)
+    idx, _ = J.cell_inputs(keys, ck, bl, cfg)
     assert nbr.shape == (40, cfg.n_bands, 9) and np.array_equal(nbr[:, :, 4], idx)
     g, fw, ft = C.unkey(keys)
     pc = pixel_cells(g, fw * C.FW, ft * C.FT + C.FT // 2, bl, cfg)

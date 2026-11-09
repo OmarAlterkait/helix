@@ -65,7 +65,7 @@ class CellDecoder(nn.Module):
 
     Each cell's query (its offsets and the covering tokens' ``n_slot`` input slots per band, i.e.
     the coefficients themselves) attends to the encoder features of the (2r+1)^2 patches around
-    it in every band (:func:`helix.data.cells.cell_neighbors`), with a learned embedding per
+    it in every band (:func:`helix.model.cells_join.cell_neighbors`), with a learned embedding per
     (band, neighbour slot) and a learned null key so a cell with no token anywhere near still
     has one. (A per-band covering-token MLP predicts a 2-wire x 16-tick cell from one vector per
     16-wire x 128-tick patch, cannot compare the cell with the patch beside it, and spreads
@@ -83,7 +83,7 @@ class CellDecoder(nn.Module):
         if dist not in DISTS:
             raise ValueError(f"dist must be one of {DISTS}, got {dist!r}")
         self.n_bands, self.n_nbr, self.heads, self.dist = n_bands, n_nbr, heads, dist
-        n_aux = 13 * n_bands                                                    # helix.data.cells.cell_inputs
+        n_aux = 13 * n_bands                                                    # helix.model.cells_join.cell_inputs
         self.norm = nn.LayerNorm(d)
         self.kv = nn.Linear(d, proj)
         self.pos = nn.Parameter(torch.zeros(n_bands * n_nbr + 1, proj))       # + null key

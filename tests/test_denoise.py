@@ -22,6 +22,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from helix.data import cells as C                                   # noqa: E402
+from helix.model import cells_join as J                             # noqa: E402
 from helix.data.denoise import KEYS, DenoiseRows, kept_coefficients  # noqa: E402
 from helix.model.denoise import (ENCODER_PREFIXES, CellDecoder, build_denoise, calibration_stats,  # noqa: E402
                                  cat_cdf, cat_edges, cat_loss, cat_mean, cat_median, cat_presence_logit,
@@ -75,14 +76,14 @@ def test_query_cells_shapes_and_labels(sample):
     # the labels are the cells' truth: recover each row's key from the transform's own draw
     rng = np.random.default_rng([0, _name_hash(sample["name"])])
     keys, q = DenoiseRows(seed=0).rows(kept_coefficients(t, CFG), rec, CFG, rng)
-    idx, _ = C.cell_inputs(keys, t["cell_key"], t["_meta"]["band_lengths"], CFG)
+    idx, _ = J.cell_inputs(keys, t["cell_key"], t["_meta"]["band_lengths"], CFG)
     ok = (idx >= 0).any(1)
     np.testing.assert_array_equal(idx[ok], t["q_idx"])
     np.testing.assert_allclose(t["q_y"], np.log1p(q[ok] / C.Q0).astype(np.float32))
     truth = dict(zip(rec["key"].tolist(), rec["q"].tolist()))
     np.testing.assert_allclose(q, [truth.get(k, 0.0) for k in keys.tolist()])
     np.testing.assert_array_equal(t["q_present"], (t["q_y"] > np.log1p(25.0 / C.Q0)).astype(np.float32))
-    covered = (C.cell_inputs(rec["key"], t["cell_key"], t["_meta"]["band_lengths"], CFG)[0] >= 0).any(1)
+    covered = (J.cell_inputs(rec["key"], t["cell_key"], t["_meta"]["band_lengths"], CFG)[0] >= 0).any(1)
     assert set(rec["key"][covered & (rec["q"] > 25.0)].tolist()) <= set(keys[ok].tolist())  # every charged cell
     assert (t["q_present"] == 0).sum() > (t["q_present"] == 1).sum()  # and more empty ones beside them
 
@@ -382,8 +383,8 @@ def _write_denoise_run(d, fm_dir, **model):
 
 def _model_logits(model, ev, keys, ok):
     """The presence logits of ``model`` on the covered ``keys``, straight from the model."""
-    idx, aux = C.cell_inputs(keys[ok], ev.cell_key, ev.band_lengths, CFG)
-    nbr = C.cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, CFG)
+    idx, aux = J.cell_inputs(keys[ok], ev.cell_key, ev.band_lengths, CFG)
+    nbr = J.cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, CFG)
     with torch.no_grad():
         return model.predict(ev.batch, *(torch.as_tensor(a) for a in (idx, aux, nbr)))[1].numpy()
 
@@ -404,7 +405,7 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
     y, pr = predict(ev, keys)
-    ok = (C.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
     assert y.shape == pr.shape == (len(keys),) and ok.any()
     assert (y[~ok] == 0).all() and (pr[~ok] == UNCOVERED_LOGIT).all()
     np.testing.assert_allclose(pr[ok], _model_logits(m, ev, keys, ok), rtol=1e-5, atol=1e-5)   # log-odds, as is
@@ -434,7 +435,7 @@ def test_load_denoiser_reads_last_and_scores_presence_as_a_logit(fm_run, sample,
     assert pb.provenance["weights"] == "best" and _same(pb.run.model, best)
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
-    ok = (C.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
     top = predict(ev, keys)[1][ok]
     p = torch.sigmoid(torch.from_numpy(top)).numpy()
     assert (p == 1.0).all() and top.min() > 20 and not (p > np.quantile(p, 0.99)).any()   # tied: nothing above
@@ -454,7 +455,7 @@ def test_a_distributional_run_reads_back_and_predicts(fm_run, sample, tmp_path, 
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
     y, pr = predict(ev, keys)
-    ok = (C.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
     assert predict.dist == dist and ok.any() and np.isfinite(y).all() and np.isfinite(pr).all()
     np.testing.assert_allclose(pr[ok], _model_logits(m, ev, keys, ok), rtol=1e-5, atol=1e-5)
 

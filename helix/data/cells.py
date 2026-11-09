@@ -1,5 +1,5 @@
-"""The fine cell grid: simulation truth on it, one ``{name}_cells_<k>.h5`` per coefficient shard,
-and the join from a cell to the tokens covering it.
+"""The fine cell grid and the simulation truth on it: one ``{name}_cells_<k>.h5`` per coefficient
+shard (the join from a cell to the tokens covering it is :mod:`helix.model.cells_join`).
 
 The label every downstream task scores against -- the denoiser's target, the detection floor,
 the along-wire probe and the particle labels -- built once from the simulation's ``hits`` (and
@@ -123,104 +123,6 @@ def fkey(g, fw, ft):
 def unkey(k):
     k = np.asarray(k, np.int64)
     return k >> 40, (k >> 20) & 0xFFFFF, (k & 0xFFFFF) - _TOFF
-
-
-def _coeff_keys(band, plane_gid, wire, tau, cfg):
-    """``(k, key)``: which coefficients are in the tokenized bands, and their fine cells."""
-    from helix.model.tokenize import tick_of_tau
-    band, plane_gid, wire, tau = (np.asarray(x) for x in (band, plane_gid, wire, tau))
-    k = band < cfg.n_bands
-    ct = tick_of_tau(tau[k], plane_gid[k], band[k], cfg)
-    return k, fkey(plane_gid[k], wire[k] // FW, np.floor(ct / FT).astype(np.int64))
-
-
-def coeff_cells(band, plane_gid, wire, tau, cfg):
-    """Fine-cell keys (sorted, unique) of an event's kept coefficients in the tokenized bands."""
-    return np.unique(_coeff_keys(band, plane_gid, wire, tau, cfg)[1])
-
-
-def coeff_amplitude(c, cfg):
-    """``(keys, amp)``: :func:`coeff_cells` of a coeff part ``c`` (``band, plane_gid, wire, tau,
-    value`` and its ``_meta``) and, per cell, the largest ``|value| / sigma`` of the kept
-    coefficients in it -- the compressor's own detection statistic, in the units the tokenizer
-    normalises by (:func:`helix.model.tokenize.sigma_for_rows`)."""
-    from helix.model.tokenize import sigma_for_rows
-    k, key = _coeff_keys(c["band"], c["plane_gid"], c["wire"], c["tau"], cfg)
-    m = c["_meta"]
-    band, g = np.asarray(c["band"])[k], np.asarray(c["plane_gid"])[k]
-    a = np.abs(np.asarray(c["value"], np.float64).reshape(-1)[k]) \
-        / np.maximum(sigma_for_rows(g, band, m["gids"], m["norm_sigma"]), 1e-6)
-    keys, inv = np.unique(key, return_inverse=True)
-    amp = np.zeros(len(keys))
-    np.maximum.at(amp, inv.ravel(), a)
-    return keys, amp
-
-
-def _fourier(x):
-    ang = 2 * np.pi * x[..., None] * np.array([1, 2, 3], np.float32)
-    return np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(x.shape[0], -1)
-
-
-def cell_inputs(keys, cell_key, band_lengths, cfg):
-    """Per fine cell: which token covers it in each band, and where inside it.
-
-    ``keys``: fine-cell keys (:func:`fkey`). ``cell_key``: the tokenized event's per-token cell
-    keys (``B["cell_key"]``). Returns ``idx`` (n, n_bands) int64 -- the covering token's row,
-    -1 if none -- and ``aux`` (n, 13 * n_bands) float32: a presence bit per band, then the cell's
-    continuous offset inside each band's token (wire, tau), Fourier-encoded. The frozen probes
-    (:mod:`helix.eval`) and the trainable denoising head (:mod:`helix.model.denoise`) both read
-    exactly this, so a frozen and a fine-tuned number differ only in what was trained.
-    """
-    from helix.model.tokenize import pixel_cells
-
-    nb, pw, pt = cfg.n_bands, cfg.pw, cfg.pt
-    g, fw, ft = unkey(np.asarray(keys, np.int64))
-    w, t = fw * FW, ft * FT + FT // 2
-    pc = pixel_cells(g, w, t, band_lengths, cfg)
-    ck = np.asarray(cell_key, np.int64)
-    order = np.argsort(ck); cks = ck[order]
-    if len(cks):
-        pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
-        idx = np.where(cks[pos] == pc, order[pos], -1)
-    else:
-        idx = np.full(pc.shape, -1, np.int64)
-    dec = (1 << np.asarray(cfg.lev)).astype(np.float64)
-    toff = np.asarray(cfg.toff)[g % 3]
-    offs = []
-    for b in range(nb):
-        tau = (t + toff) / dec[b] - cfg.delta[b]
-        offs += [(w % pw + 0.5) / pw, (tau / pt) % 1.0]
-    aux = np.concatenate([(idx >= 0).astype(np.float32), _fourier(np.stack(offs, 1).astype(np.float32))], 1)
-    return idx.astype(np.int64), aux.astype(np.float32)
-
-
-def cell_neighbors(keys, cell_key, band_lengths, cfg, radius=1):
-    """Per fine cell and band: the tokens of the (2r+1) x (2r+1) patches around the one covering
-    it, -> (n, n_bands, (2r+1)**2) int64, -1 where no token.
-
-    Found by shifting the covering PATCH's block coordinates, so a cell with no token of its own
-    in a band still sees the tokens beside it. Slot ``(2r+1)**2 // 2`` is the covering token, the
-    same index :func:`cell_inputs` returns. Order: wire offset major, tick offset minor, each from
-    -r to r.
-    """
-    from helix.model.tokenize import cell_key as pack, pixel_cells, unpack_cell_key
-
-    g, fw, ft = unkey(np.asarray(keys, np.int64))
-    pc = pixel_cells(g, fw * FW, ft * FT + FT // 2, band_lengths, cfg)          # (n, nb)
-    pg, pb, wb, tb = unpack_cell_key(pc.ravel())
-    ck = np.asarray(cell_key, np.int64)
-    order = np.argsort(ck); cks = ck[order]
-    offs = [(dw, dt) for dw in range(-radius, radius + 1) for dt in range(-radius, radius + 1)]
-    out = np.full((pc.size, len(offs)), -1, np.int64)
-    for j, (dw, dt) in enumerate(offs):
-        w2, t2 = wb + dw, tb + dt
-        ok = (w2 >= 0) & (t2 >= 0)
-        if not ok.any() or not len(cks):
-            continue
-        k2 = pack(pg[ok], pb[ok], w2[ok] * cfg.pw, t2[ok] * cfg.pt, cfg)
-        pos = np.clip(np.searchsorted(cks, k2), 0, len(cks) - 1)
-        out[np.nonzero(ok)[0], j] = np.where(cks[pos] == k2, order[pos], -1)
-    return out.reshape(pc.shape[0], pc.shape[1], len(offs))
 
 
 # ------------------------------------------------------------------------------------------ truth
@@ -529,15 +431,18 @@ def build_shard(coeff_shard, source_root, out_dir=None):
 
 
 # ------------------------------------------------------------------------------------------- read
-def read_event(f, pos):
-    """Event at write position ``pos`` of an open cells file -> a record (:data:`SCHEMA` names),
-    without cells whose key is not a real cell (:func:`valid_cells`)."""
+def read_event(f, pos, columns=None):
+    """Event at write position ``pos`` of an open cells file -> a record (:data:`SCHEMA` names;
+    ``columns`` of them, plus ``key``, when given: training reads ``key`` and ``q`` only), without
+    cells whose key is not a real cell (:func:`valid_cells`)."""
+    want = None if columns is None else set(columns) | {"key"}
     out = {}
     for grp in GROUPS:
-        off = f[grp]["event_offset"]
-        a, b = int(off[pos]), int(off[pos + 1])
-        for g, col, name, dt in SCHEMA:
-            if g == grp:
+        cols = [(col, name) for g, col, name, _ in SCHEMA if g == grp and (want is None or name in want)]
+        if cols:
+            off = f[grp]["event_offset"]
+            a, b = int(off[pos]), int(off[pos + 1])
+            for col, name in cols:
                 out[name] = f[grp][col][a:b]
     return valid_cells(out)
 
@@ -551,7 +456,7 @@ def valid_cells(rec, gids=None, n_wires=None, n_ticks=None):
     such cells in ONE event of 200,000 (sim_wire_cells_0664 event 112): 368 with negative keys, and
     16,333 on plane 3 at fine wires up to 16,374 against 984, 12.8% of that event's charge; the
     negative ones stopped every denoiser run that drew the event. ``ct_cell`` rows of dropped cells
-    go; the rest are renumbered."""
+    go; the rest are renumbered. Columns ``rec`` does not carry are left out."""
     key = np.asarray(rec["key"])
     ok = key >= 0
     if gids is not None:
@@ -568,20 +473,14 @@ def valid_cells(rec, gids=None, n_wires=None, n_ticks=None):
         return rec
     out = dict(rec)
     for name in ("key", "q", "dom_frac", "dom_y", "dom_z"):
-        out[name] = np.asarray(rec[name])[ok]
-    new = np.cumsum(ok) - 1                                     # old cell row -> new row
-    ct = np.asarray(rec["ct_cell"], np.int64)
-    keep = ok[ct]
-    out["ct_cell"] = new[ct[keep]].astype(np.asarray(rec["ct_cell"]).dtype)
-    for name in ("ct_track", "ct_q"):
-        out[name] = np.asarray(rec[name])[keep]
+        if name in rec:
+            out[name] = np.asarray(rec[name])[ok]
+    if "ct_cell" in rec:
+        new = np.cumsum(ok) - 1                                 # old cell row -> new row
+        ct = np.asarray(rec["ct_cell"], np.int64)
+        keep = ok[ct]
+        out["ct_cell"] = new[ct[keep]].astype(np.asarray(rec["ct_cell"]).dtype)
+        for name in ("ct_track", "ct_q"):
+            if name in rec:
+                out[name] = np.asarray(rec[name])[keep]
     return out
-
-
-def open_event(path, pos):
-    """``(record, ident)`` of event ``pos`` of a cells shard at ``path``, format-checked."""
-    with h5py.File(path, "r") as f:
-        require_format(f["config"], str(path))
-        ident = read_ident(f)
-        return read_event(f, pos), dict(run=ident["run"][pos], source_file=ident["source_file"][pos],
-                                        event=int(ident["event"][pos]))

@@ -75,6 +75,7 @@ from pimm_data import ShardEventDataset, ShardReaderBase
 from pimm_data.builder import DATASETS
 
 from helix.core.coeff_io import FORMAT, shard_format
+from helix.data.verify import SIGNATURE, shard_signature
 
 logger = logging.getLogger(__name__)
 
@@ -90,19 +91,10 @@ class CoeffTPCReader(ShardReaderBase):
         self.data_root = data_root
         self.split = split
         self.dataset_name = dataset_name
-        # Shard-shared metadata. Taken from the first shard AND verified against
-        # every other one: these tables are corpus-wide by contract (norm_sigma
-        # in particular must be frozen across shards), so a disagreement means
-        # the shards are not one corpus. Serving shard 0's tables for every event
-        # silently mis-normalises everything outside shard 0.
-        self.band_lengths = None
-        self.gids = None
-        self.n_wires = None
-        self.norm_sigma = None
-        self.sigma_norm = None
-        self.config_attrs = None
-        self._meta_source = None
-        self._meta_by_path = {}                 # h5_path -> its /config tables
+        # Shard-shared tables, served from the first shard: every other shard must carry the same
+        # (shard_signature), or shard 0's norm_sigma would silently mis-normalise the rest.
+        self.band_lengths = self.gids = self.n_wires = self.norm_sigma = self.sigma_norm = None
+        self._sig_by_path = {}                  # h5_path -> shard_signature
         self._ident_by_path = {}                # h5_path -> raw (run, source_file, event)
         self._dup_ident = {}                    # h5_path -> (rows, unique) when not 1:1
         self._bad_format = {}                   # h5_path -> its format when not FORMAT
@@ -111,31 +103,12 @@ class CoeffTPCReader(ShardReaderBase):
         self._validate_shard_agreement()
 
     def _validate_shard_agreement(self):
-        """Every shard of one corpus must share the basis, plane set and — above
-        all — ``norm_sigma``. Row i of that table normalises any event in any
-        shard, so a per-shard table means the same physical coefficient is scaled
-        differently depending on where it was written.
+        """Refuse a shard of another format, a shard whose identities repeat, and shards that are
+        not one corpus (:data:`helix.data.verify.SIGNATURE`).
 
-        Deliberately run OUTSIDE ``_build_index``: that loop catches every
-        exception and downgrades it to a log warning, dropping the offending
-        shard's events silently — so raising from ``_index_for_shard`` would turn
-        a mis-built corpus into a quietly shorter one.
-        """
-        def _as_text(v):
-            """Bytes and str compare equal — h5py returns either depending on
-            how the attr was written, and a spurious mismatch here would refuse
-            a perfectly good corpus."""
-            if v is None:
-                return None
-            if isinstance(v, bytes):
-                return v.decode("utf-8", "replace")
-            return str(v)
-
-        def _same(a, b):
-            if a is None or b is None:
-                return a is None and b is None
-            return np.array_equal(np.asarray(a), np.asarray(b))
-
+        Run OUTSIDE ``_build_index``, which catches every exception and drops the shard's events
+        with a log warning: raising from ``_index_for_shard`` would turn a mis-built corpus into a
+        quietly shorter one, so the faults are recorded there and raised here."""
         for path, fmt in self._bad_format.items():
             raise ValueError(f"{path}: format {fmt!r}, not {FORMAT!r}; rebuild it "
                              f"(scripts/migrate_format.py at tag archive-2026-11 migrated the format-1 corpora)")
@@ -144,41 +117,19 @@ class CoeffTPCReader(ShardReaderBase):
                 f"{path}: /ident does not uniquely identify its events — {rows} rows "
                 f"collapse to {uniq} identities. (run, source_file, event) must be "
                 f"unique within a shard; duplicates would be silently dropped.")
-        if not self._meta_by_path:
+        if not self._sig_by_path:
             return
-        (ref_path, ref), *rest = self._meta_by_path.items()
-        for path, m in rest:
-            for name in ("band_lengths", "gids", "n_wires", "norm_sigma"):
-                if not _same(ref[name], m[name]):
-                    a = None if ref[name] is None else np.asarray(ref[name]).tolist()
-                    b = None if m[name] is None else np.asarray(m[name]).tolist()
+        why = {"basis_digest": "They were built with different DSP.",
+               "removal_json": "They were built with different DSP.",
+               "norm_sigma": "norm_sigma must be FROZEN across a corpus (build with --norm-sigma)."}
+        (ref_path, ref), *rest = self._sig_by_path.items()
+        for path, sig in rest:
+            for name in SIGNATURE:
+                if sig[name] != ref[name]:
                     raise ValueError(
                         f"{self._MODALITY} shards disagree on /config/{name}:\n"
-                        f"  {ref_path} -> {a}\n  {path} -> {b}\n"
-                        f"These shards are not one corpus. norm_sigma in particular must "
-                        f"be FROZEN across a corpus (build with --norm-sigma).")
-            if abs(float(m["sigma_norm"]) - float(ref["sigma_norm"])) > 1e-6:
-                raise ValueError(
-                    f"{self._MODALITY} shards disagree on sigma_norm: "
-                    f"{ref_path} -> {ref['sigma_norm']}, {path} -> {m['sigma_norm']}")
-            # The DSP identity. Everything above is geometry and normalisation,
-            # which two corpora built with DIFFERENT signal processing share
-            # exactly — so none of it would have caught shards from two gates
-            # landing in one directory. That is not hypothetical: the corpus
-            # submit script defaulted its output root to the older corpus while
-            # defaulting its gate to the newer one, so the ordinary way to
-            # extend a corpus wrote r1-gated shards into the pre-r1 tree, where
-            # they would have read as one corpus and trained as two.
-            for name, what in (("basis_digest", "wavelet basis / threshold"),
-                               ("removal_json", "coherent-removal gate")):
-                a, b = ref.get(name), m.get(name)
-                if _as_text(a) != _as_text(b):
-                    raise ValueError(
-                        f"{self._MODALITY} shards disagree on /config/{name} "
-                        f"({what}):\n  {ref_path} -> {_as_text(a)}\n"
-                        f"  {path} -> {_as_text(b)}\n"
-                        f"These shards were built with different DSP and are not "
-                        f"one corpus, however similar their geometry looks.")
+                        f"  {ref_path} -> {ref[name]}\n  {path} -> {sig[name]}\n"
+                        f"These shards are not one corpus. {why.get(name, '')}")
 
     def _find_files(self):
         """Glob ``{name}_{modality}_[0-9]*.h5``: the tag anchored to a digit, so no other family
@@ -212,23 +163,13 @@ class CoeffTPCReader(ShardReaderBase):
             if shard_format(cfg) != FORMAT:
                 self._bad_format[str(h5_path)] = shard_format(cfg)
                 return np.zeros(0, np.int64)
-            bl = cfg["band_lengths"][:].astype(np.int32)
-            gids = cfg["gids"][:].astype(np.int32)
-            n_wires = cfg["n_wires"][:].astype(np.int32)
-            ns = cfg["norm_sigma"][:].astype(np.float32) if "norm_sigma" in cfg else None
-            sn = float(cfg.attrs["sigma_norm"])
-            self._meta_by_path[str(h5_path)] = dict(
-                band_lengths=bl, gids=gids, n_wires=n_wires, norm_sigma=ns,
-                sigma_norm=sn,
-                # The DSP identity, as distinct from the geometry: two corpora can
-                # share every table above and differ only in the coherent gate.
-                basis_digest=cfg.attrs.get("basis_digest"),
-                removal_json=cfg.attrs.get("removal_json"))
+            self._sig_by_path[str(h5_path)] = shard_signature(cfg)
             if self.band_lengths is None:
-                self.config_attrs = dict(cfg.attrs)
-                self.band_lengths, self.gids, self.n_wires = bl, gids, n_wires
-                self.norm_sigma, self.sigma_norm = ns, sn
-                self._meta_source = str(h5_path)
+                self.band_lengths = cfg["band_lengths"][:].astype(np.int32)
+                self.gids = cfg["gids"][:].astype(np.int32)
+                self.n_wires = cfg["n_wires"][:].astype(np.int32)
+                self.norm_sigma = cfg["norm_sigma"][:].astype(np.float32) if "norm_sigma" in cfg else None
+                self.sigma_norm = float(cfg.attrs["sigma_norm"])
             ev = f["ident"]["event"][:].astype(np.int64)
             src = f["ident"]["source_file"][:]
             rn = f["ident"]["run"][:]
@@ -315,8 +256,9 @@ class CellsReader(ShardReaderBase):
     _MODALITY = "cells"
     _find_files = CoeffTPCReader._find_files            # digit-anchored glob
 
-    def __init__(self, data_root, split="", dataset_name="coeff_tpc"):
+    def __init__(self, data_root, split="", dataset_name="coeff_tpc", columns=None):
         self.data_root, self.split, self.dataset_name = data_root, split, dataset_name
+        self.columns = None if columns is None else tuple(columns)
         self._ident_by_path, self._id2pos, self._bad = {}, {}, {}
         self._init_shards()
         for path, why in self._bad.items():             # recorded, not raised: see _dup_ident above
@@ -337,14 +279,15 @@ class CellsReader(ShardReaderBase):
         return np.asarray(ev, np.int64)
 
     def read_event(self, idx):
-        """One event's record (:data:`helix.data.cells.SCHEMA` names) plus ``_ident``."""
+        """One event's record (:data:`helix.data.cells.SCHEMA` names, or ``columns`` of them) plus
+        ``_ident``."""
         from helix.data.cells import read_event
         self._ensure_open()
         file_idx, event_id = self.locate(idx)
         path = str(self.h5_files[file_idx])
         pos = self._id2pos[path][int(event_id)]
         ident = self._ident_by_path[path]
-        out = read_event(self._h5data[file_idx], pos)
+        out = read_event(self._h5data[file_idx], pos, columns=self.columns)
         out["_ident"] = dict(run=ident["run"][pos], source_file=ident["source_file"][pos],
                              event=int(ident["event"][pos]))
         return out
@@ -458,28 +401,29 @@ class CoeffTPCDataset(ShardEventDataset):
         loop=1,
         max_len=-1,
         ignore_index=-1,
-        strict_lengths=True,
-        event_range=None,
-        exclude_range=None,
         holdout=None,
         split_role=None,
         max_event_size=None,
         n_events=None,
         subset_seed=0,
+        cells_columns=None,
     ):
-        # strict by DEFAULT, unlike the other datasets. A coeff corpus is built
-        # by hundreds of independent jobs, and a truncated shard or a cells shard
-        # absent for its coeff shard would otherwise resolve to the joint index
-        # quietly ALIGNING on what it found and emitting a log warning --
-        # silently shortening the corpus in a way no downstream check can see.
+        """``holdout`` (``dict(seed, fractions={role: share})``) with ``split_role`` selects one role
+        of a split keyed on each event's identity (:meth:`event_identity`); ``max_event_size`` drops
+        events of more coefficients; ``n_events`` keeps a fixed subset (:meth:`_subset`);
+        ``cells_columns`` the cells record names to read (:data:`helix.data.cells.SCHEMA`;
+        None: all)."""
         self._modalities = tuple(modalities)
         self._validate_modalities(self._modalities)
         if 'coeff' not in self._modalities:
-            raise ValueError("modalities must include 'coeff' (cells are checked against the coeff "
-                             "event's identity)")
+            raise ValueError("modalities must include 'coeff': 'cells' is checked against the coeff event's "
+                             "identity, so load it with 'coeff'")
         self._dataset_name = dataset_name
         self._max_len = max_len
-        self._strict_lengths = strict_lengths
+        # Strict, unlike the other datasets: the corpus is built by hundreds of independent jobs, and
+        # a cells shard short of its coeff shard would otherwise ALIGN quietly on what it found --
+        # a silently shorter corpus.
+        self._strict_lengths = True
         self._source_data_root = data_root
         self._source_split = split
 
@@ -488,11 +432,10 @@ class CoeffTPCDataset(ShardEventDataset):
         self.cells_reader = None
         if 'cells' in self._modalities:
             self.cells_reader = CellsReader(
-                data_root=self._modality_root('cells'), split=split, dataset_name=dataset_name)
+                data_root=self._modality_root('cells'), split=split, dataset_name=dataset_name,
+                columns=cells_columns)
 
         # consumed by ShardEventDataset.get_data_list
-        self._event_range = tuple(event_range) if event_range else None
-        self._exclude_range = tuple(exclude_range) if exclude_range else None
         self._holdout = dict(holdout) if holdout else None
         self._split_role = split_role
         self._canonical_reader = self.coeff_reader
@@ -549,11 +492,7 @@ class CoeffTPCDataset(ShardEventDataset):
         """
         if not self._max_event_size:
             return
-        r = self._canonical_reader
-        if r is None or not hasattr(r, "event_sizes"):
-            return
-        import numpy as _np
-        sizes = _np.asarray(r.event_sizes(), dtype=_np.int64)
+        sizes = self.coeff_reader.event_sizes()
         keep = [i for i in self.data_list if sizes[i] <= self._max_event_size]
         dropped = len(self.data_list) - len(keep)
         if dropped:
@@ -574,7 +513,6 @@ class CoeffTPCDataset(ShardEventDataset):
         noise model or shard size — which matters because the probe holdout must
         keep meaning the same events across exactly that kind of change.
         """
-        import hashlib
         t = self._ident_at(idx)
         h = hashlib.blake2b(f"{t['run']}/{t['source_file']}".encode(),
                             digest_size=8).digest()
@@ -589,38 +527,6 @@ class CoeffTPCDataset(ShardEventDataset):
         pos = r._id2pos[path][int(event_num)]
         return dict(run=ident['run'][pos], source_file=ident['source_file'][pos],
                     event=int(ident['event'][pos]))
-
-    def holdout_manifest(self):
-        """``[{run, source_file, event}, ...]`` for this split, in index order.
-
-        The written counterpart to the hash: reproducible is not the same as
-        auditable, and a probe holdout that exists only as code cannot be
-        inspected, diffed, or cited.
-        """
-        r = self._canonical_reader
-        out = []
-        for i in range(len(self.data_list)):
-            # Straight from the reader's index — NOT get_data(), which loads the
-            # event's full coefficient arrays. Resolving 20k identities that way
-            # meant 20k complete event reads for data that is already in memory.
-            out.append(self._ident_at(self.data_list[i]))
-        return out
-
-    def event_sizes(self):
-        """Per-event coefficient counts, aligned with THIS dataset's index.
-
-        The reader's table is over its own global index; ``data_list`` is this
-        split's selection into it (holdout, event_range, max_len), so the two are
-        only the same while data_list is ``range(n)``. Mapping through it is what
-        keeps a size table usable after a split narrows the corpus -- the same
-        distinction ``get_data`` makes one line below.
-        """
-        r = self._canonical_reader
-        if r is None or not hasattr(r, "event_sizes"):
-            return None
-        import numpy as _np
-        sizes = _np.asarray(r.event_sizes(), dtype=_np.int64)
-        return sizes[_np.asarray(self.data_list, dtype=_np.int64)]
 
     #: an event whose truth loses more than this share of any plane's charge to valid_cells is not
     #: trained or scored on (its truth for that plane is not on the plane at all)

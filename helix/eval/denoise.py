@@ -46,7 +46,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from helix.data.cells import Q0, cell_inputs, cell_neighbors, unkey
+from helix.data.cells import Q0, unkey
+from helix.model.cells_join import cell_inputs, cell_neighbors
 from helix.eval.events import VIEWS, Scored, amplitude, cell_charge
 
 #: Truth-charge bins of the resolution (e-); the last is open.
