@@ -348,6 +348,14 @@ number still under its own key, the new ones beside it):*
     amplitude: a weak reference, so amplitude is the one to quote. The earlier "0.35 vs 0.10"
     headline was mostly the background rule. The frozen s0/s1 gap survives the change (+0.045
     [+0.040, +0.049], every view the same sign).
+    *What the 1% FPR is under this rule:* far windows are uniform over the plane's kept extent
+    AND hold >= 1 kept coefficient. So it is 1% of NOISY windows (those the gate let something
+    through), not 1% of plane area. It is a specific operating point, the same for every arm
+    and both backgrounds, and not a per-area false-positive rate. Y's deficit is not threshold
+    noise: under this rule Y has 27,420 far windows (as U and V), and the event bootstrap
+    recomputes the threshold per resample: Y -0.057 [-0.068, -0.045] clear, -0.051 [-0.072,
+    -0.038] crowded@near. Whether it is the probe or the representation is the nested control
+    (amplitude given to the probe, alone and with the FM features).
   - *d1m_lr: training-seed noise exceeds the LR effect* (paired presence clear@far 0.1-0.2 MeV,
     each cooled arm minus fm_cooldown on identical windows): lr4.4e-3 seed 0 -0.049, seed 1
     -0.005 (n.s.), lr3.1e-3 -0.009, lr2.2e-3 -0.036. The two seeds of ONE recipe differ by
