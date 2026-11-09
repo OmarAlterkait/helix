@@ -1,481 +1,304 @@
 # Architecture
 
-The modules, how data moves through them, and the on-disk formats. Why each piece
-is shaped this way is in `docs/DECISIONS.md`; how to run it is in `docs/RUNBOOK.md`.
-
----
+What the code is and how data moves through it. Procedures are in `docs/RUNBOOK.md`; the
+current numbers and standing decisions in `docs/STATUS.md`.
 
 ## 1. Data flow
 
 ```
-  JAXTPC wire campaign         SBND extracted files            goop light files
-  (HELIX_SIM_ROOT/j00X000)     (sbnd_data/extracted/<run>)     (optical only)
-        |                              |                              |
-  helix.build sim               helix.build sbnd                helix.build goop
-  (noise model + digitize)      (TPC readout + PMT/X-ARAPUCA)
-        \______________________________|______________________________/
-                                       |
-                     helix.build: event loop, TPCChain, OpticalChain, ShardWriter
-                     scripts/corpus.sh: plan -> calibrate -> build, as Slurm arrays
-                                       v
-  corpus root  <run>/<dataset>_coeff_NNNN.h5        noisy coefficients (helix-coeff-2)
-               <run>/<dataset>_coeff_clean_NNNN.h5  clean values, sim, --keep-clean only
-               <run>/<dataset>_optical_NNNN.h5      optical streams (helix-optical-2)
-               <run>/<dataset>_cells_NNNN.h5        sim truth (helix-cells-3), scripts/build_truth.py
-               _calib/  CHUNKS.txt RUNS.txt norm_sigma_global.npy
-                                       |
-                     helix.data: CoeffTPCReader -> CoeffTPCDataset
-                     helix.model.tokenize.CoeffTokenize -> CoeffCollect
-                                       v
-                     pimm.train + helix.integrations.pimm (FMTrainer, hooks, evaluator)
-                                       |
-             <save_path>/ (pimm's run dir) -> helix.model.checkpoint.load_run
-                                       v
-                     helix.eval (python -m helix.eval; truth: scripts/build_truth.py)
+JAXTPC wire campaign (HELIX_SIM_ROOT)      SBND extracted files       goop light files
+        |  python -m helix.build sim            | ... sbnd                 | ... goop (optical only)
+        v                                       v                          v
+helix.build: event loop -> TPCChain (gate, DWT, threshold) / OpticalChain -> ShardWriter
+scripts/corpus.sh: plan -> calibrate norm_sigma -> build, as Slurm arrays
+        v
+corpus root  <run>/sim_wire_coeff_NNNN.h5   noisy coefficients        helix-coeff-2
+             <run>/sim_wire_cells_NNNN.h5   simulation truth          helix-cells-3  (scripts/build_truth.py)
+             <run>/<ds>_optical_NNNN.h5     optical streams           helix-optical-2
+             _calib/ CHUNKS.txt RUNS.txt <run>.npy norm_sigma_global.npy
+        v
+helix.data.CoeffTPCDataset -> helix.model.tokenize.CoeffTokenize -> CoeffCollect
+        v
+python -m pimm.train + helix.integrations.pimm     (FM pretraining; denoiser fine-tuning)
+        v
+<save_path> = $HELIX_EXP/<run>  -> helix.model.checkpoint.load_run -> python -m helix.eval
 ```
-
----
 
 ## 2. Packages and the boundary
 
-| package | may import pimm-data / pimm | what it is |
+| package | imports pimm-data / pimm | what it is |
 |---|---|---|
-| `helix.core` | no | wavelet transform, robust statistics and hysteresis, coeff shard IO, the event and its provenance |
-| `helix.tpc` | no | TPC chain and its CoeffEvents, coherent gate, thresholding, noise model, readouts and plane geometry, readers (and the SBND build source) |
-| `helix.optical` | no | optical codec, calibration, optical shards, tokens, the goop build source |
-| `helix.model` | no (`tokenize` defers one import) | the FM and its masking, blocks, loss, tokenizer, schedule (cadence, muP), the denoiser, reading a run |
-| `helix.eval` | no | evaluation: `recon`, `events` (and windows), `probe` (floor, uprobe, labels), `denoise` |
-| `helix.build` | no (`SimSource` defers pimm-data's `densify`) | the build pipeline, its CLI and the simulation source |
-| `helix.data` | pimm-data (`dataset` only) | corpus reader and dataset (`dataset`), verifier and identity guard (`verify`), bins, `cells` truth, denoiser labels |
-| `helix.integrations.pimm` | pimm | registry adapters into pimm's trainer |
+| `helix.core` | never pimm-data | wavelet transform, robust statistics and hysteresis (`robust`), the coeff shard codec (`coeff_io`), the event and its provenance (`coeff_event`) |
+| `helix.tpc` | never pimm-data | the TPC chain (`chain`), coherent gate, threshold, noise model, readouts and plane geometry, the JAXTPC and SBND readers |
+| `helix.build` | defers one (`SimSource` uses pimm-data's `densify`) | the build pipeline and its CLI |
+| `helix.optical` | no | the optical codec, calibration, optical shards and tokens, the goop source |
+| `helix.data` | pimm-data, in `dataset` only | reader and dataset, verifier and corpus identity, bin grid, `cells` truth, the denoiser's labels |
+| `helix.model` | defers one (`tokenize` registers into pimm-data) | tokenizer, FM, denoiser, schedule and muP, reading a run |
+| `helix.eval` | through `helix.data` when events are read | `python -m helix.eval`: the fine-tune scoring, `uprobe`, `compare` |
+| `helix.integrations.pimm` | pimm and pimm-data | registry adapters into pimm's trainer |
 
-`helix.core` and `helix.tpc` never import `pimm_data`: the DSP must install with the
-base dependencies (numpy, h5py, PyWavelets, scipy, PyYAML) while pimm-data requires
-torch and hdf5plugin unconditionally. `tests/test_boundary.py` enforces it with
-import probes in clean subprocesses, a source scan, a per-submodule sweep, and a
-check that `helix.data.bins` / `helix.data.verify` stay light (`helix/data/__init__.py`
-resolves the reader and dataset lazily so they do). torch is optional at `import helix`
-time; the DSP modules import it when they run.
+**The one real boundary: `helix.core` and `helix.tpc` never import `pimm_data`.** pimm-data
+requires torch>=2.5 and hdf5plugin unconditionally; the corpus-builder side must not depend
+on it. torch itself is not excluded: `helix.core.robust` and the TPC chain import it at
+module scope. `tests/test_boundary.py` checks, importing in clean interpreters: (1) no
+submodule of `helix.core` / `helix.tpc` pulls in `pimm_data`; (2) its `LIGHT` list (`helix`,
+`helix.core`, `helix.tpc`, `helix.paths`, `helix.data` and its `bins` / `verify` / `cells` /
+`denoise`, `helix.model.tokenize`, `helix.model.checkpoint`, `helix.eval`, `helix.eval.events`)
+imports with neither torch nor pimm-data, as `pimm submit`'s preflight (a config loaded on a
+host without torch) and DataLoader workers need, which is why `helix/data/__init__.py` and
+`helix/model/__init__.py` resolve heavy names lazily; (3) `helix.data.dataset` does need
+pimm-data; (4) the bundled JAXTPC geometry JSON is byte-identical to pimm-data's; (5) no
+pretraining source (configs except `denoise.py`, `helix/model`, `helix/integrations/pimm`)
+contains the string literal `'cells'`.
 
-**The pimm-data pin.** The forward model (noise, digitize) moved from pimm-data to helix
-(`helix.tpc.noise`); a pimm-data from before the move still registers `AddNoise` and
-`Digitize`, which the image checks are absent. The pimm-data revision is named once,
-in `pyproject.toml` (`[tool.uv.sources]`); `container/install.sh` reads it from there and
-`tests/test_lockstep_pin.py` checks that no other build file names one.
+The pimm-data revision is named once, in `pyproject.toml` (`[tool.uv.sources]`);
+`container/install.sh` reads it, CI checks it is a full revision, and
+`tests/test_pimm_config.py` checks the pimm checkout pins the same one.
 
----
+## 3. Building a corpus (`helix/build.py`, `scripts/corpus.sh`)
 
-## 3. The build pipeline (`helix/build.py`)
+A source is a class that only reads: `SimSource` (`helix/build.py`; the JAXTPC campaign),
+`SBNDSource` (`helix/tpc/io_sbnd.py`), `GoopSource` (`helix/optical/goop.py`).
+`python -m helix.build SOURCE` (`sim`, `sbnd`, `goop` or `module:Class`) runs it; the source
+protocol and every option are in `helix/build.py`'s docstring. Everything after the read is
+shared: per `--events-per-shard` events, shard k is written as `PREFIX_coeff_k.h5` (and
+`PREFIX_optical_k.h5` when the source has light), each as `.part`, audited
+(`coeff_io.audit_shard`) and renamed, so a file under its final name is complete and
+`--skip-complete` resumes. `--norm-sigma TABLE` gives every shard the corpus table;
+`--calibrate TABLE` writes a table and no shards.
 
-A source is a class that only reads, next to its reader: `SimSource` in `helix/build.py` (it
-densifies with pimm-data, which `helix.tpc` may not import), `SBNDSource` in
-`helix/tpc/io_sbnd.py`, `GoopSource` in `helix/optical/goop.py`. `python -m helix.build SOURCE`
-(`SOURCES` names them; `module:Class` names any other) gives the command line documented in
-`helix/build.py`'s docstring, and `helix.build.main(Source)` the same for a class. A source provides `Source(files, device,
-optical=True)`, `len()`, `systems` (optical systems; empty for TPC only), `dataset` (the
-shards' dataset name), `pattern` (its input files in a run directory),
-`events(indices, workers)` (per event: `ident`, the TPC input as `readout` or `planes`,
-optional `clean`, `optical`, `truth`), `shard_attrs()`, and for a TPC `chain_config()` /
-`bind()`, for optical `optical_chain()`; optionally `file_plan(path, events_per_shard)`.
+`python -m helix.build SOURCE plan OUT RUN_DIR...` lists the tasks
+(`PREFIX FIRST COUNT EVENTS_PER_SHARD SHARD_START INPUT...`). `scripts/corpus.sh` writes the
+plan to `_calib/CHUNKS.txt` and the runs to `_calib/RUNS.txt`, calibrates one `norm_sigma`
+per run and their mean (`_calib/norm_sigma_global.npy`), then submits arrays over the plan.
 
-| source | `dataset` | input | TPC | optical | clean values (`--keep-clean`) |
-|---|---|---|---|---|---|
-| `sim` (`SimSource`) | `sim_wire` | `<task>/sensor/*_sensor_*.h5` (one run per campaign group) | planes, noised and digitized on the device (`helix.tpc.noise`, seeded per event) | none | yes |
-| `sbnd` (`SBNDSource`) | `sbnd` | `*.h5` (extracted SBND) | readout (adc, pedestal, present) | `pmt`, `xarapuca` | no |
-| `goop` (`GoopSource`) | `goop` | `*.h5` (goop light) | none | `goop` (+ `truth/pe_counts`) | no |
-
-Shared after the read: per `--events-per-shard` events, shard k (`--shard-start` + 0,
-1, ...) is written as `PREFIX_coeff_k.h5`, `PREFIX_optical_k.h5` and, with `--keep-clean`
-when the source has noise-free planes, `PREFIX_coeff_clean_k.h5` (k as 4 digits). Nothing
-trains on the clean shards; they exist to inspect the DSP. Each file is written as `.part`, audited
-(`helix.core.coeff_io.audit_shard` for coeff shards) and renamed whole, so a file with its
-final name is complete; `--skip-complete` makes a task whose shards all exist do nothing.
-`norm_sigma` is `--norm-sigma TABLE` (one table for the corpus) or else each shard's own;
-`--calibrate TABLE` writes the table of the selected events and no shards.
-
-`plan()` (`python -m helix.build SOURCE plan OUT RUN_DIR...`) lists a corpus's tasks, one line each,
-`PREFIX FIRST COUNT EVENTS_PER_SHARD SHARD_START INPUT...`: one task per input file when
-the source defines `file_plan` (sim: shard k = campaign events k*eps .. (k+1)*eps-1), else every
-`--events-per-task` events of a run. `scripts/corpus.sh` writes the plan to
-`_calib/CHUNKS.txt`, calibrates one `norm_sigma` table per run and their mean
-(`_calib/norm_sigma_global.npy`), then submits arrays over the plan on the site's
-corpus scheduler. One GPU type per corpus: the site pins the corpus partition.
-
----
+**The simulation source** is the JAXTPC wire campaign `doraemon_2026_1M_lartpc` (format 2;
+`helix.tpc.io`), laid out `<group>/<task>/{sensor,step,hits,labl}/`: 5 groups `j00X000` of 200
+tasks x 1000 events. A corpus run is a group, a build task is one task's sensor file, and shard
+k holds campaign events `200k .. 200k+199`. `/ident` is (run = group, source_file = sensor file
+name, event = campaign `event_id`); the noise seed (blake2b of the identity) and the holdout
+split are functions of it, not of helix's sharding. Format-1 productions are not read.
 
 ## 4. The TPC chain (`helix/tpc`)
 
-`helix.tpc.chain.TPCChain` is one chain for simulation and data, torch on one device:
+`helix.tpc.chain.TPCChain`, torch on one device, one chain for simulation and data:
 
-1. pedestal (from the input, or a clipped mean per channel);
-2. channel status: dead, noisy or baseline-step rows are excluded (zeroed, flagged invalid);
-3. DWT: coif3, level 4, periodization, time padded to a multiple of 2^level (`helix.core.wavelet`);
-4. coherent removal (`helix.tpc.coherent_gate`) on the readout's channel groups;
-5. threshold (`helix.tpc.threshold_rows`): sigma per plane and band on live rows,
-   hysteresis seeds at the universal threshold (`kappa`), grown through `floor` sigma; the
-   finest band (D1) is dropped; stored values rounded to a power-of-two step <= sigma / q
-   (`store.step_input` 16, `store.step_target` 32; `helix.tpc.chain.quantize`).
+1. pedestal; channel status (dead, noisy and baseline-step rows excluded);
+2. DWT: **coif3, level 4**, periodization (`helix.core.wavelet`);
+3. **coherent gate** (`helix.tpc.coherent_gate`) on the readout's channel groups: per band and
+   pass, the common mode of each (group, position) over non-signal rows is subtracted where it
+   is small against its MAD scale `sigc`, and with `tau` also where it is large unless more than
+   `tau` of the group's rows were flagged as signal. Simulation (`SIM_BASE`): the noise model's
+   64-wire blocks per plane, kgate = ksig = 3, 2 passes, **tau 0.05**, global `sigc`. SBND
+   (`SBND_DEFAULT`): front-end boards across planes, per-group `sigc`, no `tau`;
+4. **hysteresis threshold** (`helix.tpc.threshold_rows`): sigma per plane and band, seeds at
+   kappa = 1.0 times the universal threshold, grown through floor = 2.0 sigma; the finest band
+   **D1 is dropped**; kept values rounded to a power-of-two step <= sigma / 16.
 
-`process_event(adc, ped, present)` takes a readout (SBND); `process_planes({gid: image})`
-takes plane images (simulation). `helix.tpc.chain.coeff_event` turns the result into a
-`CoeffEvent` and evaluates the clean target at the noisy support (`clean_coeff_event`).
-Configuration is a nested dict merged and validated by `make_config`; `SBND_DEFAULT` and
-`SIM_BASE` (via `sim_config(num_wires)`) are the two bases.
+**The noise model** (`helix.tpc.noise`): incoherent ENC with the MicroBooNE series spectrum plus
+one coherent waveform per 64-wire group (neighbours anti-correlated), then `digitize`. It runs
+at build, seeded per event, so the corpus holds exactly one noise realisation per event.
 
-**The coherent gate** works on integer group labels from the readout
-(`helix.tpc.readout.ReadoutMap.labels`; -1 = excluded row). Per band and pass: the common
-mode per (group, position) is a clipped mean over non-signal rows; its scale `sigc` is a
-MAD over the band (`sigc_scope: global`) or per group (`group`); the mode is subtracted
-where `|M| < kgate * sigc`, and with `tau` also where it is larger unless more than `tau`
-of the group's rows were flagged as signal in pass 1; signal is re-detected between passes.
+Float32 reductions depend on the GPU generation, so one GPU type builds a corpus.
 
-    coherent: {groups, cross_plane, kgate, ksig, npass, tau, sigc_scope}
+## 5. Shard formats
 
-| | groups | cross_plane | kgate / ksig / npass | tau | sigc_scope |
-|---|---|---|---|---|---|
-| SBND (`SBND_DEFAULT`) | `femb`: front-end boards, 128 channels across planes | true | 3 / 3 / 2 | none | group |
-| simulation (`SIM_BASE`) | `block`: the noise model's 64-wire blocks (`readout.group_size`) | false | 3 / 3 / 2 | 0.05 | global |
-
-`groups: null` disables removal. Float32 reductions depend on summation order and a
-group's decision covers all its rows, so one GPU generation builds a corpus.
-
-**The noise model** (`helix.tpc.noise`, torch): incoherent ENC
-`sqrt(white^2 + (y + z L)^2)` with the measured MicroBooNE series spectrum by default
-(`DEFAULT_ENC = (0.90, 0.79, 0.22)`), plus one coherent waveform per group of 64
-contiguous wires (adjacent groups anti-correlated by `beta`, renormalised to
-`rms_adc` 2.5), then `digitize`. The same functions build the simulation corpus
-(`python -m helix.build sim`). Realisations come from
-per-event torch generators: reproducible on one device type, statistically (not
-bit-) equal to JAXTPC's numpy; `tests/_noise_reference.py` is the numpy port the tests
-compare against.
-
-Readers: `helix.tpc.io` reads a JAXTPC wire production campaign (format 2,
-`doraemon_2026_1M_lartpc`; `sensor_layout`, `event_ids`, `entry`, `read_event_coo`,
-`task_files`); `helix.tpc.io_sbnd.SBNDEvents` decodes extracted SBND files in worker processes.
-
-**The simulation source.** The campaign's wire stage (`HELIX_SIM_ROOT` =
-`<campaign>/data/jaxtpc_wire`) is `<group>/<task>/{sensor,step,hits}/sim_wire_{kind}_<task>.h5`:
-5 groups `j00X000` of 200 tasks, each task 5 generator jobs x 200 = 1000 events in
-`entry_NNNNNN` groups. Every file carries `/dprod/events` (`event_id`, `job_id`, `job_event`)
-and each entry the same as attrs; `event_id` is unique in the campaign (0..999999) and is
-what helix calls the event. A corpus run is a group (`<root>/j00X000/`), a build task is a
-task's sensor file, and shard k holds campaign events `k*eps .. (k+1)*eps-1` (eps 200: shard
-= generator job id). `/ident` is (run = group, source_file = the sensor file's name, event =
-`event_id`); the noise seed and the identity-hash split are functions of it, so neither
-depends on helix's sharding. Format-1 productions (`event_NNN`, e.g. `wire_test_00_00_02`,
-which built r2) are not read.
-
----
-
-## 5. The optical codec (`helix/optical`)
-
-`helix.optical` compresses optical waveforms — SBND PMT and X-ARAPUCA data, and goop's simulated
-PMTs — with one method. A light system is described by its measured single-photon response;
-everything else is derived from it.
-
-### Method (`helix.optical.codec`)
-
-Per event and system:
-
-1. **Noise and pedestal per channel, from where there is no light.** The matched-filter
-   statistic (the window minus a local baseline, correlated with the zero-mean unit-norm core of
-   the response — its shortest span around the peak holding 98% of its energy) marks light at
-   significance `k`; the noise of the statistic, of every Haar level, and the window's clipped
-   mean are measured outside it (widened by the core span) and medianed over the channel's
-   windows. A window median of integer codes is off by up to half a count, and light below the
-   trigger lifts a lit window's own estimate — either becomes fake or lost light.
-2. **The light.** Photon amplitudes `a >= 0` minimising `|y - h*a|^2 / 2 + lambda sum(a)` (FISTA,
-   then refitted without the penalty on its support), `y` the window minus its channel's
-   pedestal, `lambda = k x statistic noise x |h|` (a photon enters where its matched-filter
-   significance exceeds `k`). The light `h*a` covers isolated photons, pile-up and slow dense
-   light alike.
-3. **Stored.** The integer Haar transform of the RAW ADC samples: coarse sums always; a difference
-   where the light's difference reaches `q sigma_j` (`q = 1`: keep exactly where the signal is
-   worth a noise sigma — the error-optimal rule applied to the estimate; nothing is chosen by its
-   own noisy value), or where the data depart from the light model by `5 sigma_j` (a wrong
-   response on big pulses, artefacts that are not light; a noise coefficient passes with
-   probability ~6e-7).
-
-Decoding never uses the light estimate: it is the exact inverse Haar transform of the stored raw
-coarse sums and differences; a missing difference splits its block's sum evenly.
-
-Settings: `OpticalSpec(response, polarity, k=3, level, q=1, residual=5)`. SBND: `level` 6 (PMT 2 ns,
-X-ARAPUCA 16 ns ticks); goop: 7 (1 ns). Batching groups windows within 25% padding (goop: 0.67 s
-per event on a 2080 Ti).
-
-### Responses (`helix.optical.calibrate.fit_response`)
-
-Measured the way the codec uses them: photons from the codec's own deconvolution at significance
-5; the core (±40-80 ns) by regression on isolated single photons, each against its own local
-level, with equal weight for every arrival time mod 8 samples (cancels noise locked to the
-sample clock); the tail by least squares over all photons with the core fixed; the tail as an
-exponential model if it describes it (goop: `-0.015 exp(-t / 632 ns)`), else smoothed in log time
-(SBND PMT: ringing at 16-80 ns, 20-80 standard errors, and the AC undershoot to ~600 ns).
-A stack of matched-filter maxima — the earlier estimate — selects noise peaks in quiet windows
-and returns the noise's autocorrelation (digitizer clock lines). Recovery of a known response
-injected on noise (rms error, units of the peak): from the true response goop core 0.006, tail
-0.0004, SBND PMT 0.013 / 0.004; from a 30% wider start, one pass, goop 0.017 / 0.007, PMT
-0.021 / 0.004 (the start's error enters through the photons it deconvolves; passes reduce it).
-On data, late light correlated with each photon (argon's slow component) trades against a longer
-tail: one pass from the previous response. The X-ARAPUCA response (16 ns, short self-triggered
-windows, few isolated photons) is not recovered reliably and stays the mean isolated pulse.
-
-### Validation (`helix.optical.validate`, at tag `archive-2026-11`)
-
-Known light — single photons, and 100 / 500-photon flashes (30% 6 ns, 70% 1.5 us) — injected on
-real light-free windows (SBND) or on goop's exact noise model; error = signal dropped + noise
-kept, in a fixed reference sigma_j measured on the noise before injection; the oracle keeps
-exactly the true differences above sigma_j.
-
-Previous support rule vs this codec (SBND-data-helix `archive/scripts/rule_truth2.py`, region scoring):
-PMT per photon 13.0 values at 25.0 sigma^2 vs 6.4 at 11.5 (oracle 6.2 / 9.1); per flash 698 at 1310
-vs 484 at 827 (oracle 495 / 645); X-ARAPUCA per photon 27.5 at 58.6 vs 9.2 at 17.3. goop
-(SBND-data-helix `archive/scripts/goop_compare.py`, exact truth): whole-chunk error 3.5k sigma^2 at ~1950 values vs >= 5.7k
-for coif3 at any threshold; late single photons 450 vs >= 1230.
-
-### Files
-
-* Optical shards (`helix.optical.shard`): one modality per file next to the TPC coefficient
-  shards, joined on `(run, source_file, event)`; exact integer streams; `read_optical`.
-* Tokens (`helix.optical.tokens`): 128-sample tree blocks with a stored difference + coarse
-  tokens (128 slots, like a TPC token); `shard_tokens` decodes and tokenizes an event's windows
-  together (`shard.read_event`; one SBND event on a CPU core: PMT ~0.3 s, X-ARAPUCA ~0.08 s).
-  Not yet fed to the model.
-
-### Running
-
-Optical shards are written by the build pipeline (`helix/build.py`), next to the TPC shards:
-
-* SBND: `python -m helix.build sbnd --input RUN/*.h5 --output OUT/RUN/sbnd --device cuda` —
-  TPC `sbnd_coeff_NNNN.h5` + optical `sbnd_optical_NNNN.h5` (`--no-optical`: TPC only).
-* goop: `python -m helix.build goop --input light_output.h5 --output OUT/RUN/goop --device cuda` —
-  `goop_optical_NNNN.h5`, with goop's photon counts per PMT in `truth/pe_counts`.
-* A whole SBND corpus: `scripts/corpus.sh all sbnd OUT RUN_DIR...` (`docs/RUNBOOK.md` §3).
-  `corpus.sh` calibrates a TPC `norm_sigma` before building, so it does not serve an
-  optical-only source (goop) as is.
-
-Per-system overrides of the codec settings: `--optical-config` (json / yaml).
-
----
-
-## 6. Shard formats
-
-### Coefficient shards: `helix-coeff-2` (`helix/core/coeff_io.py`)
-
-`write_coeff_shard` / `read_coeff_event` / `audit_shard` are the schema of record. One
-modality per file, flat columnar (shard-wide arrays plus an event offset index, no
-per-event groups):
+**`helix-coeff-2`** (`helix/core/coeff_io.py`, the schema of record; flat columnar):
 
 ```
-/config   attrs: format = "helix-coeff-2", n_events, dataset_name, file_index,
-                 global_event_offset, readout_type = "wire",
-                 wavelet, dwt_level, dwt_mode, n_ticks_raw, pad, sigma_norm,
-                 basis_digest, removal_json, threshold_json, has_coords,
-                 noise_json, provenance_json
-          datasets: band_lengths (n_bands,) int32   padded band lengths
-                    gids (G,) int32                 the plane set; row order of every per-plane table
-                    n_wires (G,) int32
-                    norm_sigma (G, n_bands) float32 the corpus normalisation table
-/coord    band uint8, plane_gid int32, wire int32, tau int32   (M,)   absent when has_coords = false
-          event_offset int64 (n_events + 1,)      event i = rows off[i]:off[i+1]
-          coord_digest uint64 (n_events,)          blake2b of the event's four coordinate columns
-          sigma_threshold float32 (n_events, G, n_bands)   the event's threshold sigma
-          wire_valid uint8 (n_events, G, ceil(max n_wires / 8))   packed; absent = all valid
-/value    float32 (M,)                             raw coefficients (quantized to value_step)
-/ident    run str, source_file str, event int64 (n_events,)  [noise_seed int64 for simulation]
+/config  attrs: format, n_events, dataset_name, file_index, global_event_offset, readout_type,
+                wavelet, dwt_level, dwt_mode, n_ticks_raw, pad, sigma_norm, basis_digest,
+                removal_json, threshold_json, has_coords, noise_json, provenance_json
+         datasets: band_lengths (n_bands,), gids (G,), n_wires (G,), norm_sigma (G, n_bands)
+/coord   band u8, plane_gid i32, wire i32, tau i32 (M,); event_offset i64 (n_events+1,);
+         coord_digest u64 (n_events,); sigma_threshold f32 (n_events, G, n_bands);
+         wire_valid u8 (n_events, G, ceil(max n_wires / 8))   absent = all valid
+/value   f32 (M,)   raw coefficients
+/ident   run, source_file, event (n_events,)  [+ noise_seed for simulation]
 ```
 
-* **format** is written by every writer and required by every reader
-  (`require_format` in `coeff_io`, `CoeffTPCReader`, `CoeffTPCDataset`, `audit_shard`).
-  A shard without it is refused (the format-1 corpora were migrated in place by
-  `scripts/migrate_format.py`, at tag `archive-2026-11`).
-* **basis_digest** hashes the basis (wavelet, level, mode, n_ticks_raw, pad,
-  band_lengths, removal, threshold, sigma_norm) and is checked against those attributes
-  on read; `band_lengths` is validated against the basis.
-* **Clean values** (`*_coeff_clean_*`, `--keep-clean` only; no training reads them):
-  evaluated at the noisy support, written values only (`has_coords = false`). It joins the noisy shard by `/ident` and row for row within
-  an event; `coord_digest` in both shards must agree or the read raises.
-  Consequence: the pair measures fidelity on what was kept, never recall of what was
-  dropped.
-* **Values are raw.** Normalisation `asinh(value / norm_sigma[row_of(gid), band])` is
-  applied at tokenize; rows follow the POSITION of a gid in `gids`, not its value.
-  `sigma_threshold` (per event, defines the kept set) and `norm_sigma` (per corpus,
-  normalises) are different tables.
-* **provenance_json** records the code (`version`, `git`, `git_dirty`) and, for
-  simulation, the geometry and spectrum files with their sha256 and the seed formula;
-  `noise_json` records how the input was noised.
-* Compression is gzip with the byte shuffle; the layout, not the filter, is the contract.
+`format` is required by every reader (no legacy paths). `basis_digest` hashes the basis
+(wavelet, level, mode, ticks, pad, band lengths, removal, threshold, sigma_norm): changing any
+of them is a rebuild and a new digest, and a checkpoint is refused on a corpus of another
+digest. Values are raw; the tokenizer applies `asinh(value / norm_sigma[row of gid, band])`,
+rows following the POSITION of a gid in `gids`. `sigma_threshold` (per event, defines the kept
+set) and `norm_sigma` (per corpus, normalises) are different tables. `provenance_json` records
+the helix `git` commit and `git_dirty`.
 
-### Optical shards: `helix-optical-2` (`helix/optical/shard.py`)
+**`helix-cells-3`** (`helix/data/cells.py`): simulation truth on the fine grid of 2 wires x 16
+ticks, one `{name}_cells_<k>.h5` per coeff shard (same events and order, `/ident` copied),
+built by `scripts/build_truth.py` from the campaign's `hits`, `step` and pysupera `labl`.
+Four per-event CSR tables: `/cells` (charge `q`, the dominant hits group's share and (y, z)),
+`/cell_track`, `/plane_track` (per-track charge centroids), `/tracks` (energy, motif, pid).
+`q` is the hits file's electrons after JAXTPC's 25 e- per-sample cut; the cut is recorded
+(`label_json` `hits_threshold`) and reported by `helix.eval` as `truth.q_cut`. `Q0` (the charge
+scale of every `log1p(q / Q0)`) is defined here once. ~197 MB per 200-event shard.
 
-`/config` (format, modality = "optical", n_events), `/ident` (run, source_file, event,
-subrun, time), and per system `/optical/<system>`: the codec spec, per-waveform channel,
-time, length and counts, and exact integer streams (region runs, delta-coded coarse sums,
-keep bits, stored differences), plus per-event channel noise. Joins its TPC shard on
-(run, source_file, event). `read_optical` / `read_event` read it,
-`helix.optical.tokens.shard_tokens` tokenizes it.
+## 6. Reading the corpus (`helix/data`)
 
-### Truth shards: `helix-cells-3` (`helix/data/cells.py`)
+- `CoeffTPCReader` / `CoeffTPCDataset` (`dataset.py`, pimm-data): modalities `coeff` (always)
+  and `cells`, joined by identity and checked; one `shard_signature` per corpus (digest,
+  removal, gids, n_wires, norm_sigma); the shard tables ride in `sample['coeff']['_meta']`.
+  Training reads only `cells/key` and `cells/q` (`cells_columns`).
+- **Holdout by identity:** `holdout=dict(seed, fractions)` with `split_role` hashes
+  blake2b(run/source_file) + event, so the split survives rebuilds and reshards (fm.py: train /
+  val / probe = 0.95 / 0.03 / 0.02). `n_events` + `subset_seed` give a fixed nested label subset.
+- **Event rejection:** `max_event_size` drops events above that many coefficients (fm.py:
+  1.2M, every d1m event). With `cells`, an event whose truth puts more than 1e-3 of a plane's
+  charge off its planes is skipped (d1m event 132912, a JAXTPC int16 wire overflow).
+- `verify.py`: `verify(root)` checks a corpus against its plan (planned shards with their
+  events, nothing extra, one signature, one clean commit, no identity twice), or a run dir;
+  `compare` byte for byte; `corpus_runs`, `corpus_identity`, `check_corpus_matches`, and
+  `resolve_corpus`, which finds a run's recorded corpus at another site and holds it to the
+  recorded digest.
+- `bins.py`: the value grid (section 7); `denoise.py`: `DenoiseRows` (section 8).
 
-Simulation truth on the 2-wire x 16-tick cell grid, one `{name}_cells_<k>.h5` per coefficient
-shard (same events, same order, `/ident` copied), written by `scripts/build_truth.py` from the
-simulator's `hits`, `step` and pysupera `labl` files, separately from the corpus build. Four per-event CSR
-tables: `/cells` (per cell: charge, the dominant hits group's share and (y, z)),
-`/cell_track` (the cells' charge split by track), `/plane_track` (per plane and track: the
-charge-weighted wire / tick centroid), `/tracks` (per track: deposited energy and its
-motif / pid class). Every evaluation window lies on cell edges, so the denoiser's label and
-the truth of every `helix.eval` metric (floor, uprobe, labels, denoise) come from this alone. ~197 MB per shard of 200 events.
+## 7. The foundation model (`helix/model`)
 
-### The corpus root
+- **Tokenizer** (`tokenize.CoeffTokenize`, numpy): coefficient rows -> tokens of `pw x pt =
+  16 x 8` slots (`n_slot` 128) per band over A4, D4, D3, D2; per slot the normalised value
+  `inp` and occupancy `occ`. The target is the input itself (noisy-only); `dead_frac` is the
+  one augmentation.
+- **Encoder** (`fm.FMModel`, `blocks.py`): d768, 12 blocks, 12 heads, QK-norm, muP
+  (`schedule.py`). Each block attends within fixed-size groups along one of **four token
+  orders**: plane x time, time, plane x wire x time, and time shifted by half a group
+  (`gp` 1024 / `gd` 2048 tokens). Groups run unpadded through flash varlen attention (sm80+);
+  a per-group SDPA reference runs on CPU. `fused_qk` is the Triton QK-norm + RoPE kernel.
+- **FiLM** (`ResponseFiLM`) conditions every token on (band, plane, wire feature).
+  **RoPE** is axial on (time, wire); `wire_rope` and `rope_split` are switches kept for a
+  re-test, because a disabled axis leaves its half of each head unrotated (`rope_tables`).
+- **Masking** (`make_mask`): 75% of tokens at random; with probability `plane_frac` (0.1) a
+  step hides whole planes instead. Grouped by `plane_id`, the token set is order-free.
+- **Decoder:** 4 CrossMAE blocks; masked queries cross-attend the visible encoded tokens in
+  drift-time groups.
+- **Head and loss** (`loss.py`): per slot an occupancy logit and a **categorical value head**
+  over K = 128 bins; loss = occupancy BCE + value cross-entropy, each over its own support
+  (masked, valid; the value term on occupied slots only). The grid (`helix.data.bins`) is uniform
+  in asinh on each side of zero with one bin over the sub-threshold gap and open outer bins
+  (stored as +-1e18); edges and centroids are persistent buffers in every checkpoint. The
+  production grid is named in `helix/data/data/reference_bins.json`.
+- `lin_amp_scale` S > 0 adds the linear amplitude `sinh(inp) / S` as input columns (zero at
+  the start). **One event per rank:** the FM has no event separation (`FMTrainer.check_world`).
+- **Reading a run** (`checkpoint.load_run`): pimm's run directory (`resolved_config.json`,
+  `model/last`, `provenance.json`) -> the model with its bins, the train split's tokenizer,
+  the provenance. `weights="ema"` / `"best"` read an older run's `model_ema.pth` /
+  `model_best.pth`. Nothing is exported.
 
-    <root>/<run>/<dataset>_{coeff,optical}_NNNN.h5   (+ coeff_clean with --keep-clean)
-    <root>/<run>/<dataset>_cells_NNNN.h5   the truth, scripts/build_truth.py
-    <root>/_calib/CHUNKS.txt        the plan (helix.build.plan)
-    <root>/_calib/RUNS.txt          run directory names, one per line (training reads this)
-    <root>/_calib/<run>.npy         per-run norm_sigma; norm_sigma_global.npy their mean
+## 8. The denoiser (`helix/model/denoise.py`, `helix/data/denoise.py`)
 
-The split is computed, not stored (`holdout=` on the dataset: below).
+`DenoiseModel` = an FM run's encoder (`FMModel.encode`: every token visible) + `CellDecoder`.
+`build_denoise(fm, pretrained, freeze_encoder, ...)` takes the FM run's architecture and
+tokenizer and, with `pretrained`, its `last` weights (`pretrained=False` is the from-scratch
+baseline). A pretrained FM loads into a `lin_amp_scale` encoder with the new columns at zero
+(`pad_input_columns`). Param groups: the encoder's muP groups plus the head at `lr_head`.
 
-`python -m helix.data.verify` checks a run directory (`--dataset-name`) for
-cross-shard problems (pairs, gaps, duplicates, mixed code or basis), or a whole corpus
-against `_calib/CHUNKS.txt` (every planned shard present with its planned events and
-nothing else, optical shards holding their TPC shard's events, one global
-`norm_sigma`), or compares shard files byte for byte (`compare A B ...`, provenance
-attributes excepted).
+- **`CellDecoder`:** each 2 x 16 fine cell's query (its offsets and the covering tokens' input
+  slots) cross-attends the encoder features of the 3 x 3 token neighbourhood in every band, with
+  a learned null key. It predicts charge `log1p(q / Q0)` and a **presence** logit (q > 25 e-).
+- **`cond_charge`:** False regresses charge on every queried cell (detection, maps); True on
+  charged cells only, a charge conditional on presence (a hurdle; calorimetry).
+- **`dist`**, the charge head: `point` (squared error, default), `gauss` (+ a per-cell
+  log-width, Gaussian NLL), `cat` (one categorical: bin 0 = no charge, 256 bins in y, HL-Gauss
+  targets; requires `cond_charge=True`). Every head returns `(charge, presence_logit)` first.
+- **Labels** (`DenoiseRows`, a transform after `CoeffTokenize` on a `("coeff", "cells")`
+  sample): every charged cell, cells near charge and random cells under kept coefficients,
+  coefficient-free cells inside covered tokens, whole charge-free windows far from and near
+  activity (`near_windows`). Cells no token covers are not queried (predicted 0).
 
----
+## 9. Training through pimm (`helix/integrations/pimm`)
 
-## 7. Reading the corpus (`helix/data`)
-
-* `CoeffTPCReader` (`dataset.py`): one shard family (`modality` `coeff` or
-  `coeff_clean`), standalone h5py on pimm-data's `ShardReaderBase`; shards of another
-  format are recorded and refused.
-* `CoeffTPCDataset` (`dataset.py`, pimm-data registry): `modalities` from `coeff`
-  (always), `coeff_clean` and `cells`, joined by identity; the shard tables in
-  `sample['coeff']['_meta']`; the identity-hash split (`holdout`, `split_role`:
-  blake2b(run/source_file) + event, so independent of the build). Training reads
-  `("coeff",)`, the denoiser `("coeff", "cells")`; `tests/test_boundary.py` keeps
-  `coeff_clean` and `cells` out of pretraining.
-* `cells.py`: the truth format and grid (above), `Q0`, and the cell-to-token join.
-* `denoise.py`: `DenoiseRows`, the denoiser's label sampling on the `cells` truth.
-* `bins.py`: the categorical bin grid over NOISY coefficients (uniform in asinh on each
-  side of zero, one bin over the sub-threshold gap); the production grid is named in
-  `helix/data/data/reference_bins.json` (`coeff_bins_d1m_j000000_noisy`, from the
-  campaign corpus's first run; its digests are recorded).
-* `verify.py`: the corpus verifier (`python -m helix.data.verify`, below), `corpus_runs()`
-  (reads `_calib/RUNS.txt`) and `check_corpus_matches`, which
-  refuses a checkpoint whose recorded `basis_digest` differs from the corpus being read.
-
----
-
-## 8. The model (`helix/model`)
-
-* `tokenize.CoeffTokenize`: coefficient rows -> cells of `pw x pt = 16 x 8` slots
-  (`n_slot` 128) over the bands A4, D4, D3, D2, values normalised by `norm_sigma`. The
-  target is the normalised input itself (training is noisy-only); it differs from the
-  input only where `dead_frac` blanks it.
-* `fm.FMModel` / `build_fm` (strict: an unknown key raises): encoder blocks, cross-attention
-  decoder, a categorical head over the bin grid (`n_bins`; `loss.py`), muP (`schedule.py`), RoPE over time
-  and wire (`blocks.py`). Attention is grouped along four token orders and runs unpadded
-  through flash varlen attention (also `blocks.py`), which needs sm80+ (A100); on CPU / fp32
-  the same groups run one SDPA each (tests, CPU evaluation). `fused_qk` is the Triton
-  QK-norm + RoPE kernel (`kernels.py`), with the unfused path taken off-GPU.
-  Masking (`fm.make_mask`): `random` cells by default, whole planes with probability
-  `plane_frac`. `plane_id` serves as FiLM index, RoPE axis, masking group and plane
-  identity at once.
-* The FM has no event separation: one event per rank, and `FMTrainer` refuses any other
-  per-GPU batch (the design for separation and its acceptance criterion: MULTI_EVENT_BATCHING
-  at git tag `archive-2026-11`).
-* `denoise.DenoiseModel` / `build_denoise`: the supervised denoiser, an FM run plus a task
-  head. The encoder takes the FM run's architecture, tokenizer and (`pretrained`) weights,
-  optionally frozen (`freeze_encoder`); `CellDecoder` cross-attends from each 2 x 16 fine cell
-  to the 3 x 3 token neighbourhood per band and returns charge `log1p(q/Q0)` and a presence
-  logit; `cond_charge` regresses charge on charged cells only (calorimetry) instead of on every
-  queried cell (detection, maps). `dist` is the charge head's form: `point` (squared error,
-  the default), `gauss` (+ a per-cell width, Gaussian likelihood) or `cat` (one categorical
-  over no-charge + charge bins, replacing both heads; a hurdle, so `cond_charge=True`); every
-  head returns `(charge, presence_logit)` first, so `predict` and the evaluation read all three
-  alike. `lin_amp_scale` > 0 gives the encoder the linear-amplitude input channel
-  (`FMModel`), a pretrained FM loading into it with the new columns at zero
-  (`pad_input_columns`). `param_groups` = the encoder's muP groups + the head at
-  `lr_head`. Its labels are `helix.data.denoise.DenoiseRows`, a transform after
-  `CoeffTokenize` on a `("coeff", "cells")` sample.
-* `checkpoint.py` (`load_run`) is the one reader of a trained run, FM or denoiser: pimm's run
-  directory (`resolved_config.json`, `model/model_ema.pth`, `model/last` or
-  `model/model_best.pth`, `provenance.json`) -> the model (an FM with its bins), the train
-  split's `PatchConfig` (a denoiser's is its FM run's), provenance. Nothing is exported.
-
----
-
-## 9. pimm integration (`helix/integrations/pimm`)
-
-helix uses pimm's training engine only (`python -m pimm.train`), not its launch layer.
-A config pulls in `custom_imports = dict(imports=["helix.integrations.pimm"])`, which
-registers:
+helix uses pimm's training engine and launcher; pimm is not modified for helix beyond the
+local commits on the site's pinned checkout (`docs/STATUS.md`). A config's
+`custom_imports = dict(imports=["helix.integrations.pimm"])` registers:
 
 | registry | names |
 |---|---|
 | TRANSFORMS | `CoeffTokenize`, `DenoiseRows`, `CoeffCollect` |
-| DATASETS | `CoeffTPCDataset` (wraps `helix.data.CoeffTPCDataset`, runs pimm's transforms) |
-| MODELS | `Coeff-FM`, `Coeff-Denoise` |
-| TRAINERS | `FMTrainer`: the model's param groups (muP; the denoiser's head), the batch check, `"auto"` cadence, a `CoeffTokenize(cfg="model")` filled from the model's FM run |
-| SCHEDULERS | `WSDStableLR`, `WSDCooldownLR`, `WarmupCosineLR` (the denoiser) |
-| HOOKS | `HelixProvenance` (alias `HelixPathBootstrap`), `FiniteGuard`, `StepWatchdog` |
+| DATASETS | `CoeffTPCDataset` |
+| MODELS | `Coeff-FM` (with `init=<run>`: a warm start from that run's `model/last`), `Coeff-Denoise` |
+| TRAINERS | `FMTrainer`: the one-event-per-rank and `required_world_size` checks, muP param groups, peak LR x sqrt(world / `lr_ref_world`), `"auto"` warmup and save cadence from the step count, the denoiser's tokenizer from its FM run |
+| SCHEDULERS | `WSDStableLR`, `WSDCooldownLR`, `WarmupCosineLR` |
+| HOOKS | `HelixProvenance` (provenance.json; refuses a resume on another corpus), `FiniteGuard`, `StepWatchdog` |
 
-**Cadence is derived at run time:** a config writes `warmup="auto"`, `save_freq="auto"`;
-`FMTrainer._resolve_cadence` fills them from pimm's `iters_per_epoch * epoch` through
-`helix.model.schedule` (`warmup_steps`, `save_every`). `FMTrainer` also scales the peak LR by
-sqrt(world / 16), and `scripts/submit.sh` appends the batch (= world size), so no config reads it.
+`StepWatchdog` (300 s, `faulthandler`) makes a stuck rank dump its stacks and exit before
+NCCL's 600 s timeout; `configs/launch/_common.yaml` turns on the NCCL flight recorder and puts
+helix and pimm on `PYTHONPATH` on every link. Checkpoints are pimm's standard (DCP), written
+by `CheckpointSaverIteration` to `model/last` only. There is no in-training evaluation, no
+`model_best`, no EMA.
 
-`configs/pimm/fm.py` is the whole run: corpus = `HELIX_CORPUS`'s parent with its
-`_calib/RUNS.txt`, the reference bin grid, the `nz_pw16` recipe (d 768, 12 + 4 blocks, 12
-heads, QK-norm, fused QK-norm + RoPE, K = 128; fused AdamW at LR 4.4e-3) + `WSDStableLR`,
-batch 1 per rank. Variants override only what
-differs: `fm_cooldown.py` (warm start `model.init=$HELIX_EXP/fm`, its `last`; first 3 runs, one
-epoch, `WSDCooldownLR`), `fm_smoke.py` (a
-small model, 32 events, one GPU). Anything else is a `key=value` override.
+Configs (`configs/pimm/`) state intent and hold one rank's batch; `scripts/submit.sh` appends
+the batch for nodes x GPUs. `fm.py` is the stable phase; `fm_cooldown.py` the WSD cooldown
+(warm start `model.init=$HELIX_EXP/fm`, first `COOLDOWN_RUNS` runs, one epoch); `fm_smoke.py`
+a wiring check; `denoise.py` the denoiser on `model.fm`; `ft_eval.py` the evaluation protocol.
 
-`configs/pimm/denoise.py` (`_base_` fm.py) trains the denoiser through the same trainer and
-launcher: `Coeff-Denoise` on the FM run `model.fm` (default `$HELIX_EXP/fm_cooldown`), the M6d recipe
-of DENOISE (archive tag) as defaults (`model.cond_charge=True` is M6dc), the FM's identity-hash
-holdout, `WarmupCosineLR`, and its weight is `model/last` (no in-training evaluation, no
-best-checkpoint selection). `data.train.n_events` trains on a fixed,
-nested subset of the train split (label efficiency).
+## 10. Evaluation (`helix/eval`)
 
----
+**The primary evaluation of a pretrained encoder is a fine-tune**, `configs/pimm/ft_eval.py`:
+the denoiser (point head, `cond_charge`, no linear amplitude) on a fixed 1,024-event labelled
+subset for 16 epochs on exactly 4 ranks (4,096 steps; `required_world_size`), then
+`python -m helix.eval <run>`, which scores the run's `model/last` on every probe-split event of
+its corpus (`helix.eval.denoise`):
 
-## 10. Sites
+- **Windows** (`helix.eval.events`), 32 wires x 128 ticks on the fine grid: `iso` windows hold
+  one compact isolated particle, `clear` when no other charge is in the +-16 w / +-128 t padding,
+  `crowded` when some is but none within a cell. Backgrounds: `bg` (FAR: no charge in the
+  padding) and `near` (no charge within a cell, some in the padding), both placed uniformly in
+  area and kept only with >= 1 kept coefficient inside.
+- **The key:** clear iso windows detected above each view's 99th percentile of its far windows,
+  and crowded ones above its near windows' 99th percentile; by deposited energy, per view, with
+  an event bootstrap. A window's score is its largest presence log-odds; the fit-free
+  `amplitude` (largest kept |coefficient| / sigma) is scored on the same windows. The 1% is of
+  noisy windows, not of plane area. A cell no token covers scores as a miss.
+- **Charge** on every charged cell: median and hw68 of log(pred / true) per truth bin,
+  linearity, per-event closure, presence calibration (ECE, Brier, log-loss).
+- The JSON records the run's provenance, the corpus and its `basis_digest`, the FM run and
+  `truth.q_cut`; per-window scores go to `<out>.windows.npz`.
+- **`compare`** (`python -m helix.eval compare --a ... --b ...`): paired A - B of every window
+  number over shared event resamples; several files per side are training seeds, paired seed by
+  seed; `views` shows whether a pooled difference is carried by one view. It refuses dumps whose
+  windows differ.
+- **`uprobe`** (`--uprobe FM_RUN`, `helix.eval.probe`), the one frozen-feature key kept: an
+  MLP on the frozen encoder's features (`FMModel.encode`) predicts the along-wire coordinate,
+  the 3D information one plane lacks. It fits on the first two thirds of the probe events
+  (<= 1M rows) and reports within-(event, plane) R^2 against geometry and raw-input references.
+- A run trained at another site is found through `verify.resolve_corpus` and
+  `helix.eval.resolve_exp` (or `--corpus` / `--fm`).
 
-`helix/paths.py` resolves every external root from the environment or the site profile
-`helix/sites/<site>.yaml` (`HELIX_SITE`, or detected: `/sdf` for S3DF, `$NERSC_HOST` for
-NERSC). A root the site does not declare is `null` and asking for it raises. The profile
-also holds the container (`runtime`, `image`, `python`, `binds`, NERSC's interactive
-runtime) and scheduler facts per job kind (`train`, `corpus`).
+## 11. Sites and paths
 
-* `scripts/helix_env.sh` (sourced) exports the roots as `HELIX_*`, the container as
-  `HELIX_CONTAINER_*` and the scheduler as `HELIX_SLURM_<KIND>_*`, using a host Python
-  with PyYAML (`HELIX_PYTHON`, else `$SCRATCH/helix-host-venv` from
-  `scripts/make_host_env.sh`, else a system python).
-* `scripts/helix_run.sh CMD...` runs a command in the site's container (apptainer,
-  shifter, podman-hpc or none), rewriting a leading `python` to the in-image interpreter,
-  binding both checkouts, forwarding `HELIX_*`, the site's env and `HELIX_FORWARD_ENV`,
-  with `PYTHONNOUSERSITE=1` and `PYTHONPATH=pimm:helix`. podman-hpc (NERSC, interactive)
-  is chosen on a TTY; `HELIX_INTERACTIVE=0` forces the batch runtime.
-* `scripts/corpus.sh` submits with `sbatch` from the host; `scripts/submit.sh` submits
-  training through `pimm submit` (recipes in `configs/launch/`, submitit chains, multi-node
-  under shifter with the `nccl-plugin` module). Both pass the site's account / partition /
-  QOS / constraint as flags. `scripts/sweep.py` runs a study file (`configs/sweeps/`) through
-  `submit.sh`, with evaluation jobs held by `--dependency=afterok`.
+`helix/paths.py` resolves every external root from `HELIX_<NAME>` in the environment, else
+the site profile `helix/sites/<site>.yaml` (`HELIX_SITE`, or detected: `/sdf` -> s3df,
+`$NERSC_HOST` -> nersc). Roots: `HELIX_CORPUS_ROOT`, `HELIX_CORPUS` (one run dir; its parent is
+the corpus), `HELIX_SIM_ROOT`, `HELIX_ARCHIVE` (bin tables), `HELIX_EXP` (runs),
+`HELIX_PIMM_ROOT`, `HELIX_JAXTPC_ROOT`. A root a site lacks is `null`, and asking for it raises
+`SiteError`. The profile also holds the container (runtime, image, in-image python, binds,
+NERSC's interactive runtime) and scheduler facts per job kind (`train`, `eval`, `corpus`;
+`train.pimm_rev` pins pimm).
+
+`scripts/helix_env.sh` (sourced) exports them as `HELIX_*`, `HELIX_CONTAINER_*` and
+`HELIX_SLURM_<KIND>_*`. `scripts/helix_run.sh CMD` runs CMD in the site's container (apptainer,
+shifter or podman-hpc) with `PYTHONNOUSERSITE=1`, `PYTHONPATH=pimm:helix`, both checkouts bound
+and the site's `env:`; podman-hpc on a TTY at NERSC, `HELIX_INTERACTIVE=0` forces the batch
+runtime. `container/install.sh` is the one image recipe (`helix-train.def`, `Dockerfile`,
+`Dockerfile.nersc`); it installs dependencies only, helix and pimm arrive by bind mount.
 
 | | S3DF (`s3df.yaml`) | NERSC (`nersc.yaml`) |
 |---|---|---|
-| container | apptainer, `/sdf/data/neutrino/omara/images/helix-train.sif` | shifter `ghcr.io/omaralterkait/helix-nersc:jax-cuda12` (STALE: built with jax; rebuild and repoint, TODO); podman-hpc interactive |
-| train | `mli:cider-ml`, ampere, QOS normal | `m5238_g`, constraint gpu, QOS preempt |
-| corpus | `mli:default`, turing, QOS preemptable, `--requeue` | `m5238_g`, constraint gpu, QOS shared |
+| container | apptainer `helix-train.sif` | shifter `helix-nersc:jax-cuda12` (stale tag); podman-hpc interactive |
+| train | `mli:cider-ml`, ampere, QOS normal; pimm not pinned | `m5238_g`, `-C gpu`, QOS preempt (2 h `time_min`); pimm pinned |
+| eval | ampere, 1 GPU, 32 cores, 64 GB | QOS shared, 2 GPUs' share (64 cores, 112 GB) |
+| corpus | `mli:default`, turing, preemptable, `--requeue` | `m5238_g`, `-C gpu`, QOS shared |
 
-The container: `container/install.sh` is the one recipe, run by `container/helix-train.def`
-(apptainer), `container/Dockerfile` (CI, `ghcr.io/omaralterkait/helix`) and
-`container/Dockerfile.nersc` (Docker v2 manifest for shifter / podman-hpc). It installs
-dependencies only, with pimm-data at the revision `pyproject.toml` pins; helix and pimm
-arrive by bind mount and `PYTHONPATH`, so editing either needs no rebuild. Rebuild the
-image when the pimm-data pin moves.
+## 12. Optical
+
+`helix.optical` compresses SBND PMT and X-ARAPUCA waveforms and goop's simulated PMTs with one
+codec (`codec.py`): per channel the noise and pedestal from light-free samples, the light as a
+sparse non-negative deconvolution with the measured single-photon response
+(`calibrate.fit_response`), and storage as the integer Haar transform of the raw ADC, keeping a
+difference where the light reaches one noise sigma or the data depart from the light model by
+5 sigma; decoding is the exact inverse transform. `python -m helix.build sbnd` writes optical
+shards (`helix-optical-2`, `helix/optical/shard.py`, joined on identity) beside the TPC ones
+(`--no-optical` skips them); `goop` is optical only and
+`corpus.sh`, which calibrates a TPC `norm_sigma`, does not serve it. `helix.optical.tokens`
+makes 128-slot tokens, but nothing feeds them to the model. The validation numbers are in
+`docs/ARCHITECTURE.md` §5 at git tag `eval-probes-final`.
