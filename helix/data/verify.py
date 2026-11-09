@@ -122,6 +122,48 @@ def check_corpus_matches(recorded, actual, *, where=""):
     return f"corpus identity OK (basis_digest={b[:12]}…)"
 
 
+def resolve_corpus(recorded_root, *, override=None, identity=None, dataset_name="sim_wire", split=None):
+    """``(path, note)``: the corpus a run recorded, found at THIS site, and its identity check.
+
+    A run records its corpus as the absolute path it trained at, so a run trained at S3DF names a
+    path NERSC does not have. In order: ``override`` (the caller's ``--corpus``); the recorded
+    path, if it exists; this site's copy under the same name -- ``HELIX_CORPUS_ROOT/<name>``, or
+    ``HELIX_CORPUS``'s parent when that is ``<name>`` (the tail rule :func:`read_plan` applies to
+    a moved plan). Whatever is found is then held to ``identity``, the run's recorded
+    :func:`corpus_identity`, by :func:`check_corpus_matches`: a different ``basis_digest`` is
+    refused, a run that recorded none is let through with "unchecked" in the note. ``split``
+    (one run directory, or the run's list of them: the first is read) locates a shard."""
+    from helix import paths
+
+    recorded_root = str(recorded_root)
+    name = os.path.basename(os.path.normpath(recorded_root))
+    if override:
+        path = str(override)
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f"--corpus {path}: not a directory")
+    elif os.path.isdir(recorded_root):
+        path = recorded_root
+    else:
+        tried = []
+        try:
+            root, _ = paths.resolve("HELIX_CORPUS_ROOT")
+            one, _ = paths.resolve("HELIX_CORPUS")
+        except paths.SiteError:
+            root = one = None
+        if root is not None:
+            tried.append(root / name)
+        if one is not None and one.parent.name == name:
+            tried.append(one.parent)
+        path = next((str(p) for p in tried if p.is_dir()), None)
+        if path is None:
+            raise FileNotFoundError(
+                f"the run's corpus {recorded_root} is not at this site (looked for {name!r} at "
+                f"{', '.join(map(str, tried)) or 'no configured corpus root'}); pass its location (--corpus)")
+    sp = split[0] if isinstance(split, (list, tuple)) and split else (split or None)
+    note = check_corpus_matches(identity, corpus_identity(path, dataset_name, sp), where=path)
+    return path, note
+
+
 def corpus_runs(corpus_root=None) -> list[str]:
     """The run list, read from the corpus's own ``_calib/RUNS.txt``.
 

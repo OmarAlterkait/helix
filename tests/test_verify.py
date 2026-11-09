@@ -110,6 +110,45 @@ def test_an_unstamped_run_warns_but_does_not_fail(tmp_path):
         assert "NOT RECORDED" in note
 
 
+def test_resolve_corpus_finds_a_moved_corpus_by_its_name(tmp_path, monkeypatch):
+    """A run trained at S3DF names its corpus by the S3DF path. Here it is this site's copy of
+    the same name -- under HELIX_CORPUS_ROOT, or HELIX_CORPUS's parent -- held to the run's
+    recorded identity; a path that exists is used as recorded, ``--corpus`` wins, and nothing
+    found is refused with the cure named."""
+    from helix.data.verify import resolve_corpus
+    here = tmp_path / "scratch"
+    corpus = here / "coeff_tpc_d1m"
+    (corpus / "j000000").mkdir(parents=True)
+    _shard(corpus / "j000000", *R1)
+    ident = corpus_identity(str(corpus / "j000000"))
+    rec = "/sdf/data/neutrino/omara/coeff_tpc_d1m"
+    monkeypatch.setenv("HELIX_CORPUS_ROOT", str(here))
+    monkeypatch.setenv("HELIX_CORPUS", str(tmp_path / "unrelated" / "j000000"))
+    path, note = resolve_corpus(rec, identity=ident, split=["j000000"])
+    assert path == str(corpus) and "identity OK" in note
+    monkeypatch.setenv("HELIX_CORPUS_ROOT", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("HELIX_CORPUS", str(corpus / "j000000"))
+    assert resolve_corpus(rec, identity=ident, split=["j000000"])[0] == str(corpus)
+    assert resolve_corpus(str(corpus), identity=ident, split="j000000")[0] == str(corpus)
+    other = tmp_path / "copy" / "j000000"
+    other.mkdir(parents=True)
+    _shard(other, *R1)
+    assert resolve_corpus(rec, override=str(other.parent), identity=ident, split=["j000000"])[0] == str(other.parent)
+    with pytest.raises(FileNotFoundError, match="--corpus"):
+        resolve_corpus("/sdf/data/neutrino/omara/coeff_tpc_nope", identity=ident)
+
+
+def test_resolve_corpus_refuses_another_dsp_and_passes_an_unstamped_run(tmp_path):
+    from helix.data.verify import resolve_corpus
+    run = tmp_path / "coeff_tpc" / "j000000"
+    run.mkdir(parents=True)
+    _shard(run, *LEGACY)
+    with pytest.raises(ValueError, match="corpus mismatch"):
+        resolve_corpus(str(run.parent), identity={"basis_digest": R1[0], "removal_json": R1[1]}, split=["j000000"])
+    path, note = resolve_corpus(str(run.parent), identity=None, split=["j000000"])
+    assert path == str(run.parent) and "unchecked" in note
+
+
 # ── the resume path, not just eval ───────────────────────────────────────────
 
 @needs_pimm_data

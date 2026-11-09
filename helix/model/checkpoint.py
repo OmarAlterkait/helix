@@ -114,17 +114,21 @@ def _read_config(path):
     return json.load(open(os.path.join(run_dir(path), _CONFIG)))
 
 
-def load_run(path, weights="ema", *, device=None):
+def load_run(path, weights="ema", *, device=None, fm=None):
     """A :class:`Run` from a run directory, or from one weight file (or ``last`` directory) of it.
 
     ``weights``: ``"ema"`` (``model/model_ema.pth``), ``"last"`` (``model/last``) or ``"best"``
     (``model/model_best.pth``), used when ``path`` is the run directory; a weight file names
-    itself. A missing EMA is an error, not a fallback to the raw weights.
+    itself. A missing EMA is an error, not a fallback to the raw weights. ``fm``: for a denoiser,
+    where its FM run is at this site when the recorded ``model.fm`` (an absolute path) has moved
+    -- its architecture and tokenizer are read from there.
     """
     import torch
 
     rd = run_dir(path)
     config = json.load(open(os.path.join(rd, _CONFIG)))
+    if fm is not None:
+        config["model"]["fm"] = str(fm)
     p = os.path.abspath(str(path))
     if p == rd:
         if weights not in WEIGHTS:
