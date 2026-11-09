@@ -12,24 +12,15 @@ regressed on charged cells only), no linear-amplitude input. Vary ``model.fm`` (
 ``model.freeze_encoder=True`` is the frozen diagnostic, scored the same way.
 
 The length is in epochs and the global batch is the rank count (one event per rank), so
-1,024 x 16 / 4 = 4,096 steps only on 4 ranks (one node): any other world size is refused rather
-than run at another length. A study is ``configs/sweeps/ft_eval.yaml``.
+1,024 x 16 / 4 = 4,096 steps only on 4 ranks (one node): ``required_world_size`` makes the trainer
+refuse any other world size rather than run at another length (configs read no world size). A study is ``configs/sweeps/ft_eval.yaml``.
 
     scripts/submit.sh ft_eval --run.name ft_<encoder> --resources.nnodes 1 -- model.fm=<FM run>
 """
-import os as _os
-
 _base_ = ["./denoise.py"]
 
-# WORLD_SIZE under torchrun, SLURM_NTASKS inside a job step; neither outside a job (a config
-# loaded by hand, the launcher's preflight), where the four ranks are what will be asked for
-_ws = _os.environ.get("WORLD_SIZE") or (_os.environ.get("SLURM_NTASKS") if "SLURM_STEP_ID" in _os.environ else None)
-if _ws is not None and int(_ws) != 4:
-    raise ValueError(f"ft_eval: WORLD_SIZE={_ws}; the protocol is 1024 events x 16 epochs at one event per rank "
-                     "on exactly 4 ranks (4096 steps). Run it on one 4-GPU node.")
-
+required_world_size = 4                  # checked by FMTrainer (helix.integrations.pimm.trainer.check_world)
 epoch = 16
 model = dict(cond_charge=True, dist="point", lin_amp_scale=0.0)
 data = dict(train=dict(n_events=1024, subset_seed=0))
 
-del _os, _ws

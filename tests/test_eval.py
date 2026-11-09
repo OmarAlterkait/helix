@@ -582,19 +582,27 @@ def test_the_ft_eval_config_is_the_protocol_and_needs_four_ranks(monkeypatch):
     from pimm.utils.config import Config
     from helix.paths import SiteError
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "pimm", "ft_eval.py")
-    monkeypatch.setenv("WORLD_SIZE", "4")
     try:
         cfg = Config.fromfile(path)
     except (SiteError, FileNotFoundError, SystemExit) as exc:
         pytest.skip(f"config needs a root this site does not configure: {exc}")
     t, m = cfg.data["train"], cfg.model
-    assert (t["n_events"], t["subset_seed"], cfg.epoch) == (1024, 0, 16) and cfg.batch_size == 4
+    assert (t["n_events"], t["subset_seed"], cfg.epoch) == (1024, 0, 16) and cfg.required_world_size == 4
     assert m["type"] == "Coeff-Denoise" and m["cond_charge"] and m["dist"] == "point" and m["lin_amp_scale"] == 0.0
     assert m["pretrained"] and not m["freeze_encoder"]                  # the frozen diagnostic is an override
-    for ws in ("2", "16"):
-        monkeypatch.setenv("WORLD_SIZE", ws)
-        with pytest.raises(Exception, match="WORLD_SIZE"):
-            Config.fromfile(path)
+    from helix.integrations.pimm.trainer import check_world
+    check_world(dict_cfg(batch_size=4, required_world_size=4), 4)
+    for ws in (2, 16):
+        with pytest.raises(ValueError, match="required_world_size"):
+            check_world(dict_cfg(batch_size=ws, required_world_size=4), ws)
+    with pytest.raises(ValueError, match="events per GPU"):
+        check_world(dict_cfg(batch_size=8), 4)
+
+
+def dict_cfg(**kw):
+    """A config-like object (attribute access), as pimm's Config gives the trainer."""
+    import types
+    return types.SimpleNamespace(**kw)
 
 
 # ---- the windows and the fine-grid join --------------------------------------------------

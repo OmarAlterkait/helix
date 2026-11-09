@@ -22,6 +22,24 @@ from pimm.utils.scheduler import SCHEDULERS
 from helix.model.schedule import param_group_ratios
 
 
+def check_world(cfg, world):
+    """Refuse a run whose global batch or rank count does not fit its config: exactly one event
+    per rank (``FMTrainer.build_train_loader``), and, where a config fixes it, the rank count
+    itself (``required_world_size``: a protocol whose length is in epochs is a fixed number of
+    steps only at one world size -- configs/pimm/ft_eval.py)."""
+    per_gpu = cfg.batch_size // world
+    if per_gpu != 1:
+        raise ValueError(
+            f"batch_size={cfg.batch_size} over world_size={world} gives {per_gpu} events per GPU. "
+            f"The FM requires exactly 1: it has no event separation, so a larger per-GPU batch "
+            f"trains attention ACROSS unrelated events without failing. Set batch_size to the "
+            f"number of ranks (scripts/submit.sh appends batch_size=<nodes x GPUs>).")
+    req = getattr(cfg, "required_world_size", None)
+    if req is not None and world != int(req):
+        raise ValueError(f"world_size={world}, but this config fixes required_world_size={req}: its "
+                         f"length (epochs x events / ranks) is the protocol only there.")
+
+
 @TRAINERS.register_module()
 class FMTrainer(Trainer):
     """pimm's Trainer with what the FM needs, and nothing else.
@@ -51,15 +69,7 @@ class FMTrainer(Trainer):
         the GPU count: ``batch_size = 4`` is right on 4 ranks and wrong on 1.
         See docs/ARCHITECTURE.md §8.
         """
-        per_gpu = self.cfg.batch_size // comm.get_world_size()
-        if per_gpu != 1:
-            raise ValueError(
-                f"batch_size={self.cfg.batch_size} over world_size="
-                f"{comm.get_world_size()} gives {per_gpu} events per GPU. The FM "
-                f"requires exactly 1: it has no event separation, so a larger "
-                f"per-GPU batch trains attention ACROSS unrelated events without "
-                f"failing. Set batch_size to the number of ranks (scripts/submit.sh "
-                f"appends batch_size=<nodes x GPUs>).")
+        check_world(self.cfg, comm.get_world_size())
         # Before the loader is built (the only one: evaluate=False builds no val/test loader).
         if resolve_tokenizer(self.cfg.data, getattr(unwrap_model(self.model), "tokenizer", None)):
             self.logger.info(f"tokenizer from the model's FM run: {unwrap_model(self.model).tokenizer}")

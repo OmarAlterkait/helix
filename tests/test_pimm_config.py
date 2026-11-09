@@ -271,7 +271,9 @@ def test_configs_are_world_size_free():
     on the submitting host as on the job."""
     for path in sorted(pathlib.Path(CONFIG).parent.glob("*.py")):
         src = path.read_text()
-        assert "world_size" not in src and "WORLD_SIZE" not in src, path.name
+        # read at load: the env var or a helper call. A declared ``required_world_size`` (checked by
+        # FMTrainer at run time, configs/pimm/ft_eval.py) is a constant, not a read.
+        assert "WORLD_SIZE" not in src and "world_size(" not in src, path.name
         tree = ast.parse(src)
         vals = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
                 for t in n.targets if isinstance(t, ast.Name)}

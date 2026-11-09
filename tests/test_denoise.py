@@ -422,6 +422,7 @@ def test_load_denoiser_reads_last_and_scores_presence_as_a_logit(fm_run, sample,
 
     d, _ = fm_run
     best = _write_denoise_run(str(tmp_path), d)
+    torch.save({"state_dict": best.state_dict()}, os.path.join(tmp_path, "model", "model_best.pth"))  # an older run's
     torch.manual_seed(9)
     last = build_denoise(str(d), cond_charge=False, compile_blocks=False)
     with torch.no_grad():
