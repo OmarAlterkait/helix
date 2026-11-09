@@ -891,3 +891,20 @@ done. There is one launcher, `scripts/submit.sh` through `pimm submit` (§0). Th
   against normal's 10000, so a long job waits rather than runs, and S3DF
   preemption cancels rather than requeues. Resume needs `weight=` **and** `resume=`, which
   pimm's `scripts/train.sh` passes from its latest-checkpoint resolver on a requeued link.
+
+---
+
+## Data, environment and tests trimmed (2026-11-09)
+
+**One noise realisation, no clean target.** The `coeff_clean` modality is gone (dataset, verifier,
+`build --keep-clean`, the codec's values-only shard, `clean_coeff_event`): nothing trained,
+evaluated or configured it, and no clean-shard augmentation is planned. Shards still write
+`has_coords` and `coord_digest`, so a rebuild stays byte-comparable with the corpus.
+**One corpus check, `helix.data.verify.verify`**: planned shards present with their planned
+events and nothing extra (a run directory alone: every gap); one `shard_signature`
+(basis_digest, removal, gids, n_wires, norm_sigma, the same check `CoeffTPCReader` makes); one
+helix commit and a clean tree; one set of DSP inputs; no identity twice -- corpus-wide, not per
+run. **Training reads `cells/key` and `cells/q` only** (`cells_columns`); evaluation reads the
+whole record. The cell-to-token join is `helix.model.cells_join`. `DenoiseRows`' four sampling
+knobs stay (a sampling A/B is planned). The value grid was measured against the analytic
+uniform-in-asinh centroid and left as it is: changing it changes training.
