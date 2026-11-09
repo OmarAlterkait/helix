@@ -1,9 +1,9 @@
 """Masked reconstruction: the training objective and its grid-free read-backs, on held-out events.
 
-ONE implementation, used twice: :class:`helix.integrations.pimm.eval.CoeffFMEvaluator` (the
-validation pass inside a training run, sums all-reduced across ranks) and :class:`Recon` (the
-``recon`` metric of ``python -m helix.eval``, one process over the probe split). Both mask with
-the same seeded generator per batch index, so the same event is masked the same way by both.
+The metric code of :class:`helix.integrations.pimm.eval.CoeffFMEvaluator` (the validation pass
+inside a training run, sums all-reduced across ranks), kept apart from it so it needs no pimm.
+Batch ``i`` is masked with a seeded generator (:func:`mask_for`), so an event is masked the same
+way at every evaluation. Also :func:`autocast`, which every evaluation forward uses.
 
 Reported (pooled over tokens, never a mean of per-event means: dense events are both heavier
 and harder, corr(per-event CE, token count) = 0.79, so the unweighted mean is ~0.09 nats
@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import contextlib
 
-import numpy as np
 import torch
 
 #: Grid-free accumulators, summed per batch (and across ranks).
@@ -127,58 +126,3 @@ def mask_for(core, B, i, rank=0, seed=MASK_SEED, mode="random", ratio=None, n_pl
 def autocast(device, dtype=torch.bfloat16, enabled=True):
     return torch.autocast(device_type=device.type, dtype=dtype) if enabled and device.type == "cuda" \
         else contextlib.nullcontext()
-
-
-#: The region mask: tokens grouped by (plane, REGION_W wires, REGION_T ticks), REGION_FRAC of
-#: the regions masked, chosen by a fixed hash of the region -- the predecessor's
-#: (``scripts/eval_resolution.py`` at origin/main), so its numbers carry over.
-REGION_W, REGION_T, REGION_FRAC = 32, 128, 0.75
-
-
-def region_mask(B, pw, frac=REGION_FRAC, wires=REGION_W, ticks=REGION_T):
-    """Mask ``frac`` of the batch's (plane, ``wires`` wires, ``ticks`` ticks) regions whole: a
-    token's region is that of its patch's wire centre and its time coordinate ``t_phys``, and a
-    region is masked when ``crc32`` of its key falls in the first ``frac`` of 1000 buckets --
-    the same regions in every event and every run, no generator."""
-    import zlib
-    wc = B["cell_wb"].float().cpu().numpy() * pw + pw / 2
-    tc = B["t_phys"].float().cpu().numpy()
-    g = B["plane_id"].cpu().numpy().astype(np.int64)
-    rk = (g << 40) | ((wc // wires).astype(np.int64) << 20) | (np.floor(tc / ticks).astype(np.int64) + 4096)
-    u, inv = np.unique(rk, return_inverse=True)
-    h = np.array([zlib.crc32(int(x).to_bytes(8, "little", signed=True)) % 1000 for x in u.tolist()], np.int64)
-    return torch.from_numpy(h[inv.ravel()] < int(round(1000 * frac))).to(B["plane_id"].device)
-
-
-class Recon:
-    """The ``recon`` metric: :func:`heads_loss` over the evaluated events, pooled, under two masks.
-
-    The top-level numbers are the model's own random mask (:func:`mask_for`, the training
-    evaluator's: ~0.69 var_expl on fm_cooldown); ``region`` holds the same numbers under
-    :func:`region_mask` (75% of 32-wire x 128-tick regions hidden whole, the predecessor's
-    reconstruction score, ~0.31-0.39): with whole neighbourhoods gone a token cannot be
-    interpolated from the next one, so it is the information-limited case. ``mask_frac`` is the
-    fraction of tokens each masks."""
-
-    name = "recon"
-
-    def __init__(self, ctx):
-        self.core, self.pw = ctx.run.model, int(ctx.run.tokenizer.pw)
-        self.acc = {m: ({}, {}, dict.fromkeys(GF_KEYS, 0.0), [0, 0]) for m in ("random", "region")}
-        self.n = 0
-
-    def add(self, ev):
-        B = ev.batch
-        for kind, mask in (("random", mask_for(self.core, B, ev.index)), ("region", region_mask(B, self.pw))):
-            totals, counts, gf, frac = self.acc[kind]
-            with torch.no_grad(), autocast(B["plane_id"].device):
-                out = heads_loss(self.core, B, mask, gf)
-            pool(out, B, mask, totals, counts)
-            frac[0] += int(mask.sum()); frac[1] += int(mask.numel())
-        self.n += 1
-
-    def result(self):
-        def one(kind):
-            totals, counts, gf, (k, n) = self.acc[kind]
-            return dict(average(totals, counts, gf), mask_frac=k / max(n, 1))
-        return dict(one("random"), n_events=self.n, region=one("region"))

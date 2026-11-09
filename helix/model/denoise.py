@@ -310,7 +310,8 @@ def cat_median(logits, edges):
 def calibration_stats(head, out, y_true):
     """``(stat, width)`` per cell of a distributional head's output ``out`` (its forward's) against
     the truth ``y_true``: gauss -- z = (y_true - mu) / sigma and sigma; cat -- the PIT
-    (:func:`cat_cdf`) and the predictive std. ``helix.eval.denoise`` scores their coverage."""
+    (:func:`cat_cdf`) and the predictive std, whose coverage says whether the width is calibrated
+    (the evaluation no longer scores it: tag eval-probes-final)."""
     if head.dist == "gauss":
         sig = torch.exp(out[2].float().clamp(*LOG_SIGMA_RANGE))
         return (y_true.float() - out[0].float()) / sig, sig

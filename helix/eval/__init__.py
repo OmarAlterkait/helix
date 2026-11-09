@@ -1,122 +1,158 @@
 """Evaluating a trained run: one library, one entry point.
 
-    python -m helix.eval RUN_DIR --metrics recon,floor,uprobe,labels --out scores.json
-    python -m helix.eval RUN_DIR --metrics denoise --denoiser DENOISE_RUN_DIR --out d.json
+    python -m helix.eval DENOISER_RUN --out e.json          # the evaluation
+    python -m helix.eval --uprobe FM_RUN --out u.json       # the frozen along-wire probe
+    python -m helix.eval compare --a A.windows.npz [A2 ...] [--b B.windows.npz ...] --out d.json
 
-``RUN_DIR`` is a pimm run (``save_path``) or one checkpoint inside it; the model, its tokenizer
-and its corpus come from the run itself (:func:`helix.model.checkpoint.load_run`). Events are the
-run's corpus restricted to the ``probe`` role of its holdout, read once with their cells truth
-(``scripts/build_truth.py``) and shared by every metric (:mod:`helix.eval.events`).
+The evaluation of a pretrained encoder is a fixed-budget FINE-TUNE: the denoiser trained on
+1,024 labelled events (``configs/pimm/ft_eval.py``; a study is ``configs/sweeps/ft_eval.yaml``),
+scored by :mod:`helix.eval.denoise` -- detection on the windows (the presence log-odds against
+the fit-free amplitude, on identical windows) and charge accuracy on every charged cell. The same
+protocol with ``model.freeze_encoder=True`` is the frozen diagnostic: one scoring path.
 
-Metrics:
+``DENOISER_RUN`` is a pimm run directory (its ``model/last``, the end of the budget, unless
+``weights`` says otherwise) or one checkpoint inside it. Everything else comes from the run: the
+events are its config's corpus restricted to the ``probe`` role of its holdout -- every probe
+event is scored, since nothing is fitted here -- tokenized as its FM run tokenizes
+(:mod:`helix.eval.events`).
 
-  recon    masked reconstruction (:mod:`helix.eval.recon`, the training run's own validation
-           metric, CoeffFMEvaluator): loss, bce, val, var_expl, charge_closure, charge_resid
-           under the model's random mask, and the same under a 75% region mask (``region``)
-  floor    the detection floor (:class:`helix.eval.probe.Floor`): a probe on frozen features predicts
-           per-cell charge; efficiency at a 1% false-positive rate per view, by energy, with the
-           threshold on the far and on the near background, and the AUC; the trained arm
-           against the raw tokenizer inputs under the same probe and the fit-free amplitude
-  uprobe   the along-wire probe (:class:`helix.eval.probe.UProbe`): within-group R^2 of ``u`` per
-           patch, per view; trained against the raw inputs and the geometry columns alone
-  labels   the particle probe (:class:`helix.eval.probe.Labels`): each signal cell's motif and pid,
-           balanced accuracy; trained against the raw inputs and the token layout alone
-  denoise  a denoiser's per-cell charge on the floor's windows, and its charge resolution,
-           linearity, closure and presence calibration on every charged cell
-           (:mod:`helix.eval.denoise`)
+``uprobe`` (:mod:`helix.eval.probe`) is the one frozen-feature key kept: the along-wire
+coordinate from a pretrained FM run's encoder, the 3D information a single plane cannot give. It
+fits on the first two thirds of the probe events and scores the rest.
 
-The probes (floor, uprobe, labels) fit on the first two thirds of the events (at most
-``helix.eval.probe.FIT_ROWS`` rows each, sampled evenly over them), ``probe_seeds`` times each,
-and score every row of the rest as it arrives; denoise scores the same rest. Every probe arm is
-compared with a reference that is not a probe of another encoder: a randomly initialised
-encoder under the same probe measured below the fit-free amplitude on the floor and below
-geometry along the wire, so it bounds the probe's fitting, not the representation. Intervals
-are [16, 84]% over an event bootstrap of the scored events.
-
-The JSON records what was evaluated: ``run`` (the run's provenance, its ``weights`` included),
-``corpus`` (the evaluated shards' ``basis_digest``), ``truth`` (the per-sample charge cut the
-cells truth carries) and ``weights`` (per metric, the weight set it read: the run's for recon
-and the probes, the denoiser's own checkpoint for denoise).
+A run records absolute paths -- its corpus, a denoiser's FM run -- and a run trained at another
+site names paths this one does not have. Both are found here (:func:`helix.data.verify.
+resolve_corpus`, :func:`resolve_exp`) or given (``corpus``, ``fm``), and the corpus is held to
+the run's recorded identity (a different ``basis_digest`` is refused). The JSON records what was
+evaluated: ``run`` (the run's provenance, the weights it read included), ``corpus`` (recorded and
+resolved path, the identity check, the evaluated shards' ``basis_digest``), ``fm`` (likewise),
+``truth`` (the per-sample charge cut the cells truth carries) and ``code``.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass
 
-METRICS = ("recon", "floor", "uprobe", "labels", "denoise")
-
-__all__ = ["METRICS", "Context", "evaluate"]
+__all__ = ["Context", "evaluate", "evaluate_uprobe", "resolve_exp"]
 
 
 @dataclass
 class Context:
-    """What every metric is built from: the run, the encoder it probes, how many leading events
-    the probes fit on, the seeds, and how many fits per probe arm."""
+    """What the denoiser's metric is built from: the run (its tokenizer), the predictor, the
+    window seed and the bootstrap."""
     run: object
-    model: object
-    n_train: int
+    denoiser: object                 # predict(event, keys) -> (y, logit)
     seed: int = 0
     n_boot: int = 200
-    denoiser: object = None          # predict(event, keys) -> (y, presence), for denoise
-    probe_seeds: int = 2             # fits per probe arm, seeds seed + k, on the same rows
-    presence_q: float = 25.0         # denoise: the presence label, q > presence_q (e-)
-    fit_windows: str = "none"        # floor: also fit on the fit events' window cells: all / neg (bg, near)
+    presence_q: float = 25.0         # the presence label, q > presence_q (e-)
 
 
-def evaluate(path, metrics=("recon", "floor", "uprobe", "labels"), *, weights="ema", max_events=None,
-             denoiser=None, seed=0, n_boot=200, probe_seeds=2, presence_q=25.0, fit_windows="none",
-             device=None, log=print):
-    """Score the run at ``path`` on ``metrics``; returns the results as one JSON-able dict."""
-    from helix.eval.denoise import Denoise, load_denoiser
-    from helix.eval.events import dataset, events, identity
-    from helix.eval.probe import Floor, Labels, UProbe, split_events
-    from helix.eval.recon import Recon
+def resolve_exp(recorded, *, override=None):
+    """``(path, note)``: a run path another run recorded (a denoiser's ``model.fm``), at THIS
+    site. In order: ``override``; the recorded path, if it exists; the same path relative to
+    another site's ``HELIX_EXP`` (``helix/sites/*.yaml``) under this site's -- an S3DF
+    ``/sdf/.../exp/helix/fm_cooldown`` is NERSC's ``$HELIX_EXP/fm_cooldown``."""
+    from helix import paths
+
+    if override:
+        if not os.path.exists(str(override)):
+            raise FileNotFoundError(f"--fm {override}: no such run or checkpoint")
+        return str(override), "given"
+    recorded = str(recorded)
+    if os.path.exists(recorded):
+        return recorded, "as recorded"
+    try:
+        here, _ = paths.resolve("HELIX_EXP")
+    except paths.SiteError:
+        here = None
+    for site in paths.available_sites():
+        base = os.path.expandvars(str((paths._read_profile(site).get("roots") or {}).get("HELIX_EXP") or ""))
+        if not base or "$" in base or here is None:
+            continue
+        rel = os.path.relpath(recorded, base)
+        if not rel.startswith("..") and (here / rel).exists():
+            return str(here / rel), f"relocated from {site}'s HELIX_EXP"
+    raise FileNotFoundError(f"{recorded}: not at this site, and not under another site's HELIX_EXP that "
+                            f"maps onto this one's ({here}); pass its location (--fm)")
+
+
+def _corpus(run, override):
+    """The run's corpus at this site and the identity check: ``(dataset, info)``."""
+    from helix.data.verify import resolve_corpus
+    from helix.eval.events import dataset
+
+    d = run.config["data"]["train"]
+    root, check = resolve_corpus(d["data_root"], override=override,
+                                 identity=(run.provenance.get("corpus") or {}).get("identity"),
+                                 dataset_name=d.get("dataset_name", "sim_wire"), split=d.get("split"))
+    return dataset(run, root), dict(recorded=d["data_root"], resolved=root, check=check)
+
+
+def _score(run, ds, metric, max_events, log):
+    """Feed the first ``max_events`` probe events to ``metric``; ``(n_events, identity)``."""
+    from helix.eval.events import events, identity
+
+    n = len(ds) if not max_events else min(int(max_events), len(ds))
+    if not n:
+        raise ValueError(f"{run.provenance['run']}: the probe split of the run's corpus is empty")
+    dev = next(run.model.parameters()).device
+    for ev in events(ds, run.tokenizer, dev, n):
+        metric.add(ev)
+        if ev.index % 100 == 0 or ev.index + 1 == n:
+            log(f"  event {ev.index + 1}/{n}")
+    return n, identity(ds)
+
+
+def _record(run, n, ident, corpus, seed, n_boot):
     from helix.integrations._bootstrap import provenance
+    return dict(run=run.provenance, tokenizer=asdict(run.tokenizer), n_events=n, seed=seed, n_boot=n_boot,
+                code=provenance(), corpus=dict(corpus, basis_digest=ident["basis_digest"]),
+                truth=dict(q_cut=ident["truth_q_cut"], q_cut_source=ident["truth_q_cut_source"]))
+
+
+def evaluate(path, *, weights="last", corpus=None, fm=None, max_events=None, seed=0, n_boot=200,
+             presence_q=25.0, device=None, log=print):
+    """Score the fine-tuned denoiser at ``path`` on its own probe events; returns the results as
+    one JSON-able dict, the window scores under ``metrics.denoise._windows``."""
+    import json
+
+    from helix.eval.denoise import Denoise, load_denoiser
+    from helix.model.checkpoint import run_dir
+
+    recorded = (json.load(open(os.path.join(run_dir(path), "resolved_config.json"))).get("model") or {}).get("fm")
+    fm_path, fm_note = resolve_exp(recorded, override=fm) if recorded or fm else (None, "none recorded")
+    predict, _ = load_denoiser(path, device, weights=weights, fm=fm_path)
+    run = predict.run
+    ds, cinfo = _corpus(run, corpus)
+    log(f"[helix.eval] {run.provenance['run']} weights={run.provenance['weights']} step={run.provenance['step']}"
+        f" corpus={cinfo['resolved']} ({cinfo['check']}) fm={fm_path} ({fm_note})")
+    m = Denoise(Context(run, predict, seed, n_boot, float(presence_q)))
+    n, ident = _score(run, ds, m, max_events, log)
+    out = _record(run, n, ident, cinfo, seed, n_boot)
+    out.update(fm=dict(recorded=recorded, resolved=fm_path, note=fm_note), presence_q=float(presence_q),
+               metrics={"denoise": m.result()})
+    return out
+
+
+def evaluate_uprobe(path, *, weights="ema", corpus=None, max_events=None, seed=0, n_boot=200, probe_seeds=2,
+                    device=None, log=print):
+    """The along-wire probe (:class:`helix.eval.probe.UProbe`) of the FM run at ``path``."""
+    from helix.eval.probe import ProbeContext, UProbe, split_events
     from helix.model.checkpoint import load_run
 
-    metrics = tuple(metrics)
-    unknown = sorted(set(metrics) - set(METRICS))
-    if unknown:
-        raise ValueError(f"unknown metric(s) {unknown}; known: {METRICS}")
-    if ("denoise" in metrics) != (denoiser is not None):
-        raise ValueError("the denoise metric needs a denoiser run (denoiser=...), and only it does")
     if int(probe_seeds) < 1:
         raise ValueError(f"probe_seeds={probe_seeds}: a probe arm needs at least one fit")
     run = load_run(path, weights, device=device)
-    dev = next(run.model.parameters()).device
-    ds = dataset(run)
+    if run.config["model"].get("type") == "Coeff-Denoise":
+        raise ValueError(f"{path}: a denoiser run; the along-wire probe reads a pretrained FM's encoder")
+    ds, cinfo = _corpus(run, corpus)
     n = len(ds) if not max_events else min(int(max_events), len(ds))
-    if not n:
-        raise ValueError(f"{path}: the probe split of the run's corpus is empty")
-    predict = None
-    if denoiser is not None:
-        predict, cfg = load_denoiser(denoiser, dev)
-        if cfg != run.tokenizer:
-            raise ValueError(f"the denoiser tokenizes with {cfg}, the run with {run.tokenizer}")
-    probes = {"floor", "uprobe", "labels"} & set(metrics)
-    ctx = Context(run, run.model, split_events(n) if probes or predict else n, seed, n_boot, predict,
-                  int(probe_seeds), float(presence_q), str(fit_windows))
-    log(f"[helix.eval] {run.provenance['run']} weights={run.provenance['weights']} "
-        f"step={run.provenance['step']} events={n} (probes fit on {ctx.n_train}) metrics={','.join(metrics)}")
-
-    ms = [dict(recon=Recon, floor=Floor, uprobe=UProbe, labels=Labels, denoise=Denoise)[m](ctx) for m in metrics]
-    for ev in events(ds, run.tokenizer, dev, n):
-        for m in ms:
-            m.add(ev)
-        if ev.index % 100 == 0 or ev.index + 1 == n:
-            log(f"  event {ev.index + 1}/{n}")
-
-    ident = identity(ds)
-    dn = getattr(predict, "provenance", None) or {}
-    out = dict(run=run.provenance, tokenizer=asdict(run.tokenizer), n_events=n, seed=seed,
-               n_boot=n_boot, probe_seeds=int(probe_seeds), fit_windows=str(fit_windows),
-               denoiser=None if denoiser is None else str(denoiser), code=provenance(),
-               corpus=dict(basis_digest=ident["basis_digest"]),
-               truth=dict(q_cut=ident["truth_q_cut"], q_cut_source=ident["truth_q_cut_source"]),
-               weights={m: {k: (dn if m == "denoise" else run.provenance).get(k)
-                            for k in ("run", "weights", "checkpoint", "step")} for m in metrics},
-               metrics={})
-    for m in ms:
-        log(f"[helix.eval] {m.name}")
-        out["metrics"][m.name] = m.result()
+    ctx = ProbeContext(run, run.model, split_events(n), seed, n_boot, int(probe_seeds))
+    log(f"[helix.eval] uprobe {run.provenance['run']} weights={run.provenance['weights']} "
+        f"step={run.provenance['step']} events={n} (fit on {ctx.n_train}) corpus={cinfo['resolved']} ({cinfo['check']})")
+    m = UProbe(ctx)
+    n, ident = _score(run, ds, m, n, log)
+    out = _record(run, n, ident, cinfo, seed, n_boot)
+    out.update(probe_seeds=int(probe_seeds), metrics={"uprobe": m.result()})
     return out

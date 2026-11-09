@@ -1,8 +1,8 @@
 """The evaluated events: a run's held-out split, tokenized once, with its cells truth.
 
 Every metric reads the same :class:`Event` objects, so an event is read, tokenized and moved to
-the device once, and the encoder's frozen features and the event's map rows and windows are
-computed once per event however many metrics use them.
+the device once, and its windows (and, for the along-wire probe, the encoder's frozen features)
+are computed once per event however many metrics use them.
 
 WINDOWS
 =======
@@ -10,47 +10,46 @@ The evaluation windows and the detection floor, on the fixed fine grid.
 
 Every model is scored on the same 2-wire x 16-tick cells (:mod:`helix.data.cells`) whatever its
 patch size, so a bigger patch cannot lose sub-patch detail without the score moving. A cell no
-token covers is scored as predicted 0, never dropped: which cells are scored never depends on the
-tokenizer.
+token covers is scored as its predictor's floor (0, or a large negative log-odds), never dropped:
+which cells are scored never depends on the tokenizer.
 
-Truth (per event, from the cells record; no tokenizer, no checkpoint):
+Windows, per event, from the cells record (no tokenizer, no checkpoint): 32 wires x 128 ticks
+(16 x 8 fine cells), all cells kept:
 
-  map rows   fine cells a probe is FITTED on: every cell with truth charge (capped), cells near
-             signal, cells at random kept coefficients (noise-dominated). Not scored.
-  windows    32 wires x 128 ticks (16 x 8 fine cells), all cells kept:
-               iso   one isolated, compact particle (>=90% of its plane charge inside, <5% of
-                     the window from anything else), placed at a RANDOM offset around it (a
-                     window centred on truth would put a blurred prediction's centre on the
-                     answer)
-               bg    the FAR background: origin uniform over the plane's kept-coefficient
-                     extent, no truth charge within +-16 w / +-128 t and at least one kept
-                     coefficient inside; up to :data:`N_BG_PLANE` per plane, so every view has
-                     its own background
-               near  the NEAR background: no truth charge in the window or within one cell
-                     of it, but some within +-16 w / +-128 t -- exactly the surroundings
-                     ``bg`` must keep empty (:func:`helix.data.denoise.near_windows`, the
-                     denoiser's own training windows) -- and at least one kept coefficient
-                     inside, as every ``bg`` window has (both uniform in area: they differ in
-                     distance to charge alone); up to :data:`N_BG_PLANE` per plane.
-                     Drawn after the others, so iso and bg are the same with or without them
+  iso   one isolated, compact particle (>=90% of its plane charge inside, <5% of the window from
+        anything else), placed at a RANDOM offset around it (a window centred on truth would put
+        a blurred prediction's centre on the answer); ``ctx`` says where it sits relative to
+        OTHER particles' charge: ``clear`` (none in the padding a far window keeps empty),
+        ``crowded`` (some in that padding, none within a cell: the near windows' own rule) or
+        ``mixed`` (other charge in or right beside the window; not scored)
+  bg    the FAR background: origin uniform over the plane's kept-coefficient extent, no truth
+        charge within +-16 w / +-128 t and at least one kept coefficient inside; up to
+        :data:`N_BG_PLANE` per plane, so every view has its own background
+  near  the NEAR background: no truth charge in the window or within one cell of it, but some
+        within +-16 w / +-128 t -- exactly the surroundings ``bg`` must keep empty
+        (:func:`helix.data.denoise.near_windows`, the denoiser's own training windows) -- and at
+        least one kept coefficient inside, as every ``bg`` window has (both uniform in area: they
+        differ in distance to charge alone); up to :data:`N_BG_PLANE` per plane
+  isox  extra CLEAR iso windows (clear windows are ~6% of iso ones, too few below 0.1 MeV): they
+        count in the clear efficiency and nowhere else
 
-The number (:func:`score_windows`): a window's score is its largest cell score; an iso window
-is detected when it scores above the 99th percentile of the background windows OF ITS VIEW (U,
-V or Y, both volumes) -- a 1% false-positive rate per view, since the views differ in noise
-and one pooled threshold is set by the views with most background (measured: Y ran at 2.4-3.2%
-under a pooled 1%). Reported as the detected fraction by the particle's deposited energy (its
-whole track's step energy; it tracks the charge in the window, Spearman 0.94-0.96 on every
-view at ~20k e/MeV), with a [16, 84]% interval over an event bootstrap.
+Each kind is drawn after the ones above it, so earlier windows do not depend on later kinds.
 
-The far background alone sets that threshold, while an iso window caps foreign charge only
-INSIDE itself (5%), so a prediction that hazes charge around tracks gains iso efficiency at no
-cost on it. The near background prices the haze: the same efficiency with each view's
-threshold set on the near windows instead, and the rate at which the far threshold fires on
-them (1% if near and far look alike to the prediction). Beside them, threshold-free, the AUC
-of iso against far background (seed pairs agree to ~0.005 on it, ~0.04 on the efficiency at
-1%); and every number per view as well as pooled over views.
+The numbers (:func:`window_stat`): a window's score is its largest cell score. The MATCHED pair,
+iso against background at the same distance from charge:
 
-Also here: the within-group R^2 the along-wire probe reports (:func:`group_r2`).
+  clear          clear iso windows detected above the 99th percentile of the FAR windows OF
+                 THEIR VIEW (U, V or Y, both volumes) -- a 1% false-positive rate per view,
+                 since the views differ in noise and one pooled threshold is set by the views
+                 with most background (measured: Y ran at 2.4-3.2% under a pooled 1%)
+  crowded_near   crowded iso windows detected above each view's 99th percentile of its NEAR
+                 windows: the far background alone lets a prediction that hazes charge around
+                 tracks gain efficiency at no cost; the near background prices the haze
+
+each by the particle's deposited energy (its whole track's step energy; Spearman 0.94-0.96 with
+the charge in the window on every view at ~20k e/MeV), per view, their mean and pooled, with a
+[16, 84]% interval over an event bootstrap; and per view the rate at which the far threshold
+fires on near windows (1% if near and far look alike to the prediction).
 
 numpy at import; torch and pimm-data only when events are read.
 """
@@ -78,8 +77,8 @@ class Event:
 
     def raw_inputs(self):
         """Per token, the tokenizer's own input to the encoder -- ``inp`` and ``occ``
-        (``n_slot`` each), concatenated, float32, cached: what the probes' ``raw`` arm reads in
-        place of encoder features."""
+        (``n_slot`` each), concatenated, float32, cached: what the along-wire probe's ``raw``
+        arm reads in place of encoder features."""
         if self._raw is None:
             import torch
             self._raw = torch.cat([self.batch["inp"].float(), self.batch["occ"].float()], 1)
@@ -95,22 +94,22 @@ class Event:
                 self._feats = model.encode(self.batch).float()
         return self._feats
 
-    def truth(self, seed, windows):
-        """:func:`event_truth` of the event (its windows only if ``windows``),
-        drawn with ``[seed, index]``, cached."""
+    def truth(self, seed):
+        """:func:`event_truth` of the event, drawn with ``[seed, index]``, cached."""
         s, t = self._truth or (None, None)
-        if s != seed or (windows and "wkey" not in t):
-            t = event_truth(self.cells, self.coeff_cells, np.random.default_rng([seed, self.index]), windows)
+        if s != seed:
+            t = event_truth(self.cells, self.coeff_cells, np.random.default_rng([seed, self.index]))
             self._truth = (seed, t)
         return t
 
 
-def dataset(run):
+def dataset(run, data_root=None):
     """The run's corpus (``data.train`` of its config) restricted to the ``probe`` role of its
-    holdout, with the coefficients and their cells truth."""
+    holdout, with the coefficients and their cells truth. ``data_root``: where that corpus is
+    at this site (:func:`helix.data.verify.resolve_corpus`); default the run's recorded path."""
     from helix.data import CoeffTPCDataset
     d = (run.config.get("data") or {}).get("train") or {}
-    return CoeffTPCDataset(data_root=d["data_root"], split=d.get("split", ""),
+    return CoeffTPCDataset(data_root=str(data_root or d["data_root"]), split=d.get("split", ""),
                            dataset_name=d.get("dataset_name", "sim_wire"), modalities=("coeff", "cells"),
                            holdout=d.get("holdout"), split_role="probe")
 
@@ -181,8 +180,8 @@ def events(ds, tokenizer, device, max_events=None):
 
 WW, WT = 32, 128                     # window, wires x raw ticks
 ENERGY_BINS = (0.0, 0.1, 0.2, 0.5, 1e9)                  # MeV
-#: per event: signal map rows at most, iso windows at most, bg windows per plane at most
-CAP_SIGNAL, N_ISO, N_BG_PLANE = 3000, 60, 10
+#: per event: iso windows at most, bg (and near) windows per plane at most
+N_ISO, N_BG_PLANE = 60, 10
 N_BG_TRIES = 4000                    # far-background draws per plane
 KINDS = ("iso", "bg", "near", "isox")
 VIEWS = ("U", "V", "Y")
@@ -209,36 +208,21 @@ def cell_charge(cells, keys):
     return np.where(uk_s[pos] == keys, fq_s[pos], 0.0)
 
 
-def event_truth(cells, coeff_cells, rng, windows=True):
-    """The map rows and windows of one event, from its cells record.
+def event_truth(cells, coeff_cells, rng):
+    """The windows of one event, from its cells record.
 
     ``cells``: a :mod:`helix.data.cells` record (tracks numbered by row, energies in
     ``trk_energy``). ``coeff_cells``: fine-cell keys of the event's kept coefficients (any band,
-    :func:`helix.data.cells.coeff_cells`). Returns ``mrows``/``mq`` (map rows and their truth
-    charge) and, with ``windows``, ``wkey`` (window cells in window order, :func:`window_cells`'
-    order inside each) and ``meta`` (one dict per window: ``kind``, ``g``, ``w0``, ``t0``, ``E``
-    -- the iso particle's energy, NaN for a background window, ``bg`` or ``near``; ``ctx`` -- for
-    an iso window ``clear`` / ``crowded`` / ``mixed`` by other particles' charge around it, as in
-    the code below, None otherwise). The map
-    rows are drawn first, so they are the same with or without the windows.
+    :func:`helix.data.cells.coeff_cells`). Returns ``wkey`` (window cells in window order,
+    :func:`window_cells`' order inside each) and ``meta`` (one dict per window: ``kind``, ``g``,
+    ``w0``, ``t0``, ``E`` -- the iso particle's energy, NaN for a background window; ``ctx`` --
+    for an iso window ``clear`` / ``crowded`` / ``mixed`` by other particles' charge around it,
+    None otherwise).
     """
     E = dict(enumerate(np.asarray(cells["trk_energy"], np.float64).tolist()))
     uk = np.asarray(cells["key"], np.int64)
     fq = np.asarray(cells["q"], np.float64)
     ck = np.unique(np.asarray(coeff_cells, np.int64))
-
-    # map rows: signal, near signal, random kept coefficients
-    sig = uk[fq > 0]
-    if len(sig) > CAP_SIGNAL:
-        sig = rng.choice(sig, CAP_SIGNAL, replace=False)
-    sg, sw, st = unkey(sig)
-    near = fkey(sg, np.maximum(sw + rng.integers(-8, 9, len(sig)), 0), st + rng.integers(-8, 9, len(sig)))
-    near = near[np.isin(near, ck)]
-    coeff = rng.choice(ck, min(len(sig) // 2 + 1, len(ck)), replace=False) if len(ck) else ck
-    mrows = np.unique(np.concatenate([sig, near, coeff]))
-    mq = cell_charge(cells, mrows)
-    if not windows:
-        return dict(mrows=mrows, mq=mq)
 
     # One row per (cell, particle), placed at the cell's origin. Every box below is grid-aligned
     # (origins are multiples of FW / FT, paddings too), so a row is inside a box exactly when its
@@ -352,7 +336,7 @@ def event_truth(cells, coeff_cells, rng, windows=True):
     wkey = np.concatenate([window_cells(g, w0, t0) for _, g, w0, t0, _, _ in wins]) if wins \
         else np.zeros(0, np.int64)
     meta = [dict(kind=k, g=g, w0=w0, t0=t0, E=e, ctx=c) for k, g, w0, t0, e, c in wins]
-    return dict(mrows=mrows, mq=mq, wkey=wkey, meta=meta)
+    return dict(wkey=wkey, meta=meta)
 
 
 def _ratio(a, b):
@@ -363,86 +347,36 @@ def _frac(w, hit, sel):
     return _ratio((w * hit)[sel].sum(), w[sel].sum())
 
 
+def _diff(a, b):
+    return {k: a[k] - b[k] for k in a}
+
+
 def window_stat(score, meta):
     """``(stat, n_events, n_windows)`` of one per-cell ``score`` (flat over the windows' cells in
     window order; larger = more charge): ``stat(m)`` the floor's numbers under per-event weights
-    ``m`` (:func:`bootstrap`), keyed by ``<E bin>`` and, where per view, ``_<view>``:
+    ``m`` (:func:`bootstrap`), keyed by ``<E bin>`` and a view suffix -- ``_U`` / ``_V`` / ``_Y``,
+    ``_mean`` (of the three views) or none (pooled over views, each at its own threshold):
 
-      floor_eff1pct_<E>[_<V>]       iso efficiency, threshold each view's 99th percentile of its
-                                    FAR (``bg``) windows -- the floor itself
-      floor_eff1pct_<E>_ev          the same, each event's iso windows of the bin weighted
-                                    equally (pooled: an event with more windows weighs more)
-      floor_eff1pct_near_<E>[_<V>]  threshold set on the NEAR windows instead; a view without
-                                    near windows is left out
-      near_fpr_at_far[_<V>]         the fraction of near windows above the far threshold
-      auc_<E>[_<V>]                 P(iso scores above a far window of its view), ties 1/2
-      floor_eff1pct_clear_<E>       MATCHED: iso windows with no other charge in the padding
-                                    (``ctx`` clear) at the far threshold
-      floor_eff1pct_crowded_near_<E>  MATCHED: iso windows by the near windows' own rule (other
-                                    charge in the padding, none within a cell) at the near threshold
-      floor_eff1pct_crowded_<E>     those crowded iso windows at the far threshold, for contrast
-      floor_eff1pct_mixed_<E>       the mixed iso windows (other charge in or beside the window,
-                                    which a detection may be crediting) at the far threshold:
-                                    all-iso is the count-weighted sum of clear, crowded and mixed
-                                    (clear among the iso windows, ``n_windows`` ``iso_clear_*``;
-                                    the clear efficiency itself also scores the extra clear draws,
-                                    ``isox``, which no other number includes)
-      kept_clear_<E>[_<V>]          the fraction of clear windows holding >= 1 kept coefficient:
-                                    one without scores 0 on every arm, below every bg window (each
-                                    drawn around one), so this caps every arm -- the corpus gate's
-                                    share of the floor
-      floor_eff1pct_clear_kept_<E>[_<V>]  the clear efficiency among those windows
-      tok_clear_<E>                 the fraction of clear windows with >= 1 cell under a covering
-                                    token -- the fitted arms' cap (a token's coefficients may sit
-                                    outside the window)
-      auc_near_vs_far[_shtok|_noshtok]  P(a near window scores above a far one) -- the haze
-                                    threshold-free -- in all, and in near windows that do or do not
-                                    share a covering token with charge (``shtok``): a haze only in
-                                    the sharing ones is token resolution, one in both the encoder's
-                                    context; ``near_fpr_at_far_shtok`` / ``_noshtok`` likewise
-      floor_eff1pct_clear_tokonly_<E>  the clear efficiency among windows covered by a token but
-                                    holding no kept coefficient: context from outside the window,
-                                    or haze leaking back in
-      auc_clear_<E>, auc_crowded_near_<E>  the matched pairs threshold-free: clear iso against far,
-                                    crowded iso against near windows, within each view
-      (the two matched efficiencies also per view, ``_<V>``; ``n_windows`` counts each context
-      per view and per energy bin)
+      floor_eff1pct_clear_<E>         clear iso windows (and the extra clear draws, ``isox``)
+                                      above each view's 99th percentile of its FAR windows
+      floor_eff1pct_crowded_near_<E>  crowded iso windows above each view's 99th percentile of
+                                      its NEAR windows; a view without near windows is left out
+      near_fpr_at_far_<V>             the fraction of near windows above the far threshold
 
+    ``n_windows``: each kind per view, and the clear and crowded windows per energy bin and view.
     ``meta``: one dict per window, its event as ``ev``."""
     n = len(meta)
     s = np.asarray(score, np.float64).reshape(n, -1).max(1) if n else np.zeros(0)
     ev = np.array([m["ev"] for m in meta], np.int64)
-    kind = np.array([KINDS.index(m["kind"]) for m in meta], np.int64)
+    kind = np.array([m["kind"] for m in meta], dtype=object)
     view = np.array([m["g"] % 3 for m in meta], np.int64)
     eb = np.array([np.searchsorted(ENERGY_BINS, m["E"], side="right") - 1 if m["kind"] in ("iso", "isox") else -1
                    for m in meta], np.int64)
+    ctx = np.array([m.get("ctx") or "" for m in meta], dtype=object)
     evs, we = np.unique(ev, return_inverse=True)
-    iso, bg, near, isox = kind == 0, kind == 1, kind == 2, kind == 3
-    ctx = np.array([m.get("ctx") or "" for m in meta])
-    # clear: the iso windows that are, plus the extra clear draws (isox); crowded and mixed are iso only
-    clear = ((ctx == "clear") & iso) | isox
-    crowded, mixed = (ctx == "crowded") & iso, (ctx == "mixed") & iso
-    kept = np.array([bool(m.get("kept", True)) for m in meta], bool)       # >= 1 kept coefficient inside
-    tok = np.array([bool(m.get("tok", True)) for m in meta], bool)         # >= 1 cell under a token
-    shtok = np.array([bool(m.get("shtok", False)) for m in meta], bool)   # shares a token with charge
-    # per-event equal weights of the iso windows: 1 / (the event's iso windows in that energy bin)
-    cell = we * len(ENERGY_NAMES) + np.maximum(eb, 0)
-    cnt = np.bincount(cell[iso], minlength=len(evs) * len(ENERGY_NAMES))
-    inv_n = np.where(iso, 1.0 / np.maximum(cnt[cell], 1), 0.0)
-    # AUC: per view, the far windows in score order and where each iso score falls among them
-    # (fixed); a resample only re-weighs, so a statistic is a cumulative sum, not a sort
-    def pairs(ref, sel):
-        """Per view: ``ref``'s windows in score order and where each ``sel`` score falls among them."""
-        out = []
-        for v in range(3):
-            b = np.nonzero(ref & (view == v))[0]
-            b = b[np.argsort(s[b], kind="stable")]
-            i = np.nonzero(sel & (view == v))[0]
-            out.append((b, i, np.searchsorted(s[b], s[i], "left"), np.searchsorted(s[b], s[i], "right")))
-        return out
-    auc = pairs(bg, iso)
-    auc_ctx = {"clear": pairs(bg, clear), "crowded_near": pairs(near, crowded),
-               "nearbg_shtok": pairs(bg, near & shtok), "nearbg_noshtok": pairs(bg, near & ~shtok)}
+    bg, near = kind == "bg", kind == "near"
+    clear = ((ctx == "clear") & (kind == "iso")) | (kind == "isox")
+    crowded = (ctx == "crowded") & (kind == "iso")
 
     def thresholds(w, ref):
         thr = np.full(3, np.nan)
@@ -454,75 +388,27 @@ def window_stat(score, meta):
 
     def stat(m):
         w = m[we]
-        far = thresholds(w, bg)
-        det = s > np.where(np.isnan(far), np.inf, far)[view]          # a view without bg: none detected
-        thr_n = thresholds(w, near)
-        has_n = ~np.isnan(thr_n)[view]
+        far, thr_n = thresholds(w, bg), thresholds(w, near)
+        det = s > np.where(np.isnan(far), np.inf, far)[view]           # a view without bg: none detected
         det_n = s > np.where(np.isnan(thr_n), np.inf, thr_n)[view]
-        # per view and iso window: the weight of far windows it beats (+1/2 the ties), and of all
-        def beats(ps):
-            bt, tt = np.zeros(n), np.zeros(n)
-            for b, i, lo, hi in ps:
-                cw = np.concatenate([[0.0], np.cumsum(w[b])])
-                bt[i], tt[i] = (cw[lo] + cw[hi]) / 2, cw[-1]
-            return bt, tt
-        beat, tot = beats(auc)
-        ctx_beats = {k: beats(ps) for k, ps in auc_ctx.items()}
+        has_n = ~np.isnan(thr_n)[view]
         out = {}
         for k, nm in enumerate(ENERGY_NAMES):
-            sel = iso & (eb == k)
-            out[f"floor_eff1pct_{nm}"] = _frac(w, det, sel)
-            out[f"floor_eff1pct_{nm}_ev"] = _frac(w * inv_n, det, sel)
-            out[f"floor_eff1pct_near_{nm}"] = _frac(w, det_n, sel & has_n)
-            selc = (iso | isox) & (eb == k)                            # the matched sets' energy bin
-            out[f"floor_eff1pct_clear_{nm}"] = _frac(w, det, selc & clear)
-            out[f"floor_eff1pct_crowded_near_{nm}"] = _frac(w, det_n, sel & crowded & has_n)
-            out[f"floor_eff1pct_crowded_{nm}"] = _frac(w, det, sel & crowded)
-            out[f"floor_eff1pct_mixed_{nm}"] = _frac(w, det, sel & mixed)
-            # the corpus gate's share: how many clear windows kept any coefficient, and the clear
-            # efficiency among those (what the representation does with what the gate let through)
-            out[f"kept_clear_{nm}"] = _frac(w, kept, selc & clear)
-            out[f"floor_eff1pct_clear_kept_{nm}"] = _frac(w, det, selc & clear & kept)
-            out[f"tok_clear_{nm}"] = _frac(w, tok, selc & clear)
-            out[f"floor_eff1pct_clear_tokonly_{nm}"] = _frac(w, det, selc & clear & tok & ~kept)
-            for key, m in (("clear", clear), ("crowded_near", crowded)):
-                bt, tt = ctx_beats[key]
-                out[f"auc_{key}_{nm}"] = _ratio((w * bt)[selc & m].sum(), (w * tt)[selc & m].sum())
-            for v in range(3):
-                sv = sel & (view == v)
-                out[f"floor_eff1pct_clear_{nm}_{VIEWS[v]}"] = _frac(w, det, selc & (view == v) & clear)
-                out[f"kept_clear_{nm}_{VIEWS[v]}"] = _frac(w, kept, selc & (view == v) & clear)
-                out[f"floor_eff1pct_clear_kept_{nm}_{VIEWS[v]}"] = _frac(w, det, selc & (view == v) & clear & kept)
-                out[f"floor_eff1pct_crowded_near_{nm}_{VIEWS[v]}"] = _frac(w, det_n, sv & crowded & has_n)
-            for v in range(3):
-                sv = sel & (view == v)
-                out[f"floor_eff1pct_{nm}_{VIEWS[v]}"] = _frac(w, det, sv)
-                out[f"floor_eff1pct_near_{nm}_{VIEWS[v]}"] = _frac(w, det_n, sv & has_n)
-                out[f"auc_{nm}_{VIEWS[v]}"] = _ratio((w * beat)[sv].sum(), (w * tot)[sv].sum())
-            out[f"auc_{nm}"] = _ratio((w * beat)[sel].sum(), (w * tot)[sel].sum())
-        out["near_fpr_at_far"] = _frac(w, det, near)
-        # the haze threshold-free (comparable across fit settings, unlike a rate at the far
-        # threshold, which the fit moves): P(a near window scores above a far one), by whether it
-        # shares a covering token with charge
-        for key in ("shtok", "noshtok"):
-            bt, tt = ctx_beats[f"nearbg_{key}"]
-            m = near & (shtok if key == "shtok" else ~shtok)
-            out[f"auc_near_vs_far_{key}"] = _ratio((w * bt)[m].sum(), (w * tt)[m].sum())
-            out[f"near_fpr_at_far_{key}"] = _frac(w, det, m)
-        bt = ctx_beats["nearbg_shtok"][0] + ctx_beats["nearbg_noshtok"][0]
-        tt = ctx_beats["nearbg_shtok"][1] + ctx_beats["nearbg_noshtok"][1]
-        out["auc_near_vs_far"] = _ratio((w * bt)[near].sum(), (w * tt)[near].sum())
+            for key, d, sel in (("clear", det, clear), ("crowded_near", det_n, crowded & has_n)):
+                sel = sel & (eb == k)
+                base = f"floor_eff1pct_{key}_{nm}"
+                pv = [_frac(w, d, sel & (view == v)) for v in range(3)]
+                out[base] = _frac(w, d, sel)
+                out[f"{base}_mean"] = float(np.mean(pv))
+                out.update({f"{base}_{VIEWS[v]}": pv[v] for v in range(3)})
         for v in range(3):
             out[f"near_fpr_at_far_{VIEWS[v]}"] = _frac(w, det, near & (view == v))
         return out
 
-    counts = {f"{k}_{VIEWS[v]}": int(((kind == i) & (view == v)).sum())
-              for i, k in enumerate(KINDS) for v in range(3)}
-    ctxs = (("clear", clear & iso), ("crowded", crowded), ("mixed", mixed))   # iso windows; isox apart
-    counts.update({f"iso_{c}_{VIEWS[v]}": int((m & (view == v)).sum()) for c, m in ctxs for v in range(3)})
-    counts.update({f"iso_{c}_{nm}": int((m & (eb == k)).sum()) for c, m in ctxs for k, nm in enumerate(ENERGY_NAMES)})
-    counts["isox"] = int(isox.sum())
-    counts["near_shtok"] = int((near & shtok).sum())
+    counts = {f"{k}_{VIEWS[v]}": int(((kind == k) & (view == v)).sum()) for k in KINDS for v in range(3)}
+    counts.update({f"{c}_{nm}_{VIEWS[v]}": int((sel & (eb == k) & (view == v)).sum())
+                   for c, sel in (("clear", clear), ("crowded", crowded))
+                   for k, nm in enumerate(ENERGY_NAMES) for v in range(3)})
     return stat, len(evs), counts
 
 
@@ -535,40 +421,60 @@ def score_windows(score, meta, n_boot=200, seed=0):
     return out
 
 
-def seed_spread(points):
-    """Over the probe seeds: ``{"seed_mean": {k: mean}, "seed_half_range": {k: (max - min) / 2}}``
-    of each key's point value, one dict per seed -- the fit's own variance, which the event
-    bootstrap (one fitted probe, resampled events) does not contain."""
-    out = {"seed_mean": {}, "seed_half_range": {}}
-    for k in points[0]:
-        v = np.array([p[k] for p in points], np.float64)
-        ok = v[np.isfinite(v)]
-        out["seed_mean"][k] = round(float(ok.mean()), 4) if len(ok) else float("nan")
-        out["seed_half_range"][k] = round(float(ok.max() - ok.min()) / 2, 4) if len(ok) else float("nan")
-    return out
+def amplitude(ev, keys):
+    """The amplitude baseline's score of fine cells ``keys``: the largest kept coefficient's
+    |value| / sigma in the cell, 0 where none -- fit-free, what the corpus gate alone gives."""
+    uk, amp = ev.coeff_amp
+    if not len(uk):
+        return np.zeros(len(keys))
+    p = np.clip(np.searchsorted(uk, keys), 0, len(uk) - 1)
+    return np.where(uk[p] == keys, amp[p], 0.0)
 
 
-def plane_group(e, g):
-    """One id per (event, plane gid); :func:`group_event` inverts it."""
-    return np.asarray(e, np.int64) * 16 + np.asarray(g, np.int64)
+#: The per-window metadata a windows dump carries: what places a window (a far window's kind,
+#: plane and NaN energy alone do not).
+WINDOW_META = ("ev", "kind", "g", "E", "ctx", "w0", "t0")
 
 
-def group_event(k):
-    return np.asarray(k, np.int64) // 16
+class Scored:
+    """The scored events' windows and named per-cell scores on them, scored by
+    :func:`score_windows`."""
 
+    def __init__(self):
+        self.meta, self.s = [], {}
 
-def group_r2(p, y, group):
-    """Per group: ``(keys, sse, sst)`` of prediction ``p`` against truth ``y`` once both are
-    centred within the group, so a per-group offset costs nothing. The pooled within-group
-    ``R^2 = 1 - sum(sse) / sum(sst)``; unlike a correlation it also charges a prediction of the
-    wrong scale."""
-    keys, inv = np.unique(np.asarray(group), return_inverse=True)
-    inv, G = inv.ravel(), len(keys)
-    n = np.bincount(inv, minlength=G)
-    p, y = np.asarray(p, np.float64), np.asarray(y, np.float64)
-    dp = p - (np.bincount(inv, p, G) / n)[inv]
-    dy = y - (np.bincount(inv, y, G) / n)[inv]
-    return keys, np.bincount(inv, (dy - dp) ** 2, G), np.bincount(inv, dy * dy, G)
+    def add(self, ev, tr, scores):
+        """``tr``: the event's truth; ``scores``: ``{name: score per window cell}``."""
+        self.meta += [dict(m, ev=ev.index) for m in tr["meta"]]
+        for k, s in scores.items():
+            self.s.setdefault(k, []).append(np.asarray(s, np.float32))
+
+    def stat(self, name):
+        """:func:`window_stat` of score ``name``: ``(stat, n_events, n_windows)``."""
+        if not self.meta:
+            raise ValueError("no scored window")
+        return window_stat(np.concatenate(self.s[name]), self.meta)
+
+    def paired(self, a, b, n_boot, seed):
+        """``a - b`` of every number, each ``[point, lo, hi]`` over the SAME resamples."""
+        sa, n, _ = self.stat(a)
+        sb = self.stat(b)[0]
+        return bootstrap(lambda m: _diff(sa(m), sb(m)), n, n_boot, seed)
+
+    def result(self, n_boot, seed, names=None):
+        if not self.meta:
+            raise ValueError("no scored window")
+        return {k: score_windows(np.concatenate(self.s[k]), self.meta, n_boot, seed) for k in (names or self.s)}
+
+    def windows(self):
+        """Every scored window once: its metadata as arrays and each named score's window score
+        (the max over its cells, what every number thresholds) -- written beside the results so
+        two runs scored on the SAME windows compare paired (``python -m helix.eval compare``)."""
+        n = len(self.meta)
+        out = {f"meta/{k}": np.array([m.get(k) if m.get(k) is not None else "" for m in self.meta])
+               for k in WINDOW_META}
+        out.update({f"score/{k}": np.concatenate(v).reshape(n, -1).max(1) for k, v in self.s.items()})
+        return out
 
 
 def bootstrap(stat, n_events, n_boot=200, seed=0):

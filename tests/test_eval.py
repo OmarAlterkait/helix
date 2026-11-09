@@ -1,4 +1,5 @@
-"""helix.eval: reading a run, the evaluated events and their windows, and every metric."""
+"""helix.eval: reading a run, the evaluated events and their windows, the fine-tune's metric, the
+along-wire probe, compare and the CLI."""
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -24,10 +25,9 @@ from helix.eval import events as W
 # split-checkpoint writer when pimm is importable); the metrics run on synthetic events whose
 # truth is a cells record and whose tokens come from the training tokenizer. Pinned: the loader
 # returns exactly the saved weights, the tokenizer of the train split and the step of the weight
-# set it read, and refuses what it cannot read; the probes are seeded and learn what a feature
-# carries (an informative "trained" arm beats its reference: the coefficient amplitude, the
-# geometry columns, the token layout); a perfect denoiser scores perfectly; recon is the
-# evaluator's metric.
+# set it read, and refuses what it cannot read; the along-wire probe is seeded and learns what a
+# feature carries (an informative "trained" arm beats geometry alone); a perfect denoiser scores
+# perfectly, every probe event is scored, and an uncovered charged cell is a miss.
 
 SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=2, dec_blocks=1, heads=2, n_bins=16, gp=64, gd=128)
 TOK = dict(cell_t="grid_center", pw=4, pt=2)
@@ -186,10 +186,14 @@ def _events(run, ds):
     return list(events(ds, run.tokenizer, torch.device("cpu")))
 
 
-def _ctx(run, n, n_boot=20, denoiser=None, probe_seeds=2):
+def _pctx(run, n, n_boot=20, probe_seeds=2):
+    from helix.eval.probe import ProbeContext, split_events
+    return ProbeContext(run, run.model, split_events(n), 0, n_boot, probe_seeds)
+
+
+def _dctx(run, denoiser, n_boot=20):
     from helix.eval import Context
-    from helix.eval.probe import split_events
-    return Context(run, run.model, split_events(n), 0, n_boot, denoiser, probe_seeds)
+    return Context(run, denoiser, 0, n_boot)
 
 
 def _token_feature(ev, values, d=SMALL["d"], seed=0):
@@ -221,124 +225,27 @@ def test_events_are_the_training_tokens_with_their_cells(synth):
     assert amp[np.searchsorted(keys, k0[0])] >= abs(ds[0]["coeff"]["value"][0, 0]) - 1e-6
 
 
-def test_recon_is_the_evaluators_metric(synth):
-    from helix.eval import recon as R
-    d, ds = synth
-    run = load_run(d, device="cpu")
-    m = R.Recon(_ctx(run, len(ds)))
-    evs = _events(run, ds)[:3]
-    for e in evs:
-        m.add(e)
-    got = m.result()
-    totals, counts, gf = {}, {}, dict.fromkeys(R.GF_KEYS, 0.0)
-    for i, e in enumerate(evs):                                       # the evaluator's loop, by hand
-        mask = R.mask_for(run.model, e.batch, i)
-        with torch.no_grad():
-            R.pool(R.heads_loss(run.model, e.batch, mask, gf), e.batch, mask, totals, counts)
-    want = R.average(totals, counts, gf)
-    assert got["n_events"] == 3 and {"loss", "bce", "val", "var_expl", "charge_closure", "charge_resid"} <= set(got)
-    for k, v in want.items():
-        assert got[k] == pytest.approx(v, rel=1e-6)
-    # and the same under the region mask, beside it
-    totals, counts, gf = {}, {}, dict.fromkeys(R.GF_KEYS, 0.0)
-    for e in evs:
-        mask = R.region_mask(e.batch, run.tokenizer.pw)
-        with torch.no_grad():
-            R.pool(R.heads_loss(run.model, e.batch, mask, gf), e.batch, mask, totals, counts)
-    want = R.average(totals, counts, gf)
-    assert {"loss", "var_expl", "charge_closure", "mask_frac"} <= set(got["region"])
-    for k, v in want.items():
-        assert got["region"][k] == pytest.approx(v, rel=1e-6)
-    assert 0 < got["region"]["mask_frac"] < 1 and got["region"]["var_expl"] != got["var_expl"]
-
-
-def test_the_region_mask_hides_whole_regions_as_the_predecessor_did():
-    """Tokens of one (plane, 32-wire, 128-tick) region are masked together, 75% of regions are,
-    and the regions are the predecessor's (scripts/eval_resolution.py's crc32 of the key)."""
-    import zlib
-    from helix.eval.recon import region_mask
-    rng = np.random.default_rng(0)
-    n, pw = 20000, 16
-    B = dict(cell_wb=torch.from_numpy(rng.integers(0, 120, n)),
-             t_phys=torch.from_numpy(rng.uniform(-20, 6000, n).astype(np.float32)),
-             plane_id=torch.from_numpy(rng.integers(0, 6, n)))
-    m = region_mask(B, pw).numpy()
-    wc = B["cell_wb"].float().numpy() * pw + pw / 2
-    rk = (B["plane_id"].numpy().astype(np.int64) << 40) | ((wc // 32).astype(np.int64) << 20) \
-        | (np.floor(B["t_phys"].numpy() / 128).astype(np.int64) + 4096)
-    ref = np.array([zlib.crc32(int(x).to_bytes(8, "little", signed=True)) % 1000 for x in rk]) < 750
-    np.testing.assert_array_equal(m, ref)
-    u, inv = np.unique(rk, return_inverse=True)
-    per = np.bincount(inv, m, len(u)) / np.bincount(inv, minlength=len(u))
-    assert set(np.unique(per)) <= {0.0, 1.0} and 0.7 < per.mean() < 0.8
-
-
-def test_floor_learns_what_the_features_carry(synth):
-    from helix.eval.probe import Floor
-    d, ds = synth
-    run = load_run(d, device="cpu")
-    m = Floor(_ctx(run, len(ds)))
-    for e in _events(run, ds):
-        e._feats = _token_feature(e, np.log1p(e.cells["q"] / C.Q0))
-        m.add(e)
-    out = m.result()
-    assert out["n_train_events"] == 6 and np.isfinite(out["val_mse"])
-    for arm in ("trained", "amplitude"):
-        r = out[arm]
-        kinds = {k: v for k, v in r["n_windows"].items() if k.split("_")[0] in ("iso", "bg", "near") and k[-2:] in ("_U", "_V", "_Y") and k.count("_") == 1}
-        assert len(r["floor_eff1pct_0.1-0.2"]) == 3 and len(kinds) == 9 and min(kinds.values()) > 0
-    # the coefficient values are noise here, so the amplitude finds nothing the features do not
-    eff = lambda a: np.nanmean([v[0] for k, v in out[a].items() if k.startswith("floor_eff")])   # noqa: E731
-    assert eff("trained") > eff("amplitude") + 0.2, (out["trained"], out["amplitude"])
-    k = "floor_eff1pct_0.5-1e+09"
-    assert out["d_over_amplitude"][k] == pytest.approx(out["trained"][k][0] - out["amplitude"][k][0], abs=1e-4)
-    # trained - raw, paired over the same resamples (the raw inputs find these particles too: here
-    # a coefficient sits under every charged cell, so occupancy alone gives them away)
-    for k in ("floor_eff1pct_0.1-0.2", "auc_0.1-0.2_Y", "near_fpr_at_far"):
-        d, lo, hi = out["d_over_raw"][k]
-        assert d == pytest.approx(out["trained"][k][0] - out["raw"][k][0], abs=1e-3) and lo <= d <= hi
-    # two fits per arm on the same rows: their mean and half-range beside the interval
-    assert out["probe_seeds"] == 2 and len(out["trained"]["val_mse_seeds"]) == 2
-    assert out["trained"]["val_mse_seeds"][0] == pytest.approx(out["val_mse"], rel=1e-5)
-    hr = out["trained"]["seed_half_range"]
-    assert set(hr) == set(out["trained"]["seed_mean"]) >= {"floor_eff1pct_0.1-0.2", "auc_0.1-0.2"}
-    assert all(v >= 0 for v in hr.values() if v == v) and "amplitude" not in out["d_over_raw_seeds"]
-    assert set(out["d_over_raw_seeds"]) == {"seed_mean", "seed_half_range"}
-    # the presence arm: the same features and rows as a classifier of q > presence_q, scored by its
-    # probability -- on features that ARE the charge it finds what the regression finds
-    assert eff("presence") > eff("amplitude") + 0.2, (out["presence"], out["amplitude"])
-    assert len(out["presence"]["val_bal_acc_seeds"]) == 2
-    assert len(out["presence_raw"]["val_bal_acc_seeds"]) == 2 and "d_presence_over_raw" in out
-    # what the probes fit on: by default the map rows only
-    assert out["fit_windows"] == "none" and out["fit_composition"]["map"]["frac"] == 1.0
-    assert 0 < out["fit_composition"]["all"]["pos"] < 1
-
-
 def test_the_raw_arm_on_raw_features_is_the_trained_arm(synth):
     """Fed the raw inputs as its 'encoder features', the trained arm IS the raw arm: same rows,
     same probe, same seed -- so trained - raw is what the features add over the input, exactly."""
-    from helix.eval.probe import Floor, UProbe
+    from helix.eval.probe import UProbe
     d, ds = synth
     run = load_run(d, device="cpu")
-    ms = [Floor(_ctx(run, len(ds), probe_seeds=1)), UProbe(_ctx(run, len(ds), probe_seeds=1))]
+    m = UProbe(_pctx(run, len(ds), probe_seeds=1))
     for e in _events(run, ds):
         e._feats = e.raw_inputs()
         assert e._feats.shape == (len(e.cell_key), 2 * SMALL["n_slot"])
-        for m in ms:
-            m.add(e)
-    fl, up = (m.result() for m in ms)
-    keys = [k for k, v in fl["trained"].items() if k.startswith(("floor_eff", "auc_", "near_fpr")) and v[0] == v[0]]
-    assert keys and all(fl["trained"][k] == fl["raw"][k] for k in keys)
-    assert all(fl["d_over_raw"][k] == [0.0, 0.0, 0.0] for k in keys)
+        m.add(e)
+    up = m.result()
     assert up["trained"]["r2"] == up["raw"]["r2"] and up["d_over_raw"] == [0.0, 0.0, 0.0]
-    assert fl["trained"]["seed_half_range"]["floor_eff1pct_0.1-0.2"] == 0.0          # one seed: no spread
+    assert up["trained"]["seed_half_range"]["r2"] == 0.0                         # one seed: no spread
 
 
 def test_uprobe_learns_u_and_geometry_alone_does_not(synth):
     from helix.eval.probe import UProbe, u_of
     d, ds = synth
     run = load_run(d, device="cpu")
-    m = UProbe(_ctx(run, len(ds)))
+    m = UProbe(_pctx(run, len(ds)))
     for e in _events(run, ds):
         g = C.unkey(e.cells["key"])[0]
         e._feats = _token_feature(e, u_of(g, e.cells["dom_y"], e.cells["dom_z"]))
@@ -348,22 +255,6 @@ def test_uprobe_learns_u_and_geometry_alone_does_not(synth):
     assert all(out["trained"][f"r2_{v}"][0] > 0.3 for v in "UVY")
     d, lo, hi = out["d_over_geo"]
     assert d == pytest.approx(out["trained"]["r2"][0] - out["geo"]["r2"][0], abs=1e-3) and lo <= d <= hi
-
-
-def test_labels_learn_the_class_the_features_carry(synth):
-    from helix.eval.probe import Labels
-    d, ds = synth
-    run = load_run(d, device="cpu")
-    m = Labels(_ctx(run, len(ds)))
-    for e in _events(run, ds):
-        e._feats = _token_feature(e, C.cell_class(e.cells, "trk_motif").astype(np.float64))
-        m.add(e)
-    out = m.result()
-    mo = out["motif"]
-    assert set(mo["prior"]) == set(C.MOTIF_NAMES) and sum(mo["prior"].values()) == pytest.approx(1, abs=1e-3)
-    assert mo["trained"]["macro_recall"][0] > 0.6 > mo["geo"]["macro_recall"][0]
-    assert mo["d_over_geo"][0] == pytest.approx(mo["trained"]["macro_recall"][0] - mo["geo"]["macro_recall"][0], abs=1e-3)
-    assert set(out["pid"]["trained"]["recall"]) <= set(C.PID_NAMES)
 
 
 def test_patch_rows_label_is_the_dominant_cells_charge_weighted_u():
@@ -379,26 +270,38 @@ def test_patch_rows_label_is_the_dominant_cells_charge_weighted_u():
     assert pr["geo"][0, :6].tolist() == [1, 0, 0, 0, 0, 0] and pr["geo"][0, -4:].tolist() == [1, 1, 0, 0]
 
 
-def test_a_perfect_denoiser_scores_perfectly(synth):
+def _oracle(scale=1.0, q_present=25.0, covered_only=True):
+    """A denoiser that knows the truth: ``scale`` x each cell's charge (each covered cell's, with
+    ``covered_only``), presence log-odds +20 above ``q_present`` e- and -20 below, the uncovered
+    floor where no token covers the cell."""
+    from helix.eval.denoise import UNCOVERED_LOGIT
+
+    def predict(ev, keys):
+        q = dict(zip(ev.cells["key"].tolist(), ev.cells["q"].tolist()))
+        idx, _ = C.cell_inputs(keys, ev.cell_key, ev.band_lengths, patch_config(TOK))
+        ok = (idx >= 0).any(1)
+        t = np.array([q.get(k, 0.0) for k in keys.tolist()]) * (ok if covered_only else 1)
+        logit = np.where(ok, np.where(t > q_present, 20.0, -20.0), UNCOVERED_LOGIT)
+        return np.log1p(scale * t / C.Q0).astype(np.float32), logit.astype(np.float32)
+    return predict
+
+
+def test_a_perfect_denoiser_scores_perfectly_on_every_probe_event(synth):
+    """No fit split: every event is scored, and a denoiser that knows the truth finds every clear
+    and crowded window, its presence on identical windows with the amplitude's."""
     from helix.eval.denoise import Denoise
     d, ds = synth
     run = load_run(d, device="cpu")
-
-    def oracle(ev, keys):
-        q = dict(zip(ev.cells["key"].tolist(), ev.cells["q"].tolist()))
-        idx, _ = C.cell_inputs(keys, ev.cell_key, ev.band_lengths, run.tokenizer)
-        ok = (idx >= 0).any(1)
-        y = np.log1p(np.array([q.get(k, 0.0) for k in keys.tolist()]) / C.Q0).astype(np.float32)
-        y = np.where(ok, y, 0)
-        return y, (y > 0).astype(np.float32)
-
-    m = Denoise(_ctx(run, len(ds), denoiser=oracle))
+    m = Denoise(_dctx(run, _oracle()))
     for e in _events(run, ds):
         m.add(e)
     out = m.result()
-    for r in (out["charge"], out["presence"]):
-        effs = [v[0] for k, v in r.items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
-        assert effs and min(effs) == 1.0
+    win = out.pop("_windows")
+    assert set(np.unique(win["meta/ev"]).tolist()) == set(range(len(ds)))       # all 9 events scored
+    assert {"score/presence", "score/amplitude"} <= set(win) and len(win["score/presence"]) == len(win["meta/ev"])
+    effs = [v[0] for k, v in out["presence"].items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
+    assert effs and min(effs) == 1.0
+    assert set(out) == {"presence", "amplitude", "cells"}
 
 
 class _Fit:                                       # a fitted probe, as far as result() reads one
@@ -407,35 +310,19 @@ class _Fit:                                       # a fitted probe, as far as re
 
 def _scored(cls, n_seeds=1, **state):
     """A probe metric in its scored state, set by hand (the rows a probe would have predicted)."""
-    from helix.eval import Context
+    from helix.eval.probe import ProbeContext
     m = cls.__new__(cls)
-    m.ctx = Context(None, None, 3, 0, 20, None, n_seeds)
+    m.ctx = ProbeContext(None, None, 3, 0, 20, n_seeds)
     m.n_fit, m.n_patch = 10, 0
     for k, v in state.items():
         setattr(m, k, v)
     return m
 
 
-def test_labels_ev_recall_weighs_every_event_equally():
-    """Event 0 has 100 rows, all right; events 1-3 one row each, all wrong. Pooled the recall is
-    100/103; with every event weighing the same it is 1/4."""
-    from helix.eval.probe import LABELS_ARMS, TASKS, Labels, seed_name
-    y = np.zeros(103, np.int64)
-    e = np.concatenate([np.zeros(100, np.int64), [1, 2, 3]])
-    hit = np.concatenate([np.zeros(100, np.int64), [1, 1, 1]])          # predicted class: 0 right, 1 wrong
-    m = _scored(Labels, probes={(t, a): [_Fit()] for t in TASKS for a in LABELS_ARMS},
-                p={(t, seed_name(a, 0)): [hit] for t in TASKS for a in LABELS_ARMS},
-                y={t: [y] for t in TASKS}, e=[e])
-    out = m.result()["motif"]
-    assert out["trained"]["macro_recall"][0] == pytest.approx(100 / 103, abs=1e-4)
-    assert out["trained"]["macro_recall_ev"][0] == pytest.approx(0.25, abs=1e-4)
-    assert out["d_over_raw"][0] == 0 and out["d_over_geo_ev"][0] == 0
-
-
 def test_uprobe_ev_r2_weighs_every_group_equally():
     """One (event, plane) group of 200 rows predicted perfectly, three of 4 rows predicted
     backwards: the pooled R^2 follows the big group, the group-equal one the many small ones."""
-    from helix.eval.events import group_r2, plane_group
+    from helix.eval.probe import group_r2, plane_group
     from helix.eval.probe import UPROBE_ARMS, UProbe, seed_name
     rng = np.random.default_rng(0)
     sizes = [200, 4, 4, 4]
@@ -452,45 +339,65 @@ def test_uprobe_ev_r2_weighs_every_group_equally():
     assert out["r2"][0] > 0.5 > out["r2_ev"][0] and out["r2_ev_U"][0] == out["r2_ev"][0]
 
 
-def _oracle(scale=1.0, q_present=25.0):
-    """A denoiser that knows the truth: ``scale`` x each covered cell's charge, presence 1 above
-    ``q_present`` e-."""
-    def predict(ev, keys):
-        q = dict(zip(ev.cells["key"].tolist(), ev.cells["q"].tolist()))
-        idx, _ = C.cell_inputs(keys, ev.cell_key, ev.band_lengths, patch_config(TOK))
-        t = np.array([q.get(k, 0.0) for k in keys.tolist()]) * ((idx >= 0).any(1))
-        return np.log1p(scale * t / C.Q0).astype(np.float32), (t > q_present).astype(np.float32)
-    return predict
-
-
 def test_the_denoise_charge_numbers_are_exact_for_the_truth_and_see_a_scale(synth):
     from helix.eval.denoise import Denoise, PRED_NAMES, TRUTH_NAMES
     d, ds = synth
     run = load_run(d, device="cpu")
     outs = {}
     for scale in (1.0, 1.1):
-        m = Denoise(_ctx(run, len(ds), denoiser=_oracle(scale)))
+        m = Denoise(_dctx(run, _oracle(scale)))
         for e in _events(run, ds):
             m.add(e)
         outs[scale] = m.result()
     for scale, out in outs.items():
         cl = out["cells"]
-        assert cl["n_cells"] > 0 and cl["presence_q"] == 25.0
+        assert cl["n_cells"] > 0 and cl["presence_q"] == 25.0 and cl["frac_uncovered"] == 0   # synth: all covered
         for v in ("all", "U", "V", "Y"):
             bv = cl["by_view"][v]
             res = [r for r in bv["resolution"].values() if r["n"]]
             assert len(res) >= 2 and sum(r["n"] for r in bv["resolution"].values()) > 0
             for r in res:                                       # log(pred / true) = log(scale), no spread
                 assert r["median"] == pytest.approx(np.log(scale), abs=1e-4) and r["hw68"] == pytest.approx(0, abs=1e-4)
-                assert r["frac_zero"] == 0
+                assert r["frac_zero"] == 0 and r["frac_uncovered"] == 0
             lin = [r for r in bv["linearity"].values() if r["n"]]
             assert lin and all(r["median_true_over_pred"] == pytest.approx(1 / scale, rel=1e-4) for r in lin)
-            assert bv["closure"]["median"] == pytest.approx(scale, rel=1e-4) and bv["closure"]["n_events"] == 3
+            assert bv["closure"]["median"] == pytest.approx(scale, rel=1e-4) and bv["closure"]["n_events"] == len(ds)
             cal = cl["calibration"]["presence"][v]                   # presence is right either way
             assert cal["n"] > cl["by_view"][v]["resolution"][TRUTH_NAMES[0]]["n"] and 0 < cal["frac_true"] < 1
-            assert cal["ece"] == 0 and cal["brier"] == 0 and cal["log_loss"] < 1e-6
+            assert cal["ece"] < 1e-6 and cal["brier"] < 1e-6 and cal["log_loss"] < 1e-6
         assert set(cl["by_view"]["all"]["linearity"]) == set(PRED_NAMES)
-        assert "floor_eff1pct_near_0.1-0.2" in out["charge"] and "near_fpr_at_far" in out["presence"]
+        assert "floor_eff1pct_crowded_near_0.1-0.2_mean" in out["presence"] and "near_fpr_at_far_Y" in out["amplitude"]
+
+
+def test_an_uncovered_charged_cell_is_a_miss(synth):
+    """With half of each event's tokens gone, the charged cells they covered are still scored --
+    predicted 0, a miss -- even by a predictor that knows their charge: closure is the covered
+    share of the charge, frac_uncovered the uncovered share of the cells. They used to be dropped,
+    which scored a tokenizer that covers less as no worse."""
+    from helix.eval.denoise import Denoise
+    d, ds = synth
+    run = load_run(d, device="cpu")
+    evs = _events(run, ds)[:3]
+    cov, q = [], []
+    for e in evs:
+        e.cell_key = e.cell_key[len(e.cell_key) // 2:]
+        k, qq = np.asarray(e.cells["key"]), np.asarray(e.cells["q"], np.float64)
+        k, qq = k[qq > 25], qq[qq > 25]
+        cov.append((C.cell_inputs(k, e.cell_key, e.band_lengths, run.tokenizer)[0] >= 0).any(1)); q.append(qq)
+    cov, q = np.concatenate(cov), np.concatenate(q)
+    assert 0.05 < cov.mean() < 0.95
+    m = Denoise(_dctx(run, _oracle(covered_only=False), n_boot=5))
+    for e in evs:
+        m.add(e)
+    cl = m.result()["cells"]
+    a = cl["by_view"]["all"]
+    assert cl["n_cells"] == len(q) and cl["frac_uncovered"] == pytest.approx(1 - cov.mean(), abs=1e-6)
+    assert a["frac_uncovered"] == pytest.approx(1 - cov.mean(), abs=1e-6)
+    assert a["closure"]["pooled"] == pytest.approx(q[cov].sum() / q.sum(), rel=1e-4)
+    for r in a["resolution"].values():
+        if r["n"]:
+            assert r["frac_zero"] == r["frac_uncovered"]          # the uncovered ones, and only they
+    assert cl["calibration"]["presence"]["all"]["ece"] < 1e-6         # calibration: the covered cells
 
 
 def test_binary_calibration():
@@ -504,71 +411,6 @@ def test_binary_calibration():
     assert c["log_loss"] == pytest.approx(-(0.7 * np.log(0.9) + 0.3 * np.log(0.1)), rel=1e-5)
     p = rng.random(200000)                                              # calibrated by construction
     assert binary_calibration(p, rng.random(200000) < p)["ece"] < 0.01
-
-
-def test_dist_calibration_of_calibrated_distributions():
-    """y_true drawn from each cell's own Gaussian: z covers 0.683 / 0.954 in every bin and view,
-    the median width is the error's hw68; a uniform PIT covers 0.68 / 0.95."""
-    from helix.eval.denoise import TRUTH_NAMES, dist_calibration
-    rng = np.random.default_rng(0)
-    n = 400000
-    q = np.exp(rng.uniform(np.log(1e3), np.log(1e6), n))
-    view = rng.integers(0, 3, n)
-    sig = 0.05
-    err = sig * rng.standard_normal(n)                                  # mu - y_true
-    g = dist_calibration("gauss", -err / sig, np.full(n, sig), err, q, view)
-    assert g["kind"] == "gauss"
-    for v in ("all", "U", "V", "Y"):
-        for nm in TRUTH_NAMES:
-            r = g[v][nm]
-            assert r["n"] > 1000
-            assert r["cov68"] == pytest.approx(0.683, abs=0.02) and r["cov95"] == pytest.approx(0.954, abs=0.01)
-            assert r["width_median"] == pytest.approx(sig) and r["err_hw68"] == pytest.approx(sig, rel=0.05)
-    c = dist_calibration("cat", rng.random(n), np.full(n, sig), err, q, view)["all"]
-    for nm in TRUTH_NAMES:
-        assert c[nm]["cov68"] == pytest.approx(0.68, abs=0.01) and c[nm]["cov95"] == pytest.approx(0.95, abs=0.01)
-    o = dist_calibration("gauss", -2 * err / sig, np.full(n, sig / 2), err, q, view)["all"]   # over-confident
-    assert all(o[nm]["cov68"] < 0.45 for nm in TRUTH_NAMES)
-    assert dist_calibration("gauss", [], [], [], [], [])["all"][TRUTH_NAMES[0]]["n"] == 0
-    with pytest.raises(ValueError, match="kind"):
-        dist_calibration("point", [], [], [], [], [])
-
-
-def test_the_denoise_metric_scores_a_distributional_heads_calibration(synth):
-    """A predictor with ``calib`` (a gauss head that knows the truth up to a calibrated error) adds
-    ``cells.dist``; its charge numbers come from the same call; one without it adds nothing."""
-    from helix.eval.denoise import Denoise
-    d, ds = synth
-    run = load_run(d, device="cpu")
-    base = _oracle()
-    rng = np.random.default_rng(0)
-    sig = 0.02
-
-    def predict(ev, keys):
-        return base(ev, keys)
-
-    def calib(ev, keys, y_true):
-        y, pr = base(ev, keys)
-        err = (sig * rng.standard_normal(len(keys))).astype(np.float32)
-        return y + err, pr, -err / sig, np.full(len(keys), sig, np.float32)
-
-    predict.dist, predict.calib = "gauss", calib
-    m = Denoise(_ctx(run, len(ds), denoiser=predict))
-    for e in _events(run, ds):
-        m.add(e)
-    cl = m.result()["cells"]
-    dd = cl["dist"]
-    assert dd["kind"] == "gauss"
-    rows = [r for r in dd["all"].values() if r["n"]]
-    assert sum(r["n"] for r in dd["all"].values()) <= cl["n_cells"] and rows
-    big = max(rows, key=lambda r: r["n"])
-    assert big["n"] > 500 and big["cov68"] == pytest.approx(0.683, abs=0.06) and big["width_median"] == pytest.approx(sig)
-    res = [r for r in cl["by_view"]["all"]["resolution"].values() if r["n"]]
-    assert all(r["hw68"] > 0 for r in res)                          # the charge numbers saw calib's y
-    m = Denoise(_ctx(run, len(ds), denoiser=base))
-    for e in _events(run, ds):
-        m.add(e)
-    assert "dist" not in m.result()["cells"]
 
 
 def test_identity_reads_the_digest_and_the_truth_cut(tmp_path):
@@ -594,7 +436,7 @@ def test_identity_reads_the_digest_and_the_truth_cut(tmp_path):
 
 def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
     from helix.eval.probe import fit_probe
-    from helix.eval.events import group_r2
+    from helix.eval.probe import group_r2
 
     def r(p, y, g):
         _, sse, sst = group_r2(p, y, g)
@@ -619,20 +461,6 @@ def test_fit_probe_is_seeded_and_selects_on_the_metric_it_reports():
     assert c.val_score == pytest.approx(0, abs=1e-6)
 
 
-def test_a_classifier_probe_balances_its_classes():
-    """A class at 2% of the rows that the inputs separate is still recalled: the loss is
-    weighted by inverse class frequency and selection is on the mean per-class recall."""
-    from helix.eval.probe import fit_probe
-    rng = np.random.default_rng(0)
-    n = 6000
-    e = np.repeat(np.arange(12), n // 12)
-    y = np.where(rng.random(n) < 0.02, 2, rng.integers(0, 2, n))
-    X = (rng.standard_normal((n, 16)) + 1.5 * np.eye(16)[y]).astype(np.float32)
-    p = fit_probe(torch.from_numpy(X), np.zeros((n, 0), np.float32), y, e, n_classes=3, seed=0, device="cpu")
-    got = p.predict(torch.from_numpy(X), np.zeros((n, 0), np.float32))
-    assert got.dtype == np.int64 and (got[y == 2] == 2).mean() > 0.6 and 0.6 < p.val_score <= 1
-
-
 def test_fit_probe_uses_extra_columns_in_any_units_beside_many_features():
     """The geometry columns are standardised with the features: in their own units beside
     hundreds of unit-variance channels they were ignored (the along-wire random arm scored 0.005
@@ -648,11 +476,8 @@ def test_fit_probe_uses_extra_columns_in_any_units_beside_many_features():
     assert np.corrcoef(p, s)[0, 1] > 0.9
 
 
-def test_the_probes_fit_on_a_budget_and_keep_no_features_of_a_scored_event(synth, monkeypatch):
+def test_the_probe_fits_on_a_budget_and_keeps_no_features_of_a_scored_event(synth, monkeypatch):
     import helix.eval.probe as P
-    from helix.eval.probe import Floor
-    from helix.eval.probe import Labels
-    from helix.eval.probe import UProbe
     rng = lambda: np.random.default_rng(3)                                             # noqa: E731
     assert np.array_equal(P.fit_rows(5, 4, rng()), np.arange(5))
     monkeypatch.setattr(P, "FIT_ROWS", 3000)         # 500 rows per training event: binds
@@ -660,38 +485,115 @@ def test_the_probes_fit_on_a_budget_and_keep_no_features_of_a_scored_event(synth
     assert len(k) == 428 and np.array_equal(k, np.unique(k)) and np.array_equal(k, P.fit_rows(1000, 7, rng()))
     d, ds = synth
     run = load_run(d, device="cpu")
-    ctx = _ctx(run, len(ds), n_boot=5)
-    ms = [Floor(ctx), UProbe(ctx), Labels(ctx)]
+    ctx = _pctx(run, len(ds), n_boot=5)
+    m = P.UProbe(ctx)
     for e in _events(run, ds):
-        for m in ms:
-            m.add(e)
-            assert (m.fit is None) == (e.index >= ctx.n_train)      # fitted at the first scored event
+        m.add(e)
+        assert (m.fit is None) == (e.index >= ctx.n_train)      # fitted at the first scored event
     assert P.gather(torch.zeros((5, 3)), np.zeros((0, 4), np.int64)).shape == (0, 12)   # an event without rows
-    held = list(ms[0].scored.s["trained"]) + list(ms[1].p["trained"]) + list(ms[2].p[("motif", "trained")])
+    held = list(m.p["trained"])
     assert held and all(isinstance(x, np.ndarray) and x.ndim == 1 for x in held)    # predictions, no features
-    for m in ms:
-        out = m.result()
-        assert 0 < out["n_fit_rows"] <= 3000
+    assert 0 < m.result()["n_fit_rows"] <= 3000
 
 
-def test_the_cli_writes_one_json(synth, tmp_path, monkeypatch):
+def _fake_corpus(ds, seen=None):
+    """``helix.eval._corpus`` on synthetic events: the dataset and what resolution would record."""
+    def corpus(run, override):
+        if seen is not None:
+            seen["override"] = override
+        return ds, dict(recorded="/nowhere", resolved=override or "/nowhere", check="corpus identity NOT "
+                        "RECORDED by this run (predates the stamp); reading basis_digest=... unchecked")
+    return corpus
+
+
+def test_the_cli_scores_a_fine_tuned_denoiser_run(synth, tmp_path, monkeypatch):
+    """``python -m helix.eval DENOISER_RUN``: the run's ``last`` weights, its FM run where recorded,
+    the corpus as resolved, one JSON and the two window scores beside it -- which compare pairs
+    within the run (presence against amplitude)."""
     import helix.eval as E
-    import helix.eval.events as EV
+    from helix.eval.__main__ import main
+    from test_denoise import _write_denoise_run
+    d, ds = synth
+    den = tmp_path / "den"
+    den.mkdir()
+    _write_denoise_run(str(den), d)
+    seen = {}
+    monkeypatch.setattr(E, "_corpus", _fake_corpus(ds, seen))
+    out = tmp_path / "e.json"
+    assert main([str(den), "--out", str(out), "--max-events", "3", "--boot", "5", "--corpus", "/here"]) == 0
+    res = json.load(open(out))
+    assert res["n_events"] == 3 and set(res["metrics"]) == {"denoise"} and seen["override"] == "/here"
+    assert res["run"]["weights"] == "last" and res["run"]["checkpoint"].endswith(os.path.join("last", "weights.pth"))
+    assert res["fm"] == dict(recorded=str(d), resolved=str(d), note="as recorded")
+    assert res["corpus"]["resolved"] == "/here" and "unchecked" in res["corpus"]["check"]
+    assert set(res["truth"]) == {"q_cut", "q_cut_source"} and "_windows" not in res["metrics"]["denoise"]
+    assert set(res["metrics"]["denoise"]) == {"presence", "amplitude", "cells"}
+    z = np.load(tmp_path / "e.windows.npz")
+    assert {f"meta/{k}" for k in W.WINDOW_META} | {"score/presence", "score/amplitude"} == set(z.files)
+    assert set(np.unique(z["meta/ev"]).tolist()) == {0, 1, 2}
+    pa = tmp_path / "pa.json"
+    assert main(["compare", "--a", str(tmp_path / "e.windows.npz"), "--arm", "presence", "--arm-b", "amplitude",
+                 "--boot", "5", "--out", str(pa)]) == 0
+    r = json.load(open(pa))
+    assert r["arm_b"] == "amplitude" and "floor_eff1pct_clear_0.1-0.2_mean" in r["a_minus_b"]
+
+
+def test_the_cli_runs_the_along_wire_probe_on_an_fm_run(synth, tmp_path, monkeypatch):
+    import helix.eval as E
     from helix.eval.__main__ import main
     d, ds = synth
-    monkeypatch.setattr(EV, "dataset", lambda run: ds)
-    out = tmp_path / "s.json"
-    assert main([str(d), "--metrics", "recon", "--out", str(out), "--max-events", "2"]) == 0
+    monkeypatch.setattr(E, "_corpus", _fake_corpus(ds))
+    out = tmp_path / "u.json"
+    assert main(["--uprobe", str(d), "--out", str(out), "--probe-seeds", "1", "--boot", "5"]) == 0
     res = json.load(open(out))
-    assert res["n_events"] == 2 and set(res["metrics"]) == {"recon"} and res["run"]["weights"] == "ema"
-    # what was evaluated: the weights each metric read, the shards' digest, the truth's cut
-    w = res["weights"]["recon"]
-    assert set(res["weights"]) == {"recon"} and (w["run"], w["weights"], w["step"]) == (str(d), "ema", 5)
-    assert w["checkpoint"].endswith("model_ema.pth") and res["probe_seeds"] == 2
-    assert set(res["corpus"]) == {"basis_digest"} and set(res["truth"]) == {"q_cut", "q_cut_source"}
-    assert "region" in res["metrics"]["recon"]
-    with pytest.raises(ValueError, match="unknown metric"):
-        E.evaluate(d, ["nope"])
+    assert set(res["metrics"]) == {"uprobe"} and res["run"]["weights"] == "ema" and res["probe_seeds"] == 1
+    assert res["n_events"] == len(ds) and res["metrics"]["uprobe"]["n_train_events"] == 6
+    assert "r2" in res["metrics"]["uprobe"]["trained"] and not (tmp_path / "u.windows.npz").exists()
+    with pytest.raises(SystemExit, match="--fm"):
+        main(["--uprobe", str(d), "--fm", str(d), "--out", str(out)])
+
+
+def test_resolve_exp_relocates_another_sites_run(tmp_path, monkeypatch):
+    """A denoiser trained at S3DF names its FM run by an S3DF path; here it is the same path under
+    this site's HELIX_EXP, or what ``--fm`` says. Neither: refused, naming the cure."""
+    from helix.eval import resolve_exp
+    rec = "/sdf/data/neutrino/omara/exp/helix/fm_cooldown/model/last"   # helix/sites/s3df.yaml's HELIX_EXP
+    if os.path.exists(rec):
+        pytest.skip("at S3DF: the recorded path exists")
+    monkeypatch.setenv("HELIX_EXP", str(tmp_path))
+    with pytest.raises(FileNotFoundError, match="--fm"):
+        resolve_exp(rec)
+    (tmp_path / "fm_cooldown" / "model" / "last").mkdir(parents=True)
+    path, note = resolve_exp(rec)
+    assert path == str(tmp_path / "fm_cooldown" / "model" / "last") and "s3df" in note
+    assert resolve_exp(str(tmp_path), override=str(tmp_path / "fm_cooldown")) == (str(tmp_path / "fm_cooldown"), "given")
+    assert resolve_exp(str(tmp_path))[1] == "as recorded"
+    with pytest.raises(FileNotFoundError, match="--fm"):
+        resolve_exp(rec, override=str(tmp_path / "nope"))
+
+
+def test_the_ft_eval_config_is_the_protocol_and_needs_four_ranks(monkeypatch):
+    """configs/pimm/ft_eval.py: 1,024 labelled events for 16 epochs at one event per rank is 4,096
+    steps only on 4 ranks, so any other world size is refused rather than run at another length."""
+    import importlib.util
+    if importlib.util.find_spec("pimm") is None:
+        pytest.skip("pimm not importable in this env")
+    from pimm.utils.config import Config
+    from helix.paths import SiteError
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "pimm", "ft_eval.py")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    try:
+        cfg = Config.fromfile(path)
+    except (SiteError, FileNotFoundError, SystemExit) as exc:
+        pytest.skip(f"config needs a root this site does not configure: {exc}")
+    t, m = cfg.data["train"], cfg.model
+    assert (t["n_events"], t["subset_seed"], cfg.epoch) == (1024, 0, 16) and cfg.batch_size == 4
+    assert m["type"] == "Coeff-Denoise" and m["cond_charge"] and m["dist"] == "point" and m["lin_amp_scale"] == 0.0
+    assert m["pretrained"] and not m["freeze_encoder"]                  # the frozen diagnostic is an override
+    for ws in ("2", "16"):
+        monkeypatch.setenv("WORLD_SIZE", ws)
+        with pytest.raises(Exception, match="WORLD_SIZE"):
+            Config.fromfile(path)
 
 
 # ---- the windows and the fine-grid join --------------------------------------------------
@@ -830,63 +732,76 @@ def test_a_perfect_prediction_scores_perfectly():
     effs = [v[0] for k, v in out.items() if k.startswith("floor_eff1pct_") and v[0] == v[0]]
     assert effs and all(v == 1.0 for v in effs)        # every isolated particle beats empty windows
     assert out["n_windows"]["bg_U"] > 0 and out["n_windows"]["bg_V"] == 0
-    assert out["near_fpr_at_far"][0] == 0.0 and out["n_windows"]["near_U"] > 0
-    aucs = [v[0] for k, v in out.items() if k.startswith("auc_") and not k.startswith("auc_near_vs_far")
-            and v[0] == v[0]]
-    assert aucs and all(v == 1.0 for v in aucs)
-    assert out["auc_near_vs_far"][0] == 0.5                              # no haze: near scores as far
-    assert np.isnan(out["floor_eff1pct_0.1-0.2_V"][0])                  # no V window: not a 0
+    assert out["near_fpr_at_far_U"][0] == 0.0 and out["n_windows"]["near_U"] > 0
+    assert np.isnan(out["floor_eff1pct_clear_0.1-0.2_V"][0])            # no V window: not a 0
+    assert np.isnan(out["floor_eff1pct_clear_0.1-0.2_mean"][0])         # nor is the view mean
+    assert not any(k.startswith("auc") or k.endswith("_ev") for k in out)
 
 
 def test_a_haze_around_tracks_is_free_on_the_far_background_and_priced_on_the_near():
     """A prediction that puts charge (above any particle's) on every cell within 8 cells of truth
-    detects every isolated particle against the far background, which keeps those surroundings
-    empty by construction -- and nothing against the near background, on which the far threshold
-    fires every time."""
-    rec, ck = _event(np.random.default_rng(0))
+    detects every clear particle against the far background, which keeps those surroundings
+    empty by construction -- and no crowded one against the near background, on which the far
+    threshold fires every time."""
+    rec, ck = _event(np.random.default_rng(0), n_part=120)
     tr = W.event_truth(rec, ck, np.random.default_rng(1))
     meta = [dict(m, ev=0) for m in tr["meta"]]
     q = _charge(rec, tr["wkey"])
     hazy = np.maximum(q, _haze(rec, tr["wkey"], 1.5 * q.max()))
     good, bad = (W.score_windows(s, meta, n_boot=5) for s in (q, hazy))
-    E = [nm for nm in W.ENERGY_NAMES if good[f"floor_eff1pct_{nm}"][0] == good[f"floor_eff1pct_{nm}"][0]]
-    assert E
-    for nm in E:
-        assert bad[f"floor_eff1pct_{nm}"][0] == 1.0 == good[f"floor_eff1pct_{nm}"][0]           # far: blind to it
-        assert bad[f"floor_eff1pct_{nm}_U"][0] == 1.0
-        assert bad[f"floor_eff1pct_near_{nm}"][0] == 0.0 and good[f"floor_eff1pct_near_{nm}"][0] == 1.0
-        assert bad[f"floor_eff1pct_near_{nm}_U"][0] == 0.0
-    assert bad["near_fpr_at_far"][0] == 1.0 == bad["near_fpr_at_far_U"][0] and good["near_fpr_at_far"][0] == 0.0
+    ok = lambda k: good[k][0] == good[k][0]                                       # noqa: E731
+    clear = [nm for nm in W.ENERGY_NAMES if ok(f"floor_eff1pct_clear_{nm}")]
+    crowded = [nm for nm in W.ENERGY_NAMES if ok(f"floor_eff1pct_crowded_near_{nm}")]
+    assert clear and crowded
+    for nm in clear:
+        assert bad[f"floor_eff1pct_clear_{nm}"][0] == 1.0 == good[f"floor_eff1pct_clear_{nm}"][0]   # far: blind
+        assert bad[f"floor_eff1pct_clear_{nm}_U"][0] == 1.0
+    for nm in crowded:
+        assert bad[f"floor_eff1pct_crowded_near_{nm}"][0] == 0.0 and good[f"floor_eff1pct_crowded_near_{nm}"][0] == 1.0
+        assert bad[f"floor_eff1pct_crowded_near_{nm}_U"][0] == 0.0
+    assert bad["near_fpr_at_far_U"][0] == 1.0 and good["near_fpr_at_far_U"][0] == 0.0
 
 
 def test_the_matched_floor_compares_iso_and_background_at_the_same_distance_from_charge():
     """A predictor that hazes charge near activity: far windows score 0, near windows 3. Iso
     windows with clear padding score 5 and are all found at the far threshold; crowded iso
     windows score like the near windows (3, the haze alone), so the matched near threshold finds
-    none of them while the far threshold finds them all."""
+    none of them. Mixed iso windows are in no number."""
     meta, score = [], []
     for e in range(10):
         meta += [dict(kind="bg", g=0, E=np.nan, ev=e)] * 20 + [dict(kind="near", g=0, E=np.nan, ev=e)] * 20
         score += [0.0] * 20 + [3.0] * 20
         meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="clear")] * 3
         meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="crowded")] * 3
-        score += [5.0] * 3 + [3.0] * 3
+        meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="mixed")] * 3
+        score += [5.0] * 3 + [3.0] * 3 + [9.0] * 3
     stat, _, counts = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)
     got = stat(np.ones(10, np.int64))
-    assert got["floor_eff1pct_clear_0.1-0.2"] == 1.0
-    assert got["floor_eff1pct_crowded_0.1-0.2"] == 1.0
-    assert got["floor_eff1pct_crowded_near_0.1-0.2"] == 0.0
-    assert counts["iso_clear_U"] == 30 == counts["iso_crowded_U"] and counts["iso_U"] == 60
-    assert counts["iso_clear_0.1-0.2"] == 30
-    assert got["auc_clear_0.1-0.2"] == 1.0                   # 5 above every far window (0)
-    assert got["auc_crowded_near_0.1-0.2"] == 0.5            # 3 ties every near window (3)
-    assert got["floor_eff1pct_clear_0.1-0.2_U"] == 1.0
-    assert np.isnan(got["floor_eff1pct_mixed_0.1-0.2"]) and counts["iso_mixed_U"] == 0 and counts["isox"] == 0
+    assert got["floor_eff1pct_clear_0.1-0.2"] == 1.0 == got["floor_eff1pct_clear_0.1-0.2_U"]
+    assert got["floor_eff1pct_crowded_near_0.1-0.2"] == 0.0 == got["floor_eff1pct_crowded_near_0.1-0.2_U"]
+    assert np.isnan(got["floor_eff1pct_clear_0.1-0.2_mean"])           # V and Y have no windows
+    assert counts["clear_0.1-0.2_U"] == 30 == counts["crowded_0.1-0.2_U"] and counts["iso_U"] == 90
+    assert got["near_fpr_at_far_U"] == 1.0 and np.isnan(got["near_fpr_at_far_V"])
+    assert set(got) == ({f"floor_eff1pct_{k}_{nm}{v}" for k in ("clear", "crowded_near") for nm in W.ENERGY_NAMES
+                         for v in ("", "_U", "_V", "_Y", "_mean")} | {f"near_fpr_at_far_{v}" for v in W.VIEWS})
 
 
-def test_the_extra_clear_windows_count_in_clear_and_nowhere_else():
-    """isox windows (extra clear draws) score in the clear efficiency only: the iso floor is the
-    iso windows' alone."""
+def test_the_view_mean_is_the_mean_of_the_three_views():
+    """Clear windows on all three views, found on U only: per view 1, 0, 0; their mean 1/3; the
+    pooled value weighs the views by their window counts (U has 3 of the 5 per event)."""
+    meta, score = [], []
+    for e in range(10):
+        for g, n_iso, s in ((0, 3, 5.0), (1, 1, 0.0), (2, 1, 0.0)):
+            meta += [dict(kind="bg", g=g, E=np.nan, ev=e)] * 20 + [dict(kind="iso", g=g, E=0.05, ev=e, ctx="clear")] * n_iso
+            score += [1.0] * 20 + [s] * n_iso
+    got = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)[0](np.ones(10, np.int64))
+    k = "floor_eff1pct_clear_0-0.1"
+    assert [got[f"{k}_{v}"] for v in W.VIEWS] == [1.0, 0.0, 0.0]
+    assert got[f"{k}_mean"] == pytest.approx(1 / 3) and got[k] == pytest.approx(3 / 5)
+
+
+def test_the_extra_clear_windows_count_in_clear():
+    """isox windows (extra clear draws) score in the clear efficiency; crowded ones are iso alone."""
     meta, score = [], []
     for e in range(10):
         meta += [dict(kind="bg", g=0, E=np.nan, ev=e)] * 20
@@ -895,90 +810,8 @@ def test_the_extra_clear_windows_count_in_clear_and_nowhere_else():
         score += [0.0, 5.0]
     stat, _, counts = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)
     got = stat(np.ones(10, np.int64))
-    assert got["floor_eff1pct_0.1-0.2"] == 0.0 and got["floor_eff1pct_clear_0.1-0.2"] == 1.0
-    assert counts["isox"] == 10 and counts["iso_clear_U"] == 0 and counts["iso_U"] == 10
-
-
-def test_the_gate_coverage_caps_the_clear_efficiency():
-    """A clear window with no kept coefficient (``kept`` False) scores 0 and cannot be found:
-    kept_clear is the cap, and the efficiency among kept windows is what the scores do with them."""
-    meta, score = [], []
-    for e in range(10):
-        meta += [dict(kind="bg", g=0, E=np.nan, ev=e, kept=True)] * 20
-        score += [0.0] * 20
-        meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="clear", kept=True)] * 2
-        meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="clear", kept=False)] * 2
-        score += [5.0, 5.0, 0.0, 0.0]
-    stat, _, _ = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)
-    got = stat(np.ones(10, np.int64))
-    assert got["kept_clear_0.1-0.2"] == 0.5 and got["floor_eff1pct_clear_0.1-0.2"] == 0.5
-    assert got["floor_eff1pct_clear_kept_0.1-0.2"] == 1.0 and got["kept_clear_0.1-0.2_U"] == 0.5
-    assert got["tok_clear_0.1-0.2"] == 1.0 and got["floor_eff1pct_clear_tokonly_0.1-0.2"] == 0.0   # tok defaults True
-
-
-def test_the_haze_is_split_by_whether_a_near_window_shares_a_token_with_charge():
-    """Near windows that share a covering token with charge score like it (3), the others like the
-    far background (0): the haze AUC is 1 in the first and 1/2 in the second."""
-    meta, score = [], []
-    for e in range(10):
-        meta += [dict(kind="bg", g=0, E=np.nan, ev=e)] * 20
-        score += [0.0] * 20
-        meta += [dict(kind="near", g=0, E=np.nan, ev=e, shtok=True)] * 10
-        meta += [dict(kind="near", g=0, E=np.nan, ev=e, shtok=False)] * 10
-        score += [3.0] * 10 + [0.0] * 10
-        meta += [dict(kind="iso", g=0, E=0.15, ev=e, ctx="clear")]
-        score += [5.0]
-    stat, _, counts = W.window_stat(np.repeat(np.asarray(score), N_CELL), meta)
-    got = stat(np.ones(10, np.int64))
-    assert got["auc_near_vs_far_shtok"] == 1.0 and got["auc_near_vs_far_noshtok"] == 0.5
-    assert got["auc_near_vs_far"] == 0.75 and got["near_fpr_at_far_shtok"] == 1.0
-    assert got["near_fpr_at_far_noshtok"] == 0.0 and counts["near_shtok"] == 100
-
-
-def test_the_auc_is_the_weighted_pair_ordering_within_a_view():
-    rng = np.random.default_rng(0)
-    meta, score = [], []
-    for g, shift in ((0, 0.5), (2, 1.0)):
-        for _ in range(80):
-            meta.append(dict(kind="bg", g=g, E=np.nan, ev=len(meta) % 10))
-            score.append(rng.random())
-        for _ in range(40):
-            meta.append(dict(kind="iso", g=g, E=0.15, ev=len(meta) % 10))
-            score.append(shift * rng.random() + 0.3 * shift)
-    score = np.round(score, 2)                                          # ties count one half
-    stat, n, _ = W.window_stat(np.repeat(score, N_CELL), meta)
-    view = np.array([m["g"] % 3 for m in meta]); kind = np.array([m["kind"] for m in meta])
-    ev = np.array([m["ev"] for m in meta])
-
-    def brute(m, views):
-        num = den = 0.0
-        for v in views:
-            i, b = np.nonzero((kind == "iso") & (view == v))[0], np.nonzero((kind == "bg") & (view == v))[0]
-            w = np.outer(m[ev[i]], m[ev[b]])
-            num += (w * ((score[i][:, None] > score[b][None]) + 0.5 * (score[i][:, None] == score[b][None]))).sum()
-            den += w.sum()
-        return num / den
-    m = rng.integers(0, 3, n)                                           # a resample's weights
-    got = stat(m)
-    assert got["auc_0.1-0.2_U"] == pytest.approx(brute(m, [0])) and got["auc_0.1-0.2_Y"] == pytest.approx(brute(m, [2]))
-    assert got["auc_0.1-0.2"] == pytest.approx(brute(m, [0, 2]))      # pooled over views: pairs within a view
-
-
-def test_the_ev_efficiency_weighs_every_event_equally():
-    """One event with 50 detected windows and four with one missed each: pooled 50/54, per event
-    1/5."""
-    meta, score = [], []
-    for e in range(5):
-        meta += [dict(kind="bg", g=0, E=np.nan, ev=e)] * 20
-        score += [0.0] * 20
-    meta += [dict(kind="iso", g=0, E=0.15, ev=0)] * 50
-    score += [1.0] * 50
-    for e in range(1, 5):
-        meta.append(dict(kind="iso", g=0, E=0.15, ev=e))
-        score.append(0.0)
-    out = W.score_windows(np.repeat(score, N_CELL), meta, n_boot=5)
-    assert out["floor_eff1pct_0.1-0.2"][0] == pytest.approx(50 / 54, abs=1e-4)
-    assert out["floor_eff1pct_0.1-0.2_ev"][0] == pytest.approx(0.2, abs=1e-4)
+    assert got["floor_eff1pct_clear_0.1-0.2"] == 1.0 and np.isnan(got["floor_eff1pct_crowded_near_0.1-0.2"])
+    assert counts["isox_U"] == 10 and counts["clear_0.1-0.2_U"] == 10 and counts["iso_U"] == 10
 
 
 def test_the_threshold_is_each_views_own():
@@ -991,23 +824,24 @@ def test_the_threshold_is_each_views_own():
             meta.append(dict(kind="bg", g=g, E=np.nan, ev=int(rng.integers(0, 30))))
             score.append(scale * rng.random())
         for _ in range(50):
-            meta.append(dict(kind="iso", g=g, E=0.15, ev=int(rng.integers(0, 30))))
+            meta.append(dict(kind="iso", g=g, E=0.15, ev=int(rng.integers(0, 30)), ctx="clear"))
             score.append(scale * (1.5 + rng.random()))
     out = W.score_windows(np.repeat(score, N_CELL), meta, n_boot=5)
-    assert out["floor_eff1pct_0.1-0.2"][0] == 1.0
+    assert out["floor_eff1pct_clear_0.1-0.2"][0] == 1.0
     pooled = np.quantile([s for s, m in zip(score, meta) if m["kind"] == "bg"], 0.99)
     assert np.mean([s > pooled for s, m in zip(score, meta) if m["kind"] == "iso"]) < 0.7   # what one pooled cut gives
 
 
 def test_group_r2_ignores_offsets_and_charges_scale():
+    from helix.eval.probe import group_r2
     rng = np.random.default_rng(0)
     grp = np.repeat(np.arange(10), 50)
     y = rng.standard_normal(500) + 10 * grp                 # between-group variance dominates
-    r2 = lambda p: (lambda k, sse, sst: 1 - sse.sum() / sst.sum())(*W.group_r2(p, y, grp))   # noqa: E731
+    r2 = lambda p: (lambda k, sse, sst: 1 - sse.sum() / sst.sum())(*group_r2(p, y, grp))   # noqa: E731
     assert r2(y + 7 * rng.standard_normal(10)[grp]) == pytest.approx(1.0)      # a per-group offset is free
     assert r2(np.zeros(500)) == pytest.approx(0.0) and r2(10 * grp) == pytest.approx(0.0)
     assert r2(3 * y) < 0                                 # perfectly correlated, wrong scale
-    keys, sse, sst = W.group_r2(y, y, grp)
+    keys, sse, sst = group_r2(y, y, grp)
     assert keys.tolist() == list(range(10)) and (sse == 0).all() and (sst > 0).all()
 
 
@@ -1110,79 +944,102 @@ def test_cell_neighbors_centre_is_the_covering_token_and_shifts_by_one_patch():
         assert np.array_equal(wb, wb0 + dw) and np.array_equal(tb, tb0 + dt)
 
 
+def _dump(path, meta, **scores):
+    """A windows dump as the CLI writes one: ``meta/<key>`` per window, ``score/<name>``."""
+    arr = lambda k: np.array([m[k] for m in meta])                              # noqa: E731
+    np.savez(path, **{f"meta/{k}": arr(k) for k in meta[0]}, **{f"score/{k}": v for k, v in scores.items()})
+
+
+def _clear_meta(n_ev=20, views=(0,), n_bg=30, n_iso=5):
+    meta = []
+    for e in range(n_ev):
+        for g in views:
+            meta += [dict(ev=e, kind="bg", g=g, E=np.nan, ctx="", w0=0, t0=0)] * n_bg
+            meta += [dict(ev=e, kind="iso", g=g, E=0.15, ctx="clear", w0=32, t0=0)] * n_iso
+    return meta
+
+
 def test_compare_is_paired_over_identical_windows(tmp_path):
     """Two runs scored on the same windows: A - B over shared resamples, zero for identical
-    scores and exact for a known difference; different windows are refused."""
+    scores and exact for a known difference; different windows -- events, origins, a key only
+    one dump has -- are refused."""
     from helix.eval.__main__ import main as cli
     rng = np.random.default_rng(0)
-    meta = []
-    for e in range(20):
-        meta += [dict(ev=e, kind="bg", g=0, E=np.nan, ctx="")] * 30
-        meta += [dict(ev=e, kind="iso", g=0, E=0.15, ctx="clear")] * 5
-    arr = lambda k: np.array([m[k] for m in meta])                              # noqa: E731
-    base = {f"floor/meta/{k}": arr(k) for k in ("ev", "kind", "g", "E", "ctx")}
+    meta = _clear_meta()
     s_bg = rng.random(len(meta))
-    is_iso = arr("kind") == "iso"
+    is_iso = np.array([m["kind"] == "iso" for m in meta])
     a = np.where(is_iso, 2.0, s_bg)                      # every iso window above every bg: found
     b = np.where(is_iso, np.where(np.arange(len(meta)) % 2 == 0, 2.0, 0.0), s_bg)   # half of them
-    np.savez(tmp_path / "a.npz", **base, **{"floor/score/trained": a})
-    np.savez(tmp_path / "b.npz", **base, **{"floor/score/trained": b})
-    cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "a.npz"), "--out", str(tmp_path / "aa.json")])
-    import json
-    same = json.load(open(tmp_path / "aa.json"))["a_minus_b"]
-    assert same["floor_eff1pct_0.1-0.2"] == [0.0, 0.0, 0.0]
-    cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "b.npz"), "--out", str(tmp_path / "ab.json")])
+    _dump(tmp_path / "a.npz", meta, presence=a)
+    _dump(tmp_path / "b.npz", meta, presence=b)
+    cli(["compare", "--a", str(tmp_path / "a.npz"), "--b", str(tmp_path / "a.npz"), "--out", str(tmp_path / "aa.json")])
+    same = json.load(open(tmp_path / "aa.json"))
+    assert same["a_minus_b"]["floor_eff1pct_clear_0.1-0.2"] == [0.0, 0.0, 0.0] and same["n_pairs"] == 1
+    cli(["compare", "--a", str(tmp_path / "a.npz"), "--b", str(tmp_path / "b.npz"), "--out", str(tmp_path / "ab.json")])
     d = json.load(open(tmp_path / "ab.json"))["a_minus_b"]["floor_eff1pct_clear_0.1-0.2"]
     assert d[0] == pytest.approx(1.0 - (b[is_iso] > 1).mean()) and d[1] <= d[0] <= d[2]
-    # the window flags travel: a shared-token flag in the dumps reaches the haze keys
-    sh = dict(base, **{"floor/meta/shtok": np.zeros(len(meta), bool), "floor/meta/kept": np.ones(len(meta), bool),
-                       "floor/meta/tok": np.ones(len(meta), bool)})
-    np.savez(tmp_path / "s.npz", **sh, **{"floor/score/trained": a})
-    cli(["compare", str(tmp_path / "s.npz"), str(tmp_path / "s.npz"), "--out", str(tmp_path / "ss.json")])
-    assert "auc_near_vs_far_noshtok" in json.load(open(tmp_path / "ss.json"))["a_minus_b"]
-    other = dict(base); other["floor/meta/ev"] = base["floor/meta/ev"][::-1].copy()
-    np.savez(tmp_path / "c.npz", **other, **{"floor/score/trained": a})
-    with pytest.raises(SystemExit, match="windows differ"):
-        cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "c.npz"), "--out", str(tmp_path / "ac.json")])
-    # origins: a far window's kind, plane and NaN energy do not place it
-    z = np.zeros(len(meta), np.int64)
-    w = dict(base, **{"floor/meta/w0": z, "floor/meta/t0": z})
-    w2 = dict(w, **{"floor/meta/w0": np.where(is_iso, 0, 32)})
-    np.savez(tmp_path / "w.npz", **w, **{"floor/score/trained": a})
-    np.savez(tmp_path / "w2.npz", **w2, **{"floor/score/trained": a})
-    with pytest.raises(SystemExit, match="windows differ"):
-        cli(["compare", str(tmp_path / "w.npz"), str(tmp_path / "w2.npz"), "--out", str(tmp_path / "ww.json")])
-    with pytest.raises(SystemExit, match="only one run"):
-        cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "w.npz"), "--out", str(tmp_path / "aw.json")])
-    # seeds: the difference is the mean over the probe seeds both dumps carry
-    np.savez(tmp_path / "a2.npz", **base, **{"floor/score/trained": a, "floor/score/trained.s1": a})
-    np.savez(tmp_path / "b2.npz", **base, **{"floor/score/trained": b, "floor/score/trained.s1": a})
-    cli(["compare", str(tmp_path / "a2.npz"), str(tmp_path / "b2.npz"), "--out", str(tmp_path / "ab2.json")])
-    r = json.load(open(tmp_path / "ab2.json"))
-    assert r["seeds"] == [0, 1]
-    assert r["a_minus_b"]["floor_eff1pct_clear_0.1-0.2"][0] == pytest.approx(d[0] / 2, abs=1e-3)
-    assert r["seed_half_range"]["floor_eff1pct_clear_0.1-0.2"] == pytest.approx(d[0] / 2, abs=1e-3)
+    other = [dict(m, ev=19 - m["ev"]) for m in meta]
+    _dump(tmp_path / "c.npz", other, presence=a)
+    with pytest.raises(SystemExit, match="differ"):
+        cli(["compare", "--a", str(tmp_path / "a.npz"), "--b", str(tmp_path / "c.npz"), "--out", str(tmp_path / "x.json")])
+    moved = [dict(m, w0=64) if m["kind"] == "bg" else m for m in meta]        # far windows elsewhere
+    _dump(tmp_path / "w.npz", moved, presence=a)
+    with pytest.raises(SystemExit, match=r"differ \(w0\)"):
+        cli(["compare", "--a", str(tmp_path / "a.npz"), "--b", str(tmp_path / "w.npz"), "--out", str(tmp_path / "x.json")])
+    _dump(tmp_path / "f.npz", [dict(m, flag=True) for m in meta], presence=a)
+    with pytest.raises(SystemExit, match="only some dumps record flag"):
+        cli(["compare", "--a", str(tmp_path / "a.npz"), "--b", str(tmp_path / "f.npz"), "--out", str(tmp_path / "x.json")])
+    with pytest.raises(SystemExit, match="no score"):
+        cli(["compare", "--a", str(tmp_path / "a.npz"), "--arm-b", "amplitude", "--out", str(tmp_path / "x.json")])
+
+
+def test_compare_averages_the_seed_files_of_each_arm(tmp_path):
+    """Two seeds a side: the pairs' differences are averaged and their spread is the seed
+    half-range; one file on a side pairs with every file on the other; a seed scored on other
+    windows is refused."""
+    from helix.eval.__main__ import main as cli
+    rng = np.random.default_rng(2)
+    meta = _clear_meta()
+    s_bg = rng.random(len(meta))
+    is_iso = np.array([m["kind"] == "iso" for m in meta])
+    half = np.arange(len(meta)) % 2 == 0
+    found = np.where(is_iso, 2.0, s_bg)                  # every clear window found
+    some = np.where(is_iso, np.where(half, 2.0, 0.0), s_bg)
+    _dump(tmp_path / "a0.npz", meta, presence=found)
+    _dump(tmp_path / "a1.npz", meta, presence=found)
+    _dump(tmp_path / "b0.npz", meta, presence=found)
+    _dump(tmp_path / "b1.npz", meta, presence=some)
+    cli(["compare", "--a", str(tmp_path / "a0.npz"), str(tmp_path / "a1.npz"),
+         "--b", str(tmp_path / "b0.npz"), str(tmp_path / "b1.npz"), "--out", str(tmp_path / "s.json")])
+    r = json.load(open(tmp_path / "s.json"))
+    one = 1.0 - (some[is_iso] > 1).mean()                # seed 1's difference; seed 0's is 0
+    k = "floor_eff1pct_clear_0.1-0.2"
+    assert r["n_pairs"] == 2 and r["a_minus_b"][k][0] == pytest.approx(one / 2, abs=1e-3)
+    assert r["seed_half_range"][k] == pytest.approx(one / 2, abs=1e-3)
+    cli(["compare", "--a", str(tmp_path / "a0.npz"), "--b", str(tmp_path / "b0.npz"), str(tmp_path / "b1.npz"),
+         "--out", str(tmp_path / "s1.json")])
+    assert json.load(open(tmp_path / "s1.json"))["a_minus_b"][k][0] == pytest.approx(one / 2, abs=1e-3)
+    _dump(tmp_path / "b2.npz", [dict(m, ev=(m["ev"] + 1) % 20) for m in meta], presence=found)
+    with pytest.raises(SystemExit, match="differ"):
+        cli(["compare", "--a", str(tmp_path / "a0.npz"), str(tmp_path / "a1.npz"),
+             "--b", str(tmp_path / "b0.npz"), str(tmp_path / "b2.npz"), "--out", str(tmp_path / "x.json")])
+    with pytest.raises(SystemExit, match="pair seed by seed"):
+        cli(["compare", "--a", str(tmp_path / "a0.npz"), str(tmp_path / "a1.npz"), "--b", str(tmp_path / "b0.npz"),
+             str(tmp_path / "b1.npz"), str(tmp_path / "b0.npz"), "--out", str(tmp_path / "x.json")])
 
 
 def test_compare_shows_a_difference_carried_by_some_views(tmp_path):
     """B finds every clear window on U and none on V or Y: the pooled difference is positive, its
     views block shows U at 0 and V, Y above it, not of one sign."""
     from helix.eval.__main__ import main as cli
-    import json
     rng = np.random.default_rng(1)
-    meta = []
-    for e in range(30):
-        for g in range(3):
-            meta += [dict(ev=e, kind="bg", g=g, E=np.nan, ctx="")] * 20
-            meta += [dict(ev=e, kind="iso", g=g, E=0.15, ctx="clear")] * 4
-    arr = lambda k: np.array([m[k] for m in meta])                              # noqa: E731
-    base = {f"floor/meta/{k}": arr(k) for k in ("ev", "kind", "g", "E", "ctx")}
-    s_bg, iso = rng.random(len(meta)), arr("kind") == "iso"
-    a = np.where(iso, 2.0, s_bg)
-    b = np.where(iso & (arr("g") == 0), 2.0, np.where(iso, 0.0, s_bg))
-    np.savez(tmp_path / "a.npz", **base, **{"floor/score/trained": a})
-    np.savez(tmp_path / "b.npz", **base, **{"floor/score/trained": b})
-    cli(["compare", str(tmp_path / "a.npz"), str(tmp_path / "b.npz"), "--out", str(tmp_path / "ab.json")])
+    meta = _clear_meta(n_ev=30, views=(0, 1, 2), n_bg=20, n_iso=4)
+    s_bg = rng.random(len(meta))
+    iso = np.array([m["kind"] == "iso" for m in meta])
+    g = np.array([m["g"] for m in meta])
+    _dump(tmp_path / "a.npz", meta, presence=np.where(iso, 2.0, s_bg))
+    _dump(tmp_path / "b.npz", meta, presence=np.where(iso & (g == 0), 2.0, np.where(iso, 0.0, s_bg)))
+    cli(["compare", "--a", str(tmp_path / "a.npz"), "--b", str(tmp_path / "b.npz"), "--out", str(tmp_path / "ab.json")])
     v = json.load(open(tmp_path / "ab.json"))["views"]["floor_eff1pct_clear_0.1-0.2"]
     assert v["U"] == 0 and v["V"] > 0.9 and v["Y"] > 0.9 and not v["same_sign"]
     assert v["mean"] == pytest.approx((v["U"] + v["V"] + v["Y"]) / 3, abs=1e-3)
@@ -1192,34 +1049,16 @@ def test_the_cli_writes_the_window_scores_beside_the_json(tmp_path, monkeypatch)
     """A metric's ``_windows`` arrays leave the JSON for ``<out>.windows.npz``."""
     import helix.eval as E
     from helix.eval.__main__ import main
-    fake = {"metrics": {"floor": {"x": 1, "_windows": {"meta/ev": np.arange(3), "score/trained": np.ones(3)}}}}
+    fake = {"metrics": {"denoise": {"x": 1, "_windows": {"meta/ev": np.arange(3), "score/presence": np.ones(3)}}}}
     monkeypatch.setattr(E, "evaluate", lambda *a, **k: fake)
     out = tmp_path / "s.json"
-    assert main(["run", "--metrics", "floor", "--out", str(out)]) == 0
-    assert "_windows" not in json.load(open(out))["metrics"]["floor"]
+    assert main(["run", "--out", str(out)]) == 0
+    assert "_windows" not in json.load(open(out))["metrics"]["denoise"]
     z = np.load(tmp_path / "s.windows.npz")
-    assert set(z.files) == {"floor/meta/ev", "floor/score/trained"}
+    assert set(z.files) == {"meta/ev", "score/presence"}
 
 
 def test_cell_charge_reads_the_truth_and_zeros_the_rest():
     cells = dict(key=np.array([5, 2, 9], np.int64), q=np.array([50.0, 20.0, 90.0]))
     assert W.cell_charge(cells, [2, 3, 9, 5]).tolist() == [20.0, 0.0, 90.0, 50.0]
     assert W.cell_charge(dict(key=np.zeros(0, np.int64), q=np.zeros(0)), [1]).tolist() == [0.0]
-
-
-def test_presence_scores_do_not_saturate():
-    """Two cells a probe calls 'present' with logits 50 and 60 apart: as probabilities both are
-    exactly 1.0 in float32 (a 1%-FPR threshold could not separate them); as log-odds they stay
-    ordered."""
-    import torch
-    from helix.eval.probe import Probe
-
-    class Net(torch.nn.Module):
-        def forward(self, x):
-            return torch.stack([torch.zeros(len(x)), x[:, 0]], 1)
-
-    p = Probe(Net(), torch.zeros(2), torch.ones(2), "cpu", n_classes=2)
-    X = torch.tensor([[50.0], [60.0]])
-    s = p.logodds(X, np.zeros((2, 1), np.float32))
-    assert torch.tensor([[0.0, 50.0], [0.0, 60.0]]).softmax(1)[:, 1].eq(1.0).all()
-    assert s[1] > s[0] and s[0] == pytest.approx(50.0)

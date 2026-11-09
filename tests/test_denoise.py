@@ -9,8 +9,9 @@ pretrained) weights; ``freeze_encoder`` leaves only the head trainable; the para
 exactly the trainable parameters with the head at its own LR; ``cond_charge`` regresses charged
 cells only; a denoiser run reads back with its FM run's tokenizer. The charge heads (``dist``):
 the gauss likelihood and the cat targets, presence, point estimates and loss are what their
-docstrings say; every head trains through the model and reads back with its calibration path; a
-pretrained FM loads into an encoder with the linear-amplitude channel.
+docstrings say; every head trains through the model and reads back through load_denoiser
+(``model/last`` by default, presence as log-odds); a pretrained FM loads into an encoder with
+the linear-amplitude channel.
 """
 import json
 import os
@@ -363,8 +364,9 @@ def test_every_head_trains_through_coeff_denoise(fm_run, sample, dist, cond):
 # ------------------------------------------------------------------------------- reading it back
 def _write_denoise_run(d, fm_dir, **model):
     """A denoiser run as pimm writes one: its config names the FM run and a tokenizer by
-    reference; model/model_best.pth holds its weights. ``model``: further model-section keys."""
-    os.makedirs(os.path.join(d, "model"), exist_ok=True)
+    reference; model/model_best.pth and model/last/weights.pth hold its weights. ``model``:
+    further model-section keys."""
+    os.makedirs(os.path.join(d, "model", "last"), exist_ok=True)
     cfg = {"model": {"type": "Coeff-Denoise", "fm": str(fm_dir), "pretrained": True, "freeze_encoder": False,
                      "cond_charge": False, "lr_head": 1e-2, "compile_blocks": True, **model},
            "data": {"train": {"type": "CoeffTPCDataset", "data_root": "/nowhere", "split": ["run_x"],
@@ -374,13 +376,22 @@ def _write_denoise_run(d, fm_dir, **model):
     json.dump(cfg, open(os.path.join(d, "resolved_config.json"), "w"))
     torch.manual_seed(5)
     m = build_denoise(str(fm_dir), **{"cond_charge": False, **model}, compile_blocks=False)
-    torch.save({"state_dict": {"module." + k: v for k, v in m.state_dict().items()}},
-               os.path.join(d, "model", "model_best.pth"))
+    sd = {"state_dict": {"module." + k: v for k, v in m.state_dict().items()}}
+    torch.save(sd, os.path.join(d, "model", "model_best.pth"))
+    torch.save(sd, os.path.join(d, "model", "last", "weights.pth"))
     return m
 
 
+def _model_logits(model, ev, keys, ok):
+    """The presence logits of ``model`` on the covered ``keys``, straight from the model."""
+    idx, aux = C.cell_inputs(keys[ok], ev.cell_key, ev.band_lengths, CFG)
+    nbr = C.cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, CFG)
+    with torch.no_grad():
+        return model.predict(ev.batch, *(torch.as_tensor(a) for a in (idx, aux, nbr)))[1].numpy()
+
+
 def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tmp_path):
-    from helix.eval.denoise import load_denoiser
+    from helix.eval.denoise import UNCOVERED_LOGIT, load_denoiser
     from helix.eval.events import events
     from helix.model.checkpoint import load_run
 
@@ -391,20 +402,48 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
     with pytest.raises(FileNotFoundError, match="model_ema"):
         load_run(tmp_path, device="cpu")                           # a denoiser has no EMA
     predict, cfg = load_denoiser(str(tmp_path), "cpu")
-    assert cfg == CFG
+    assert cfg == CFG and predict.dist == "point" and predict.run.tokenizer == CFG
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
     y, pr = predict(ev, keys)
     ok = (C.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
     assert y.shape == pr.shape == (len(keys),) and ok.any()
-    assert ((pr >= 0) & (pr <= 1)).all() and (y[~ok] == 0).all() and (pr[~ok] == 0).all()
+    assert (y[~ok] == 0).all() and (pr[~ok] == UNCOVERED_LOGIT).all()
+    np.testing.assert_allclose(pr[ok], _model_logits(m, ev, keys, ok), rtol=1e-5, atol=1e-5)   # log-odds, as is
     with pytest.raises(ValueError, match="not a denoiser"):
         load_denoiser(os.path.join(d, "model", "iter_3.pth"), "cpu")
-    assert predict.dist == "point" and not hasattr(predict, "calib")
+
+
+def test_load_denoiser_reads_last_and_scores_presence_as_a_logit(fm_run, sample, tmp_path):
+    """The default weight set is ``model/last`` (the end of the fixed budget), ``best`` on request.
+    A head confident everywhere (presence logit ~40) is exactly 1.0 as a float32 probability on
+    every cell -- all tied at the top, so a 1% threshold cannot separate them -- and still ordered
+    as log-odds, which is what the window score is."""
+    from helix.eval.denoise import load_denoiser
+    from helix.eval.events import events
+
+    d, _ = fm_run
+    best = _write_denoise_run(str(tmp_path), d)
+    torch.manual_seed(9)
+    last = build_denoise(str(d), cond_charge=False, compile_blocks=False)
+    with torch.no_grad():
+        last.head.out.bias[1] += 40.0
+    torch.save({"state_dict": last.state_dict()}, os.path.join(tmp_path, "model", "last", "weights.pth"))
+    predict, _ = load_denoiser(str(tmp_path), "cpu")
+    assert predict.provenance["weights"] == "last" and _same(predict.run.model, last)
+    pb, _ = load_denoiser(str(tmp_path), "cpu", weights="best")
+    assert pb.provenance["weights"] == "best" and _same(pb.run.model, best)
+    ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
+    keys = sample["cells"]["key"]
+    ok = (C.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    top = predict(ev, keys)[1][ok]
+    p = torch.sigmoid(torch.from_numpy(top)).numpy()
+    assert (p == 1.0).all() and top.min() > 20 and not (p > np.quantile(p, 0.99)).any()   # tied: nothing above
+    assert len(np.unique(top)) > 1 and (top > np.quantile(top, 0.99)).any()             # log-odds: still ordered
 
 
 @pytest.mark.parametrize("dist,lin", [("gauss", 0.0), ("cat", 30.0)])
-def test_a_distributional_run_reads_back_with_its_calibration_path(fm_run, sample, tmp_path, dist, lin):
+def test_a_distributional_run_reads_back_and_predicts(fm_run, sample, tmp_path, dist, lin):
     from helix.eval.denoise import load_denoiser
     from helix.eval.events import events
     from helix.model.checkpoint import load_run
@@ -415,16 +454,10 @@ def test_a_distributional_run_reads_back_with_its_calibration_path(fm_run, sampl
     predict, _ = load_denoiser(str(tmp_path), "cpu")
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
-    yt = np.log1p(sample["cells"]["q"] / C.Q0).astype(np.float32)
     y, pr = predict(ev, keys)
-    y2, pr2, stat, width = predict.calib(ev, keys, yt)
-    np.testing.assert_allclose(y2, y, atol=1e-5)
-    np.testing.assert_allclose(pr2, pr, atol=1e-5)
     ok = (C.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
-    assert predict.dist == dist and ok.any() and (width[ok] > 0).all() and np.isfinite(stat).all()
-    assert ((pr >= 0) & (pr <= 1)).all() and (stat[~ok] == 0).all()
-    if dist == "cat":
-        assert ((stat >= 0) & (stat <= 1)).all()
+    assert predict.dist == dist and ok.any() and np.isfinite(y).all() and np.isfinite(pr).all()
+    np.testing.assert_allclose(pr[ok], _model_logits(m, ev, keys, ok), rtol=1e-5, atol=1e-5)
 
 
 def test_the_fm_run_is_required_to_be_an_fm(tmp_path, fm_run):
