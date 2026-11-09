@@ -34,7 +34,7 @@ IMAGE=${HELIX_CONTAINER_IMAGE:-}
 IN_PY=${HELIX_CONTAINER_PYTHON:-python3}
 BINDS=${HELIX_CONTAINER_BINDS:-}
 
-# pimm AND helix, in that order -- the same pair helix.paths.pythonpath() returns.
+# pimm AND helix, in that order (scripts/submit.sh puts the same pair on the launcher's path).
 # Without pimm, anything importing it (the pimm config contract tests, the trainer)
 # dies with "No module named 'pimm'" INSIDE the container while working outside it.
 HPP="$HELIX_ROOT"

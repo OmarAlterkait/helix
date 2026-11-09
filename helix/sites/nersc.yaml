@@ -20,28 +20,22 @@ roots:
   # the per-rank index build is ~1,580 file opens EACH, so the filesystem under
   # it stops being a detail.
   #
-  # $SCRATCH is purged on inactivity, so the durable copy stays on $CFS and is
-  # named below rather than forgotten. Re-stage by copying it back:
-  # rsync -a $HELIX_CORPUS_DURABLE/ $SCRATCH/coeff_tpc_d1m/
+  # $SCRATCH is purged on inactivity; the durable copy stays on $CFS. Re-stage by copying it back:
+  # rsync -a $CFS/m5238/users/oalter/coeff_tpc_d1m/ $SCRATCH/coeff_tpc_d1m/
   HELIX_CORPUS_ROOT:   $SCRATCH
   HELIX_CORPUS:        $SCRATCH/coeff_tpc_d1m/j000000
-  HELIX_CORPUS_DURABLE: $CFS/m5238/users/oalter/coeff_tpc_d1m
   # The campaign the corpus is built from (doraemon_2026_1M_lartpc) has no copy here
   # (the wire_test_00_00_02 copy is a format helix no longer reads).
   HELIX_SIM_ROOT:      null
   HELIX_ARCHIVE:       $CFS/m5238/users/oalter/archive
   HELIX_EXP:           $CFS/m5238/users/oalter/exp/helix
-  # $SCRATCH is Lustre and is PURGED on inactivity. Nothing durable belongs here.
-  HELIX_SCRATCH:       $SCRATCH
   # A detached worktree of pimm-private at the pinned commit (scheduler.train.pimm_rev): training
   # runs the pimm that was tested, not whatever branch the development checkout is on.
   HELIX_PIMM_ROOT:     $HOME/nu/pimm-pin
-  HELIX_PIMM_DATA_SRC: $HOME/nu/pimm-data/src
   # Not present at this site. Declared as null so `python -m helix.paths` reports
   # "not configured" rather than inheriting an S3DF path that cannot exist here
   # and then reporting it MISSING, which reads like breakage rather than absence.
   HELIX_JAXTPC_ROOT:   null
-  HELIX_OPTICAL_DATA:  null
 
 # Environment this site needs set for helix to work at all. Not paths, not
 # scheduler flags -- facts about the machine that some library reads.
@@ -165,7 +159,3 @@ scheduler:
     # memory counts toward that -- `-c 32 --mem=56G` passes, 60G is rejected.
     qos: shared
     gpus_flag: gpus
-    # Perlmutter's MaxArraySize is 1000, so the S3DF 0-99 split is not required.
-    # Kept at 100 anyway: the corpus is built one RUN per submission and a run is
-    # at most 100 source files.
-    array: 0-99%32

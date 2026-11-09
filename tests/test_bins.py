@@ -124,7 +124,6 @@ def test_rederiving_the_production_grid_reproduces_it_bit_identically():
     bin table to a receiving site, so it earns its runtime.
     """
     pytest.importorskip("torch")
-    from helix.paths import archive
 
     # From reference_bins.json's declared name, not a literal. This said `_v2`
     # while the JSON said `_v3`, and because the guard below SKIPS on absence the

@@ -15,8 +15,6 @@ detect:
 roots:
   HELIX_CORPUS_ROOT:   /sdf/data/neutrino/omara
   HELIX_CORPUS:        /sdf/data/neutrino/omara/coeff_tpc_d1m/j000000
-  # One filesystem here, so there is no staged/durable split to record.
-  HELIX_CORPUS_DURABLE: null
   # The JAXTPC wire stage of the 1M-event campaign: <group>/<task>/{sensor,step,hits,labl}/
   # (helix/tpc/io.py, helix/data/cells.py). sensor / step / hits link to doraemon's
   # /sdf/data/neutrino/doraemon/doraemon_2026_1M_lartpc/data/jaxtpc_wire; labl is
@@ -27,12 +25,8 @@ roots:
   HELIX_SIM_ROOT:      /sdf/data/neutrino/omara/doraemon_2026_1M_lartpc/data/jaxtpc_wire
   HELIX_ARCHIVE:       /sdf/data/neutrino/omara/archive
   HELIX_EXP:           /sdf/data/neutrino/omara/exp/helix
-  HELIX_SCRATCH:       $SCRATCH
   HELIX_PIMM_ROOT:     /sdf/group/neutrino/omara/pimm-fm
-  HELIX_PIMM_DATA_SRC: /sdf/group/neutrino/omara/pimm-data/src
   HELIX_JAXTPC_ROOT:   /sdf/group/neutrino/omara/JAXTPC
-  # Another user's home directory. Out of scope for the wire FM.
-  HELIX_OPTICAL_DATA:  /sdf/home/y/youngsam/sw/dune/sim/goop/data/light_output.h5
 
 # The container, as four facts rather than one path. `HELIX_IMAGE` used to be a
 # single root typed as a filesystem path to a .sif, which cannot describe a site
