@@ -99,7 +99,7 @@ to ~1e-3, so an analytic grid is feasible.
 - **d1m denoiser at full length.** The `d1m_denoise` arms crashed or hung and were initialised
   from `fm_cooldown`'s EMA. The d1m port lacks M11's linear amplitude by default, augmentation,
   complete truth and volume-aware layouts; `dist` is undecided (point / gauss / cat). Its sweep
-  scores with `--weights best`, which runs trained since the trim do not have.
+  scores `last`; the arms in flight (trained at 9f34c74, before the trim) are scored by hand.
 - **Hangs.** Three denoiser-type runs hung (one rank or node silent until NCCL's 600 s), likely
   rank-0 checkpoint I/O on CFS during the collective DCP save (point_l30: a GLOO
   `gather_object` timeout in `save_dcp_checkpoint`). Eval-step saves and `model_best` are gone;

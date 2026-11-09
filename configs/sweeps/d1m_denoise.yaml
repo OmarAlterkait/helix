@@ -6,7 +6,7 @@
 #               0.59-0.71 of the point head's error from 16 k e- up; never run at full length)
 #   cat_l30     a categorical over charge with a zero bin, replacing presence + charge (new)
 # One noise realisation, no augmentation (the user's decision). Each is scored by
-# `helix.eval` (its best checkpoint): detection (far and near background, matched), per-bin bias
+# `helix.eval` (its last checkpoint): detection (far and near background, matched), per-bin bias
 # and resolution, linearity, closure and presence calibration.
 #
 #   python scripts/sweep.py configs/sweeps/d1m_denoise.yaml --dry-run
@@ -21,5 +21,5 @@ arms:
   gauss_l30: {overrides: {model.dist: gauss, model.lin_amp_scale: 30.0}}
   cat_l30:   {overrides: {model.dist: cat, model.lin_amp_scale: 30.0}}
 after_each:
-  command: python -m helix.eval $HELIX_EXP/{run} --weights best --out $HELIX_EXP/{run}/eval_denoise.json
+  command: python -m helix.eval $HELIX_EXP/{run} --out $HELIX_EXP/{run}/eval_denoise.json
   time: "04:00:00"
