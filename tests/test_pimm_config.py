@@ -66,23 +66,6 @@ def test_tokenizer_does_not_drag_in_the_tpc_stack():
         f"tokenize pulled in {r.stdout.strip()} — the umbrella is eager again")
 
 
-def test_umbrella_exposes_the_codec_and_the_model():
-    """The names two sibling repos actually consume must be reachable.
-
-    The umbrella exported six 2025 DSP names while pimm-data imported
-    helix.core.* and the pimm configs imported helix.model.* — every real
-    consumer bypassed it. These resolve lazily, so naming them costs nothing.
-    """
-    import helix
-    for name in ("CoeffEvent", "write_coeff_shard", "read_coeff_event",
-                 "audit_shard", "coord_digest", "build",
-                 "TPCChain", "sim_config"):
-        assert hasattr(helix, name), name
-        assert name in dir(helix)
-    with pytest.raises(AttributeError, match="no attribute"):
-        helix.definitely_not_a_real_name
-
-
 pimm_required = pytest.mark.skipif(
     not _pimm_importable(), reason="pimm (and its dependencies) not importable")
 

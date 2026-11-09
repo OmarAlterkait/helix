@@ -1,73 +1,15 @@
 """HELIX — Hierarchical Encoding for Learned Inference on eXperimental data.
 
-  helix.core    — the coefficient shard codec, the wavelet transform, robust
-                  statistics and hysteresis (torch, imported when they compute)
-  helix.tpc     — wire-plane chain (helix.tpc.chain.TPCChain): coherent noise
-                  removal + wavelet threshold
+  helix.core    — the coefficient shard codec, the wavelet transform, robust statistics
+  helix.tpc     — the wire-plane chain (helix.tpc.chain.TPCChain): coherent noise removal and
+                  wavelet threshold
   helix.optical — optical waveforms (SBND PMT / X-ARAPUCA, goop): one codec, optical shards
   helix.build   — any source's events through both into shards (python -m helix.build sim)
+  helix.data    — the coeff corpus as a pimm-data family, its truth and its verifier
   helix.model   — the coefficient foundation model and its tokenizer
+  helix.eval    — the evaluation of a trained encoder
 
-**Every name below is resolved lazily** (PEP 562). This is not a style choice.
-
-The umbrella used to import the wire-plane modules eagerly, so
-``import helix.core.coeff_io`` — or ``helix.model.tokenize``, which pimm-data
-runs inside every DataLoader worker — pulled in the whole wire-plane HDF5 stack.
-Measured: importing the tokenizer cost 1.07s and dragged ``h5py``, for a module
-that needs neither. It also made ``helix.core``'s "detector-agnostic" claim
-false at import time, and left the tokenizer one heavy or broken import in
-``helix.tpc`` away from failing in every worker.
-
-Two invariants this must preserve, both already enforced by tests:
-``import helix`` must pull in neither ``pimm`` nor ``torch``
-(``tests/test_pimm_config.py``), and ``helix.model.tokenize`` must stay
-torch-free (``tests/test_tokenize.py``, checked in a subprocess). Laziness
-strengthens both — the model names below resolve only when touched.
-
-``__version__`` stays eager: ``helix.core.coeff_io`` stamps it into every corpus
-shard, and that must not depend on attribute-access order.
+Import the module you need; this package imports nothing, so ``import helix`` pulls in neither
+pimm nor torch (tests/test_pimm_config.py). ``__version__`` is stamped into every corpus shard.
 """
 __version__ = "0.3.0"
-
-#: Public name -> the module that defines it. Three tiers: the coefficient
-#: codec (the cross-repo contract pimm-data reads), the DSP, and the model.
-_LAZY = {
-    # -- codec: what pimm-data and the corpus verifier depend on -------------
-    "CoeffEvent": "helix.core.coeff_event",
-    "BasisDescriptor": "helix.core.coeff_event",
-    "write_coeff_shard": "helix.core.coeff_io",
-    "read_coeff_event": "helix.core.coeff_io",
-    "audit_shard": "helix.core.coeff_io",
-    "coord_digest": "helix.core.coeff_io",
-    # -- DSP ----------------------------------------------------------------
-    "TPCChain": "helix.tpc.chain",
-    "sim_config": "helix.tpc.chain",
-    "sensor_layout": "helix.tpc.io",
-    "build": "helix.build",
-    # -- model: torch is imported only if one of these is touched -----------
-    "build_fm": "helix.model",
-    "FMModel": "helix.model",
-    "CoeffTokenize": "helix.model.tokenize",
-    # -- data: the coeff corpus as a pimm-data family. Importing these pulls
-    #    pimm_data (and so torch); they are lazy for the same reason the model
-    #    entries are, which is what keeps a numpy-only corpus reader working.
-    "CoeffTPCDataset": "helix.data",
-    "CoeffTPCReader": "helix.data",
-}
-
-__all__ = sorted(_LAZY)
-
-
-def __getattr__(name):
-    """Resolve a public name to its defining module on first access (PEP 562)."""
-    target = _LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module 'helix' has no attribute {name!r}")
-    import importlib
-    value = getattr(importlib.import_module(target), name)
-    globals()[name] = value          # cache: subsequent lookups skip __getattr__
-    return value
-
-
-def __dir__():
-    return sorted(set(globals()) | set(_LAZY))
