@@ -216,6 +216,25 @@ denoiser label and the evaluation need (on run 0027575715 shard 0 it reproduces 
 pixel-level windows exactly). Size: ~197 MB per shard. It replaces the per-script truth
 dumps (`dump_probe_truth`, `dump_resolution_truth`, `build_denoise_truth`, ...).
 
+**2026-11-09: the frozen probes were removed (tag `eval-probes-final`); the primary evaluation is
+the `ft_eval` fine-tune; frozen diagnostic = `freeze_encoder`.** `configs/pimm/ft_eval.py` (the
+denoiser on 1,024 labelled events, 16 epochs, 4 ranks = 4,096 steps), scored by `python -m
+helix.eval <run>`: the clear and crowded@near efficiency at 1% FPR per view, by energy, for the
+presence log-odds against the fit-free amplitude on identical windows, and charge accuracy on
+every charged cell. The same protocol with `model.freeze_encoder=True` is the frozen diagnostic,
+so there is one scoring path and no probe code. *Why:* an MAE is pretrained to be fine-tuned; the
+frozen floor probe measured its own extrapolation from map rows to window cells as much as the
+features (the nested amplitude control below). Clear / crowded@near: fine-tuned 0.53 /
+0.54, frozen 0.34 / 0.10, amplitude 0.26 / 0.06. `uprobe` is kept as the second, frozen key until
+the fine-tune key is validated against it (`python -m helix.eval --uprobe <FM run>`): it is the
+only frozen key that ordered pretraining arms (LR 2.2e-3 0.445 < 3.1e-3 0.483 < 4.4e-3
+0.489 / 0.505), and it measures 3D information, not detection. Also changed, so no window number
+or windows dump from before is comparable: the map-row draw is gone (every later window moved),
+every probe event is scored (no fit split), the denoiser's weight is `model/last`, its presence
+window score is the log-odds (it saturated as a probability), and a charged cell no token covers
+counts as a miss (`frac_uncovered`) instead of being dropped. The entries below describe the
+evaluation before this one.
+
 **One evaluation command.** `python -m helix.eval RUN --metrics recon,floor,uprobe,labels,denoise
 --out FILE` scores a run from its pimm directory: `recon` (the training evaluator's
 metric code, under the random and the region mask), `floor` (the detection floor on frozen
