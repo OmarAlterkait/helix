@@ -22,6 +22,42 @@ answered wrongly is worth as much as the answer.
 
 ---
 
+## Training: pimm is the engine, helix's integration is trimmed (2026-11-09)
+
+Supersedes the hooks, cadence and warm-start entries below where they disagree.
+
+**No in-training evaluation, no `model_best`, no EMA.** Validation loss does not rank
+representations (rank correlation 0.15 with the probes over 17 r1 models), and the primary
+evaluation is a separate fine-tune, so `CoeffFMEvaluator` / `DenoiseEvaluator` are gone and every
+config sets `evaluate=False` with `data.train` only. `WeightEMA` is gone: fine-tuned, a cooldown's
+`last` and the stable phase's EMA scored the same (0.530 +- 0.003), and cooldowns already skipped
+it. A run's weight is `model/last` -- `load_run`, `build_denoise`, `helix.eval` and the denoiser's
+reader default to it; an old run's `model_ema.pth` / `model_best.pth` stay readable by name.
+*Would overturn:* a ranking task where val loss agrees with the fine-tune.
+
+**One saver, no eval coupling.** `CheckpointSaverIteration(save_freq="auto")` writes `model/last`
+on the derived cadence and nothing else. pimm's `CheckpointSaver` also wrote `iter_N.pth` on every
+save step and, for the denoiser, saved on every evaluator step -- part of the suspected cause of
+three training hangs. `StepWatchdog` (faulthandler, re-armed per step, 300 s) makes a stuck rank
+dump its stacks and exit before NCCL's 600 s timeout; the launch recipe turns on NCCL's flight
+recorder. `FiniteGuard` and `HelixProvenance` (provenance + the corpus-mismatch refusal; the old
+name `HelixPathBootstrap` is an alias) stay.
+
+**No sys.path bootstrap.** pimm's `train.sh` prepends its code snapshot to `PYTHONPATH` (it never
+pinned it), and `configs/launch/_common.yaml`'s `setup:` exports helix on every link, so neither
+the block in `fm.py` nor the hook that rewrote the dumped `config.py` was needed.
+
+**Configs are world-size-free.** They hold one rank's batch (1) and workers; `scripts/submit.sh`
+appends the batch overrides for nodes x GPUs, and `FMTrainer` scales the peak LR as
+`lr * sqrt(world / lr_ref_world)` (fm.py: 4.4e-3 at 16 -- the same numbers as before at every
+count). **Warm starts are `model.init=<run>`** (its `model/last`, loaded by `Coeff-FM`), not
+pimm's `weight=`, which `train.sh` sets on every resumed link.
+
+A run dumped before this change names `WeightEMA` and an evaluator in its `config.py`; it resumes
+only from the tree it started on.
+
+---
+
 ## State at the 2026-11 handoff (2026-11-06)
 
 What existed when the work moved to NERSC (helix-nersc); the choices it left open are in

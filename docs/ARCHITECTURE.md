@@ -420,25 +420,26 @@ registers:
 | MODELS | `Coeff-FM`, `Coeff-Denoise` |
 | TRAINERS | `FMTrainer`: the model's param groups (muP; the denoiser's head), the batch check, `"auto"` cadence, a `CoeffTokenize(cfg="model")` filled from the model's FM run |
 | SCHEDULERS | `WSDStableLR`, `WSDCooldownLR`, `WarmupCosineLR` (the denoiser) |
-| HOOKS | `HelixPathBootstrap`, `WeightEMA`, `FiniteGuard`, `CoeffFMEvaluator`, `DenoiseEvaluator` |
+| HOOKS | `HelixProvenance` (alias `HelixPathBootstrap`), `FiniteGuard`, `StepWatchdog` |
 
-**Cadence is derived at run time:** a config writes `warmup="auto"`, `save_freq="auto"`, `every_n_steps="auto"`;
+**Cadence is derived at run time:** a config writes `warmup="auto"`, `save_freq="auto"`;
 `FMTrainer._resolve_cadence` fills them from pimm's `iters_per_epoch * epoch` through
-`helix.model.schedule` (`warmup_steps`, `eval_every`, `save_every`).
+`helix.model.schedule` (`warmup_steps`, `save_every`). `FMTrainer` also scales the peak LR by
+sqrt(world / 16), and `scripts/submit.sh` appends the batch (= world size), so no config reads it.
 
 `configs/pimm/fm.py` is the whole run: corpus = `HELIX_CORPUS`'s parent with its
 `_calib/RUNS.txt`, the reference bin grid, the `nz_pw16` recipe (d 768, 12 + 4 blocks, 12
 heads, QK-norm, fused QK-norm + RoPE, K = 128; fused AdamW at LR 4.4e-3) + `WSDStableLR`,
-batch = world size. Variants override only what
-differs: `fm_cooldown.py` (warm start from `$HELIX_EXP/fm/model/last`, first 3 runs, one
+batch 1 per rank. Variants override only what
+differs: `fm_cooldown.py` (warm start `model.init=$HELIX_EXP/fm`, its `last`; first 3 runs, one
 epoch, `WSDCooldownLR`), `fm_smoke.py` (a
 small model, 32 events, one GPU). Anything else is a `key=value` override.
 
 `configs/pimm/denoise.py` (`_base_` fm.py) trains the denoiser through the same trainer and
 launcher: `Coeff-Denoise` on the FM run `model.fm` (default `$HELIX_EXP/fm_cooldown`), the M6d recipe
 of DENOISE (archive tag) as defaults (`model.cond_charge=True` is M6dc), the FM's identity-hash
-holdout, `WarmupCosineLR`, `DenoiseEvaluator` (the training loss on the val split, fixed
-draws) and `model/model_best.pth` by validation loss. `data.train.n_events` trains on a fixed,
+holdout, `WarmupCosineLR`, and its weight is `model/last` (no in-training evaluation, no
+best-checkpoint selection). `data.train.n_events` trains on a fixed,
 nested subset of the train split (label efficiency).
 
 ---

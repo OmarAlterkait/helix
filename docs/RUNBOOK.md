@@ -223,28 +223,39 @@ calibration.
 * **The corpus** is `HELIX_CORPUS`'s parent, with its runs from `_calib/RUNS.txt`
   (S3DF default: `coeff_tpc_d1m`). `HELIX_CORPUS=<root>/<run> scripts/submit.sh fm` trains
   on another; the variable reaches the jobs.
-* **No step counts.** Warmup and the eval / checkpoint / EMA-save cadence are `"auto"`
-  and resolved by `FMTrainer` from `iters_per_epoch * epoch`; the log line `cadence over
-  N steps: ...` shows them. Change the length with `epoch=`.
-* **Batch = GPUs.** `batch_size` is the world size (one event per rank:
-  `helix.paths.world_size()`: torchrun's `WORLD_SIZE`), in every config; pimm's preflight
-  checks it at the launch's ranks. The recipe was measured at 16 GPUs (`--resources.nnodes 4`).
+* **No step counts.** Warmup and the checkpoint cadence are `"auto"` and resolved by
+  `FMTrainer` from `iters_per_epoch * epoch`; the log line `cadence over N steps: ...` shows
+  them. Change the length with `epoch=`.
+* **No in-training evaluation** (`evaluate=False`: no val loader, no `model_best`). A run's
+  weight is `model/last`, the only thing the saver (`CheckpointSaverIteration`) writes;
+  score it afterwards (section 7).
+* **Batch = GPUs.** The configs hold one rank's batch (1) and read no world size;
+  `submit.sh` appends `batch_size=W batch_size_val=W batch_size_test=W num_worker=...` for
+  W = nodes x GPUs (visible in `--dry-run`), and `FMTrainer` refuses `batch_size != W`. The
+  peak LR is `optimizer.lr` at `lr_ref_world` ranks (fm.py: 4.4e-3 at 16), scaled by
+  `FMTrainer` as sqrt(W / 16); the denoiser's is absolute. The recipe was measured at 16 GPUs
+  (`--resources.nnodes 4`). By hand (`python -m pimm.train`) on more than one rank, pass the
+  batch yourself.
+* **A hung rank** dumps every thread's stack to the job's stderr and exits after 300 s
+  without a step (`StepWatchdog`), before NCCL's 600 s timeout; the NCCL flight recorder
+  (`TORCH_NCCL_DUMP_ON_TIMEOUT`, set in `configs/launch/_common.yaml`) records the collectives.
 * **GPU type.** The varlen attention needs sm80+ (A100 or newer): `ampere` at S3DF,
   never `turing`.
 * **The recipe** is `nz_pw16` (`configs/pimm/fm.py`: d768, LR 4.4e-3), whose LR was tuned
   at 29.2k steps on 16 GPUs; see `docs/DECISIONS.md` before changing the length much.
-* **Cooldown** is a separate short run warm-started with `weight=` (never `resume=`): it
+* **Cooldown** is a separate short run warm-started with `model.init=<run>` (that run's
+  `model/last`; not pimm's `weight=`, which a resumed link sets to its own checkpoint): it
   anneals over its own steps on the first 3 runs for one epoch. It reads the stable run at
-  `$HELIX_EXP/fm`; for another stable run pass `weight=$HELIX_EXP/<name>/model/last`.
+  `$HELIX_EXP/fm`; for another stable run pass `model.init=$HELIX_EXP/<name>`.
 * **Preemption** costs at most one checkpoint interval: the next link resumes. S3DF
   cancels preempted jobs, NERSC requeues them; `afterany` continues either way.
 * fm_smoke reads its bins from `$HELIX_ARCHIVE/coeff_bins_K32_smoke.pt`.
 * **The denoiser** (`configs/pimm/denoise.py`) is an FM run plus a head: `model.fm=<run dir>`
   (default `$HELIX_EXP/fm_cooldown`, the cooled FM) gives the encoder's architecture, tokenizer
-  and (`model.pretrained`, default True) EMA weights; `model.freeze_encoder=True` trains the head only. It reads the `cells` truth
+  and (`model.pretrained`, default True) `last` weights; `model.freeze_encoder=True` trains the head only. It reads the `cells` truth
   (section 7: `scripts/build_truth.py` first). Its length is epochs like the FM's: a
-  label subset (`data.train.n_events`) needs a larger `epoch` for the same step count. The
-  best checkpoint by validation loss is `model/model_best.pth`.
+  label subset (`data.train.n_events`) needs a larger `epoch` for the same step count. Its
+  weight is `model/last` (there is no best-checkpoint selection).
 
 ---
 
@@ -272,13 +283,13 @@ needs flash attention, sm80+):
     sbatch ... --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python -m helix.eval \
                 $HELIX_EXP/fm_cooldown --metrics denoise --denoiser $HELIX_EXP/denoise --out $HELIX_EXP/denoise/eval.json"
 
-`RUN` is the run directory (`--weights ema` default, or `last`) or one checkpoint inside it
-(`model/iter_N.pth`). Events: the run's own corpus, `probe` role of its holdout
-(`--max-events` for a quick look). Metrics: `recon` (the training evaluator's
-masked reconstruction), `floor` (detection floor from frozen features, per-view 1% FPR, by
+`RUN` is the run directory (`--weights last` default, or `ema` for a run made before the EMA
+was retired) or one checkpoint inside it (an old run's `model/iter_N.pth`). Events: the run's
+own corpus, `probe` role of its holdout (`--max-events` for a quick look). Metrics: `recon`
+(the training objective's masked reconstruction), `floor` (detection floor from frozen features, per-view 1% FPR, by
 energy; trained against the coefficient amplitude), `uprobe` (along-wire coordinate,
 within-group R^2; trained against geometry), `labels` (motif / pid per signal cell, balanced
-accuracy; trained against the token layout), `denoise` (`--denoiser <denoise run>`, its best
+accuracy; trained against the token layout), `denoise` (`--denoiser <denoise run>`, its last
 checkpoint, on the floor's windows). The probes fit
 on the first two thirds of the events (at most `FIT_ROWS` = 1M rows each, sampled evenly over
 them, so memory stays ~25 GB at any split) and score the rest as they arrive, with [16, 84]%
