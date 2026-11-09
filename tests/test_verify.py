@@ -251,7 +251,7 @@ def test_a_corpus_mismatch_on_RESUME_reaches_the_caller(tmp_path, monkeypatch):
     import pytest
 
     pytest.importorskip("pimm")
-    from helix.integrations.pimm.hooks import HelixPathBootstrap
+    from helix.integrations.pimm.hooks import HelixProvenance
 
     save = tmp_path / "run"
     save.mkdir()
@@ -259,7 +259,7 @@ def test_a_corpus_mismatch_on_RESUME_reaches_the_caller(tmp_path, monkeypatch):
         "corpus": {"basis_digest": "a" * 64, "removal_json": "{}", "sigma_norm": 2.6,
                    "shard": "sim_wire_coeff_0000.h5"}}]))
 
-    hook = HelixPathBootstrap.__new__(HelixPathBootstrap)
+    hook = HelixProvenance.__new__(HelixProvenance)
     logged = []
     hook.trainer = types.SimpleNamespace(
         cfg=types.SimpleNamespace(save_path=str(save)),

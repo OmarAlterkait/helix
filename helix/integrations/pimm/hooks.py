@@ -1,4 +1,4 @@
-"""Run-lifecycle hooks: the resume bootstrap (+ provenance) and the weight EMA.
+"""Run-lifecycle hooks: provenance (+ the corpus-mismatch refusal) and the weight EMA.
 
 Not evaluation — that is :mod:`helix.integrations.pimm.eval`. These two are
 about what a run WRITES, the evaluator about what it MEASURES.
@@ -14,65 +14,19 @@ from pimm.engines.hooks.builder import HOOKS
 from pimm.engines.hooks.default import HookBase
 from pimm.utils import comm
 
-from helix.integrations._bootstrap import (bootstrap_block, has_bootstrap,
-                                           running_roots)
-
 
 @HOOKS.register_module()
-class HelixPathBootstrap(HookBase):
-    """Put the helix `sys.path` bootstrap back into the config pimm dumps.
+class HelixProvenance(HookBase):
+    """Record which code and corpus produced this run; refuse to continue it on another corpus.
 
-    Without this a chained run cannot resume, and it fails LATE — after job 1 has
-    burned its whole wall-clock allocation.
-
-    The cause is that `Config.dump` serialises the RESOLVED dict, not the source:
-    `custom_imports` is a dict and survives, while the `sys.path.append` that made
-    `helix.integrations.pimm` importable is a STATEMENT and does not. Job 1 loads
-    the config from the repo and is fine; every later job takes train.sh's resume
-    branch, which loads `${EXP_DIR}/config.py` (train.sh:226) with
-    `PYTHONPATH=${EXP_DIR}/code` (train.sh:253) — pimm's own snapshot, which does
-    not contain helix. `custom_imports` then raises a bare ImportError with the
-    real ModuleNotFoundError swallowed by `import_modules_from_strings`.
-
-    So the dumped config is rewritten here, once, on rank 0. The root is taken
-    from the RUNNING helix rather than a constant, so a resumed job re-enters the
-    same checkout job 1 used instead of whatever the default happens to point at
-    by then; HELIX_ROOT still overrides. This runs in `before_train`, after
-    `_train_utils.py:147` has dumped the config.
-
-    It cannot instead snapshot helix into `${EXP_DIR}/code`: that directory is
-    built by `cp -r scripts tools pimm` inside pimm's train.sh, and the point of
-    this integration is that pimm is not modified.
+    Rank 0, in ``before_train`` -- on every link of a chain, so a link resumed from a different
+    tree or against a different corpus is on record (and the latter refused).
     """
 
-    def __init__(self, root=None):
-        self.root = root
-
     def before_train(self):
-        import os
-
         if comm.get_rank() != 0:
             return
         self._stamp_provenance()
-        path = os.path.join(self.trainer.cfg.save_path, "config.py")
-        try:
-            with open(path) as fh:
-                src = fh.read()
-        except FileNotFoundError:
-            # No dump means nothing will be resumed from it either.
-            return
-        if has_bootstrap(src):
-            return
-        helix_root, pimm_data_root = running_roots()
-        helix_root = self.root or helix_root
-        tmp = path + ".helixtmp"
-        with open(tmp, "w") as fh:
-            fh.write(bootstrap_block(helix_root, pimm_data_root) + "\n" + src)
-        os.replace(tmp, path)          # atomic: a torn config.py is unresumable
-        self.trainer.logger.info(
-            f"HelixPathBootstrap: re-added the sys.path bootstrap to {path} "
-            f"(helix={helix_root!r}, pimm_data={pimm_data_root!r}) so chained "
-            f"jobs can resume")
 
     def _corpus_identity(self):
         """The DSP identity of the corpus this run is training on, or None.
@@ -102,9 +56,7 @@ class HelixPathBootstrap(HookBase):
     def _stamp_provenance(self):
         """Write ``<save_path>/provenance.json``: which code produced this run.
 
-        This hook already resolves the checkouts for the resume bootstrap, so it
-        is the one place that knows them — recording them here costs one file and
-        no new hook in the config. Appends rather than overwrites, so a
+        Appends rather than overwrites, so a
         chained/requeued job leaves a record of every link — a run that was
         preempted and resumed from a DIFFERENT working tree is exactly the case
         worth catching, and an overwrite would hide it.
@@ -151,7 +103,7 @@ class HelixPathBootstrap(HookBase):
             os.replace(tmp, path)
             h = info["helix"]
             self.trainer.logger.info(
-                f"HelixPathBootstrap: provenance -> {path} "
+                f"HelixProvenance: provenance -> {path} "
                 f"(helix {(h['commit'] or '?')[:12]}"
                 f"{'-dirty' if h['dirty'] else ''} on {h['branch']})")
             if h["dirty"]:
@@ -162,7 +114,7 @@ class HelixPathBootstrap(HookBase):
             # Provenance is a record, not a dependency. Never take down a run.
             # NOTE: the corpus check is deliberately NOT in here -- see below.
             self.trainer.logger.exception(
-                "HelixPathBootstrap: could not write provenance.json")
+                "HelixProvenance: could not write provenance.json")
 
         # OUTSIDE the handler: a corpus mismatch must reach the caller.
         if _deferred_check is not None:
@@ -172,6 +124,16 @@ class HelixPathBootstrap(HookBase):
             # unreadable record is tolerated, exactly as at eval time.
             note = check_corpus_matches(prev, actual, where=path)
             self.trainer.logger.info(f"[corpus] {note}")
+
+
+@HOOKS.register_module()
+class HelixPathBootstrap(HelixProvenance):
+    """The old name of :class:`HelixProvenance`, kept so a config dumped by a run started before
+    the rename still resolves. It no longer rewrites the dumped config: the launcher exports
+    helix on PYTHONPATH for every link (``configs/launch/_common.yaml``)."""
+
+    def __init__(self, root=None):                  # ``root`` was the rewrite's; ignored
+        pass
 
 
 @HOOKS.register_module()

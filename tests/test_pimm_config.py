@@ -1,5 +1,5 @@
-"""The pimm config contract: helix's configs, the registry adapters and the sys.path bootstrap
-against what pimm reads, and the integration's import boundaries."""
+"""The pimm config contract: helix's configs and the registry adapters against what pimm
+reads, and the integration's import boundaries."""
 import importlib.util
 import os
 from pathlib import Path
@@ -391,219 +391,8 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
         "the missing-bins error should explain WHY the model cannot supply them")
 
 
-def test_configs_bootstrap_helix_onto_sys_path():
-    """Every pimm config must put helix on sys.path ITSELF, by APPEND.
-
-    pimm's scripts/train.sh hard-sets PYTHONPATH to its own code directory in
-    every branch, so a launch through `pimm submit` cannot see helix by
-    environment alone. The config is a Python file executed before
-    `custom_imports` is processed (Config.fromfile), so it can bootstrap itself
-    — which avoids installing helix into a shared image.
-
-    It must use insert(1) — the only position that works, as both obvious
-    choices fail in opposite directions:
-
-      insert(0)  pimm's loader does insert(0, temp_dir) -> import -> pop(0), and
-                 the config executes during that import, so an insert(0) here is
-                 what the pop deletes. Fails silently: helix stays unimportable
-                 and custom_imports raises a bare ImportError with the real cause
-                 swallowed by import_modules_from_strings.
-      append     survives the pop, but loses to site-packages — the pimm image
-                 ships pimm_data 0.3.0, which has no coeff module, so the run
-                 dies on "No module named 'pimm_data.coeff'".
-    """
-    import re
-    from pathlib import Path
-
-    cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
-    found = sorted(cfg_dir.glob("fm*.py"))
-    assert found, "no pimm configs found"
-    for path in found:
-        src = path.read_text()
-        # A config may INHERIT the bootstrap: pimm execs each `_base_` file
-        # before merging (Config._file2dict), so the base's sys.path statement
-        # runs and helix is importable by the time this file is read. Verified
-        # against a real load with helix off PYTHONPATH, not assumed — see
-        # test_a_derived_config_inherits_a_working_bootstrap below. Requiring
-        # every config to repeat the block would force copy-paste of the one
-        # thing that must never drift.
-        if "_base_" in src and "_sys.path." not in src:
-            # The ASSIGNMENT again, not the word: this file's own comment says
-            # custom_imports is inherited, and matching the word made the guard
-            # fire on that sentence. Exactly the trap documented four lines down.
-            assert "custom_imports = " not in src, (
-                f"{path.name} inherits its bootstrap but sets custom_imports "
-                f"itself; the two must travel together")
-            continue
-        # The ASSIGNMENT, not the word — the bootstrap comment mentions
-        # custom_imports and would otherwise match first, making the ordering
-        # check below compare against the wrong position.
-        assign = src.index("custom_imports = ")
-        # Ignore comment lines: they discuss insert(0) and append by name.
-        code = "\n".join(ln for ln in src.splitlines()
-                         if not ln.lstrip().startswith("#"))
-        boot = re.search(r"_sys\.path\.(insert|append)\(\s*(\d+)?", code)
-        assert boot, f"{path.name} does not bootstrap onto sys.path"
-        assert (boot.group(1), boot.group(2)) == ("insert", "1"), (
-            f"{path.name} uses sys.path.{boot.group(1)}({boot.group(2) or ''}) — "
-            f"must be insert(1): insert(0) is removed by pimm's own pop(0), and "
-            f"append loses to the stale pimm_data in site-packages")
-        assert src.index("_sys.path.") < assign, (
-            f"{path.name} bootstraps AFTER custom_imports, which is too late")
-        assert "PIMM_DATA_SRC" not in src, (
-            f"{path.name} still bootstraps a pimm-data CHECKOUT. The image "
-            f"installs it at the pinned revision and the build refuses a stale "
-            f"one, so shadowing it makes the run disagree with the pin — one "
-            f"authority governs the image and another the run. (Was required "
-            f"when the image baked 0.3.0; that is fixed at the source.) "
-            f"the image's 0.3.0 "
-            f"has no CoeffTPCDataset")
-
-
-@pimm_importable
-@pytest.mark.xfail(strict=False, reason=(
-    "The CODE and this TEST disagree about intent, and the disagreement is "
-    "deliberate on the code's side. configs/pimm/fm_cooldown.py says a "
-    "derived config does NOT get its own sys.path bootstrap -- 'a config that "
-    "touches sys.path must also register HelixPathBootstrap so a RESUMED job can "
-    "still import helix, and the hook belongs to the base' -- so it relies on "
-    "helix already being importable, which the launcher guarantees by exporting "
-    "PYTHONPATH. This test strips helix from PYTHONPATH and demands it work "
-    "anyway. In production the launcher always sets it, so nothing is broken "
-    "today; but one of the two should change. Marked rather than edited because "
-    "silencing it by rewriting either side is how a real expectation gets lost. "
-    "Invisible until a clean-room run, where this module stops skipping."))
-def test_a_derived_config_inherits_a_working_bootstrap(tmp_path):
-    """A `_base_` config must actually reach helix without help from the env.
-
-    The exemption above is only sound if inheritance really carries the
-    bootstrap. It does — pimm execs the base before merging — but that is a
-    property of pimm's loader, not of our config, so it is checked rather than
-    reasoned about: load a derived config in a subprocess whose PYTHONPATH has
-    NO helix, and require that helix becomes importable anyway.
-    """
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    derived = [p for p in sorted((root / "configs" / "pimm").glob("fm*.py"))
-               if "_base_" in p.read_text() and "_sys.path." not in p.read_text()]
-    if not derived:
-        pytest.skip("no _base_-derived configs")
-
-    env = {k: v for k, v in os.environ.items()}
-    env["PYTHONPATH"] = ":".join(
-        p for p in env.get("PYTHONPATH", "").split(":") if p and "helix" not in p)
-    prog = (
-        "import sys\n"
-        "assert not any('helix' in p for p in sys.path), sys.path\n"
-        "from pimm.utils.config import Config\n"
-        f"c = Config.fromfile({str(derived[0])!r})\n"
-        "import helix\n"
-        "print('OK', c.custom_imports['imports'][0])\n")
-    r = subprocess.run([sys.executable, "-c", prog], capture_output=True,
-                       text=True, env=env, cwd=str(tmp_path))
-    assert r.returncode == 0 and "OK" in r.stdout, (
-        f"{derived[0].name} does not inherit a working bootstrap:\n"
-        f"{r.stdout}\n{r.stderr[-2000:]}")
-
-
-def test_bootstrap_configs_also_register_the_rewrite_hook():
-    """A config that bootstraps sys.path MUST also list HelixPathBootstrap.
-
-    The two are one mechanism split across a process boundary: the source-level
-    bootstrap gets job 1 running, and the hook puts that bootstrap back into the
-    config pimm DUMPS so job 2 (which loads the dump, not this file) can import
-    helix at all. Having only the first is the dangerous state — it works
-    perfectly until the first requeue, hours in.
-    """
-    from pathlib import Path
-
-    cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
-    for path in sorted(cfg_dir.glob("fm*.py")):
-        src = path.read_text()
-        if "_sys.path." not in src:
-            continue
-        assert "HelixPathBootstrap" in src, (
-            f"{path.name} bootstraps sys.path but never registers "
-            f"HelixPathBootstrap, so a resumed job cannot import helix")
-
-
-def test_bootstrap_block_is_valid_python_that_appends():
-    """The block the hook writes must parse, and must append rather than insert."""
-    import ast
-
-    from helix.integrations._bootstrap import bootstrap_block
-
-    block = bootstrap_block("/some/checkout", "/some/pimm-data/src")
-    ast.parse(block)                      # a syntax error here is unresumable
-    # The block's own comments explain the insert(0) trap, so check the CODE.
-    code = "\n".join(ln for ln in block.splitlines()
-                     if not ln.lstrip().startswith("#"))
-    assert "_sys.path.insert(1, _p)" in code, (
-        "insert(1) is the only workable position: insert(0) is deleted by pimm's "
-        "own sys.path.pop(0), and append loses to site-packages' stale pimm_data")
-    assert "insert(0" not in code
-    assert ".append(" not in code
-    assert "'/some/checkout'" in block
-    assert "'/some/pimm-data/src'" not in block, (
-        "the block must NOT insert a pimm-data checkout: the image installs the "
-        "pinned revision and shadowing it splits authority between image and run")
-    assert "HELIX_ROOT" in block and "PIMM_DATA_SRC" not in block
-
-
-def test_rewritten_config_is_importable_without_helix_on_the_path(tmp_path):
-    """End-to-end: dump-shaped config + the hook's block -> helix imports.
-
-    Simulates what train.sh's resume branch does — load <save_path>/config.py in
-    a process whose sys.path does NOT contain helix — and asserts the rewritten
-    file repairs it.
-    """
-    pytest.importorskip("pimm_data")  # the subprocess imports it via the config
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    from helix.integrations._bootstrap import bootstrap_block
-
-    root = str(Path(__file__).resolve().parent.parent)
-
-    # The property is that the block inserts ONLY helix, so `pimm_data` keeps
-    # resolving to whatever is INSTALLED. This used to build a "fresh" and a
-    # "stale" pimm_data and assert the fresh one won, because the block had to
-    # beat the image's baked 0.3.0. The image installs the pinned revision now,
-    # so shadowing it is the bug and resolving to it is the contract.
-    dumped = "custom_imports = dict(imports=['helix.integrations.pimm'])\n"
-    cfg = tmp_path / "config.py"
-    cfg.write_text(bootstrap_block(root) + "\n" + dumped)
-
-    probe = tmp_path / "probe.py"
-    probe.write_text(
-        "import runpy, sys\n"
-        f"sys.path[:] = [p for p in sys.path if {root!r} not in p]\n"
-        f"runpy.run_path({str(cfg)!r})\n"
-        "import importlib\n"
-        "importlib.import_module('helix')\n"
-        "pd = importlib.import_module('pimm_data')\n"
-        "print('HELIX-IMPORTABLE', 'pimm_data=' + (pd.__file__ or ''))\n")
-    # Inherit the env: we WANT the installed pimm_data reachable, because that
-    # is what the run must resolve.
-    env = dict(os.environ)
-    out = subprocess.run([sys.executable, str(probe)], capture_output=True,
-                         text=True, env=env, cwd=str(tmp_path), timeout=120)
-    assert out.returncode == 0, f"probe failed:\n{out.stdout}\n{out.stderr[-2000:]}"
-    assert "HELIX-IMPORTABLE" in out.stdout, (
-        f"the rewritten config did not make helix importable:\n{out.stderr[-2000:]}")
-    resolved = out.stdout.split("pimm_data=")[-1].strip()
-    assert str(tmp_path) not in resolved and root not in resolved, (
-        f"the config bootstrap shadowed the installed pimm_data with "
-        f"{resolved!r}. It must not: the pin governs the image, and a run that "
-        f"resolves something else makes the pin a statement about nothing.")
-
-
 def test_configs_leave_no_module_objects_in_the_namespace():
-    """The sys.path bootstrap must not leak `_os`/`_sys` into the config dict.
+    """A config must not leave a module object (an `import os as _os`) in its namespace.
 
     `Config._file2dict` keeps every module-level name not starting with `__`
     (pimm/utils/config.py:261-262). A leaked module object reaches `Config.dump`,
@@ -636,13 +425,6 @@ def test_configs_leave_no_module_objects_in_the_namespace():
             # is correct for RUNNING the config; it says nothing about whether the
             # config leaks module objects, which is what is under test here.
             #
-            # SystemExit is the third spelling of the same thing, and the one a
-            # CI runner hits FIRST: every fm config refuses to execute
-            # without HELIX_ROOT, because it cannot self-locate (pimm executes a
-            # temp copy, so __file__ is the copy) and a wrong checkout is a
-            # correctness bug rather than an inconvenience. With no site and no
-            # environment, that refusal fires before any root is even consulted.
-            #
             # Skip that config rather than fail: the contract under test is about
             # module objects leaking into the namespace, and a config that cannot
             # be executed tells us nothing about it either way.
@@ -661,19 +443,6 @@ def test_configs_leave_no_module_objects_in_the_namespace():
     if not checked:
         pytest.skip("no coeff_fm config could be executed; external data absent: "
                     + "; ".join(missing))
-
-
-def test_bootstrap_block_deletes_its_temporaries():
-    """Same guarantee for the block the hook writes into the dumped config."""
-    import types
-
-    from helix.integrations._bootstrap import bootstrap_block
-
-    ns = {}
-    exec(compile(bootstrap_block("/a", "/b"), "<block>", "exec"), ns)
-    leaked = sorted(k for k, v in ns.items()
-                    if not k.startswith("__") and isinstance(v, types.ModuleType))
-    assert not leaked, f"bootstrap_block leaks {leaked}"
 
 
 def test_the_cooldown_has_the_base_hooks_without_the_ema():

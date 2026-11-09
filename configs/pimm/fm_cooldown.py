@@ -10,8 +10,6 @@ No ``WeightEMA``: it would start from a clone of the stable phase's weights, and
 9.4k steps). A cooldown's weight is ``model/last`` -- ``helix.eval --weights last``, a denoiser's
 ``model.fm=<run>/model/last``; ``weights="ema"`` on it is refused (no EMA file), not substituted.
 """
-# helix is importable here because the launcher exports PYTHONPATH; the sys.path block and
-# its HelixPathBootstrap hook belong to the base.
 from helix.paths import root as _root                            # noqa: E402
 from helix.data.verify import corpus_runs as _corpus_runs     # noqa: E402
 
@@ -28,7 +26,7 @@ scheduler = dict(type="WSDCooldownLR", warmup=0, floor=1e-3)
 # fm.py's hooks without WeightEMA (a list is replaced, not merged; tests/test_pimm_config.py
 # checks the two stay the same otherwise)
 hooks = [
-    dict(type="HelixPathBootstrap"),
+    dict(type="HelixProvenance"),
     dict(type="CheckpointLoader"),
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),

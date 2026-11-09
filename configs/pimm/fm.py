@@ -15,24 +15,10 @@ split, the corpus and the GPU count) through :mod:`helix.model.schedule`. Anythi
     scripts/submit.sh fm --resources.nnodes 4 [pimm submit flags] [-- key=value ...]
 """
 
-# helix onto sys.path before custom_imports is read (pimm executes this file first). From
-# HELIX_ROOT, not __file__: pimm executes a temp copy. insert(1): pimm's loader does
-# insert(0, temp) -> import -> pop(0), which would remove an insert(0); an append would lose
-# to site-packages.
-import os as _os
-import sys as _sys
-
-_p = _os.environ.get("HELIX_ROOT")
-if not _p or not _os.path.isdir(_p):
-    raise SystemExit(
-        f"HELIX_ROOT is {'not set' if not _p else f'not a directory: {_p}'}.\n"
-        f"  Set it to your helix checkout (scripts/submit.sh exports it).")
-if _p not in _sys.path:
-    _sys.path.insert(1, _p)
+# helix is importable because the launcher puts it on PYTHONPATH (configs/launch/_common.yaml's
+# setup:; pimm's train.sh prepends its code snapshot and keeps the rest, on every link of a
+# chain); by hand, scripts/helix_run.sh.
 from helix.paths import root as _root                            # noqa: E402
-
-# module objects must not stay in the namespace: pimm dumps it, and yapf rejects them
-del _os, _sys, _p
 
 custom_imports = dict(imports=["helix.integrations.pimm"], allow_failed_imports=False)
 
@@ -131,7 +117,7 @@ data = dict(
 
 # ---------------------------------------------------------------------------- hooks
 hooks = [
-    dict(type="HelixPathBootstrap"),    # puts the sys.path block back into pimm's dumped config
+    dict(type="HelixProvenance"),       # provenance.json; refuses a resume on another corpus
     dict(type="CheckpointLoader"),
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),

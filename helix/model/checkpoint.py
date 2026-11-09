@@ -11,7 +11,7 @@ and by helix's hooks, so nothing is exported or promoted first:
                              model/last/trainer.dcp (``trainer.global_step``)
     model/iter_N.pth,        pimm: {state_dict}
     model/model_best.pth     (best: CheckpointSaver's lowest validation loss, when it selects one)
-    provenance.json          HelixPathBootstrap: one record per link (code, corpus identity, step)
+    provenance.json          HelixProvenance: one record per link (code, corpus identity, step)
 
 ``load_run(path, weights="ema")`` takes the run directory (``weights`` picks the EMA, the last or
 the best checkpoint) or one of those weight files / the ``last`` directory, and returns a

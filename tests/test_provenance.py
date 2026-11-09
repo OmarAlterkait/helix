@@ -132,9 +132,9 @@ def test_provenance_covers_helix_and_pimm_data():
 @needs_pimm
 def test_stamp_appends_so_a_resumed_link_does_not_erase_the_first(tmp_path):
     """A run resumed from a DIFFERENT tree is the case worth catching."""
-    from helix.integrations.pimm import HelixPathBootstrap
+    from helix.integrations.pimm import HelixProvenance
 
-    h = HelixPathBootstrap()
+    h = HelixProvenance()
     logged = []
     h.trainer = types.SimpleNamespace(
         cfg=types.SimpleNamespace(save_path=str(tmp_path)),
@@ -155,9 +155,9 @@ def test_stamp_appends_so_a_resumed_link_does_not_erase_the_first(tmp_path):
 @needs_pimm
 def test_stamping_never_takes_down_a_run(tmp_path):
     """Provenance is a record, not a dependency."""
-    from helix.integrations.pimm import HelixPathBootstrap
+    from helix.integrations.pimm import HelixProvenance
 
-    h = HelixPathBootstrap()
+    h = HelixProvenance()
     seen = []
     h.trainer = types.SimpleNamespace(
         cfg=types.SimpleNamespace(save_path=str(tmp_path / "does" / "not" / "exist")),
@@ -166,6 +166,26 @@ def test_stamping_never_takes_down_a_run(tmp_path):
                                      exception=lambda *a, **k: seen.append("logged")))
     h._stamp_provenance()                          # must not raise
     assert seen == ["logged"]
+
+
+@needs_pimm
+def test_the_old_hook_name_still_builds_and_only_stamps(tmp_path):
+    """Configs dumped by runs started before the rename name ``HelixPathBootstrap`` (with its
+    old ``root=``); they must still build, and the hook must no longer touch config.py."""
+    from pimm.engines.hooks.builder import HOOKS
+
+    from helix.integrations.pimm import HelixProvenance
+
+    h = HOOKS.build(dict(type="HelixPathBootstrap", root="/old/checkout"))
+    assert isinstance(h, HelixProvenance)
+    (tmp_path / "config.py").write_text("x = 1\n")
+    h.trainer = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(save_path=str(tmp_path), data=None), global_step=0,
+        logger=types.SimpleNamespace(info=lambda *a: None, warning=lambda *a: None,
+                                     exception=lambda *a, **k: None))
+    h.before_train()
+    assert (tmp_path / "config.py").read_text() == "x = 1\n"
+    assert (tmp_path / "provenance.json").exists()
 
 
 def test_code_version_is_atomic_or_absent():

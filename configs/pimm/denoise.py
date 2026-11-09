@@ -35,8 +35,6 @@ scoring is ``python -m helix.eval <FM run> --metrics denoise --denoiser <this ru
     scripts/submit.sh denoise --run.name denoise_gauss -- model.cond_charge=True model.dist=gauss
     scripts/submit.sh denoise --run.name denoise_cat -- model.cond_charge=True model.dist=cat
 """
-# helix is importable here because the launcher exports PYTHONPATH; the sys.path block and
-# its HelixPathBootstrap hook belong to the base.
 from helix.paths import root as _root                            # noqa: E402
 
 _base_ = ["./fm.py"]
@@ -78,7 +76,7 @@ data = dict(
 
 # ---------------------------------------------------------------------------- hooks
 hooks = [
-    dict(type="HelixPathBootstrap"),
+    dict(type="HelixProvenance"),
     dict(type="CheckpointLoader"),
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),

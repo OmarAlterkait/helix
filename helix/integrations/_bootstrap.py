@@ -1,109 +1,26 @@
-"""The `sys.path` bootstrap that makes a pimm config self-sufficient.
+"""What produced a run: the checkouts this process imported, recorded beside its weights.
 
-Kept apart from :mod:`helix.integrations.pimm` on purpose: that module imports
-pimm's registries at module scope, and this text generator needs none of them.
-Splitting it means the block can be tested wherever helix's suite runs, rather
-than only in an image that also has pimm — and the thing under test here is
-exactly the piece whose failure mode is invisible until a run tries to resume.
+Pure helix and free of pimm's registries, unlike :mod:`helix.integrations.pimm`, so it is
+importable (and testable) wherever helix's suite runs; ``helix.eval`` stamps its results with
+the same record.
 
-Two packages need bootstrapping, for different reasons:
-
-``helix``      is not installed in the pimm image at all.
-``pimm_data``  IS installed, but the image ships 0.3.0, which predates the coeff
-               corpus and has no ``CoeffTPCDataset``. So this is not a missing
-               import but a STALE one, and the working checkout has to take
-               precedence over site-packages.
-
-The block exists because two of pimm's behaviours compose badly:
-
-  * `Config.dump` writes the RESOLVED config dict, so `custom_imports` (a dict)
-    survives into `<save_path>/config.py` while a `sys.path` mutation (a
-    statement) does not; and
-  * `scripts/train.sh` loads that dumped file on resume (line 226) with
-    PYTHONPATH pinned to pimm's own code snapshot (line 253), which contains
-    neither package.
-
-So the dumped config names modules it cannot import.
-:class:`~helix.integrations.pimm.HelixPathBootstrap` writes this block back into
-it.
+The module once also generated a ``sys.path`` block that a hook wrote back into pimm's dumped
+config, on the belief that pimm's ``scripts/train.sh`` PINNED ``PYTHONPATH`` to its code
+snapshot on resume. It prepends the snapshot to the environment's ``PYTHONPATH`` instead, and the
+launch recipe's ``setup:`` (``configs/launch/_common.yaml``) exports helix there, so every link
+of a chain can import helix without help.
 """
 
 from __future__ import annotations
 
-__all__ = ["BOOTSTRAP_MARK", "bootstrap_block", "has_bootstrap", "running_roots"]
-
-#: Marker identifying a block we wrote, so re-running the hook is a no-op.
-BOOTSTRAP_MARK = "# helix: sys.path bootstrap re-added by HelixPathBootstrap"
-
-#: (env var, package) pairs the block resolves, in precedence order.
-# helix only. PIMM_DATA_SRC was here when the image baked a stale pimm_data and
-# a checkout had to win over it; the image installs the pinned revision now.
-ROOTS = (("HELIX_ROOT", "helix"),)
-
-
-def bootstrap_block(helix_root, pimm_data_root=None):
-    """Source lines putting the helix checkout on ``sys.path``, honouring HELIX_ROOT.
-
-    ONLY helix. It used to insert a pimm-data checkout too, because the image
-    baked pimm_data 0.3.0 and `CoeffTPCDataset` needed a newer one -- so the
-    checkout had to WIN over site-packages, not merely be present. Both halves
-    of that are now false: the image installs pimm-data at the PINNED revision
-    and container/helix-train.def's %post fails the build if it is stale, and
-    `CoeffTPCDataset` is helix's (helix/data/dataset.py), not pimm-data's.
-    Shadowing the installed copy only meant the pin governed the image while a
-    checkout governed the run -- two authorities, differing by whatever was
-    uncommitted.
-
-    ``pimm_data_root`` is accepted and ignored, so an old caller does not break.
-
-    ``insert(1)``, which is neither of the two obvious choices and is the only
-    one that works:
-
-    * ``insert(0)`` is defeated by pimm's own loader. ``Config._file2dict`` does
-      ``sys.path.insert(0, temp_dir)`` -> ``import_module`` -> ``sys.path.pop(0)``.
-      The config executes during that import, so an ``insert(0)`` here lands
-      ABOVE the temp dir and the trailing ``pop(0)`` deletes our entry instead of
-      pimm's — silently, leaving the temp dir behind.
-    * ``append`` survives the pop but loses on precedence to anything already on
-      the path under the same name.
-
-    ``insert(1)`` sits just under pimm's temp dir, so the ``pop(0)`` removes the
-    temp dir and leaves ours at the front, ahead of site-packages.
-
-    The trailing ``del`` is required, not tidiness. ``Config._file2dict`` keeps
-    every module-level name that does not start with ``__``
-    (``pimm/utils/config.py:261-262``), so ``_os``/``_sys`` would enter the config
-    dict as MODULE OBJECTS; ``Config.dump`` then renders ``_os = <module 'os'
-    ...>`` and yapf rejects it with ``YapfError: <unknown>:1:5: invalid syntax``,
-    killing the run during setup.
-    """
-    return (
-        f"{BOOTSTRAP_MARK}\n"
-        "# `custom_imports` below needs helix importable. pimm's train.sh sets\n"
-        "# PYTHONPATH to its own code snapshot only, so helix is not reachable by\n"
-        "# environment. insert(1), not insert(0): pimm's loader pops index 0.\n"
-        "# pimm_data is NOT inserted -- the image installs it at the pinned\n"
-        "# revision and the build refuses a stale one, so there is one authority.\n"
-        "import os as _os\n"
-        "import sys as _sys\n"
-        f"_p = _os.environ.get('HELIX_ROOT') or {str(helix_root)!r}\n"
-        "if _p not in _sys.path:\n"
-        "    _sys.path.insert(1, _p)\n"
-        "del _os, _sys, _p\n"
-    )
-
-
-def has_bootstrap(src):
-    """True if ``src`` already carries a block written by the hook."""
-    return BOOTSTRAP_MARK in src
+__all__ = ["provenance", "running_roots"]
 
 
 def running_roots():
     """``(helix_root, pimm_data_root)`` of the packages in THIS process.
 
-    Taken from the running modules rather than from constants, so a resumed job
-    re-enters the same checkouts job 1 used instead of whatever a default happens
-    to point at by then.
+    Taken from the running modules rather than from constants, so the record names
+    the code that actually ran -- a link resumed from a different tree included.
     """
     import os
 
