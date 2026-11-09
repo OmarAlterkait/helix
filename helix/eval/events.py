@@ -128,7 +128,7 @@ def identity(ds):
     out = dict(basis_digest=None, truth_q_cut=None, truth_q_cut_source=None)
     r = getattr(ds, "coeff_reader", None)
     if r is not None:
-        meta = getattr(r, "_meta_by_path", {})
+        meta = getattr(r, "_sig_by_path", {})            # path -> helix.data.verify.shard_signature
         dig = sorted({_text(m.get("basis_digest")) for m in meta.values()} - {None})
         out["basis_digest"] = dig[0] if len(dig) == 1 else (dig or None)
     c = getattr(ds, "cells_reader", None)

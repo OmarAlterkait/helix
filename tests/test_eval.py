@@ -425,7 +425,7 @@ def test_identity_reads_the_digest_and_the_truth_cut(tmp_path):
             f.create_group("config").attrs["label_json"] = json.dumps(label)
         paths.append(str(p))
     meta = {"a": {"basis_digest": b"d1g"}, "b": {"basis_digest": "d1g"}}        # bytes or str, as h5py gives
-    ds = SimpleNamespace(coeff_reader=SimpleNamespace(_meta_by_path=meta),
+    ds = SimpleNamespace(coeff_reader=SimpleNamespace(_sig_by_path=meta),
                          cells_reader=SimpleNamespace(h5_files=paths[:1]))
     assert identity(ds) == dict(basis_digest="d1g", truth_q_cut=25.0,
                                 truth_q_cut_source="cells /config label_json hits_threshold")
