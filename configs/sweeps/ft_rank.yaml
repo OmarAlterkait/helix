@@ -28,8 +28,8 @@ overrides:
 arms:
   ft_cool:       {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last}}
   ft_cool_s1:    {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, seed: 1}}
-  ft_stable:     {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm}}
-  ft_stable_s1:  {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm, seed: 1}}
+  ft_stable:     {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm/model/model_ema.pth}}
+  ft_stable_s1:  {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm/model/model_ema.pth, seed: 1}}
   ft_lr44s1:     {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_s1_cool/model/last}}
   ft_lr44s1_s1:  {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_s1_cool/model/last, seed: 1}}
   ft_lr44s0:     {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_cool/model/last}}

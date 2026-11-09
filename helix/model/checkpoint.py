@@ -6,15 +6,17 @@ and by helix's hooks, so nothing is exported or promoted first:
     resolved_config.json     pimm's dump of the config the run trained with: the model section
                              (the architecture, ``build_fm``), the train split's CoeffTokenize cfg
                              (the tokenizer), the corpus (data.train)
-    model/model_ema.pth      helix.integrations.pimm.hooks.WeightEMA: {state_dict, decay, step}
     model/last/weights.pth   pimm's split checkpoint: {state_dict}; its step is in
-                             model/last/trainer.dcp (``trainer.global_step``)
-    model/iter_N.pth,        pimm: {state_dict}
-    model/model_best.pth     (best: CheckpointSaver's lowest validation loss, when it selects one)
+                             model/last/trainer.dcp (``trainer.global_step``). THE weight set:
+                             a current run writes nothing else
     provenance.json          HelixProvenance: one record per link (code, corpus identity, step)
 
-``load_run(path, weights="ema")`` takes the run directory (``weights`` picks the EMA, the last or
-the best checkpoint) or one of those weight files / the ``last`` directory, and returns a
+Older runs may also hold ``model/model_ema.pth`` (the retired WeightEMA hook: {state_dict, decay,
+step}), ``model/iter_N.pth`` and ``model/model_best.pth`` (pimm's CheckpointSaver: {state_dict});
+they stay readable.
+
+``load_run(path, weights="last")`` takes the run directory (``weights`` picks the last checkpoint,
+or an older run's EMA or best) or one of those weight files / the ``last`` directory, and returns a
 :class:`Run`: the model in eval mode with the bins it trained with (``bin_edges`` and the
 centroid tables are persistent buffers, so they ride in every weight file), the tokenizer's
 ``PatchConfig``, and the run's provenance.
@@ -38,7 +40,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-WEIGHTS = ("ema", "last", "best")
+WEIGHTS = ("last", "ema", "best")
 _WEIGHT_PATH = {"ema": "model_ema.pth", "last": "last", "best": "model_best.pth"}
 _CONFIG = "resolved_config.json"
 
@@ -114,12 +116,12 @@ def _read_config(path):
     return json.load(open(os.path.join(run_dir(path), _CONFIG)))
 
 
-def load_run(path, weights="ema", *, device=None):
+def load_run(path, weights="last", *, device=None):
     """A :class:`Run` from a run directory, or from one weight file (or ``last`` directory) of it.
 
-    ``weights``: ``"ema"`` (``model/model_ema.pth``), ``"last"`` (``model/last``) or ``"best"``
-    (``model/model_best.pth``), used when ``path`` is the run directory; a weight file names
-    itself. A missing EMA is an error, not a fallback to the raw weights.
+    ``weights``: ``"last"`` (``model/last``, the default), or an older run's ``"ema"``
+    (``model/model_ema.pth``) or ``"best"`` (``model/model_best.pth``), used when ``path`` is the run
+    directory; a weight file names itself. A missing one is an error, never a fallback to another.
     """
     import torch
 

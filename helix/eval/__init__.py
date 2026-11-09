@@ -63,7 +63,7 @@ class Context:
     fit_windows: str = "none"        # floor: also fit on the fit events' window cells: all / neg (bg, near)
 
 
-def evaluate(path, metrics=("recon", "floor", "uprobe", "labels"), *, weights="ema", max_events=None,
+def evaluate(path, metrics=("recon", "floor", "uprobe", "labels"), *, weights="last", max_events=None,
              denoiser=None, seed=0, n_boot=200, probe_seeds=2, presence_q=25.0, fit_windows="none",
              device=None, log=print):
     """Score the run at ``path`` on ``metrics``; returns the results as one JSON-able dict."""

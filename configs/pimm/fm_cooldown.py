@@ -3,12 +3,8 @@
 The stable phase (``fm.py``) commits to no step count, so it can be extended; this short run
 decays the LR as ``max(floor, 1 - sqrt(p))`` over its own steps (``WSDCooldownLR``; pimm
 injects ``total_steps``). It anneals on the first ``COOLDOWN_RUNS`` runs of the corpus, one
-epoch; cadence is ``"auto"`` as in the base.
-
-No ``WeightEMA``: it would start from a clone of the stable phase's weights, and at decay 0.9999
-(a ~10k-step time constant) a cooldown's EMA is mostly those un-annealed weights (~39% after
-9.4k steps). A cooldown's weight is ``model/last`` -- ``helix.eval --weights last``, a denoiser's
-``model.fm=<run>/model/last``; ``weights="ema"`` on it is refused (no EMA file), not substituted.
+epoch; cadence and hooks are the base's. Its weight is ``model/last`` (``helix.eval``'s
+default, a denoiser's ``model.fm=<run>``).
 """
 from helix.paths import root as _root                            # noqa: E402
 from helix.data.verify import corpus_runs as _corpus_runs     # noqa: E402
@@ -22,17 +18,6 @@ weight = str(_root("HELIX_EXP") / "fm" / "model" / "last")
 resume = False
 epoch = 1
 scheduler = dict(type="WSDCooldownLR", warmup=0, floor=1e-3)
-# fm.py's hooks without WeightEMA (a list is replaced, not merged; tests/test_pimm_config.py
-# checks the two stay the same otherwise)
-hooks = [
-    dict(type="HelixProvenance"),
-    dict(type="CheckpointLoader"),
-    dict(type="ModelHook"),
-    dict(type="IterationTimer", warmup_iter=1),
-    dict(type="InformationWriter", log_frequency=200),
-    dict(type="FiniteGuard", check_every=100, max_skips=20),
-    dict(type="CheckpointSaverIteration", save_freq="auto"),
-]
 save_path = str(_root("HELIX_EXP") / "fm_cooldown")
 
 del _root, _corpus_runs

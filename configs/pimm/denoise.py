@@ -6,7 +6,7 @@ is M6d of DENOISE at tag archive-2026-11, and it is the default:
 
 * the encoder is the FM run ``model.fm`` (default ``$HELIX_EXP/fm_cooldown``, the cooled FM): its architecture, its
   tokenizer (``CoeffTokenize(cfg="model")``, filled by FMTrainer from that run) and, with
-  ``model.pretrained=True``, its EMA weights; ``pretrained=False`` is the from-scratch baseline
+  ``model.pretrained=True``, its last weights; ``pretrained=False`` is the from-scratch baseline
   on the same architecture; ``model.freeze_encoder=True`` keeps the encoder fixed;
 * ``model.cond_charge``: False = M6d (detection, maps), True = M6dc (calorimetry: charge
   regressed on charged cells only);

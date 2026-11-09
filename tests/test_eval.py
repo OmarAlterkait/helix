@@ -54,8 +54,9 @@ def _model(seed):
 
 
 def _write_run(d, *, ema_step=5, last_step=7, prefix=""):
-    """A run directory: resolved_config.json, provenance.json, the EMA sidecar (WeightEMA._save's
-    layout), pimm's split checkpoint model/last (weights.pth + trainer.dcp) and an iter snapshot."""
+    """A run directory: resolved_config.json, provenance.json, an old run's EMA sidecar (the retired
+    WeightEMA's layout), pimm's split checkpoint model/last (weights.pth + trainer.dcp) and an iter
+    snapshot."""
     import torch.distributed.checkpoint as dcp
     d = str(d)
     os.makedirs(os.path.join(d, "model"), exist_ok=True)
@@ -84,18 +85,18 @@ def _same(a, b):
 
 
 # ---------------------------------------------------------------------------------------- loader
-def test_load_run_reads_the_ema_and_the_last_checkpoint(tmp_path):
+def test_load_run_reads_the_last_checkpoint_and_an_old_runs_ema(tmp_path):
     raw, ema = _write_run(tmp_path)
     r = load_run(tmp_path, device="cpu")
-    assert _same(r.model, ema) and not r.model.training
+    assert _same(r.model, raw) and not r.model.training
     assert not any(p.requires_grad for p in r.model.parameters())
     assert torch.isfinite(r.model.bin_edges).all()
     assert r.tokenizer == patch_config(TOK)
     p = r.provenance
-    assert (p["weights"], p["step"], p["run"], p["bins"]) == ("ema", 5, str(tmp_path), "/archive/bins.pt")
+    assert (p["weights"], p["step"], p["run"], p["bins"]) == ("last", 7, str(tmp_path), "/archive/bins.pt")
     assert p["corpus"]["identity"] == {"basis_digest": "abc"} and p["code"]["helix"]["commit"] == "c0ffee"
-    r = load_run(tmp_path, "last", device="cpu")
-    assert _same(r.model, raw) and (r.provenance["weights"], r.provenance["step"]) == ("last", 7)
+    r = load_run(tmp_path, "ema", device="cpu")                     # a run from before WeightEMA went
+    assert _same(r.model, ema) and (r.provenance["weights"], r.provenance["step"]) == ("ema", 5)
 
 
 def test_a_run_recording_retired_options_still_reads():
@@ -121,7 +122,7 @@ def test_load_run_refuses_what_it_cannot_read(tmp_path):
     _write_run(tmp_path)
     os.remove(tmp_path / "model" / "model_ema.pth")
     with pytest.raises(FileNotFoundError, match="model_ema.pth"):
-        load_run(tmp_path, device="cpu")                             # no silent fallback to raw weights
+        load_run(tmp_path, "ema", device="cpu")                      # no silent fallback to raw weights
     with pytest.raises(ValueError, match="weights="):
         load_run(tmp_path, "raw", device="cpu")
     deep = tmp_path / "a" / "b" / "c" / "d"                          # four levels below the run: not inside it
@@ -683,11 +684,11 @@ def test_the_cli_writes_one_json(synth, tmp_path, monkeypatch):
     out = tmp_path / "s.json"
     assert main([str(d), "--metrics", "recon", "--out", str(out), "--max-events", "2"]) == 0
     res = json.load(open(out))
-    assert res["n_events"] == 2 and set(res["metrics"]) == {"recon"} and res["run"]["weights"] == "ema"
+    assert res["n_events"] == 2 and set(res["metrics"]) == {"recon"} and res["run"]["weights"] == "last"
     # what was evaluated: the weights each metric read, the shards' digest, the truth's cut
     w = res["weights"]["recon"]
-    assert set(res["weights"]) == {"recon"} and (w["run"], w["weights"], w["step"]) == (str(d), "ema", 5)
-    assert w["checkpoint"].endswith("model_ema.pth") and res["probe_seeds"] == 2
+    assert set(res["weights"]) == {"recon"} and (w["run"], w["weights"], w["step"]) == (str(d), "last", 7)
+    assert w["checkpoint"].endswith(os.path.join("last", "weights.pth")) and res["probe_seeds"] == 2
     assert set(res["corpus"]) == {"basis_digest"} and set(res["truth"]) == {"q_cut", "q_cut_source"}
     assert "region" in res["metrics"]["recon"]
     with pytest.raises(ValueError, match="unknown metric"):

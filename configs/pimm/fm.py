@@ -122,7 +122,6 @@ hooks = [
     dict(type="IterationTimer", warmup_iter=1),
     dict(type="InformationWriter", log_frequency=200),
     dict(type="FiniteGuard", check_every=100, max_skips=20),
-    dict(type="WeightEMA", decay=0.9999, save_freq="auto"),
     dict(type="CheckpointSaverIteration", save_freq="auto"),   # model/last only, no iter_N.pth
 ]
 train = dict(type="FMTrainer")

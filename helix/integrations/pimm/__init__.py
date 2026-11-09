@@ -29,7 +29,7 @@ model do not.
 
 The ``Coeff-FM`` and ``Coeff-Denoise`` MODELS entries are defined here. Submodules: ``data``
 (dataset + terminal transform), ``trainer`` (``FMTrainer`` + the schedules),
-``hooks`` (what a run WRITES: provenance, weight EMA, finite
+``hooks`` (what a run WRITES: provenance, the finite
 guard). Importing this package registers all of them, because ``custom_imports`` names this
 path and nothing else.
 
@@ -39,7 +39,7 @@ is scored afterwards (``python -m helix.eval``, and a fine-tune) from its ``mode
 
 from helix.data.denoise import DenoiseRows
 from helix.integrations.pimm.data import CoeffCollect, CoeffTPCDataset
-from helix.integrations.pimm.hooks import HelixPathBootstrap, HelixProvenance, WeightEMA
+from helix.integrations.pimm.hooks import FiniteGuard, HelixPathBootstrap, HelixProvenance
 from helix.integrations.pimm.trainer import (FMTrainer, WarmupCosineLR,
                                              WSDCooldownLR, WSDStableLR)
 from helix.model.tokenize import CoeffTokenize
@@ -48,7 +48,7 @@ from pimm.models.builder import MODELS
 __all__ = ["CoeffTokenize", "DenoiseRows", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
            "CoeffDenoise", "build_coeff_fm",
            "FMTrainer", "WarmupCosineLR",
-           "WSDStableLR", "WSDCooldownLR", "WeightEMA", "HelixProvenance", "HelixPathBootstrap"]
+           "WSDStableLR", "WSDCooldownLR", "FiniteGuard", "HelixProvenance", "HelixPathBootstrap"]
 
 
 @MODELS.register_module("Coeff-FM")

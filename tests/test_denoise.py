@@ -34,8 +34,8 @@ CFG = patch_config(TOK)
 @pytest.fixture(scope="module")
 def fm_run(tmp_path_factory):
     d = tmp_path_factory.mktemp("fm")
-    _, ema = _write_run(d)
-    return d, ema
+    last, _ = _write_run(d)
+    return d, last
 
 
 @pytest.fixture(scope="module")
@@ -122,13 +122,13 @@ def test_the_transform_needs_tokens_and_cells(sample):
 
 # ---------------------------------------------------------------------------------------- model
 def test_the_model_is_the_fm_runs_encoder(fm_run):
-    d, ema = fm_run
+    d, last = fm_run
     m = build_denoise(str(d), compile_blocks=False)
     assert m.tokenizer == CFG and m.fm.d == SMALL["d"]
     enc = {k: v for k, v in m.fm.state_dict().items()}
-    assert all(torch.equal(enc[k].float(), v.float()) for k, v in ema.state_dict().items())   # its EMA
+    assert all(torch.equal(enc[k].float(), v.float()) for k, v in last.state_dict().items())  # its last
     s = build_denoise(str(d), pretrained=False, compile_blocks=False)
-    assert not _same(s.fm, ema) and s.tokenizer == CFG
+    assert not _same(s.fm, last) and s.tokenizer == CFG
     assert not torch.isfinite(s.fm.bin_edges).any()                 # from scratch: nothing of the run
 
 
@@ -197,15 +197,15 @@ def test_cell_decoder_survives_cells_with_no_tokens_and_is_unbounded():
 
 
 def test_build_denoise_loads_a_pretrained_fm_into_the_amplitude_channel(fm_run, sample):
-    d, ema = fm_run
+    d, last = fm_run
     m = build_denoise(str(d), lin_amp_scale=30.0, compile_blocks=False).eval()
     n = SMALL["n_slot"]
-    w, w0 = m.fm.embed.weight, ema.embed.weight
+    w, w0 = m.fm.embed.weight, last.embed.weight
     assert w.shape == (w0.shape[0], 3 * n) and m.fm.lin_amp_scale == 30.0
     assert torch.equal(w[:, :2 * n], w0.float()) and (w[:, 2 * n:] == 0).all()
     B = _batch(_rows(sample, seed=0))
     with torch.no_grad():
-        torch.testing.assert_close(m.fm.encode(B), ema.eval().encode(B), atol=1e-5, rtol=0)   # starts as the FM
+        torch.testing.assert_close(m.fm.encode(B), last.eval().encode(B), atol=1e-5, rtol=0)   # starts as the FM
 
 
 # ----------------------------------------------------------------------------- distributional heads
@@ -389,7 +389,7 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
     r = load_run(tmp_path, "last", device="cpu")
     assert _same(r.model, m) and r.tokenizer == CFG and r.provenance["weights"] == "last"
     with pytest.raises(FileNotFoundError, match="model_ema"):
-        load_run(tmp_path, device="cpu")                           # a denoiser has no EMA
+        load_run(tmp_path, "ema", device="cpu")                    # a denoiser has no EMA
     predict, cfg = load_denoiser(str(tmp_path), "cpu")
     assert cfg == CFG
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))

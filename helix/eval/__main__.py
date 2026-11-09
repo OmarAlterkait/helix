@@ -98,7 +98,7 @@ def main(argv=None):
     ap.add_argument("run", help="a pimm run directory (save_path), or one checkpoint inside it")
     ap.add_argument("--metrics", default="recon,floor,uprobe,labels", help=f"comma-separated, of {','.join(METRICS)}")
     ap.add_argument("--out", required=True, help="results JSON (written whole)")
-    ap.add_argument("--weights", default="ema", choices=("ema", "last"), help="for a run directory")
+    ap.add_argument("--weights", default="last", choices=("last", "ema"), help="for a run directory")
     ap.add_argument("--max-events", type=int, default=None, help="only the first N events of the split")
     ap.add_argument("--denoiser", default=None, help="a denoiser run (configs/pimm/denoise.py; its last checkpoint) or one "
                     "checkpoint of it, for --metrics denoise")

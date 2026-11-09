@@ -466,19 +466,12 @@ def test_configs_leave_no_module_objects_in_the_namespace():
                     + "; ".join(missing))
 
 
-def test_the_cooldown_has_the_base_hooks_without_the_ema():
-    """fm_cooldown.py restates fm.py's hook list (a list is replaced, not merged) minus WeightEMA:
-    a cooldown's EMA would be mostly the un-annealed stable weights. Read from the sources, so
-    the two cannot drift apart unnoticed."""
-    import ast
-    from pathlib import Path
-
-    def hooks(name):
-        src = (Path(__file__).resolve().parent.parent / "configs" / "pimm" / name).read_text()
-        node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
-                    and any(getattr(t, "id", None) == "hooks" for t in n.targets))
-        return [{kw.arg: ast.literal_eval(kw.value) for kw in h.keywords} for h in node.value.elts]
-
-    base, cool = hooks("fm.py"), hooks("fm_cooldown.py")
-    assert any(h["type"] == "WeightEMA" for h in base)
-    assert cool == [h for h in base if h["type"] != "WeightEMA"]
+def test_the_fm_variants_inherit_the_base_hooks():
+    """fm_cooldown.py and fm_smoke.py take fm.py's hook list rather than restating it (a list is
+    replaced, not merged, so a restated copy drifts). The cooldown used to restate it to drop
+    WeightEMA; with no EMA anywhere there is nothing to drop."""
+    for name in ("fm_cooldown.py", "fm_smoke.py"):
+        src = (pathlib.Path(CONFIG).parent / name).read_text()
+        assert "hooks" not in _config_names(pathlib.Path(CONFIG).parent / name), name
+        assert "WeightEMA" not in src
+    assert "WeightEMA" not in pathlib.Path(CONFIG).read_text()
