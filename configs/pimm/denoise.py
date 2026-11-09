@@ -11,7 +11,7 @@ is M6d of DENOISE at tag archive-2026-11, and it is the default:
 * ``model.cond_charge``: False = M6d (detection, maps), True = M6dc (calorimetry: charge
   regressed on charged cells only);
 * ``model.lin_amp_scale``: 0 = the FM's input alone (asinh per slot); S > 0 (M10lin: 30) adds
-  the linear amplitude sinh(inp) / S as input columns, zero at the start (docs/DECISIONS.md:
+  the linear amplitude sinh(inp) / S as input columns, zero at the start (docs/STATUS.md:
   0 until a d1m run confirms r1's gain);
 * ``model.dist``: the charge head -- ``"point"`` (squared error, the default), ``"gauss"`` (a
   learned per-cell width, Gaussian likelihood) or ``"cat"`` (one categorical over no-charge +
@@ -30,8 +30,8 @@ is M6d of DENOISE at tag archive-2026-11, and it is the default:
 Label efficiency: ``data.train.n_events=N`` trains on a fixed, nested random subset of the train
 split (``data.train.subset_seed``); raise ``epoch`` with it, since the length is in epochs. The
 evaluation protocol (1,024 events, 16 epochs, 4 ranks) is ``ft_eval.py`` on this base. Scoring is
-``python -m helix.eval <this run> --out e.json`` (its ``model/last``; ``--weights best`` for the
-checkpoint of the lowest validation loss).
+``python -m helix.eval <this run> --out e.json`` (its ``model/last``; ``--weights best`` reads an
+older run's ``model_best.pth``).
 
     scripts/submit.sh denoise --resources.nnodes 4 [-- key=value ...]
     scripts/submit.sh denoise --run.name denoise_m6dc -- model.cond_charge=True

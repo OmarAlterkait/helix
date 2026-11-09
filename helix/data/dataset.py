@@ -11,7 +11,7 @@ slice per event; ``plane_gid`` is a column. This is pimm-data's own offset idiom
 (cf. the optical second row-space) applied shard-wide.
 
 One shard family per modality (``{name}_coeff_*.h5``, ``{name}_cells_*.h5``), joined by
-identity. The on-disk layout is the shared contract of ``docs/ARCHITECTURE.md`` §6 (Coefficient shards); this reader
+identity. The on-disk layout is the shared contract of ``docs/ARCHITECTURE.md`` §5 (Shard formats); this reader
 implements it with **standalone h5py** (no helix import at read time — no cycle),
 and is round-trip golden-tested against helix's reference codec.
 

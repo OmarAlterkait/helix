@@ -110,7 +110,7 @@ def test_example_config_declares_the_custom_import():
         # the configs resolve the corpus's run list at module scope
         pytest.skip(f"config needs a root this site does not configure: {exc}")
     assert "helix.integrations.pimm" in cfg.custom_imports["imports"]
-    # one rank's batch: scripts/submit.sh appends batch_size=<nodes x GPUs> (docs/ARCHITECTURE.md §8)
+    # one rank's batch: scripts/submit.sh appends batch_size=<nodes x GPUs> (docs/ARCHITECTURE.md §7)
     assert cfg.batch_size == 1
     assert cfg.model["type"] == "Coeff-FM"
     assert cfg.data["train"]["type"] == "CoeffTPCDataset"
@@ -198,7 +198,7 @@ def test_derived_fields_really_are_derived():
 
 def test_configs_are_world_size_free():
     """The FM needs batch_size_per_gpu == 1: it has no event separation, so a rank holding two
-    events would attend across them (docs/ARCHITECTURE.md §8). pimm's ``batch_size`` is GLOBAL;
+    events would attend across them (docs/ARCHITECTURE.md §7). pimm's ``batch_size`` is GLOBAL;
     the configs hold one rank's value (1) and read no world size at load -- scripts/submit.sh
     appends the launch's batch, and FMTrainer scales the LR -- so a config means the same thing
     on the submitting host as on the job."""

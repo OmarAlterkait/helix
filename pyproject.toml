@@ -24,8 +24,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# torch is optional at install: the DSP (helix.core.wavelet, the TPC chain, the optical codec)
-# and the model import it when they run, never at `import helix`. CPU wheels:
+# torch is optional at install: `import helix` needs none (tests/test_boundary.py), but the
+# DSP (helix.core.robust, the TPC chain, the optical codec) and the model import it. CPU wheels:
 # pip install --index-url https://download.pytorch.org/whl/cpu
 torch = ["torch>=2.0"]
 
@@ -46,7 +46,7 @@ probe = ["hdf5plugin>=4.0", "torch>=2.0"]
 # NOTE this covers the DATA layer only. helix/integrations/pimm/* also imports
 # the `pimm` training framework itself, which is not declared here because it is
 # not on PyPI either; installing this extra does NOT give you a working training
-# integration. Use the container (docs/ARCHITECTURE.md section 10).
+# integration. Use the container (docs/ARCHITECTURE.md section 11).
 pimm = ["pimm-data>=0.4.0"]
 
 dev = ["pytest>=7.0"]

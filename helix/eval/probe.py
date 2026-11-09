@@ -1,6 +1,6 @@
 """The along-wire probe (``uprobe``): an MLP fitted in memory on FROZEN encoder features.
 
-The one frozen-feature key kept (docs/DECISIONS.md, 2026-11-09): it measures 3D information --
+The one frozen-feature key kept (docs/STATUS.md): it measures 3D information --
 the coordinate a single wire plane cannot fix -- not detection, and it is the only frozen key
 that has ordered pretraining arms. It stays beside the fine-tune (:mod:`helix.eval.denoise`)
 until that key is shown to rank arms the same way.

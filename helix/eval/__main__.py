@@ -108,7 +108,7 @@ def main(argv=None):
     ap.add_argument("--uprobe", action="store_true", help="score the frozen along-wire probe of an FM run instead")
     ap.add_argument("--out", required=True, help="results JSON (written whole)")
     ap.add_argument("--weights", default=None, choices=("ema", "last", "best"),
-                    help="for a run directory (default: last for a denoiser, ema for --uprobe)")
+                    help="for a run directory (default: last; ema and best read runs from before 2026-11-09)")
     ap.add_argument("--corpus", default=None, help="the run's corpus at this site, where its recorded path is "
                     "absent and this site's corpus root does not hold it")
     ap.add_argument("--fm", default=None, help="the denoiser's FM run at this site, where its recorded model.fm "

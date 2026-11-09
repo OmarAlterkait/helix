@@ -1,6 +1,6 @@
 """pimm config: the evaluation protocol -- a fixed-budget fine-tune of a pretrained FM.
 
-The primary evaluation of a pretrained encoder (docs/DECISIONS.md, 2026-11-09): the denoiser
+The primary evaluation of a pretrained encoder (docs/STATUS.md): the denoiser
 (``denoise.py``) trained on a fixed 1,024-event labelled subset (``subset_seed=0``, the same
 events for every encoder) for 16 epochs, then scored on the probe split by
 

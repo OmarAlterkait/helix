@@ -67,7 +67,7 @@ class FMTrainer(Trainer):
 
         It is easy to hit by accident, because the correct global value tracks
         the GPU count: ``batch_size = 4`` is right on 4 ranks and wrong on 1.
-        See docs/ARCHITECTURE.md §8.
+        See docs/ARCHITECTURE.md §7.
         """
         check_world(self.cfg, comm.get_world_size())
         # Before the loader is built (the only one: evaluate=False builds no val/test loader).

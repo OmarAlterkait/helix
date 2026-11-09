@@ -1,7 +1,7 @@
 """Masked reconstruction: the training objective and its grid-free read-backs, on held-out events.
 
-The metric code of :class:`helix.integrations.pimm.eval.CoeffFMEvaluator` (the validation pass
-inside a training run, sums all-reduced across ranks), kept apart from it so it needs no pimm.
+The metric code of the retired in-training evaluator (``CoeffFMEvaluator``, removed 2026-11-09:
+there is no in-training evaluation); every evaluation forward still uses :func:`autocast`.
 Batch ``i`` is masked with a seeded generator (:func:`mask_for`), so an event is masked the same
 way at every evaluation. Also :func:`autocast`, which every evaluation forward uses.
 

@@ -129,7 +129,7 @@ def corpus_runs(corpus_root=None) -> list[str]:
     if not os.path.isfile(manifest):
         raise FileNotFoundError(
             f"no run manifest at {manifest}. _calib/RUNS.txt is written by "
-            f"`scripts/corpus.sh plan` (docs/RUNBOOK.md §3); a corpus "
+            f"`scripts/corpus.sh plan` (docs/RUNBOOK.md §2); a corpus "
             f"without it is incomplete, not merely undocumented.")
     with open(manifest, "r", encoding="utf-8") as fh:
         runs = fh.read().split()

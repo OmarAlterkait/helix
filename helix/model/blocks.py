@@ -46,7 +46,7 @@ def rope_tables(ang_t, ang_w, dtype=None):
 
     Built once per token layout rather than inside every block. ``ang_w=None``
     leaves the wire half unrotated (cos 1, sin 0) rather than reallocating it to
-    time -- a known defect (REVIEW_FIELD §1.3 at git tag archive-2026-11; TODO.md), kept because changing it
+    time -- a known defect (REVIEW_FIELD §1.3 at git tag archive-2026-11; docs/STATUS.md), kept because changing it
     changes the model."""
     if ang_w is None:
         c = torch.cat([torch.cos(ang_t), torch.ones_like(ang_t)], -1)

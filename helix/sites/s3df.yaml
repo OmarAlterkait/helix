@@ -44,7 +44,7 @@ scheduler:
   train:
     # `neutrino:default@ampere` carries ONLY the preemptable QOS, and preemption
     # at S3DF CANCELS rather than requeues, so a job longer than the preemption
-    # window cannot finish on it. See TODO.md.
+    # window cannot finish on it.
     account: mli:cider-ml
     partition: ampere
     qos: normal
@@ -62,7 +62,7 @@ scheduler:
     # A DIFFERENT account: authorisation is per partition, and mli:cider-ml does
     # not cover turing while mli:default does. The DSP is architecture-sensitive
     # (turing and A100 disagree on 0.016% of surviving coefficients), so the
-    # corpus is built on turing only -- see docs/DECISIONS.md.
+    # corpus is built on turing only -- see docs/STATUS.md.
     account: mli:default
     partition: turing
     qos: preemptable

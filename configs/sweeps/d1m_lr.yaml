@@ -1,5 +1,5 @@
-# The recipe's learning rate on d1m, before any long run (TODO: "Confirm the LR at production
-# length"). fm.py's 4.4e-3 * sqrt(GPUs / 16) was tuned on r1 at 29.2k steps; the optimum falls
+# The recipe's learning rate on d1m, before any long run (docs/STATUS.md: the LR at production
+# length). fm.py's 4.4e-3 * sqrt(GPUs / 16) was tuned on r1 at 29.2k steps; the optimum falls
 # with run length, so three peak LRs at 16 GPUs -- 4.4e-3 (the recipe), 3.1e-3, 2.2e-3 (the B = 4
 # equivalents 2.2e-3, 1.55e-3, 1.1e-3) -- for 3 epochs of j000000 (~36k steps), each cooled, plus a
 # second seed of the recipe's LR: the noise floor every difference is read against (r1 d768:
@@ -9,9 +9,9 @@
 #
 #   python scripts/sweep.py configs/sweeps/d1m_lr.yaml --dry-run
 #
-# Cooldown length (TODO C6): on a one-run corpus fm_cooldown's COOLDOWN_RUNS is a whole epoch of
+# Cooldown length (docs/STATUS.md): on a one-run corpus fm_cooldown's COOLDOWN_RUNS is a whole epoch of
 # j000000 (a third of the stable phase); max_len caps it at 57,600 events = 3.6k steps at 16 GPUs,
-# 10% of the stable phase. A file-order prefix, as C6 warns, but the same one for every arm.
+# 10% of the stable phase. A file-order prefix, as STATUS warns, but the same one for every arm.
 config: fm
 submit: [--resources.nnodes, "4"]
 arms:
