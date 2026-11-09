@@ -6,15 +6,17 @@ and by helix's hooks, so nothing is exported or promoted first:
     resolved_config.json     pimm's dump of the config the run trained with: the model section
                              (the architecture, ``build_fm``), the train split's CoeffTokenize cfg
                              (the tokenizer), the corpus (data.train)
-    model/model_ema.pth      helix.integrations.pimm.hooks.WeightEMA: {state_dict, decay, step}
     model/last/weights.pth   pimm's split checkpoint: {state_dict}; its step is in
-                             model/last/trainer.dcp (``trainer.global_step``)
-    model/iter_N.pth,        pimm: {state_dict}
-    model/model_best.pth     (best: CheckpointSaver's lowest validation loss, when it selects one)
-    provenance.json          HelixPathBootstrap: one record per link (code, corpus identity, step)
+                             model/last/trainer.dcp (``trainer.global_step``). THE weight set:
+                             a current run writes nothing else
+    provenance.json          HelixProvenance: one record per link (code, corpus identity, step)
 
-``load_run(path, weights="ema")`` takes the run directory (``weights`` picks the EMA, the last or
-the best checkpoint) or one of those weight files / the ``last`` directory, and returns a
+Older runs may also hold ``model/model_ema.pth`` (the retired WeightEMA hook: {state_dict, decay,
+step}), ``model/iter_N.pth`` and ``model/model_best.pth`` (pimm's CheckpointSaver: {state_dict});
+they stay readable.
+
+``load_run(path, weights="last")`` takes the run directory (``weights`` picks the last checkpoint,
+or an older run's EMA or best) or one of those weight files / the ``last`` directory, and returns a
 :class:`Run`: the model in eval mode with the bins it trained with (``bin_edges`` and the
 centroid tables are persistent buffers, so they ride in every weight file), the tokenizer's
 ``PatchConfig``, and the run's provenance.
@@ -24,9 +26,9 @@ and a denoiser (``Coeff-Denoise``, ``configs/pimm/denoise.py``), whose model nam
 is built on. A denoiser's architecture and tokenizer are that run's, so reading a denoiser reads
 the FM run's ``resolved_config.json`` too (its weights are the denoiser's own).
 
-Starting a TRAINING run from a checkpoint is not this module's job: pimm's ``weight=`` does it
-(``configs/pimm/fm_cooldown.py``); a denoiser's model initialises its encoder from its FM run
-through this loader (:func:`helix.model.denoise.build_denoise`).
+A TRAINING run warm-starts through this loader: the ``Coeff-FM`` model key ``init``
+(``configs/pimm/fm_cooldown.py``) and a denoiser's encoder from its FM run
+(:func:`helix.model.denoise.build_denoise`) both read another run's ``last`` with it.
 
 No pimm import: pimm is needed to write a run, not to read one.
 """
@@ -38,7 +40,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-WEIGHTS = ("ema", "last", "best")
+WEIGHTS = ("last", "ema", "best")
 _WEIGHT_PATH = {"ema": "model_ema.pth", "last": "last", "best": "model_best.pth"}
 _CONFIG = "resolved_config.json"
 
@@ -73,11 +75,13 @@ RETIRED_TRAIN_OPTS = ("dec_frac", "n_masks")
 
 def model_config(config):
     """``build_fm`` kwargs from a resolved config: the model section without the registry
-    selector and the bins table (the bins ride in the weights), and without compilation (how the
-    run executed, not what it learned). A run may record a training option since removed
-    (:data:`RETIRED_TRAIN_OPTS`); it never changed the model outside training, so it is dropped."""
+    selector, the bins table (the bins ride in the weights) and the warm start ``init`` (where
+    training STARTED; reloading it would read a second run, whose weights are overwritten
+    anyway), and without compilation (how the run executed, not what it learned). A run may
+    record a training option since removed (:data:`RETIRED_TRAIN_OPTS`); it never changed the
+    model outside training, so it is dropped."""
     arch = {k: v for k, v in dict(config["model"]).items()
-            if k not in ("type", "bins") + RETIRED_TRAIN_OPTS}
+            if k not in ("type", "bins", "init") + RETIRED_TRAIN_OPTS}
     arch["compile_blocks"] = False
     for k, v in arch.items():
         if isinstance(v, list):                      # JSON has no tuple
@@ -114,14 +118,14 @@ def _read_config(path):
     return json.load(open(os.path.join(run_dir(path), _CONFIG)))
 
 
-def load_run(path, weights="ema", *, device=None, fm=None):
+def load_run(path, weights="last", *, device=None, fm=None):
     """A :class:`Run` from a run directory, or from one weight file (or ``last`` directory) of it.
 
-    ``weights``: ``"ema"`` (``model/model_ema.pth``), ``"last"`` (``model/last``) or ``"best"``
-    (``model/model_best.pth``), used when ``path`` is the run directory; a weight file names
-    itself. A missing EMA is an error, not a fallback to the raw weights. ``fm``: for a denoiser,
-    where its FM run is at this site when the recorded ``model.fm`` (an absolute path) has moved
-    -- its architecture and tokenizer are read from there.
+    ``weights``: ``"last"`` (``model/last``, the default), or an older run's ``"ema"``
+    (``model/model_ema.pth``) or ``"best"`` (``model/model_best.pth``), used when ``path`` is the run
+    directory; a weight file names itself. A missing one is an error, never a fallback to another.
+    ``fm``: for a denoiser, where its FM run is at this site when the recorded ``model.fm`` (an
+    absolute path) has moved -- its architecture and tokenizer are read from there.
     """
     import torch
 

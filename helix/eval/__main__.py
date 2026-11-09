@@ -124,7 +124,7 @@ def main(argv=None):
     if a.uprobe:
         if a.fm:
             raise SystemExit("--fm relocates a denoiser's FM run; --uprobe reads the FM run itself")
-        res = E.evaluate_uprobe(a.run, weights=a.weights or "ema", probe_seeds=a.probe_seeds, **common)
+        res = E.evaluate_uprobe(a.run, weights=a.weights or "last", probe_seeds=a.probe_seeds, **common)
     else:
         res = E.evaluate(a.run, weights=a.weights or "last", fm=a.fm, presence_q=a.presence_q, **common)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)

@@ -99,9 +99,9 @@ interpretation freely; change compression only with a measured reason.
 **Reading a run has ONE owner (`helix.model.checkpoint.load_run`).** Downstream
 code takes pimm's run directory (`save_path`) or one checkpoint in it, never an
 exported copy: `resolved_config.json` gives the architecture, the train split's
-`CoeffTokenize` cfg and the corpus; `model/model_ema.pth` (WeightEMA) or
-`model/last` the weights, with the bins as persistent buffers; `provenance.json`
-the code and corpus identity. Starting a training run from a checkpoint is pimm's
+`CoeffTokenize` cfg and the corpus; `model/last` the weights (an old run's
+`model_ema.pth` by name), with the bins as persistent buffers; `provenance.json`
+the code and corpus identity. A warm start is the model key `init=<run>`, not pimm's
 `weight=`. Evaluation is `python -m helix.eval RUN --metrics ... --out FILE`
 (`helix/eval/`); truth is the `cells` modality (`scripts/build_truth.py`).
 
@@ -138,8 +138,8 @@ planes are contiguous). For a second modality those four roles separate; see
 - **The global batch IS the rank count.** The FM takes one event per rank (no
   event separation — `docs/ARCHITECTURE.md` §8; the design for it is MULTI_EVENT_BATCHING at the
   archive tag), and `FMTrainer`
-  raises unless `batch_size // world_size == 1`. It is derived from `WORLD_SIZE`, never written
-  down; a literal is right at exactly one GPU count.
+  raises unless `batch_size // world_size == 1`. Configs hold one rank's batch (1);
+  `scripts/submit.sh` appends `batch_size=<nodes x GPUs>`. Never write the global batch into a config.
 - **GPFS does not support the locks HDF5 and uv take.** Every real-shard read at
   NERSC fails `OSError: [Errno 524] unable to lock file` without
   `HDF5_USE_FILE_LOCKING=FALSE`, which the site profile's `env:` sets. `uv` hits

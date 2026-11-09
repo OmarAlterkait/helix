@@ -371,8 +371,8 @@ def test_no_training_module_names_the_clean_modality():
 
 
 def _default_of(path, cls, arg):
-    """A constructor default read from source -- the pimm adapter imports pimm,
-    which the CI image does not carry, so it is parsed, not imported."""
+    """A constructor default read from source (parsed, not imported: some of these modules
+    import pimm, which the CI image does not carry)."""
     import ast
     tree = ast.parse(path.read_text())
     fn = next(n for c in ast.walk(tree) if isinstance(c, ast.ClassDef) and c.name == cls
@@ -387,8 +387,9 @@ def test_defaults_load_no_clean_data():
     from helix.model.tokenize import CoeffTokenize, assemble
     assert "clean_part" not in inspect.signature(CoeffTokenize.__init__).parameters
     assert "value_clean" not in inspect.signature(assemble).parameters
-    wrapper = ROOT / "helix" / "integrations" / "pimm" / "data.py"
-    assert _default_of(wrapper, "CoeffTPCDataset", "modalities") == ("coeff",)
+    # the pimm wrapper passes its kwargs through, so the default that governs a config is the reader's
+    reader = ROOT / "helix" / "data" / "dataset.py"
+    assert _default_of(reader, "CoeffTPCDataset", "modalities") == ("coeff",)
 
 
 def test_target_is_the_noisy_input():

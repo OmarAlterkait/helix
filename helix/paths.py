@@ -304,41 +304,6 @@ def container(key: str | None = None) -> Any:
     return spec[key]
 
 
-def world_size(default: int = 4) -> int:
-    """The number of ranks this process is part of: ``WORLD_SIZE`` (torchrun), else
-    ``SLURM_NTASKS`` inside a job step (one task per GPU).
-
-    An environment fact, which is why it lives here rather than in a config.
-
-    It is load-bearing for the coefficient FM specifically: the model takes
-    exactly ONE event per rank (it has no event separation, so two events in a
-    forward would attend across each other -- docs/ARCHITECTURE.md §8), so the
-    global batch is *defined* as the rank count and
-    ``helix.integrations.pimm.trainer`` raises when they disagree.
-
-    Hardcoding it made every config correct at exactly one GPU count: ``4`` was
-    right on four ranks and fatal on one and on sixteen, and changing the count
-    meant editing three files. A batch-size/learning-rate scaling study is a
-    sweep over rank counts, so that hardcoding is the thing that makes the study
-    an editing exercise.
-
-    Both are set before the config is read, so inside a job this is the true
-    count. The ``default`` applies only outside one (a config loaded by hand).
-    Getting it wrong there is safe: the trainer's guard fires with a named cause
-    rather than training something subtly different.
-    """
-    raw = os.environ.get("WORLD_SIZE") or (os.environ.get("SLURM_NTASKS") if "SLURM_STEP_ID" in os.environ else None)
-    if not raw:
-        return default
-    try:
-        n = int(raw)
-    except ValueError:
-        raise SiteError(f"WORLD_SIZE={raw!r} is not an integer") from None
-    if n < 1:
-        raise SiteError(f"WORLD_SIZE={n} is not a positive rank count")
-    return n
-
-
 def site_env() -> dict[str, str]:
     """Environment variables this site needs set, from its ``env:`` block.
 

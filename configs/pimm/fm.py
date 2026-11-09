@@ -7,7 +7,7 @@ A run is four choices, and only these differ between configs:
 * the phase: stable (this file), cooldown from a checkpoint (``fm_cooldown.py``);
 * the length: ``epoch``.
 
-Nothing here is a step count. Warmup, eval and checkpoint cadence are ``"auto"``: FMTrainer
+Nothing here is a step count. Warmup and checkpoint cadence are ``"auto"``: FMTrainer
 derives them from the run's own step count (pimm's ``iters_per_epoch * epoch``, i.e. the
 split, the corpus and the GPU count) through :mod:`helix.model.schedule`. Anything else is a
 ``key=value`` override after ``--``, e.g. ``scripts/submit.sh fm -- model.plane_frac=0.25``.
@@ -15,24 +15,10 @@ split, the corpus and the GPU count) through :mod:`helix.model.schedule`. Anythi
     scripts/submit.sh fm --resources.nnodes 4 [pimm submit flags] [-- key=value ...]
 """
 
-# helix onto sys.path before custom_imports is read (pimm executes this file first). From
-# HELIX_ROOT, not __file__: pimm executes a temp copy. insert(1): pimm's loader does
-# insert(0, temp) -> import -> pop(0), which would remove an insert(0); an append would lose
-# to site-packages.
-import os as _os
-import sys as _sys
-
-_p = _os.environ.get("HELIX_ROOT")
-if not _p or not _os.path.isdir(_p):
-    raise SystemExit(
-        f"HELIX_ROOT is {'not set' if not _p else f'not a directory: {_p}'}.\n"
-        f"  Set it to your helix checkout (scripts/submit.sh exports it).")
-if _p not in _sys.path:
-    _sys.path.insert(1, _p)
+# helix is importable because the launcher puts it on PYTHONPATH (configs/launch/_common.yaml's
+# setup:; pimm's train.sh prepends its code snapshot and keeps the rest, on every link of a
+# chain); by hand, scripts/helix_run.sh.
 from helix.paths import root as _root                            # noqa: E402
-
-# module objects must not stay in the namespace: pimm dumps it, and yapf rejects them
-del _os, _sys, _p
 
 custom_imports = dict(imports=["helix.integrations.pimm"], allow_failed_imports=False)
 
@@ -47,19 +33,21 @@ BINS = str(_reference_table())          # helix/data/data/reference_bins.json na
 # ---------------------------------------------------------------------------- run
 weight = None
 resume = False
-evaluate = True
+evaluate = False                        # scored afterwards (helix.eval, a fine-tune), not by val loss
 test_only = False
 seed = 0
 save_path = str(_root("HELIX_EXP") / "fm")
 
-from helix.paths import world_size as _world_size               # noqa: E402
 from helix.paths import scheduler as _scheduler                 # noqa: E402
 
-_WORLD = _world_size()
-batch_size = _WORLD                     # one event per rank: the FM has no event separation
-batch_size_val = _WORLD
-batch_size_test = _WORLD
-num_worker = int(_scheduler("train", "workers_per_gpu") or 4) * _WORLD
+# pimm's batch and workers are GLOBAL; one rank's values here. The FM takes one event per rank
+# (no event separation; FMTrainer refuses anything else), so the batch IS the world size, and
+# scripts/submit.sh appends batch_size / batch_size_val / batch_size_test / num_worker for the
+# launch's nodes x GPUs. Nothing here reads the world size.
+batch_size = 1
+batch_size_val = 1
+batch_size_test = 1
+num_worker = int(_scheduler("train", "workers_per_gpu") or 4)
 
 epoch = 3
 eval_epoch = 1
@@ -103,9 +91,10 @@ model = dict(
 )
 # The peak LR scales as sqrt(batch): 4.4e-3 at 16 events per step, the batch the recipe was
 # measured at (2.2e-3 was the measured optimum at 4 events: SCIENCE sections 5, 9, at git tag
-# archive-2026-11). muP transfers it across width only.
-optimizer = dict(type="AdamW", lr=4.4e-3 * (_WORLD / 16) ** 0.5, weight_decay=0.05, betas=(0.9, 0.95),
-                 fused=True)
+# archive-2026-11). muP transfers it across width only. ``optimizer.lr`` is the LR AT
+# ``lr_ref_world`` ranks; FMTrainer applies lr * sqrt(world / lr_ref_world) at build.
+optimizer = dict(type="AdamW", lr=4.4e-3, weight_decay=0.05, betas=(0.9, 0.95), fused=True)
+lr_ref_world = 16
 scheduler = dict(type="WSDStableLR", warmup="auto")
 
 # ---------------------------------------------------------------------------- data
@@ -116,31 +105,29 @@ transform = [
 # The split hashes each event's identity, so it does not depend on the corpus's build,
 # shard layout or run list.
 HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
-_common = dict(type="CoeffTPCDataset", data_root=CORPUS, split=RUNS, dataset_name="sim_wire",
-               modalities=("coeff",), transform=transform, holdout=HOLDOUT)
 # The size cap is a guard against an outlier event, not a filter: d1m's largest event (1,066,152
 # coefficients, 48k tokens) peaks at 13.9 GB in one d768 training step (4.7-6.7 GB with act_ckpt),
 # within a 40 GB A100, where 600k -- from the padded-attention era -- dropped 18.9% of d1m's events,
 # the busiest (2026-11-07). Training is A100-only (varlen attention needs sm80+), so no smaller GPU
-# trains from this file.
+# trains from this file. Training data only: there is no in-training evaluation (evaluate=False),
+# so pimm builds no val/test loader.
 data = dict(
-    train=dict(**_common, split_role="train", max_event_size=1_200_000),
-    val=dict(**_common, split_role="val"),
-    test=dict(**_common, split_role="val"),
+    train=dict(type="CoeffTPCDataset", data_root=CORPUS, split=RUNS, dataset_name="sim_wire",
+               modalities=("coeff",), transform=transform, holdout=HOLDOUT, split_role="train",
+               max_event_size=1_200_000),
 )
 
 # ---------------------------------------------------------------------------- hooks
 hooks = [
-    dict(type="HelixPathBootstrap"),    # puts the sys.path block back into pimm's dumped config
+    dict(type="HelixProvenance"),       # provenance.json; refuses a resume on another corpus
     dict(type="CheckpointLoader"),
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),
     dict(type="InformationWriter", log_frequency=200),
     dict(type="FiniteGuard", check_every=100, max_skips=20),
-    dict(type="WeightEMA", decay=0.9999, save_freq="auto"),
-    dict(type="CoeffFMEvaluator", every_n_steps="auto", max_batches=200),
-    dict(type="CheckpointSaver", save_freq="auto"),
+    dict(type="StepWatchdog", timeout=300),     # a stuck rank dumps its stacks before NCCL's 600 s
+    dict(type="CheckpointSaverIteration", save_freq="auto"),   # model/last only, no iter_N.pth
 ]
 train = dict(type="FMTrainer")
 
-del _root, _corpus_runs, _reference_table, _world_size, _scheduler, _WORLD
+del _root, _corpus_runs, _reference_table, _scheduler

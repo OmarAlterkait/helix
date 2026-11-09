@@ -35,8 +35,8 @@ CFG = patch_config(TOK)
 @pytest.fixture(scope="module")
 def fm_run(tmp_path_factory):
     d = tmp_path_factory.mktemp("fm")
-    _, ema = _write_run(d)
-    return d, ema
+    last, _ = _write_run(d)
+    return d, last
 
 
 @pytest.fixture(scope="module")
@@ -123,13 +123,13 @@ def test_the_transform_needs_tokens_and_cells(sample):
 
 # ---------------------------------------------------------------------------------------- model
 def test_the_model_is_the_fm_runs_encoder(fm_run):
-    d, ema = fm_run
+    d, last = fm_run
     m = build_denoise(str(d), compile_blocks=False)
     assert m.tokenizer == CFG and m.fm.d == SMALL["d"]
     enc = {k: v for k, v in m.fm.state_dict().items()}
-    assert all(torch.equal(enc[k].float(), v.float()) for k, v in ema.state_dict().items())   # its EMA
+    assert all(torch.equal(enc[k].float(), v.float()) for k, v in last.state_dict().items())  # its last
     s = build_denoise(str(d), pretrained=False, compile_blocks=False)
-    assert not _same(s.fm, ema) and s.tokenizer == CFG
+    assert not _same(s.fm, last) and s.tokenizer == CFG
     assert not torch.isfinite(s.fm.bin_edges).any()                 # from scratch: nothing of the run
 
 
@@ -198,15 +198,15 @@ def test_cell_decoder_survives_cells_with_no_tokens_and_is_unbounded():
 
 
 def test_build_denoise_loads_a_pretrained_fm_into_the_amplitude_channel(fm_run, sample):
-    d, ema = fm_run
+    d, last = fm_run
     m = build_denoise(str(d), lin_amp_scale=30.0, compile_blocks=False).eval()
     n = SMALL["n_slot"]
-    w, w0 = m.fm.embed.weight, ema.embed.weight
+    w, w0 = m.fm.embed.weight, last.embed.weight
     assert w.shape == (w0.shape[0], 3 * n) and m.fm.lin_amp_scale == 30.0
     assert torch.equal(w[:, :2 * n], w0.float()) and (w[:, 2 * n:] == 0).all()
     B = _batch(_rows(sample, seed=0))
     with torch.no_grad():
-        torch.testing.assert_close(m.fm.encode(B), ema.eval().encode(B), atol=1e-5, rtol=0)   # starts as the FM
+        torch.testing.assert_close(m.fm.encode(B), last.eval().encode(B), atol=1e-5, rtol=0)   # starts as the FM
 
 
 # ----------------------------------------------------------------------------- distributional heads
@@ -364,8 +364,7 @@ def test_every_head_trains_through_coeff_denoise(fm_run, sample, dist, cond):
 # ------------------------------------------------------------------------------- reading it back
 def _write_denoise_run(d, fm_dir, **model):
     """A denoiser run as pimm writes one: its config names the FM run and a tokenizer by
-    reference; model/model_best.pth and model/last/weights.pth hold its weights. ``model``:
-    further model-section keys."""
+    reference; model/last/weights.pth holds its weights. ``model``: further model-section keys."""
     os.makedirs(os.path.join(d, "model", "last"), exist_ok=True)
     cfg = {"model": {"type": "Coeff-Denoise", "fm": str(fm_dir), "pretrained": True, "freeze_encoder": False,
                      "cond_charge": False, "lr_head": 1e-2, "compile_blocks": True, **model},
@@ -376,9 +375,8 @@ def _write_denoise_run(d, fm_dir, **model):
     json.dump(cfg, open(os.path.join(d, "resolved_config.json"), "w"))
     torch.manual_seed(5)
     m = build_denoise(str(fm_dir), **{"cond_charge": False, **model}, compile_blocks=False)
-    sd = {"state_dict": {"module." + k: v for k, v in m.state_dict().items()}}
-    torch.save(sd, os.path.join(d, "model", "model_best.pth"))
-    torch.save(sd, os.path.join(d, "model", "last", "weights.pth"))
+    torch.save({"state_dict": {"module." + k: v for k, v in m.state_dict().items()}},
+               os.path.join(d, "model", "last", "weights.pth"))
     return m
 
 
@@ -397,10 +395,10 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
 
     d, _ = fm_run
     m = _write_denoise_run(str(tmp_path), d)
-    r = load_run(tmp_path, "best", device="cpu")
-    assert _same(r.model, m) and r.tokenizer == CFG and r.provenance["weights"] == "best"
+    r = load_run(tmp_path, "last", device="cpu")
+    assert _same(r.model, m) and r.tokenizer == CFG and r.provenance["weights"] == "last"
     with pytest.raises(FileNotFoundError, match="model_ema"):
-        load_run(tmp_path, device="cpu")                           # a denoiser has no EMA
+        load_run(tmp_path, "ema", device="cpu")                    # a denoiser has no EMA
     predict, cfg = load_denoiser(str(tmp_path), "cpu")
     assert cfg == CFG and predict.dist == "point" and predict.run.tokenizer == CFG
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
@@ -450,7 +448,7 @@ def test_a_distributional_run_reads_back_and_predicts(fm_run, sample, tmp_path, 
 
     d, _ = fm_run
     m = _write_denoise_run(str(tmp_path), d, dist=dist, cond_charge=True, lin_amp_scale=lin)
-    assert _same(load_run(tmp_path, "best", device="cpu").model, m)
+    assert _same(load_run(tmp_path, "last", device="cpu").model, m)
     predict, _ = load_denoiser(str(tmp_path), "cpu")
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
@@ -490,21 +488,18 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
     assert not m["cond_charge"] and m["lr_head"] == 1e-2 and cfg.optimizer["lr"] == 3e-3
     assert m["dist"] == "point" and m["lin_amp_scale"] == 0.0                # until measured on d1m
     assert cfg.scheduler["type"] == "WarmupCosineLR" and cfg.scheduler["warmup"] == "auto"
-    assert cfg.train["type"] == "FMTrainer" and cfg.batch_size == cfg.batch_size_val
-    for split in ("train", "val"):
-        dd = cfg.data[split]
-        assert tuple(dd["modalities"]) == ("coeff", "cells") and dd["holdout"] == cfg.HOLDOUT
-        assert [t["type"] for t in dd["transform"]] == ["CoeffTokenize", "DenoiseRows", "CoeffCollect"]
-        # presence = q > 25 e-, the cells-3 truth's cut: the labels, the model (cat's bin 0), the
-        # transform's own default and the evaluation agree
-        from helix.eval.denoise import PRESENCE_Q
-        assert dd["transform"][1]["support_min_q"] == m["support_min_q"] == DenoiseRows().support_min_q == PRESENCE_Q
-    assert cfg.data["val"]["transform"][1]["seed"] == 0 and "seed" not in cfg.data["train"]["transform"][1]
+    assert cfg.train["type"] == "FMTrainer" and not cfg.evaluate and set(cfg.data) == {"train"}
+    dd = cfg.data["train"]
+    assert tuple(dd["modalities"]) == ("coeff", "cells") and dd["holdout"] == cfg.HOLDOUT
+    assert [t["type"] for t in dd["transform"]] == ["CoeffTokenize", "DenoiseRows", "CoeffCollect"]
+    # presence = q > 25 e-, the cells-3 truth's cut: the labels, the model (cat's bin 0), the
+    # transform's own default and the evaluation agree
+    from helix.eval.denoise import PRESENCE_Q
+    assert dd["transform"][1]["support_min_q"] == m["support_min_q"] == DenoiseRows().support_min_q == PRESENCE_Q
+    assert "seed" not in dd["transform"][1]
     hooks = [h["type"] for h in cfg.hooks]
-    assert hooks.index("DenoiseEvaluator") < hooks.index("CheckpointSaver")
-    assert "WeightEMA" not in hooks and "CoeffFMEvaluator" not in hooks and "FiniteGuard" in hooks
-    saver = cfg.hooks[hooks.index("CheckpointSaver")]
-    assert saver["evaluator_every_n_steps"] == "auto"              # model_best by validation loss
+    assert hooks[-1] == "CheckpointSaverIteration" and "FiniteGuard" in hooks
+    assert not any(h.endswith("Evaluator") for h in hooks) and "WeightEMA" not in hooks
 
     from helix.integrations.pimm.trainer import resolve_tokenizer
     from pimm.models.builder import MODELS
@@ -512,8 +507,7 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
     d, _ = fm_run
     model = MODELS.build(dict(m, fm=str(d), compile_blocks=False))
     assert resolve_tokenizer(cfg.data, model.tokenizer)
-    for split in ("train", "val", "test"):
-        assert PatchConfig(**cfg.data[split]["transform"][0]["cfg"]) == CFG
+    assert PatchConfig(**cfg.data["train"]["transform"][0]["cfg"]) == CFG
     assert not resolve_tokenizer(cfg.data, model.tokenizer)        # nothing left to resolve
     with pytest.raises(ValueError, match="tokenizer"):
         resolve_tokenizer({"train": {"transform": [{"type": "CoeffTokenize", "cfg": "model"}]}}, None)

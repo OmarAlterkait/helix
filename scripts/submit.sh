@@ -105,8 +105,8 @@ elif [ -n "${HELIX_SLURM_TRAIN_QOS:-}" ]; then
 fi
 
 # What this run is: the same NAME continues only the same config, training overrides and node
-# topology (a resubmitted chain resumes from $HELIX_EXP/NAME -- below -- and the config derives
-# its batch and LR from the world size). Other scheduling flags may change. Recorded only once
+# topology (a resubmitted chain resumes from $HELIX_EXP/NAME -- below -- and its batch, workers
+# and LR follow from the world size). Other scheduling flags may change. Recorded only once
 # pimm has accepted the submission, so a rejected one does not lock the name.
 TRAIN=(); seen=0; NN=$R_NNODES; NP=$R_NPROC; prev=
 for a in "${REST[@]}"; do
@@ -117,6 +117,14 @@ for a in "${REST[@]}"; do
 done
 WHAT="${CFG#"$H"/} nodes=$NN x $NP ${TRAIN[*]}"       # relative: a frozen run tree's path is not the run's identity
 RUN=$HELIX_EXP/$NAME
+
+# The world size, as training overrides: pimm's batch and workers are GLOBAL, the FM takes one
+# event per rank (FMTrainer refuses anything else), and the configs hold one rank's values, so
+# nothing reads WORLD_SIZE at config load. Appended last, so they win; not part of WHAT, which
+# already records the topology. (FMTrainer scales the peak LR from the same world size.)
+W=$((NN * NP))
+BATCH=(batch_size=$W batch_size_val=$W batch_size_test=$W "num_worker=$((W * ${HELIX_SLURM_TRAIN_WORKERS_PER_GPU:-4}))")
+if [ "$seen" = 1 ]; then REST+=("${BATCH[@]}"); else REST+=(-- "${BATCH[@]}"); fi
 DRY=0; case " ${REST[*]} " in *" --dry-run "*) DRY=1 ;; esac
 if [ "$DRY" = 0 ] && [ -s "$RUN/submit.cmd" ] && [ "$(cat "$RUN/submit.cmd")" != "$WHAT" ]; then
   echo "submit.sh: $RUN is a run of: $(cat "$RUN/submit.cmd")" >&2

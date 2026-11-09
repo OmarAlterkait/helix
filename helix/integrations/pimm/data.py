@@ -114,26 +114,15 @@ class CoeffTPCDataset(Dataset):
     whose tokens attend across unrelated events. See ``docs/ARCHITECTURE.md §8``.
     """
 
-    def __init__(self, data_root, split="", dataset_name="coeff_tpc",
-                 modalities=("coeff",), transform=None, loop=1,
-                 max_len=-1, strict_lengths=True, event_range=None,
-                 exclude_range=None, holdout=None, split_role=None,
-                 max_event_size=None, n_events=None, subset_seed=0):
+    def __init__(self, transform=None, **kw):
         super().__init__()
         from helix.data import CoeffTPCDataset as _DS
-        # Split parameters must be FORWARDED. This wrapper re-declares the inner
-        # dataset's signature, so anything added there is invisible here until
-        # it is listed — and configs resolve THIS class, not the inner one. The
-        # unit tests construct the inner dataset directly and cannot see a
-        # missing one, so add a new parameter here in the same commit.
-        self._inner = _DS(data_root=data_root, split=split,
-                          dataset_name=dataset_name, modalities=tuple(modalities),
-                          transform=None, loop=loop, max_len=max_len,
-                          strict_lengths=strict_lengths,
-                          event_range=event_range, exclude_range=exclude_range,
-                          holdout=holdout, split_role=split_role,
-                          max_event_size=max_event_size,
-                          n_events=n_events, subset_seed=subset_seed)
+        # Everything but the transform passes straight through, so a parameter added to the
+        # inner dataset needs no change here. The wrapper used to restate the signature, and
+        # each omission (event_range, then holdout/split_role) failed only at trainer build.
+        if "modalities" in kw:
+            kw["modalities"] = tuple(kw["modalities"])        # a config's list, the reader's tuple
+        self._inner = _DS(transform=None, **kw)
         self.transform = Compose(transform)
 
     def __len__(self):

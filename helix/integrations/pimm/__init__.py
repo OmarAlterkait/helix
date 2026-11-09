@@ -29,15 +29,17 @@ model do not.
 
 The ``Coeff-FM`` and ``Coeff-Denoise`` MODELS entries are defined here. Submodules: ``data``
 (dataset + terminal transform), ``trainer`` (``FMTrainer`` + the schedules),
-``hooks`` (what a run WRITES: resume bootstrap, provenance, weight EMA, finite
-guard) and ``eval`` (what a run MEASURES). Importing this package registers all of them, because
-``custom_imports`` names this path and nothing else.
+``hooks`` (provenance, the finite guard, the step watchdog). Importing this package registers
+all of them, because ``custom_imports`` names this path and nothing else.
+
+There is no in-training evaluation: validation loss does not rank representations, so a run
+is scored afterwards (``python -m helix.eval``, and a fine-tune) from its ``model/last``.
 """
 
 from helix.data.denoise import DenoiseRows
 from helix.integrations.pimm.data import CoeffCollect, CoeffTPCDataset
-from helix.integrations.pimm.eval import CoeffFMEvaluator, DenoiseEvaluator
-from helix.integrations.pimm.hooks import HelixPathBootstrap, WeightEMA
+from helix.integrations.pimm.hooks import (FiniteGuard, HelixPathBootstrap, HelixProvenance,
+                                           StepWatchdog)
 from helix.integrations.pimm.trainer import (FMTrainer, WarmupCosineLR,
                                              WSDCooldownLR, WSDStableLR)
 from helix.model.tokenize import CoeffTokenize
@@ -45,8 +47,9 @@ from pimm.models.builder import MODELS
 
 __all__ = ["CoeffTokenize", "DenoiseRows", "CoeffCollect", "CoeffTPCDataset", "CoeffFM",
            "CoeffDenoise", "build_coeff_fm",
-           "FMTrainer", "CoeffFMEvaluator", "DenoiseEvaluator", "WarmupCosineLR",
-           "WSDStableLR", "WSDCooldownLR", "WeightEMA", "HelixPathBootstrap"]
+           "FMTrainer", "WarmupCosineLR",
+           "WSDStableLR", "WSDCooldownLR", "FiniteGuard", "StepWatchdog", "HelixProvenance",
+           "HelixPathBootstrap"]
 
 
 @MODELS.register_module("Coeff-FM")
@@ -58,12 +61,21 @@ class CoeffFM:
     ``obj_cls(**args)``. ``__new__`` returns the ``FMModel`` itself, so a config gets a model
     rather than a wrapper.
 
-    Initialising from a checkpoint is pimm's ``weight=`` (``configs/pimm/fm_cooldown.py``);
-    reading a trained run is :func:`helix.model.checkpoint.load_run`.
+    ``init`` names an FM run (or one checkpoint of it) whose weights -- its ``model/last`` by
+    default -- are loaded into the freshly built model before training: a warm start
+    (``configs/pimm/fm_cooldown.py``, a sweep's ``then:``). Not pimm's ``weight=``, for the reason
+    on :class:`CoeffDenoise`: that is what pimm's ``scripts/train.sh`` sets on every resumed link,
+    so it cannot also carry the initialisation. A resumed link builds from ``init`` and then
+    loads its own checkpoint over it. Reading the run back ignores ``init``
+    (:func:`helix.model.checkpoint.model_config`): its weights are the run's own.
     """
 
-    def __new__(cls, bins=None, **cfg):
-        return build_coeff_fm(bins=bins, **cfg)
+    def __new__(cls, bins=None, init=None, **cfg):
+        model = build_coeff_fm(bins=bins, **cfg)
+        if init:
+            from helix.model.checkpoint import load_run
+            model.load_state_dict(load_run(init, device="cpu").model.state_dict(), strict=True)
+        return model
 
 
 def build_coeff_fm(bins=None, **cfg):

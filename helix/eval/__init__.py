@@ -135,7 +135,7 @@ def evaluate(path, *, weights="last", corpus=None, fm=None, max_events=None, see
     return out
 
 
-def evaluate_uprobe(path, *, weights="ema", corpus=None, max_events=None, seed=0, n_boot=200, probe_seeds=2,
+def evaluate_uprobe(path, *, weights="last", corpus=None, max_events=None, seed=0, n_boot=200, probe_seeds=2,
                     device=None, log=print):
     """The along-wire probe (:class:`helix.eval.probe.UProbe`) of the FM run at ``path``."""
     from helix.eval.probe import ProbeContext, UProbe, split_events

@@ -163,9 +163,9 @@ class DenoiseModel(nn.Module):
     batch (``q_idx``, ``q_aux``, ``q_nbr``, ``q_y``, ``q_present``).
 
     Every head reports ``mse`` (its point estimate's squared error, on the rows ``cond_charge``
-    regresses) and ``bce`` (its presence probability's), which ``DenoiseEvaluator`` reads;
-    ``loss`` is what trains: ``mse + bce`` (point), ``nll + bce`` (gauss), ``ce`` (cat) -- so a
-    validation loss compares checkpoints of one head, not heads."""
+    regresses) and ``bce`` (its presence probability's), which pimm's InformationWriter logs;
+    ``loss`` is what trains: ``mse + bce`` (point), ``nll + bce`` (gauss), ``ce`` (cat) -- so the
+    loss compares checkpoints of one head, not heads."""
 
     def __init__(self, fm, head, *, tokenizer=None, freeze_encoder=False, cond_charge=False, lr_head=1e-2):
         super().__init__()
@@ -347,7 +347,7 @@ def build_denoise(fm, *, pretrained=True, freeze_encoder=False, cond_charge=Fals
     """A :class:`DenoiseModel` on the FM run ``fm`` (a run directory, or one checkpoint of it).
 
     The encoder takes the run's architecture and tokenizer and, with ``pretrained``, its weights
-    (``load_run``: the run's EMA, or the checkpoint named); otherwise it is freshly initialised.
+    (``load_run``: the run's last checkpoint, or the one named); otherwise it is freshly initialised.
     ``lin_amp_scale`` > 0 adds the linear-amplitude input channel to that architecture (0 keeps
     the run's own); the run's weights load into it with the new columns at zero
     (:func:`pad_input_columns`). ``dist`` is the

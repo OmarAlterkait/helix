@@ -29,11 +29,12 @@ class FMTrainer(Trainer):
     Config: ``train = dict(type="FMTrainer")``.
 
     pimm's own machinery covers everything else — DDP, resume, logging, hooks,
-    the loop itself, the training step. Four things cannot be expressed in
-    config: the one-event-per-rank check, muP's param groups, the ``"auto"``
-    cadences that follow from the run's step count, and a ``CoeffTokenize`` with
-    ``cfg="model"`` -- the tokenizer of the FM run a model is built on, known only
-    once the model is (:func:`resolve_tokenizer`).
+    the loop itself, the training step. Five things cannot be expressed in
+    config: the one-event-per-rank check, muP's param groups, the peak LR's
+    sqrt(world) scaling (:func:`scaled_lr`), the ``"auto"`` cadences that follow
+    from the run's step count, and a ``CoeffTokenize`` with ``cfg="model"`` -- the
+    tokenizer of the FM run a model is built on, known only once the model is
+    (:func:`resolve_tokenizer`).
     """
 
     def build_train_loader(self):
@@ -57,8 +58,9 @@ class FMTrainer(Trainer):
                 f"{comm.get_world_size()} gives {per_gpu} events per GPU. The FM "
                 f"requires exactly 1: it has no event separation, so a larger "
                 f"per-GPU batch trains attention ACROSS unrelated events without "
-                f"failing. Set batch_size to the number of ranks.")
-        # Before any loader is built (train is the first; val and test follow).
+                f"failing. Set batch_size to the number of ranks (scripts/submit.sh "
+                f"appends batch_size=<nodes x GPUs>).")
+        # Before the loader is built (the only one: evaluate=False builds no val/test loader).
         if resolve_tokenizer(self.cfg.data, getattr(unwrap_model(self.model), "tokenizer", None)):
             self.logger.info(f"tokenizer from the model's FM run: {unwrap_model(self.model).tokenizer}")
         return super().build_train_loader()
@@ -84,7 +86,11 @@ class FMTrainer(Trainer):
                 "having both would silently pick one — remove param_dicts.")
 
         cfg = dict(self.cfg.optimizer)
-        base_lr = cfg.get("lr")
+        base_lr = cfg["lr"] = scaled_lr(cfg.get("lr"), getattr(self.cfg, "lr_ref_world", None),
+                                        comm.get_world_size())
+        if base_lr != self.cfg.optimizer.get("lr"):
+            self.logger.info(f"peak LR {self.cfg.optimizer.get('lr'):g} at {self.cfg.lr_ref_world} "
+                             f"ranks -> {base_lr:g} at {comm.get_world_size()}")
         groups = model.param_groups(base_lr, weight_decay=cfg.get("weight_decay"))
         cfg["params"] = groups                    # type/betas/etc still honoured
         opt = OPTIMIZERS.build(cfg)
@@ -112,15 +118,14 @@ class FMTrainer(Trainer):
 
         A config states intent (epochs, model width), never a step count: that follows from
         the corpus, the split and the GPU count. ``"auto"`` is accepted for the scheduler's
-        ``warmup`` and, in every hook, ``save_freq``, ``every_n_steps`` and ``evaluator_every_n_steps``; hooks
-        are patched as config and, if pimm has built them already, as objects.
+        ``warmup`` and, in every hook, ``save_freq``; hooks are patched as config and, if pimm
+        has built them already, as objects.
         """
         from helix.model import schedule as cadence
         steps = self._total_steps()
         core = unwrap_model(self.model)
         fm = getattr(core, "fm", core)            # the denoiser's encoder is an FM
-        val = dict(save_freq=cadence.save_every(steps), every_n_steps=cadence.eval_every(steps),
-                   evaluator_every_n_steps=cadence.eval_every(steps))
+        val = dict(save_freq=cadence.save_every(steps))
         sch = self.cfg.scheduler
         if sch.get("warmup") == "auto":
             sch.warmup = cadence.warmup_steps(steps, fm.d, fm.d_base)
@@ -131,7 +136,17 @@ class FMTrainer(Trainer):
                 elif not isinstance(h, dict) and getattr(h, k, None) == "auto":
                     setattr(h, k, v)
         self.logger.info(f"cadence over {steps} steps: warmup {sch.get('warmup')}, "
-                         f"eval every {val['every_n_steps']}, save every {val['save_freq']}")
+                         f"save every {val['save_freq']}")
+
+
+def scaled_lr(lr, ref_world, world):
+    """``lr * sqrt(world / ref_world)``: the peak LR scales as sqrt(batch), and the batch is the
+    world size. A config's ``optimizer.lr`` is the LR at ``lr_ref_world`` ranks (fm.py: 4.4e-3 at
+    16), so it states one number for any GPU count; ``ref_world=None`` keeps it absolute (the
+    denoiser's)."""
+    if not ref_world or lr is None:
+        return lr
+    return lr * (world / float(ref_world)) ** 0.5
 
 
 def resolve_tokenizer(data, tokenizer):

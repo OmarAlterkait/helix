@@ -1,5 +1,5 @@
-"""The pimm config contract: helix's configs, the registry adapters and the sys.path bootstrap
-against what pimm reads, and the integration's import boundaries."""
+"""The pimm config contract: helix's configs and the registry adapters against what pimm
+reads, and the integration's import boundaries."""
 import importlib.util
 import os
 from pathlib import Path
@@ -177,49 +177,10 @@ def test_example_config_declares_the_custom_import():
         # the configs resolve the corpus's run list at module scope
         pytest.skip(f"config needs a root this site does not configure: {exc}")
     assert "helix.integrations.pimm" in cfg.custom_imports["imports"]
-    from helix.paths import world_size
-    # one event per rank: the FM has no event separation (docs/ARCHITECTURE.md §8)
-    assert cfg.batch_size == world_size()
+    # one rank's batch: scripts/submit.sh appends batch_size=<nodes x GPUs> (docs/ARCHITECTURE.md §8)
+    assert cfg.batch_size == 1
     assert cfg.model["type"] == "Coeff-FM"
     assert cfg.data["train"]["type"] == "CoeffTPCDataset"
-
-
-def test_dataset_wrapper_forwards_every_inner_parameter():
-    """The helix wrapper re-declares pimm-data's dataset signature, and CONFIGS
-    RESOLVE THE WRAPPER. So a parameter added to the inner dataset is invisible
-    until it is forwarded here.
-
-    That has bitten twice: event_range/exclude_range, then holdout/split_role —
-    the latter failed the first real 2-GPU launch with "unexpected keyword
-    argument 'holdout'" after passing every unit test, because the tests
-    construct the INNER dataset directly.
-
-    Compared by AST so this needs neither pimm nor a built dataset.
-    """
-    import ast
-    import inspect
-
-    pimm_data = pytest.importorskip("pimm_data")
-    from helix.data.dataset import CoeffTPCDataset as Inner
-
-    src = (Path(__file__).resolve().parent.parent
-           / "helix" / "integrations" / "pimm" / "data.py").read_text()
-    wrapper = None
-    for node in ast.walk(ast.parse(src)):
-        if isinstance(node, ast.ClassDef) and node.name == "CoeffTPCDataset":
-            for f in node.body:
-                if isinstance(f, ast.FunctionDef) and f.name == "__init__":
-                    wrapper = {a.arg for a in f.args.args} | {
-                        a.arg for a in f.args.kwonlyargs}
-    assert wrapper, "could not find the wrapper's __init__"
-
-    inner = set(inspect.signature(Inner.__init__).parameters)
-    # ignore_index is a base-class concern the wrapper deliberately does not expose
-    missing = inner - wrapper - {"ignore_index"}
-    assert not missing, (
-        f"the wrapper does not forward {sorted(missing)} — a config passing them "
-        f"raises TypeError at trainer build, which no unit test sees because "
-        f"they construct the inner dataset directly")
 
 
 # ---- the configs against pimm's trainer --------------------------------------------------
@@ -302,21 +263,44 @@ def test_derived_fields_really_are_derived():
             f"assigns it and the Trainer has no default for it")
 
 
-def test_batch_size_is_one():
-    """The FM needs batch_size_per_gpu == 1: it has no event separation, so a rank holding
-    two events would attend across them (docs/ARCHITECTURE.md §8). pimm's ``batch_size`` is
-    GLOBAL, so the base config sets it to the world size, and a variant to 1 or not at all."""
-    for path in sorted(pathlib.Path(CONFIG).parent.glob("fm*.py")):
-        tree = ast.parse(path.read_text())
+def test_configs_are_world_size_free():
+    """The FM needs batch_size_per_gpu == 1: it has no event separation, so a rank holding two
+    events would attend across them (docs/ARCHITECTURE.md §8). pimm's ``batch_size`` is GLOBAL;
+    the configs hold one rank's value (1) and read no world size at load -- scripts/submit.sh
+    appends the launch's batch, and FMTrainer scales the LR -- so a config means the same thing
+    on the submitting host as on the job."""
+    for path in sorted(pathlib.Path(CONFIG).parent.glob("*.py")):
+        src = path.read_text()
+        assert "world_size" not in src and "WORLD_SIZE" not in src, path.name
+        tree = ast.parse(src)
         vals = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
                 for t in n.targets if isinstance(t, ast.Name)}
         for key in ("batch_size", "batch_size_val", "batch_size_test"):
             v = vals.get(key)
             if path.name == "fm.py":
                 assert v is not None, f"fm.py does not set {key}"
-            ok = v is None or (isinstance(v, ast.Constant) and v.value == 1) or (
-                isinstance(v, ast.Name) and v.id == "_WORLD")
-            assert ok, f"{path.name}: {key} must be the world size (one event per rank) or 1"
+            assert v is None or (isinstance(v, ast.Constant) and v.value == 1), \
+                f"{path.name}: {key} must be 1 (one rank's batch) or inherited"
+
+
+def test_submit_appends_the_world_size_as_training_overrides():
+    """scripts/submit.sh turns nodes x GPUs into the batch overrides, after `--`, last."""
+    src = (pathlib.Path(CONFIG).parent.parent.parent / "scripts" / "submit.sh").read_text()
+    assert "W=$((NN * NP))" in src
+    for key in ("batch_size=$W", "batch_size_val=$W", "batch_size_test=$W", "num_worker=$((W *"):
+        assert key in src, key
+    assert 'REST+=(-- "${BATCH[@]}")' in src and 'REST+=("${BATCH[@]}")' in src
+
+
+@pimm_required
+def test_the_peak_lr_scales_as_sqrt_world_from_its_reference():
+    """fm.py's LR was ``4.4e-3 * sqrt(world / 16)`` computed in the config; FMTrainer now applies
+    the same rule, so the numbers are unchanged at every GPU count (and exact at 16)."""
+    from helix.integrations.pimm.trainer import scaled_lr
+    assert scaled_lr(4.4e-3, 16, 16) == 4.4e-3
+    for world in (1, 4, 8, 32, 64):
+        assert scaled_lr(4.4e-3, 16, world) == pytest.approx(4.4e-3 * (world / 16) ** 0.5, rel=1e-15)
+    assert scaled_lr(3e-3, None, 4) == 3e-3                        # the denoiser's: absolute
 
 
 def test_config_declares_the_custom_import():
@@ -344,6 +328,27 @@ def test_hooks_exclude_the_ones_that_do_not_fit():
     for bad in ("SemSegEvaluator", "MAEEvaluator"):
         assert bad not in hooks_src, f"{bad} does not fit the coeff FM"
     assert "CheckpointSaver" in hooks_src, "a run with no checkpointing is a trap"
+
+
+def test_no_config_evaluates_during_training():
+    """Validation loss does not rank representations, so no config evaluates in training: no
+    evaluator hook, ``evaluate`` off in the base (pimm then builds no val/test loader), and the
+    saver is CheckpointSaverIteration, which writes ``model/last`` on its cadence and nothing
+    else -- pimm's CheckpointSaver also writes ``iter_N.pth`` on every save step."""
+    import ast
+    names = {}
+    for path in sorted(pathlib.Path(CONFIG).parent.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        names[path.name] = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
+                            for t in n.targets if isinstance(t, ast.Name)}
+        hooks = names[path.name].get("hooks")
+        if hooks is None:
+            continue
+        types = [kw.value.value for h in hooks.elts for kw in h.keywords if kw.arg == "type"]
+        assert not any(t.endswith("Evaluator") for t in types), f"{path.name}: {types}"
+        assert types[-1] == "CheckpointSaverIteration", f"{path.name}: saver is {types[-1]}"
+    assert ast.literal_eval(names["fm.py"]["evaluate"]) is False
+    assert all("evaluate" not in v or ast.literal_eval(v["evaluate"]) is False for v in names.values())
 
 
 # ---- the from-scratch categorical path -------------------------------------
@@ -391,219 +396,8 @@ def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):
         "the missing-bins error should explain WHY the model cannot supply them")
 
 
-def test_configs_bootstrap_helix_onto_sys_path():
-    """Every pimm config must put helix on sys.path ITSELF, by APPEND.
-
-    pimm's scripts/train.sh hard-sets PYTHONPATH to its own code directory in
-    every branch, so a launch through `pimm submit` cannot see helix by
-    environment alone. The config is a Python file executed before
-    `custom_imports` is processed (Config.fromfile), so it can bootstrap itself
-    — which avoids installing helix into a shared image.
-
-    It must use insert(1) — the only position that works, as both obvious
-    choices fail in opposite directions:
-
-      insert(0)  pimm's loader does insert(0, temp_dir) -> import -> pop(0), and
-                 the config executes during that import, so an insert(0) here is
-                 what the pop deletes. Fails silently: helix stays unimportable
-                 and custom_imports raises a bare ImportError with the real cause
-                 swallowed by import_modules_from_strings.
-      append     survives the pop, but loses to site-packages — the pimm image
-                 ships pimm_data 0.3.0, which has no coeff module, so the run
-                 dies on "No module named 'pimm_data.coeff'".
-    """
-    import re
-    from pathlib import Path
-
-    cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
-    found = sorted(cfg_dir.glob("fm*.py"))
-    assert found, "no pimm configs found"
-    for path in found:
-        src = path.read_text()
-        # A config may INHERIT the bootstrap: pimm execs each `_base_` file
-        # before merging (Config._file2dict), so the base's sys.path statement
-        # runs and helix is importable by the time this file is read. Verified
-        # against a real load with helix off PYTHONPATH, not assumed — see
-        # test_a_derived_config_inherits_a_working_bootstrap below. Requiring
-        # every config to repeat the block would force copy-paste of the one
-        # thing that must never drift.
-        if "_base_" in src and "_sys.path." not in src:
-            # The ASSIGNMENT again, not the word: this file's own comment says
-            # custom_imports is inherited, and matching the word made the guard
-            # fire on that sentence. Exactly the trap documented four lines down.
-            assert "custom_imports = " not in src, (
-                f"{path.name} inherits its bootstrap but sets custom_imports "
-                f"itself; the two must travel together")
-            continue
-        # The ASSIGNMENT, not the word — the bootstrap comment mentions
-        # custom_imports and would otherwise match first, making the ordering
-        # check below compare against the wrong position.
-        assign = src.index("custom_imports = ")
-        # Ignore comment lines: they discuss insert(0) and append by name.
-        code = "\n".join(ln for ln in src.splitlines()
-                         if not ln.lstrip().startswith("#"))
-        boot = re.search(r"_sys\.path\.(insert|append)\(\s*(\d+)?", code)
-        assert boot, f"{path.name} does not bootstrap onto sys.path"
-        assert (boot.group(1), boot.group(2)) == ("insert", "1"), (
-            f"{path.name} uses sys.path.{boot.group(1)}({boot.group(2) or ''}) — "
-            f"must be insert(1): insert(0) is removed by pimm's own pop(0), and "
-            f"append loses to the stale pimm_data in site-packages")
-        assert src.index("_sys.path.") < assign, (
-            f"{path.name} bootstraps AFTER custom_imports, which is too late")
-        assert "PIMM_DATA_SRC" not in src, (
-            f"{path.name} still bootstraps a pimm-data CHECKOUT. The image "
-            f"installs it at the pinned revision and the build refuses a stale "
-            f"one, so shadowing it makes the run disagree with the pin — one "
-            f"authority governs the image and another the run. (Was required "
-            f"when the image baked 0.3.0; that is fixed at the source.) "
-            f"the image's 0.3.0 "
-            f"has no CoeffTPCDataset")
-
-
-@pimm_importable
-@pytest.mark.xfail(strict=False, reason=(
-    "The CODE and this TEST disagree about intent, and the disagreement is "
-    "deliberate on the code's side. configs/pimm/fm_cooldown.py says a "
-    "derived config does NOT get its own sys.path bootstrap -- 'a config that "
-    "touches sys.path must also register HelixPathBootstrap so a RESUMED job can "
-    "still import helix, and the hook belongs to the base' -- so it relies on "
-    "helix already being importable, which the launcher guarantees by exporting "
-    "PYTHONPATH. This test strips helix from PYTHONPATH and demands it work "
-    "anyway. In production the launcher always sets it, so nothing is broken "
-    "today; but one of the two should change. Marked rather than edited because "
-    "silencing it by rewriting either side is how a real expectation gets lost. "
-    "Invisible until a clean-room run, where this module stops skipping."))
-def test_a_derived_config_inherits_a_working_bootstrap(tmp_path):
-    """A `_base_` config must actually reach helix without help from the env.
-
-    The exemption above is only sound if inheritance really carries the
-    bootstrap. It does — pimm execs the base before merging — but that is a
-    property of pimm's loader, not of our config, so it is checked rather than
-    reasoned about: load a derived config in a subprocess whose PYTHONPATH has
-    NO helix, and require that helix becomes importable anyway.
-    """
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    derived = [p for p in sorted((root / "configs" / "pimm").glob("fm*.py"))
-               if "_base_" in p.read_text() and "_sys.path." not in p.read_text()]
-    if not derived:
-        pytest.skip("no _base_-derived configs")
-
-    env = {k: v for k, v in os.environ.items()}
-    env["PYTHONPATH"] = ":".join(
-        p for p in env.get("PYTHONPATH", "").split(":") if p and "helix" not in p)
-    prog = (
-        "import sys\n"
-        "assert not any('helix' in p for p in sys.path), sys.path\n"
-        "from pimm.utils.config import Config\n"
-        f"c = Config.fromfile({str(derived[0])!r})\n"
-        "import helix\n"
-        "print('OK', c.custom_imports['imports'][0])\n")
-    r = subprocess.run([sys.executable, "-c", prog], capture_output=True,
-                       text=True, env=env, cwd=str(tmp_path))
-    assert r.returncode == 0 and "OK" in r.stdout, (
-        f"{derived[0].name} does not inherit a working bootstrap:\n"
-        f"{r.stdout}\n{r.stderr[-2000:]}")
-
-
-def test_bootstrap_configs_also_register_the_rewrite_hook():
-    """A config that bootstraps sys.path MUST also list HelixPathBootstrap.
-
-    The two are one mechanism split across a process boundary: the source-level
-    bootstrap gets job 1 running, and the hook puts that bootstrap back into the
-    config pimm DUMPS so job 2 (which loads the dump, not this file) can import
-    helix at all. Having only the first is the dangerous state — it works
-    perfectly until the first requeue, hours in.
-    """
-    from pathlib import Path
-
-    cfg_dir = Path(__file__).resolve().parent.parent / "configs" / "pimm"
-    for path in sorted(cfg_dir.glob("fm*.py")):
-        src = path.read_text()
-        if "_sys.path." not in src:
-            continue
-        assert "HelixPathBootstrap" in src, (
-            f"{path.name} bootstraps sys.path but never registers "
-            f"HelixPathBootstrap, so a resumed job cannot import helix")
-
-
-def test_bootstrap_block_is_valid_python_that_appends():
-    """The block the hook writes must parse, and must append rather than insert."""
-    import ast
-
-    from helix.integrations._bootstrap import bootstrap_block
-
-    block = bootstrap_block("/some/checkout", "/some/pimm-data/src")
-    ast.parse(block)                      # a syntax error here is unresumable
-    # The block's own comments explain the insert(0) trap, so check the CODE.
-    code = "\n".join(ln for ln in block.splitlines()
-                     if not ln.lstrip().startswith("#"))
-    assert "_sys.path.insert(1, _p)" in code, (
-        "insert(1) is the only workable position: insert(0) is deleted by pimm's "
-        "own sys.path.pop(0), and append loses to site-packages' stale pimm_data")
-    assert "insert(0" not in code
-    assert ".append(" not in code
-    assert "'/some/checkout'" in block
-    assert "'/some/pimm-data/src'" not in block, (
-        "the block must NOT insert a pimm-data checkout: the image installs the "
-        "pinned revision and shadowing it splits authority between image and run")
-    assert "HELIX_ROOT" in block and "PIMM_DATA_SRC" not in block
-
-
-def test_rewritten_config_is_importable_without_helix_on_the_path(tmp_path):
-    """End-to-end: dump-shaped config + the hook's block -> helix imports.
-
-    Simulates what train.sh's resume branch does — load <save_path>/config.py in
-    a process whose sys.path does NOT contain helix — and asserts the rewritten
-    file repairs it.
-    """
-    pytest.importorskip("pimm_data")  # the subprocess imports it via the config
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    from helix.integrations._bootstrap import bootstrap_block
-
-    root = str(Path(__file__).resolve().parent.parent)
-
-    # The property is that the block inserts ONLY helix, so `pimm_data` keeps
-    # resolving to whatever is INSTALLED. This used to build a "fresh" and a
-    # "stale" pimm_data and assert the fresh one won, because the block had to
-    # beat the image's baked 0.3.0. The image installs the pinned revision now,
-    # so shadowing it is the bug and resolving to it is the contract.
-    dumped = "custom_imports = dict(imports=['helix.integrations.pimm'])\n"
-    cfg = tmp_path / "config.py"
-    cfg.write_text(bootstrap_block(root) + "\n" + dumped)
-
-    probe = tmp_path / "probe.py"
-    probe.write_text(
-        "import runpy, sys\n"
-        f"sys.path[:] = [p for p in sys.path if {root!r} not in p]\n"
-        f"runpy.run_path({str(cfg)!r})\n"
-        "import importlib\n"
-        "importlib.import_module('helix')\n"
-        "pd = importlib.import_module('pimm_data')\n"
-        "print('HELIX-IMPORTABLE', 'pimm_data=' + (pd.__file__ or ''))\n")
-    # Inherit the env: we WANT the installed pimm_data reachable, because that
-    # is what the run must resolve.
-    env = dict(os.environ)
-    out = subprocess.run([sys.executable, str(probe)], capture_output=True,
-                         text=True, env=env, cwd=str(tmp_path), timeout=120)
-    assert out.returncode == 0, f"probe failed:\n{out.stdout}\n{out.stderr[-2000:]}"
-    assert "HELIX-IMPORTABLE" in out.stdout, (
-        f"the rewritten config did not make helix importable:\n{out.stderr[-2000:]}")
-    resolved = out.stdout.split("pimm_data=")[-1].strip()
-    assert str(tmp_path) not in resolved and root not in resolved, (
-        f"the config bootstrap shadowed the installed pimm_data with "
-        f"{resolved!r}. It must not: the pin governs the image, and a run that "
-        f"resolves something else makes the pin a statement about nothing.")
-
-
 def test_configs_leave_no_module_objects_in_the_namespace():
-    """The sys.path bootstrap must not leak `_os`/`_sys` into the config dict.
+    """A config must not leave a module object (an `import os as _os`) in its namespace.
 
     `Config._file2dict` keeps every module-level name not starting with `__`
     (pimm/utils/config.py:261-262). A leaked module object reaches `Config.dump`,
@@ -636,13 +430,6 @@ def test_configs_leave_no_module_objects_in_the_namespace():
             # is correct for RUNNING the config; it says nothing about whether the
             # config leaks module objects, which is what is under test here.
             #
-            # SystemExit is the third spelling of the same thing, and the one a
-            # CI runner hits FIRST: every fm config refuses to execute
-            # without HELIX_ROOT, because it cannot self-locate (pimm executes a
-            # temp copy, so __file__ is the copy) and a wrong checkout is a
-            # correctness bug rather than an inconvenience. With no site and no
-            # environment, that refusal fires before any root is even consulted.
-            #
             # Skip that config rather than fail: the contract under test is about
             # module objects leaking into the namespace, and a config that cannot
             # be executed tells us nothing about it either way.
@@ -663,32 +450,34 @@ def test_configs_leave_no_module_objects_in_the_namespace():
                     + "; ".join(missing))
 
 
-def test_bootstrap_block_deletes_its_temporaries():
-    """Same guarantee for the block the hook writes into the dumped config."""
-    import types
-
-    from helix.integrations._bootstrap import bootstrap_block
-
-    ns = {}
-    exec(compile(bootstrap_block("/a", "/b"), "<block>", "exec"), ns)
-    leaked = sorted(k for k, v in ns.items()
-                    if not k.startswith("__") and isinstance(v, types.ModuleType))
-    assert not leaked, f"bootstrap_block leaks {leaked}"
+def test_the_fm_variants_inherit_the_base_hooks():
+    """fm_cooldown.py and fm_smoke.py take fm.py's hook list rather than restating it (a list is
+    replaced, not merged, so a restated copy drifts). The cooldown used to restate it to drop
+    WeightEMA; with no EMA anywhere there is nothing to drop."""
+    for name in ("fm_cooldown.py", "fm_smoke.py"):
+        src = (pathlib.Path(CONFIG).parent / name).read_text()
+        assert "hooks" not in _config_names(pathlib.Path(CONFIG).parent / name), name
+        assert "WeightEMA" not in src
+    assert "WeightEMA" not in pathlib.Path(CONFIG).read_text()
 
 
-def test_the_cooldown_has_the_base_hooks_without_the_ema():
-    """fm_cooldown.py restates fm.py's hook list (a list is replaced, not merged) minus WeightEMA:
-    a cooldown's EMA would be mostly the un-annealed stable weights. Read from the sources, so
-    the two cannot drift apart unnoticed."""
-    import ast
-    from pathlib import Path
+@pimm_required
+def test_init_warm_starts_from_a_runs_last_and_is_not_reread(tmp_path):
+    """``Coeff-FM``'s ``init`` loads an FM run's ``model/last`` into the freshly built model (the
+    cooldown's warm start, in place of pimm's weight=), and reading the warm-started run back
+    builds its architecture without touching ``init`` -- whose run may be gone by then."""
+    torch = pytest.importorskip("torch")
+    from test_eval import SMALL, _config, _same, _write_run
 
-    def hooks(name):
-        src = (Path(__file__).resolve().parent.parent / "configs" / "pimm" / name).read_text()
-        node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
-                    and any(getattr(t, "id", None) == "hooks" for t in n.targets))
-        return [{kw.arg: ast.literal_eval(kw.value) for kw in h.keywords} for h in node.value.elts]
+    import helix.integrations.pimm  # noqa: F401
+    from helix.model.checkpoint import model_config
+    from pimm.models.builder import MODELS
 
-    base, cool = hooks("fm.py"), hooks("fm_cooldown.py")
-    assert any(h["type"] == "WeightEMA" for h in base)
-    assert cool == [h for h in base if h["type"] != "WeightEMA"]
+    raw, ema = _write_run(tmp_path / "stable")
+    bins = dict(edges=raw.bin_edges.clone())
+    m = MODELS.build(dict(type="Coeff-FM", bins=bins, init=str(tmp_path / "stable"), **SMALL))
+    assert _same(m, raw) and not _same(m, ema)
+    cool = _config()
+    cool["model"]["init"] = str(tmp_path / "gone")
+    assert "init" not in model_config(cool)
+    assert model_config(cool) == model_config(_config())
