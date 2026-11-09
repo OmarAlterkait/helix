@@ -11,13 +11,12 @@ Layout (one modality per file, flat columnar — see docs/ARCHITECTURE.md §6):
     /config   attrs: format ("helix-coeff-2"), n_events, dataset_name, file_index, global_event_offset,
                      readout_type, wavelet, dwt_level, dwt_mode, n_ticks_raw, pad,
                      sigma_norm, basis_digest, removal_json, threshold_json,
-                     has_coords, noise_json
+                     has_coords (always True), noise_json
               datasets: band_lengths (n_bands,), gids (G,), n_wires (G,),
                         [norm_sigma (G, n_bands)]
     /coord    band uint8, plane_gid int32, wire int32, tau int32   (all (M,))
-                                                     ← absent when has_coords=False
               event_offset int64 (n_events+1,)   ← slice [off[i]:off[i+1]]
-              coord_digest uint64 (n_events,)    ← pairing key for a clean shard
+              coord_digest uint64 (n_events,)    ← per-event digest of the coords
               wire_valid uint8 (n_events, G, ceil(max n_wires / 8))  ← packbits of
                   CoeffEvent.wire_valid (False = excluded channel); absent = all valid
               sigma_threshold float32 (n_events, G, n_bands)
@@ -25,10 +24,8 @@ Layout (one modality per file, flat columnar — see docs/ARCHITECTURE.md §6):
                              sigma_threshold / q: threshold_json's value_step)
     /ident    run (n_events,), source_file (n_events,), event int64 (n_events,)
 
-The co-supported clean target is written ``coords=False`` (values only): its four
-coordinate columns would duplicate the noisy shard's byte for byte — 13 of every
-34 bytes in a pair. ``coord_digest`` is written to BOTH shards so joining them is
-a uint64 compare, and a mispairing raises rather than misaligning silently.
+``has_coords`` and ``coord_digest`` are format fields from when a values-only clean shard
+existed (removed 2026-11); still written so a rebuild compares byte for byte with the corpus.
 
 Compression defaults to gzip with the byte shuffle (always readable); the layout — not the filter — is
 the contract, so pimm-data may write blosc-zstd over the same schema.
@@ -50,13 +47,7 @@ _STR = h5py.string_dtype(encoding="utf-8")
 def coord_digest(band, plane_gid, wire, tau) -> int:
     """Order-sensitive 64-bit digest of one event's coordinate rows.
 
-    Written into EVERY shard (`/coord/coord_digest`). A co-supported clean shard
-    stores values only — its coords are, by construction, byte-identical to the
-    noisy shard's — so the digest is what makes the pairing checkable: joining the
-    two is a uint64 compare, not a rehash. Without it a mispaired clean shard
-    silently misaligns every target, which is the failure mode this codebase has
-    already produced twice (positional-vs-identity join; shard-0 meta caching).
-    """
+    Written into every shard (`/coord/coord_digest`) and checked by :func:`audit_shard`."""
     h = hashlib.blake2b(digest_size=8)
     for a, dt in ((band, np.uint8), (plane_gid, np.int32),
                   (wire, np.int32), (tau, np.int32)):
@@ -153,20 +144,12 @@ def write_coeff_shard(
     global_event_offset: int = 0,
     norm_sigma: np.ndarray | None = None,
     compression: str = "gzip",
-    coords: bool = True,
     noise: dict | None = None,
     provenance: dict | None = None,
     noise_seeds=None,
 ) -> None:
     """Write many CoeffEvents to one flat-columnar shard. All events must share
     the basis and the plane set (gids / n_wires).
-
-    ``coords=False`` writes a VALUES-ONLY shard: ``/value``, ``/ident``,
-    ``event_offset``, ``sigma_threshold`` and ``coord_digest``, but not the four
-    coordinate columns. Only valid for a co-supported target (the clean shard),
-    whose coords duplicate the noisy shard's exactly — 13 of every 34 bytes in a
-    noisy+clean pair. Read it with ``read_coeff_event(..., coords_from=<noisy>)``,
-    which refuses to proceed unless the digests match.
 
     ``noise`` records HOW the input was noised (white vs colored, spectrum,
     coherent/incoherent). Two shards built with different noise are otherwise
@@ -222,7 +205,7 @@ def write_coeff_shard(
         cfg.attrs["basis_digest"] = dig
         cfg.attrs["removal_json"] = json.dumps(basis.removal, sort_keys=True)
         cfg.attrs["threshold_json"] = json.dumps(basis.threshold, sort_keys=True)
-        cfg.attrs["has_coords"] = bool(coords)
+        cfg.attrs["has_coords"] = True
         cfg.attrs["noise_json"] = json.dumps(noise or {}, sort_keys=True)
         _prov = dict(provenance or {})
         _prov.setdefault("code", code_version())     # stamped here, not by callers
@@ -234,11 +217,10 @@ def write_coeff_shard(
             cfg.create_dataset("norm_sigma", data=np.asarray(norm_sigma, np.float32))
 
         coord = f.create_group("coord")
-        if coords:
-            _ds(coord, "band", band, compression)
-            _ds(coord, "plane_gid", plane_gid, compression)
-            _ds(coord, "wire", wire, compression)
-            _ds(coord, "tau", tau, compression)
+        _ds(coord, "band", band, compression)
+        _ds(coord, "plane_gid", plane_gid, compression)
+        _ds(coord, "wire", wire, compression)
+        _ds(coord, "tau", tau, compression)
         coord.create_dataset("event_offset", data=event_offset)
         coord.create_dataset("coord_digest", data=digests)
         _ds(coord, "sigma_threshold", sigma, compression)
@@ -265,16 +247,8 @@ def n_events(path: str | Path) -> int:
         return int(f["config"].attrs["n_events"])
 
 
-def read_coeff_event(path: str | Path, i: int, *,
-                     coords_from: str | Path | CoeffEvent | None = None) -> CoeffEvent:
-    """Read event ``i`` from a shard → CoeffEvent (slices by event_offset).
-
-    A values-only shard (``has_coords=False``, i.e. the co-supported clean
-    target) carries no coordinate columns; pass ``coords_from`` — the paired
-    noisy shard path, or an already-read :class:`CoeffEvent` — to supply them.
-    The stored ``coord_digest`` of both sides must agree, so a mispaired shard
-    raises instead of silently misaligning every target row.
-    """
+def read_coeff_event(path: str | Path, i: int) -> CoeffEvent:
+    """Read event ``i`` from a shard → CoeffEvent (slices by event_offset)."""
     with h5py.File(path, "r") as f:
         cfg = f["config"]
         basis = _basis_from_config(cfg)
@@ -282,8 +256,6 @@ def read_coeff_event(path: str | Path, i: int, *,
         if i < 0 or i + 1 >= off.shape[0]:
             raise IndexError(f"event {i} out of range (n_events={off.shape[0]-1})")
         a, b = int(off[i]), int(off[i + 1])
-        has_coords = bool(cfg.attrs["has_coords"])
-        dig = int(f["coord"]["coord_digest"][i])
         d = dict(
             value=f["value"][a:b],
             gids=cfg["gids"][:], n_wires=cfg["n_wires"][:],
@@ -294,35 +266,14 @@ def read_coeff_event(path: str | Path, i: int, *,
         )
         if "wire_valid" in f["coord"]:
             d["wire_valid"] = unpack_wire_valid(f["coord"]["wire_valid"][i], d["n_wires"])
-        if has_coords:
-            d.update(band=f["coord"]["band"][a:b], plane_gid=f["coord"]["plane_gid"][a:b],
-                     wire=f["coord"]["wire"][a:b], tau=f["coord"]["tau"][a:b])
-
-    if not has_coords:
-        if coords_from is None:
-            raise ValueError(
-                f"{path} is a values-only shard (has_coords=False): its coords live in "
-                f"the paired noisy shard. Pass coords_from=<noisy shard path or CoeffEvent>.")
-        src = (coords_from if isinstance(coords_from, CoeffEvent)
-               else read_coeff_event(coords_from, i))
-        if src.n_coeff != d["value"].shape[0]:
-            raise ValueError(
-                f"coords_from has {src.n_coeff} rows but this values-only shard's event {i} "
-                f"has {d['value'].shape[0]} — the two shards are not co-supported.")
-        src_dig = coord_digest(src.band, src.plane_gid, src.wire, src.tau)
-        if src_dig != dig:
-            raise ValueError(
-                f"coord_digest mismatch on event {i}: this shard records {dig:#018x} but "
-                f"coords_from hashes to {src_dig:#018x} — MISPAIRED shards. Every target "
-                f"row would have been silently misaligned.")
-        d.update(band=src.band, plane_gid=src.plane_gid, wire=src.wire, tau=src.tau)
+        d.update(band=f["coord"]["band"][a:b], plane_gid=f["coord"]["plane_gid"][a:b],
+                 wire=f["coord"]["wire"][a:b], tau=f["coord"]["tau"][a:b])
     return arrays_to_coeff_event(d, basis)
 
 
-def read_coeff_shard(path: str | Path, *, coords_from: str | Path | None = None) -> list[CoeffEvent]:
+def read_coeff_shard(path: str | Path) -> list[CoeffEvent]:
     """Read all events from a shard."""
-    return [read_coeff_event(path, i, coords_from=coords_from)
-            for i in range(n_events(path))]
+    return [read_coeff_event(path, i) for i in range(n_events(path))]
 
 
 # ---- shard audit -----------------------------------------------------------
@@ -346,7 +297,6 @@ def audit_shard(path, *, strict=True):
         gids = cfg["gids"][:].astype(np.int64)
         nw = cfg["n_wires"][:].astype(np.int64)
         coord, val = f["coord"], f["value"][:]
-        has_coords = bool(cfg.attrs["has_coords"])
         off = coord["event_offset"][:]
         sig = coord["sigma_threshold"][:]
 
@@ -391,45 +341,38 @@ def audit_shard(path, *, strict=True):
         bad("event_offset", int(off[-1]) != val.shape[0],
             f"last {int(off[-1])} != n_values {val.shape[0]}")
 
-        # --- coordinate ranges (a values-only shard has none: it inherits the
-        # noisy shard's, and coord_digest is what proves the pairing) ---
-        if has_coords:
-            band = coord["band"][:]; pgid = coord["plane_gid"][:]
-            wire = coord["wire"][:]; tau = coord["tau"][:]
-            bad("band", band.size and (int(band.max()) >= len(bl)),
-                f"max {int(band.max()) if band.size else -1} >= n_bands {len(bl)}")
-            bad("plane_gid", bool(np.setdiff1d(np.unique(pgid), gids).size),
-                "contains gids absent from /config/gids")
-            if tau.size:
-                bad("tau", bool(np.any(tau >= bl[band])), "tau >= band_lengths[band] for some row")
-                bad("tau", int(tau.min()) < 0, "negative")
-            if wire.size:
-                # an audit must REPORT malformed input, never raise on it: a
-                # duplicate/absent gid used to KeyError out of the audit itself,
-                # so the shard came back "unaudited" rather than "bad".
-                g2n = {int(g): int(n) for g, n in zip(gids, nw)}
-                if set(np.unique(pgid).tolist()) <= set(g2n):
-                    lim = np.array([g2n[int(g)] for g in pgid], np.int64)
-                    bad("wire", bool(np.any(wire >= lim)), "wire >= n_wires for its plane")
-                    bad("wire", int(wire.min()) < 0, "negative")
-                else:
-                    probs.append("wire: cannot range-check (plane_gid not covered by /config/gids)")
-            # the stored digest must describe the coords actually present, or a
-            # clean shard would be paired against a digest that means nothing
-            bad("coord_digest", "coord_digest" not in coord, "missing")
-            if "coord_digest" in coord:
-                dg = coord["coord_digest"][:]
-                for i in range(min(n_ev, dg.shape[0])):
-                    a, b = int(off[i]), int(off[i + 1])
-                    got = coord_digest(band[a:b], pgid[a:b], wire[a:b], tau[a:b])
-                    if got != int(dg[i]):
-                        probs.append(f"coord_digest: event {i} stored {int(dg[i]):#018x} "
-                                     f"but coords hash to {got:#018x}")
-                        break
-        else:
-            bad("coord_digest", "coord_digest" not in coord,
-                "values-only shard with no digest — its pairing is unverifiable")
-            bad("value", int(off[-1]) != val.shape[0], "offsets do not describe /value")
+        # --- coordinate ranges ---
+        band = coord["band"][:]; pgid = coord["plane_gid"][:]
+        wire = coord["wire"][:]; tau = coord["tau"][:]
+        bad("band", band.size and (int(band.max()) >= len(bl)),
+            f"max {int(band.max()) if band.size else -1} >= n_bands {len(bl)}")
+        bad("plane_gid", bool(np.setdiff1d(np.unique(pgid), gids).size),
+            "contains gids absent from /config/gids")
+        if tau.size:
+            bad("tau", bool(np.any(tau >= bl[band])), "tau >= band_lengths[band] for some row")
+            bad("tau", int(tau.min()) < 0, "negative")
+        if wire.size:
+            # an audit must REPORT malformed input, never raise on it: a
+            # duplicate/absent gid used to KeyError out of the audit itself,
+            # so the shard came back "unaudited" rather than "bad".
+            g2n = {int(g): int(n) for g, n in zip(gids, nw)}
+            if set(np.unique(pgid).tolist()) <= set(g2n):
+                lim = np.array([g2n[int(g)] for g in pgid], np.int64)
+                bad("wire", bool(np.any(wire >= lim)), "wire >= n_wires for its plane")
+                bad("wire", int(wire.min()) < 0, "negative")
+            else:
+                probs.append("wire: cannot range-check (plane_gid not covered by /config/gids)")
+        # the stored digest must describe the coords actually present
+        bad("coord_digest", "coord_digest" not in coord, "missing")
+        if "coord_digest" in coord:
+            dg = coord["coord_digest"][:]
+            for i in range(min(n_ev, dg.shape[0])):
+                a, b = int(off[i]), int(off[i + 1])
+                got = coord_digest(band[a:b], pgid[a:b], wire[a:b], tau[a:b])
+                if got != int(dg[i]):
+                    probs.append(f"coord_digest: event {i} stored {int(dg[i]):#018x} "
+                                 f"but coords hash to {got:#018x}")
+                    break
 
         # --- identity ---
         if "ident" in f:

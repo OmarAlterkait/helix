@@ -10,9 +10,8 @@ hot in the loop, so it is **flat columnar**, not per-event groups: shard-wide
 slice per event; ``plane_gid`` is a column. This is pimm-data's own offset idiom
 (cf. the optical second row-space) applied shard-wide.
 
-One modality per file (``{name}_coeff_*.h5`` noisy input, ``{name}_coeff_clean_*``
-the noise-free values of a ``--keep-clean`` build), joined by identity — never mixed. The on-disk layout is the
-shared contract of ``docs/ARCHITECTURE.md`` §6 (Coefficient shards); this reader
+One shard family per modality (``{name}_coeff_*.h5``, ``{name}_cells_*.h5``), joined by
+identity. The on-disk layout is the shared contract of ``docs/ARCHITECTURE.md`` §6 (Coefficient shards); this reader
 implements it with **standalone h5py** (no helix import at read time — no cycle),
 and is round-trip golden-tested against helix's reference codec.
 
@@ -45,9 +44,6 @@ shards and emits a **nested** dict with a ``coeff`` part of per-coefficient rows
       'name': str, 'split': str,
     }
 
-Other modalities join by identity: ``'coeff_clean'`` (``modalities=('coeff','coeff_clean')``)
-is the noise-free values of a ``--keep-clean`` build, its own shard family, read by no
-training config.
 ``'cells'`` (with ``'coeff'``) adds ``sample['cells']``: the simulation truth on the
 fine grid, one record per event (:mod:`helix.data.cells`), for downstream and
 evaluation configs only -- pretraining never opens it.
@@ -78,7 +74,7 @@ import h5py
 from pimm_data import ShardEventDataset, ShardReaderBase
 from pimm_data.builder import DATASETS
 
-from helix.core.coeff_io import FORMAT, coord_digest, shard_format
+from helix.core.coeff_io import FORMAT, shard_format
 
 logger = logging.getLogger(__name__)
 
@@ -86,16 +82,14 @@ logger = logging.getLogger(__name__)
 # ---- reader ----------------------------------------------------------------------------------
 
 class CoeffTPCReader(ShardReaderBase):
-    """Flat-columnar coeff-shard reader. ``modality`` selects the file family
-    (``'coeff'`` noisy / ``'coeff_clean'`` noise-free values)."""
+    """Flat-columnar coeff-shard reader (the ``{name}_coeff_<k>.h5`` family)."""
 
     _MODALITY = "coeff"
 
-    def __init__(self, data_root, split="", dataset_name="coeff_tpc", modality="coeff", **kwargs):
+    def __init__(self, data_root, split="", dataset_name="coeff_tpc", **kwargs):
         self.data_root = data_root
         self.split = split
         self.dataset_name = dataset_name
-        self._MODALITY = modality               # instance attr shadows the class default
         # Shard-shared metadata. Taken from the first shard AND verified against
         # every other one: these tables are corpus-wide by contract (norm_sigma
         # in particular must be frozen across shards), so a disagreement means
@@ -107,7 +101,6 @@ class CoeffTPCReader(ShardReaderBase):
         self.norm_sigma = None
         self.sigma_norm = None
         self.config_attrs = None
-        self.has_coords = True
         self._meta_source = None
         self._meta_by_path = {}                 # h5_path -> its /config tables
         self._ident_by_path = {}                # h5_path -> raw (run, source_file, event)
@@ -168,10 +161,6 @@ class CoeffTPCReader(ShardReaderBase):
                 raise ValueError(
                     f"{self._MODALITY} shards disagree on sigma_norm: "
                     f"{ref_path} -> {ref['sigma_norm']}, {path} -> {m['sigma_norm']}")
-            if bool(m["has_coords"]) != bool(ref["has_coords"]):
-                raise ValueError(
-                    f"{self._MODALITY} shards disagree on has_coords: "
-                    f"{ref_path} -> {ref['has_coords']}, {path} -> {m['has_coords']}")
             # The DSP identity. Everything above is geometry and normalisation,
             # which two corpora built with DIFFERENT signal processing share
             # exactly — so none of it would have caught shards from two gates
@@ -192,9 +181,8 @@ class CoeffTPCReader(ShardReaderBase):
                         f"one corpus, however similar their geometry looks.")
 
     def _find_files(self):
-        """Glob shards with the tag anchored to a digit — ``{name}_{modality}_[0-9]*.h5``
-        — so ``modality='coeff'`` does NOT also match ``{name}_coeff_clean_*.h5``
-        (``coeff`` is a prefix of ``coeff_clean``)."""
+        """Glob ``{name}_{modality}_[0-9]*.h5``: the tag anchored to a digit, so no other family
+        whose name starts with the modality's is matched."""
         pat = f"{self.dataset_name}_{self._MODALITY}_[0-9]*.h5"
         if isinstance(self.split, (list, tuple)):
             files, file_runs = [], []
@@ -215,7 +203,7 @@ class CoeffTPCReader(ShardReaderBase):
 
     def _index_for_shard(self, h5_path):
         """Present event **ids** for one flat shard — the ``/ident/event`` physical
-        ids (in write order) so the cross-modality joint index aligns coeff↔coeff_clean
+        ids (in write order) so the cross-modality joint index aligns coeff↔cells
         by IDENTITY, not position. Also caches shared basis/geometry, and a
         physical-id→write-position map (event_offset is positional)."""
         with h5py.File(h5_path, "r", libver="latest", swmr=True) as f:
@@ -229,10 +217,9 @@ class CoeffTPCReader(ShardReaderBase):
             n_wires = cfg["n_wires"][:].astype(np.int32)
             ns = cfg["norm_sigma"][:].astype(np.float32) if "norm_sigma" in cfg else None
             sn = float(cfg.attrs["sigma_norm"])
-            hc = bool(cfg.attrs["has_coords"])
             self._meta_by_path[str(h5_path)] = dict(
                 band_lengths=bl, gids=gids, n_wires=n_wires, norm_sigma=ns,
-                sigma_norm=sn, has_coords=hc,
+                sigma_norm=sn,
                 # The DSP identity, as distinct from the geometry: two corpora can
                 # share every table above and differ only in the coherent gate.
                 basis_digest=cfg.attrs.get("basis_digest"),
@@ -241,13 +228,12 @@ class CoeffTPCReader(ShardReaderBase):
                 self.config_attrs = dict(cfg.attrs)
                 self.band_lengths, self.gids, self.n_wires = bl, gids, n_wires
                 self.norm_sigma, self.sigma_norm = ns, sn
-                self.has_coords = hc
                 self._meta_source = str(h5_path)
             ev = f["ident"]["event"][:].astype(np.int64)
             src = f["ident"]["source_file"][:]
             rn = f["ident"]["run"][:]
             # Keep the RAW triple as well as the packed id. The packed id
-            # exists to align coeff<->coeff_clean and is deliberately lossy
+            # exists to align modalities and is deliberately lossy
             # (a hash, once a corpus spans several runs); it cannot be turned
             # back into a source file and event number. Anything that wants
             # to join a coeff event to the simulation event it came from —
@@ -301,19 +287,16 @@ class CoeffTPCReader(ShardReaderBase):
 
     def read_event(self, idx):
         """One event → flat dict of coeff rows (sliced by ``event_offset`` at the
-        physical event's write position).
-
-        A values-only shard (``has_coords=False`` — the co-supported clean
-        target) yields ``value`` and ``_coord_digest`` but no coordinate columns;
-        :class:`~pimm_data.coeff.CoeffTPCDataset` supplies them from the paired
-        noisy event after checking the digest.
-        """
+        physical event's write position)."""
         f, ev, path = self._locate_flat(idx)
         coord = f["coord"]
         off = coord["event_offset"]
         a, b = int(off[ev]), int(off[ev + 1])
-        out = {"value": f["value"][a:b].astype(np.float32)}
-        out["_coord_digest"] = int(coord["coord_digest"][ev])
+        out = {"value": f["value"][a:b].astype(np.float32),
+               "band": coord["band"][a:b].astype(np.int32),
+               "plane_gid": coord["plane_gid"][a:b].astype(np.int32),
+               "wire": coord["wire"][a:b].astype(np.int32),
+               "tau": coord["tau"][a:b].astype(np.int32)}
         if "wire_valid" in coord:                    # packed (G, ceil(max n_wires / 8))
             out["_wire_valid"] = coord["wire_valid"][ev]
         ident = self._ident_by_path.get(path)
@@ -321,13 +304,6 @@ class CoeffTPCReader(ShardReaderBase):
             out["_ident"] = dict(run=ident["run"][ev],
                                  source_file=ident["source_file"][ev],
                                  event=int(ident["event"][ev]))
-        if self.has_coords:
-            out.update(
-                band=coord["band"][a:b].astype(np.int32),
-                plane_gid=coord["plane_gid"][a:b].astype(np.int32),
-                wire=coord["wire"][a:b].astype(np.int32),
-                tau=coord["tau"][a:b].astype(np.int32),
-            )
         return out
 
 
@@ -467,10 +443,10 @@ def _offplane_share(before, after):
 
 @DATASETS.register_module()
 class CoeffTPCDataset(ShardEventDataset):
-    """Flat-columnar wavelet-coefficient corpus (noisy ``coeff`` + optional
-    joined ``coeff_clean`` target)."""
+    """Flat-columnar wavelet-coefficient corpus (``coeff``), optionally joined with its
+    simulation truth (``cells``)."""
 
-    VALID_MODALITIES = ('coeff', 'coeff_clean', 'cells')
+    VALID_MODALITIES = ('coeff', 'cells')
 
     def __init__(
         self,
@@ -492,36 +468,25 @@ class CoeffTPCDataset(ShardEventDataset):
         subset_seed=0,
     ):
         # strict by DEFAULT, unlike the other datasets. A coeff corpus is built
-        # by hundreds of independent jobs, and four separate failure shapes —
-        # a missing coeff_clean pair, a truncated shard, a shard absent mid-run,
-        # a job that died after writing only its noisy file — all resolve to the
-        # joint index quietly ALIGNING on what it found and emitting a log
-        # warning. Each silently shortens the corpus (measured: 25% gone from a
-        # missing pair) in a way no downstream check can see. Pass
-        # strict_lengths=False deliberately to read a partial corpus mid-build.
+        # by hundreds of independent jobs, and a truncated shard or a cells shard
+        # absent for its coeff shard would otherwise resolve to the joint index
+        # quietly ALIGNING on what it found and emitting a log warning --
+        # silently shortening the corpus in a way no downstream check can see.
         self._modalities = tuple(modalities)
         self._validate_modalities(self._modalities)
+        if 'coeff' not in self._modalities:
+            raise ValueError("modalities must include 'coeff' (cells are checked against the coeff "
+                             "event's identity)")
         self._dataset_name = dataset_name
         self._max_len = max_len
         self._strict_lengths = strict_lengths
         self._source_data_root = data_root
         self._source_split = split
 
-        self.coeff_reader = None
-        self.coeff_clean_reader = None
+        self.coeff_reader = CoeffTPCReader(
+            data_root=self._modality_root('coeff'), split=split, dataset_name=dataset_name)
         self.cells_reader = None
-        if 'coeff' in self._modalities:
-            self.coeff_reader = CoeffTPCReader(
-                data_root=self._modality_root('coeff'), split=split,
-                dataset_name=dataset_name, modality='coeff')
-        if 'coeff_clean' in self._modalities:
-            self.coeff_clean_reader = CoeffTPCReader(
-                data_root=self._modality_root('coeff_clean'), split=split,
-                dataset_name=dataset_name, modality='coeff_clean')
         if 'cells' in self._modalities:
-            if 'coeff' not in self._modalities:
-                raise ValueError("modalities: 'cells' is checked against the coeff event's identity; "
-                                 "load it with 'coeff'")
             self.cells_reader = CellsReader(
                 data_root=self._modality_root('cells'), split=split, dataset_name=dataset_name)
 
@@ -530,7 +495,7 @@ class CoeffTPCDataset(ShardEventDataset):
         self._exclude_range = tuple(exclude_range) if exclude_range else None
         self._holdout = dict(holdout) if holdout else None
         self._split_role = split_role
-        self._canonical_reader = self.coeff_reader or self.coeff_clean_reader
+        self._canonical_reader = self.coeff_reader
         self._build_joint_index(source_label=f"CoeffTPCDataset({data_root!r})")
         self._max_event_size = max_event_size
 
@@ -678,31 +643,19 @@ class CoeffTPCDataset(ShardEventDataset):
             'name': self.get_data_name(real_idx),
             'split': self.split if isinstance(self.split, str) else 'custom',
         }
-        raw_noisy = None
-        if self.coeff_reader is not None:
-            raw_noisy = self.coeff_reader.read_event(real_idx)
-            data['coeff'] = self._build_coeff(raw_noisy, meta=self._shard_meta())
-            # The source event this coeff event was built from: (run, source_file,
-            # event). Carried at the TOP level rather than inside a part, because
-            # it identifies the sample, not a row-space — and because a consumer
-            # joining truth onto it must not have to guess which part to look in.
-            # This is what lets a probe reach the simulation truth without the
-            # corpus storing it: /ident is already written by every shard.
-            if '_ident' in raw_noisy:
-                data['ident'] = raw_noisy['_ident']
-        if self.coeff_clean_reader is not None:
-            raw_clean = self.coeff_clean_reader.read_event(real_idx)
-            if 'band' not in raw_clean:                  # values-only target
-                raw_clean = self._inherit_coords(raw_clean, raw_noisy, real_idx)
-            # a clean-only dataset still needs the shard tables for a tokenizer
-            data['coeff_clean'] = self._build_coeff(
-                raw_clean, meta=None if raw_noisy is not None else self._shard_meta())
+        raw = self.coeff_reader.read_event(real_idx)
+        data['coeff'] = self._build_coeff(raw, meta=self._shard_meta())
+        # The source event this coeff event was built from: (run, source_file,
+        # event). Carried at the TOP level rather than inside a part, because
+        # it identifies the sample, not a row-space — and because a consumer
+        # joining truth onto it must not have to guess which part to look in.
+        data['ident'] = raw['_ident']
         if self.cells_reader is not None:
             cells = self.cells_reader.read_event(real_idx)
             ident = cells.pop('_ident')
-            if ident != raw_noisy.get('_ident'):
+            if ident != raw['_ident']:
                 raise ValueError(f"event {real_idx}: cells are for {ident}, the coeff event is "
-                                 f"{raw_noisy.get('_ident')} -- MISPAIRED coeff/cells shards.")
+                                 f"{raw['_ident']} -- MISPAIRED coeff/cells shards.")
             # off-plane cells go here, where the event's planes are known: the coeff shard's gids and
             # n_wires (helix.data.cells.valid_cells; no tick upper bound -- the stored band lengths are
             # the padded basis', and the one corrupt d1m event's late ticks sit on a plane its wires
@@ -723,31 +676,6 @@ class CoeffTPCDataset(ShardEventDataset):
                 cells = kept
             data['cells'] = cells
         return data
-
-    def _inherit_coords(self, raw_clean, raw_noisy, idx):
-        """Supply a values-only target's coords from its paired noisy event.
-
-        The clean target is CO-SUPPORTED, so its coords are the noisy event's and
-        are not stored twice (13 of every 34 bytes in a pair). ``coord_digest``
-        is what makes that safe: without the check a mispaired shard misaligns
-        every target row silently, and the model trains against noise.
-        """
-        if raw_noisy is None:
-            raise ValueError(
-                "modalities=('coeff_clean',) cannot be read alone: the clean shard is "
-                "values-only and inherits its coords from the paired 'coeff' shard. "
-                "Use modalities=('coeff', 'coeff_clean').")
-        if raw_clean['value'].shape[0] != raw_noisy['value'].shape[0]:
-            raise ValueError(
-                f"event {idx}: clean has {raw_clean['value'].shape[0]} rows, noisy has "
-                f"{raw_noisy['value'].shape[0]} — the shards are not co-supported.")
-        want, got = raw_clean['_coord_digest'], raw_noisy['_coord_digest']
-        if int(got) != int(want):
-            raise ValueError(
-                f"event {idx}: coord_digest mismatch (clean {int(want):#018x} vs noisy "
-                f"{int(got):#018x}) — MISPAIRED coeff/coeff_clean shards.")
-        return {**raw_clean, **{k: raw_noisy[k]
-                                for k in ('band', 'plane_gid', 'wire', 'tau')}}
 
     def _shard_meta(self):
         """Shard-level tables a tokenizer needs, travelling WITH the sample.

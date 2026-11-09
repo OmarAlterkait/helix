@@ -206,31 +206,26 @@ def test_chain_output_is_pinned_on_the_synthetic_planes():
     np.testing.assert_allclose(abs_sum, _PINNED_ABS_SUM, rtol=1e-5)
 
 
-def test_sim_coeff_event_and_clean_target():
+def test_sim_coeff_event():
     clean, noisy = _planes(seed=1)
     ch = TPCChain(sim_config([[len(x) for x in noisy]]))
     res = ch.process_images(noisy, tpc=0)
     ce = tpc_chain.coeff_event(ch, res, run="r", source_file="f.h5", event=3)
     assert list(ce.gids) == [0, 1, 2] and list(ce.n_wires) == [200, 200, 150] and ce.wire_valid is None
     assert len(ce.value) > 0 and (ce.band < 4).all()                      # D1 dropped (drop_finest 1)
-    cl = tpc_chain.clean_coeff_event(ch, ce, {g: clean[g] for g in range(3)})
-    assert np.array_equal(cl.wire, ce.wire) and cl.basis == ce.basis
-    big = np.abs(ce.value) > 20                                           # strong signal: noisy ~ clean
-    assert np.median(np.abs(ce.value[big] - cl.value[big]) / np.abs(ce.value[big])) < 0.2
 
 
 def test_stored_values_on_their_step():
-    """Input and target values lie on a power-of-two grid <= sigma / q of their (plane, band),
+    """Input values lie on a power-of-two grid <= sigma / q of their (plane, band),
     within half a step of the exact values; q = 0 stores them exact."""
     clean, noisy = _planes(seed=1)
     exact = TPCChain(sim_config([[len(x) for x in noisy]], {"store": {"step_input": 0, "step_target": 0}}))
     ch = TPCChain(sim_config([[len(x) for x in noisy]]))
     res = ch.process_images(noisy, tpc=0)
     ce0, ce = (tpc_chain.coeff_event(c, res) for c in (exact, ch))
-    cl0, cl = (tpc_chain.clean_coeff_event(c, e, {g: clean[g] for g in range(3)}) for c, e in ((exact, ce0), (ch, ce)))
     assert ce.basis.threshold["value_step"] == {"step_input": 16, "step_target": 32}
     assert ce.basis.digest() != ce0.basis.digest()
-    for q, x0, x in ((16, ce0, ce), (32, cl0, cl)):
+    for q, x0, x in ((16, ce0, ce),):
         step = tpc_chain.value_step(ce.sigma_threshold, q)[np.searchsorted(ce.gids, ce.plane_gid), ce.band].astype(np.float64)
         sig = ce.sigma_threshold[np.searchsorted(ce.gids, ce.plane_gid), ce.band]
         assert (step > 0).all() and (step <= sig / q).all() and (step > sig / (2 * q)).all()

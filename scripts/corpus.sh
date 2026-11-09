@@ -19,7 +19,7 @@
 # Environment: EVENTS_PER_TASK (500; sim: one sensor file per task), EVENTS_PER_SHARD (sim 200, else 100;
 # sim: a divisor of the 1000 events of a task, since shard k holds campaign events k*EPS..(k+1)*EPS-1),
 # CAL_EVENTS (100 per run), CONFIG (chain overrides, json/yaml), BUILD_ARGS (more build options for every
-# shard, e.g. --keep-clean), CONC (16 tasks at once per array),
+# shard, e.g. --no-optical), CONC (16 tasks at once per array),
 # ARRAY_MAX (100: the largest array the scheduler accepts), LOGS (OUT/_logs).
 set -euo pipefail
 H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

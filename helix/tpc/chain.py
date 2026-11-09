@@ -35,7 +35,7 @@ band (0 for dropped finest bands). The basis records the chain's coherent remova
 readout), threshold and value step, so ``basis_digest`` separates every configuration.
 
 Values are stored rounded to a power-of-two step <= sigma / q of their (plane, band)
-(:func:`quantize`; config ``store``: q = 16 for the input, 32 for the clean target): float32 still,
+(:func:`quantize`; config ``store``: q = 16 for the input; ``step_target`` 32 is unused but in the digest): float32 still,
 so every reader reads them unchanged, and the bits below the step — noise, ~13 of the 23 mantissa
 bits — no longer cost bytes (values 3.6 -> 1.4 B per coefficient).
 """
@@ -267,7 +267,7 @@ class TPCChain:
 
     def dwt_rows(self, img):
         """The chain's transform of one plane image (no gate, no threshold), the dropped finest
-        bands zeroed: the basis of the noise-free target (helix.build)."""
+        bands zeroed: what a noise-free image becomes (the tests compare against it)."""
         d = self.cfg["dwt"]
         b = self._dwt(self._to(img, np.float32), d["wavelet"], d["level"])
         nd = int(self.cfg["threshold"]["drop_finest"])
@@ -402,49 +402,3 @@ def coeff_event(chain, results, *, run="", source_file="", event=-1, sigma_norm=
     return CoeffEvent(**cols, gids=gids, n_wires=n_wires, sigma_threshold=sig,
                       basis=bs, run=str(run), source_file=str(source_file), event=int(event),
                       wire_valid=None if all(wire_valid[i, :n].all() for i, n in enumerate(n_wires)) else wire_valid)
-
-
-def clean_coeff_event(chain, noisy: CoeffEvent, clean_images) -> CoeffEvent:
-    """The noise-free target on the noisy event's support: the clean image of every plane
-    (``{gid: (wires, ticks)}``, numpy or a tensor) through the chain's transform (no gate, no
-    threshold, the dropped finest bands zeroed), read at the noisy coefficients' (band, wire, tau).
-
-    The gather runs on the chain's device: the plane's bands are concatenated along time and
-    indexed with (row, column) tensors, so only the selected values come back to the host, not
-    the dense bands (~205 MB/event). ``sigma_threshold`` is the NOISY event's: a noise-free
-    image's bands are mostly exact zeros, so their own MAD sigma would be 0 and say nothing;
-    the sigma that applies to this target is the one its normalisation shares with the input.
-    """
-    gids = [int(g) for g in noisy.gids]
-    for gi, g in enumerate(gids):                     # geometry must match, or the gather misaligns
-        if g not in clean_images:
-            raise ValueError(f"clean_images missing gid {g} present in the noisy event")
-        nw = int(clean_images[g].shape[0])
-        if nw != int(noisy.n_wires[gi]):
-            raise ValueError(f"gid {g}: clean has {nw} wires, noisy has {int(noisy.n_wires[gi])} "
-                             f"— geometry must match")
-    vals = np.zeros(len(noisy.value), np.float32)
-    col_off = np.concatenate([[0], np.cumsum(np.asarray(noisy.basis.band_lengths, np.int64))])[:-1]
-    for g in gids:
-        sel = np.nonzero(noisy.plane_gid == g)[0]
-        if not len(sel):
-            continue
-        bands = chain.dwt_rows(clean_images[g])
-        rows = noisy.wire[sel].astype(np.int64)
-        cols = col_off[noisy.band[sel]] + noisy.tau[sel]
-        if hasattr(bands[0], "detach"):               # torch: gather on the device
-            import torch
-            cat = torch.cat(list(bands), dim=1)
-            vals[sel] = cat[torch.as_tensor(rows, device=cat.device),
-                            torch.as_tensor(cols, device=cat.device)].float().cpu().numpy()
-        else:
-            vals[sel] = np.concatenate(list(bands), axis=1)[rows, cols]
-    vals = quantize(vals, noisy.band, noisy.plane_gid, noisy.gids,
-                    value_step(noisy.sigma_threshold, chain.cfg["store"]["step_target"]))
-    # SHARE the noisy coords, do not copy them: identical by construction (co-supported), never
-    # persisted for the clean target (written coords=False), never mutated. Copying them doubled
-    # the builder's accumulation (~19.6 MB/event) and got a 1000-event shard OOM-killed at 16 GB.
-    return CoeffEvent(band=noisy.band, plane_gid=noisy.plane_gid, wire=noisy.wire, tau=noisy.tau, value=vals,
-                      gids=noisy.gids, n_wires=noisy.n_wires, sigma_threshold=noisy.sigma_threshold.copy(),
-                      basis=noisy.basis, run=noisy.run, source_file=noisy.source_file, event=noisy.event,
-                      wire_valid=noisy.wire_valid)
