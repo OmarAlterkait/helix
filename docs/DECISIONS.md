@@ -354,8 +354,19 @@ number still under its own key, the new ones beside it):*
     and both backgrounds, and not a per-area false-positive rate. Y's deficit is not threshold
     noise: under this rule Y has 27,420 far windows (as U and V), and the event bootstrap
     recomputes the threshold per resample: Y -0.057 [-0.068, -0.045] clear, -0.051 [-0.072,
-    -0.038] crowded@near. Whether it is the probe or the representation is the nested control
-    (amplitude given to the probe, alone and with the FM features).
+    -0.038] crowded@near.
+    *The nested control* (fm_cooldown, 58dc4f8; every probe also given the cell's log-amplitude,
+    and an arm with amplitude alone). The MSE probe on amplitude alone reproduces the threshold
+    on Y (0.645 vs 0.652). With the FM features as well it scores U 0.160 / V 0.145 / Y 0.602
+    clear and 0.286 crowded@near, against amplitude alone's 0.008 / 0.052 / 0.645 and 0.082. So
+    given amplitude, the representation adds strongly on the induction planes and near activity,
+    and costs ~0.04 on clear Y. The presence classifier CANNOT serve as this control: given the
+    amplitude column it collapses (0.012 alone, 0.069 with FM, log-odds scored, so not
+    saturation). It is fit on map rows and scored on window cells, mostly coefficient-free, and
+    an informative column lets it learn a rule that does not extrapolate there. The frozen floor
+    probe measures that extrapolation as much as the features. It stays a diagnostic; a
+    fine-tune trained on the population it is scored on is the candidate ranking key.
+    Log-odds scoring left the standard anchor unchanged to the last digit.
   - *d1m_lr: training-seed noise exceeds the LR effect* (paired presence clear@far 0.1-0.2 MeV,
     each cooled arm minus fm_cooldown on identical windows): lr4.4e-3 seed 0 -0.049, seed 1
     -0.005 (n.s.), lr3.1e-3 -0.009, lr2.2e-3 -0.036. The two seeds of ONE recipe differ by
