@@ -117,12 +117,18 @@ class Probe:
         return torch.cat(out).numpy() if out else np.zeros(0, np.int64 if self.n_classes else np.float32)
 
 
-    def proba(self, X, extra):
-        """A two-class probe's P(class 1): the presence arm's per-cell score."""
+    def logodds(self, X, extra):
+        """A two-class probe's log-odds of class 1: the presence arm's per-cell score. Not the
+        probability: a confident probe saturates P to exactly 1.0 in float32 on many background
+        cells, the 99th-percentile threshold becomes 1.0, and no window can exceed it (measured:
+        efficiency 0 everywhere once the probe was given the cell amplitude). Log-odds orders the
+        cells the same way without saturating."""
         import torch
         with torch.no_grad():
-            out = [self.net(self.inputs(X[s:s + CHUNK], extra[s:s + CHUNK])).float().softmax(1)[:, 1].cpu()
-                   for s in range(0, len(extra), CHUNK)]
+            out = []
+            for s in range(0, len(extra), CHUNK):
+                o = self.net(self.inputs(X[s:s + CHUNK], extra[s:s + CHUNK])).float()
+                out.append((o[:, 1] - o[:, 0]).cpu())
         return torch.cat(out).numpy() if out else np.zeros(0, np.float32)
 
 
@@ -237,6 +243,7 @@ N_WCELL = (32 // FW) * (128 // FT)                     # cells per window (helix
 FLOOR_FITTED = ("trained", "raw")
 #: each fitted arm's presence classifier: ``presence_raw`` is the primary arm's raw-input reference
 PRESENCE = {"trained": "presence", "raw": "presence_raw"}
+UNCOVERED_LOGODDS = -1e6           # a presence score where no token covers the cell (finite: quantiles)
 #: the presence arm: the trained features and rows, fit as a classifier of charge above the presence
 #: threshold rather than a regression of log-charge. An MSE regression's optimum next to a track is
 #: E[q | context] > 0 -- a haze even from a representation that localises charge exactly -- so the
@@ -423,9 +430,9 @@ class Floor:
                     p[ok] = probe.predict(X, waux[ok])
                 scores[seed_name(a, k)] = np.expm1(np.maximum(p, 0)) * Q0
             for k, probe in enumerate(self.probes[PRESENCE[a]]):
-                p = np.zeros(len(widx), np.float32)
+                p = np.full(len(widx), UNCOVERED_LOGODDS, np.float32)     # no token: below every covered cell
                 if ok.any():
-                    p[ok] = probe.proba(X, waux[ok])
+                    p[ok] = probe.logodds(X, waux[ok])
                 scores[seed_name(PRESENCE[a], k)] = p
         self.scored.add(ev, tr, scores)
 

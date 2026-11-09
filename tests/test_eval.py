@@ -1205,3 +1205,21 @@ def test_cell_charge_reads_the_truth_and_zeros_the_rest():
     cells = dict(key=np.array([5, 2, 9], np.int64), q=np.array([50.0, 20.0, 90.0]))
     assert W.cell_charge(cells, [2, 3, 9, 5]).tolist() == [20.0, 0.0, 90.0, 50.0]
     assert W.cell_charge(dict(key=np.zeros(0, np.int64), q=np.zeros(0)), [1]).tolist() == [0.0]
+
+
+def test_presence_scores_do_not_saturate():
+    """Two cells a probe calls 'present' with logits 50 and 60 apart: as probabilities both are
+    exactly 1.0 in float32 (a 1%-FPR threshold could not separate them); as log-odds they stay
+    ordered."""
+    import torch
+    from helix.eval.probe import Probe
+
+    class Net(torch.nn.Module):
+        def forward(self, x):
+            return torch.stack([torch.zeros(len(x)), x[:, 0]], 1)
+
+    p = Probe(Net(), torch.zeros(2), torch.ones(2), "cpu", n_classes=2)
+    X = torch.tensor([[50.0], [60.0]])
+    s = p.logodds(X, np.zeros((2, 1), np.float32))
+    assert torch.tensor([[0.0, 50.0], [0.0, 60.0]]).softmax(1)[:, 1].eq(1.0).all()
+    assert s[1] > s[0] and s[0] == pytest.approx(50.0)
