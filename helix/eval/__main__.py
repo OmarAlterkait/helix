@@ -100,7 +100,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="results JSON (written whole)")
     ap.add_argument("--weights", default="ema", choices=("ema", "last"), help="for a run directory")
     ap.add_argument("--max-events", type=int, default=None, help="only the first N events of the split")
-    ap.add_argument("--denoiser", default=None, help="a denoiser run (configs/pimm/denoise.py; its best checkpoint) or one "
+    ap.add_argument("--denoiser", default=None, help="a denoiser run (configs/pimm/denoise.py; its last checkpoint) or one "
                     "checkpoint of it, for --metrics denoise")
     ap.add_argument("--seed", type=int, default=0, help="window placement and probe init")
     ap.add_argument("--boot", type=int, default=200, help="event-bootstrap resamples")

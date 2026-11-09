@@ -112,15 +112,14 @@ class FMTrainer(Trainer):
 
         A config states intent (epochs, model width), never a step count: that follows from
         the corpus, the split and the GPU count. ``"auto"`` is accepted for the scheduler's
-        ``warmup`` and, in every hook, ``save_freq``, ``every_n_steps`` and ``evaluator_every_n_steps``; hooks
-        are patched as config and, if pimm has built them already, as objects.
+        ``warmup`` and, in every hook, ``save_freq``; hooks are patched as config and, if pimm
+        has built them already, as objects.
         """
         from helix.model import schedule as cadence
         steps = self._total_steps()
         core = unwrap_model(self.model)
         fm = getattr(core, "fm", core)            # the denoiser's encoder is an FM
-        val = dict(save_freq=cadence.save_every(steps), every_n_steps=cadence.eval_every(steps),
-                   evaluator_every_n_steps=cadence.eval_every(steps))
+        val = dict(save_freq=cadence.save_every(steps))
         sch = self.cfg.scheduler
         if sch.get("warmup") == "auto":
             sch.warmup = cadence.warmup_steps(steps, fm.d, fm.d_base)
@@ -131,7 +130,7 @@ class FMTrainer(Trainer):
                 elif not isinstance(h, dict) and getattr(h, k, None) == "auto":
                     setattr(h, k, v)
         self.logger.info(f"cadence over {steps} steps: warmup {sch.get('warmup')}, "
-                         f"eval every {val['every_n_steps']}, save every {val['save_freq']}")
+                         f"save every {val['save_freq']}")
 
 
 def resolve_tokenizer(data, tokenizer):

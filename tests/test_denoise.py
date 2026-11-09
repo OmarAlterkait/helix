@@ -363,8 +363,8 @@ def test_every_head_trains_through_coeff_denoise(fm_run, sample, dist, cond):
 # ------------------------------------------------------------------------------- reading it back
 def _write_denoise_run(d, fm_dir, **model):
     """A denoiser run as pimm writes one: its config names the FM run and a tokenizer by
-    reference; model/model_best.pth holds its weights. ``model``: further model-section keys."""
-    os.makedirs(os.path.join(d, "model"), exist_ok=True)
+    reference; model/last/weights.pth holds its weights. ``model``: further model-section keys."""
+    os.makedirs(os.path.join(d, "model", "last"), exist_ok=True)
     cfg = {"model": {"type": "Coeff-Denoise", "fm": str(fm_dir), "pretrained": True, "freeze_encoder": False,
                      "cond_charge": False, "lr_head": 1e-2, "compile_blocks": True, **model},
            "data": {"train": {"type": "CoeffTPCDataset", "data_root": "/nowhere", "split": ["run_x"],
@@ -375,7 +375,7 @@ def _write_denoise_run(d, fm_dir, **model):
     torch.manual_seed(5)
     m = build_denoise(str(fm_dir), **{"cond_charge": False, **model}, compile_blocks=False)
     torch.save({"state_dict": {"module." + k: v for k, v in m.state_dict().items()}},
-               os.path.join(d, "model", "model_best.pth"))
+               os.path.join(d, "model", "last", "weights.pth"))
     return m
 
 
@@ -386,8 +386,8 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
 
     d, _ = fm_run
     m = _write_denoise_run(str(tmp_path), d)
-    r = load_run(tmp_path, "best", device="cpu")
-    assert _same(r.model, m) and r.tokenizer == CFG and r.provenance["weights"] == "best"
+    r = load_run(tmp_path, "last", device="cpu")
+    assert _same(r.model, m) and r.tokenizer == CFG and r.provenance["weights"] == "last"
     with pytest.raises(FileNotFoundError, match="model_ema"):
         load_run(tmp_path, device="cpu")                           # a denoiser has no EMA
     predict, cfg = load_denoiser(str(tmp_path), "cpu")
@@ -411,7 +411,7 @@ def test_a_distributional_run_reads_back_with_its_calibration_path(fm_run, sampl
 
     d, _ = fm_run
     m = _write_denoise_run(str(tmp_path), d, dist=dist, cond_charge=True, lin_amp_scale=lin)
-    assert _same(load_run(tmp_path, "best", device="cpu").model, m)
+    assert _same(load_run(tmp_path, "last", device="cpu").model, m)
     predict, _ = load_denoiser(str(tmp_path), "cpu")
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
@@ -457,21 +457,18 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
     assert not m["cond_charge"] and m["lr_head"] == 1e-2 and cfg.optimizer["lr"] == 3e-3
     assert m["dist"] == "point" and m["lin_amp_scale"] == 0.0                # until measured on d1m
     assert cfg.scheduler["type"] == "WarmupCosineLR" and cfg.scheduler["warmup"] == "auto"
-    assert cfg.train["type"] == "FMTrainer" and cfg.batch_size == cfg.batch_size_val
-    for split in ("train", "val"):
-        dd = cfg.data[split]
-        assert tuple(dd["modalities"]) == ("coeff", "cells") and dd["holdout"] == cfg.HOLDOUT
-        assert [t["type"] for t in dd["transform"]] == ["CoeffTokenize", "DenoiseRows", "CoeffCollect"]
-        # presence = q > 25 e-, the cells-3 truth's cut: the labels, the model (cat's bin 0), the
-        # transform's own default and the evaluation agree
-        from helix.eval.denoise import PRESENCE_Q
-        assert dd["transform"][1]["support_min_q"] == m["support_min_q"] == DenoiseRows().support_min_q == PRESENCE_Q
-    assert cfg.data["val"]["transform"][1]["seed"] == 0 and "seed" not in cfg.data["train"]["transform"][1]
+    assert cfg.train["type"] == "FMTrainer" and not cfg.evaluate and set(cfg.data) == {"train"}
+    dd = cfg.data["train"]
+    assert tuple(dd["modalities"]) == ("coeff", "cells") and dd["holdout"] == cfg.HOLDOUT
+    assert [t["type"] for t in dd["transform"]] == ["CoeffTokenize", "DenoiseRows", "CoeffCollect"]
+    # presence = q > 25 e-, the cells-3 truth's cut: the labels, the model (cat's bin 0), the
+    # transform's own default and the evaluation agree
+    from helix.eval.denoise import PRESENCE_Q
+    assert dd["transform"][1]["support_min_q"] == m["support_min_q"] == DenoiseRows().support_min_q == PRESENCE_Q
+    assert "seed" not in dd["transform"][1]
     hooks = [h["type"] for h in cfg.hooks]
-    assert hooks.index("DenoiseEvaluator") < hooks.index("CheckpointSaver")
-    assert "WeightEMA" not in hooks and "CoeffFMEvaluator" not in hooks and "FiniteGuard" in hooks
-    saver = cfg.hooks[hooks.index("CheckpointSaver")]
-    assert saver["evaluator_every_n_steps"] == "auto"              # model_best by validation loss
+    assert hooks[-1] == "CheckpointSaverIteration" and "FiniteGuard" in hooks
+    assert not any(h.endswith("Evaluator") for h in hooks) and "WeightEMA" not in hooks
 
     from helix.integrations.pimm.trainer import resolve_tokenizer
     from pimm.models.builder import MODELS
@@ -479,8 +476,7 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
     d, _ = fm_run
     model = MODELS.build(dict(m, fm=str(d), compile_blocks=False))
     assert resolve_tokenizer(cfg.data, model.tokenizer)
-    for split in ("train", "val", "test"):
-        assert PatchConfig(**cfg.data[split]["transform"][0]["cfg"]) == CFG
+    assert PatchConfig(**cfg.data["train"]["transform"][0]["cfg"]) == CFG
     assert not resolve_tokenizer(cfg.data, model.tokenizer)        # nothing left to resolve
     with pytest.raises(ValueError, match="tokenizer"):
         resolve_tokenizer({"train": {"transform": [{"type": "CoeffTokenize", "cfg": "model"}]}}, None)

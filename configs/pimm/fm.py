@@ -7,7 +7,7 @@ A run is four choices, and only these differ between configs:
 * the phase: stable (this file), cooldown from a checkpoint (``fm_cooldown.py``);
 * the length: ``epoch``.
 
-Nothing here is a step count. Warmup, eval and checkpoint cadence are ``"auto"``: FMTrainer
+Nothing here is a step count. Warmup and checkpoint cadence are ``"auto"``: FMTrainer
 derives them from the run's own step count (pimm's ``iters_per_epoch * epoch``, i.e. the
 split, the corpus and the GPU count) through :mod:`helix.model.schedule`. Anything else is a
 ``key=value`` override after ``--``, e.g. ``scripts/submit.sh fm -- model.plane_frac=0.25``.
@@ -33,7 +33,7 @@ BINS = str(_reference_table())          # helix/data/data/reference_bins.json na
 # ---------------------------------------------------------------------------- run
 weight = None
 resume = False
-evaluate = True
+evaluate = False                        # scored afterwards (helix.eval, a fine-tune), not by val loss
 test_only = False
 seed = 0
 save_path = str(_root("HELIX_EXP") / "fm")
@@ -102,17 +102,16 @@ transform = [
 # The split hashes each event's identity, so it does not depend on the corpus's build,
 # shard layout or run list.
 HOLDOUT = dict(seed=0, fractions=dict(train=0.95, val=0.03, probe=0.02))
-_common = dict(type="CoeffTPCDataset", data_root=CORPUS, split=RUNS, dataset_name="sim_wire",
-               modalities=("coeff",), transform=transform, holdout=HOLDOUT)
 # The size cap is a guard against an outlier event, not a filter: d1m's largest event (1,066,152
 # coefficients, 48k tokens) peaks at 13.9 GB in one d768 training step (4.7-6.7 GB with act_ckpt),
 # within a 40 GB A100, where 600k -- from the padded-attention era -- dropped 18.9% of d1m's events,
 # the busiest (2026-11-07). Training is A100-only (varlen attention needs sm80+), so no smaller GPU
-# trains from this file.
+# trains from this file. Training data only: there is no in-training evaluation (evaluate=False),
+# so pimm builds no val/test loader.
 data = dict(
-    train=dict(**_common, split_role="train", max_event_size=1_200_000),
-    val=dict(**_common, split_role="val"),
-    test=dict(**_common, split_role="val"),
+    train=dict(type="CoeffTPCDataset", data_root=CORPUS, split=RUNS, dataset_name="sim_wire",
+               modalities=("coeff",), transform=transform, holdout=HOLDOUT, split_role="train",
+               max_event_size=1_200_000),
 )
 
 # ---------------------------------------------------------------------------- hooks
@@ -124,8 +123,7 @@ hooks = [
     dict(type="InformationWriter", log_frequency=200),
     dict(type="FiniteGuard", check_every=100, max_skips=20),
     dict(type="WeightEMA", decay=0.9999, save_freq="auto"),
-    dict(type="CoeffFMEvaluator", every_n_steps="auto", max_batches=200),
-    dict(type="CheckpointSaver", save_freq="auto"),
+    dict(type="CheckpointSaverIteration", save_freq="auto"),   # model/last only, no iter_N.pth
 ]
 train = dict(type="FMTrainer")
 

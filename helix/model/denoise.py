@@ -163,9 +163,9 @@ class DenoiseModel(nn.Module):
     batch (``q_idx``, ``q_aux``, ``q_nbr``, ``q_y``, ``q_present``).
 
     Every head reports ``mse`` (its point estimate's squared error, on the rows ``cond_charge``
-    regresses) and ``bce`` (its presence probability's), which ``DenoiseEvaluator`` reads;
-    ``loss`` is what trains: ``mse + bce`` (point), ``nll + bce`` (gauss), ``ce`` (cat) -- so a
-    validation loss compares checkpoints of one head, not heads."""
+    regresses) and ``bce`` (its presence probability's), which pimm's InformationWriter logs;
+    ``loss`` is what trains: ``mse + bce`` (point), ``nll + bce`` (gauss), ``ce`` (cat) -- so the
+    loss compares checkpoints of one head, not heads."""
 
     def __init__(self, fm, head, *, tokenizer=None, freeze_encoder=False, cond_charge=False, lr_head=1e-2):
         super().__init__()

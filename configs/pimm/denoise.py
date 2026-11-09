@@ -22,9 +22,10 @@ is M6d of DENOISE at tag archive-2026-11, and it is the default:
 * encoder LR 3e-3 (muP-scaled), head LR 1e-2 (``model.lr_head``), linear warmup ("auto") then a
   cosine to 2%; 4 epochs (~38k steps at 16 GPUs, the study's 40k);
 * label sampling: ``DenoiseRows``' defaults (whole noise windows, near-activity cells and
-  windows); the val split draws with a fixed seed;
-* the train/val split is the FM's identity-hash HOLDOUT; best checkpoint
-  (``model/model_best.pth``) by validation loss (comparable within one ``dist`` only).
+  windows);
+* the train split is the FM's identity-hash HOLDOUT; the run's weight is its last checkpoint
+  (``model/last``). No in-training evaluation and no best-checkpoint selection: a validation
+  loss is comparable within one ``dist`` only, and the scoring below is what decides.
 
 Label efficiency: ``data.train.n_events=N`` trains on a fixed, nested random subset of the train
 split (``data.train.subset_seed``); raise ``epoch`` with it, since the length is in epochs. Full
@@ -63,15 +64,10 @@ scheduler = dict(_delete_=True, type="WarmupCosineLR", warmup="auto", floor=0.02
 # ---------------------------------------------------------------------------- data
 _tokenize = dict(type="CoeffTokenize", part="coeff", cfg="model")
 _collect = dict(type="CoeffCollect", part="coeff")
-_val = dict(modalities=("coeff", "cells"),
-            transform=[_tokenize, dict(type="DenoiseRows", part="coeff", support_min_q=_SUPPORT_MIN_Q, seed=0),
-                       _collect])
 data = dict(
     train=dict(modalities=("coeff", "cells"), n_events=None, subset_seed=0,
                transform=[_tokenize, dict(type="DenoiseRows", part="coeff", support_min_q=_SUPPORT_MIN_Q),
                           _collect]),
-    val=_val,
-    test=_val,
 )
 
 # ---------------------------------------------------------------------------- hooks
@@ -82,8 +78,7 @@ hooks = [
     dict(type="IterationTimer", warmup_iter=1),
     dict(type="InformationWriter", log_frequency=50),
     dict(type="FiniteGuard", check_every=100, max_skips=20),
-    dict(type="DenoiseEvaluator", every_n_steps="auto", max_batches=16),
-    dict(type="CheckpointSaver", save_freq="auto", evaluator_every_n_steps="auto"),
+    dict(type="CheckpointSaverIteration", save_freq="auto"),
 ]
 
-del _root, _tokenize, _collect, _val, _SUPPORT_MIN_Q
+del _root, _tokenize, _collect, _SUPPORT_MIN_Q

@@ -16,8 +16,7 @@ from helix.data.verify import corpus_runs as _corpus_runs     # noqa: E402
 _base_ = ["./fm.py"]
 
 COOLDOWN_RUNS = 3
-_over = dict(split=_corpus_runs(str(_root("HELIX_CORPUS").parent))[:COOLDOWN_RUNS])
-data = dict(train=dict(**_over), val=dict(**_over), test=dict(**_over))
+data = dict(train=dict(split=_corpus_runs(str(_root("HELIX_CORPUS").parent))[:COOLDOWN_RUNS]))
 
 weight = str(_root("HELIX_EXP") / "fm" / "model" / "last")
 resume = False
@@ -32,9 +31,8 @@ hooks = [
     dict(type="IterationTimer", warmup_iter=1),
     dict(type="InformationWriter", log_frequency=200),
     dict(type="FiniteGuard", check_every=100, max_skips=20),
-    dict(type="CoeffFMEvaluator", every_n_steps="auto", max_batches=200),
-    dict(type="CheckpointSaver", save_freq="auto"),
+    dict(type="CheckpointSaverIteration", save_freq="auto"),
 ]
 save_path = str(_root("HELIX_EXP") / "fm_cooldown")
 
-del _root, _corpus_runs, _over
+del _root, _corpus_runs

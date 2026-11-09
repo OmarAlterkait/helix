@@ -389,6 +389,5 @@ def test_warmup_scales_with_width_and_is_at_most_a_fifth_of_the_run():
     assert cadence.warmup_steps(3, 128, 128) == 1
 
 
-def test_a_short_run_still_evaluates_and_saves():
-    assert 25 // cadence.eval_every(25) >= cadence.MIN_EVALS
+def test_a_short_run_still_saves():
     assert 25 // cadence.save_every(25) >= cadence.MIN_SAVES

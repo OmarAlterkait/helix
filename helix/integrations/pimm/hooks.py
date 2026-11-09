@@ -1,7 +1,4 @@
 """Run-lifecycle hooks: provenance (+ the corpus-mismatch refusal) and the weight EMA.
-
-Not evaluation — that is :mod:`helix.integrations.pimm.eval`. These two are
-about what a run WRITES, the evaluator about what it MEASURES.
 """
 
 from __future__ import annotations

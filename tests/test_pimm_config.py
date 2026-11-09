@@ -346,6 +346,27 @@ def test_hooks_exclude_the_ones_that_do_not_fit():
     assert "CheckpointSaver" in hooks_src, "a run with no checkpointing is a trap"
 
 
+def test_no_config_evaluates_during_training():
+    """Validation loss does not rank representations, so no config evaluates in training: no
+    evaluator hook, ``evaluate`` off in the base (pimm then builds no val/test loader), and the
+    saver is CheckpointSaverIteration, which writes ``model/last`` on its cadence and nothing
+    else -- pimm's CheckpointSaver also writes ``iter_N.pth`` on every save step."""
+    import ast
+    names = {}
+    for path in sorted(pathlib.Path(CONFIG).parent.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        names[path.name] = {t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
+                            for t in n.targets if isinstance(t, ast.Name)}
+        hooks = names[path.name].get("hooks")
+        if hooks is None:
+            continue
+        types = [kw.value.value for h in hooks.elts for kw in h.keywords if kw.arg == "type"]
+        assert not any(t.endswith("Evaluator") for t in types), f"{path.name}: {types}"
+        assert types[-1] == "CheckpointSaverIteration", f"{path.name}: saver is {types[-1]}"
+    assert ast.literal_eval(names["fm.py"]["evaluate"]) is False
+    assert all("evaluate" not in v or ast.literal_eval(v["evaluate"]) is False for v in names.values())
+
+
 # ---- the from-scratch categorical path -------------------------------------
 
 def test_categorical_head_from_scratch_needs_explicit_bins(tmp_path):

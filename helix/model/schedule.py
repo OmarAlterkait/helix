@@ -1,5 +1,5 @@
-"""The training schedule, derived rather than written down: warmup, evaluation and checkpoint
-cadence from the run's step count, and the muP learning-rate ratios a scheduler must keep.
+"""The training schedule, derived rather than written down: warmup and checkpoint cadence
+from the run's step count, and the muP learning-rate ratios a scheduler must keep.
 
 Pure (no torch, no pimm), so it is testable without a trainer; ``FMTrainer``
 (:mod:`helix.integrations.pimm.trainer`) applies both.
@@ -58,22 +58,18 @@ keep the ratios.
 """
 from __future__ import annotations
 
-#: A run must produce at least this many of each, however short it is. The
-#: cost-derived floors below are computed from a long run's economics and will
-#: exceed a short arm outright; without these a 880-step run at B=512 evaluates
-#: zero times and checkpoints zero times, and reports nothing.
-MIN_EVALS = 8
+#: A run must checkpoint at least this often, however short it is. The cost-derived floor
+#: below is computed from a long run's economics and would exceed a short arm outright, which
+#: would then checkpoint only at its end.
 MIN_SAVES = 2
 
 #: The wall-clock costs the cadences are derived from, measured once and owned
 #: here. Perlmutter A100-40GB, helix 3aa96b2 (one implementation, compiled
-#: blocks), d512, B=16 over four nodes: the steady step, one evaluation of the
-#: 256-event val set (~2-4 s at B=16, longer on fewer ranks), and one save
-#: (3 x 226 MiB: 4 s from four nodes, 11 s from one -- the slower is used).
+#: blocks), d512, B=16 over four nodes: the steady step and one save (3 x 226 MiB:
+#: 4 s from four nodes, 11 s from one -- the slower is used).
 #: Re-measure when the model or the card changes; nothing else should restate
 #: them.
 STEP_SECONDS = 0.14
-EVAL_SECONDS = 4.0
 CKPT_SECONDS = 11.0
 
 
@@ -124,22 +120,6 @@ def save_every(steps, ckpt_seconds=CKPT_SECONDS, step_seconds=STEP_SECONDS, over
     # hundred steps it would exceed the run, which is how a cadence designed to
     # bound cost ends up producing nothing.
     ceiling = max(1, steps // MIN_SAVES)
-    return min(max(floor, max(1, steps // target_count)), ceiling)
-
-
-def eval_every(steps, eval_seconds=EVAL_SECONDS, step_seconds=STEP_SECONDS, overhead=0.02,
-               target_count=50):
-    """Evaluation cadence, in optimizer steps.
-
-    Same shape as the checkpoint cadence and for the same reason: enough points
-    to read a curve, never so often that evaluation is a material share of the
-    run.
-    """
-    floor = round(eval_seconds / (step_seconds * overhead))
-    # Same ceiling, same reason: at B=512 over this corpus STEPS is ~880 and the
-    # 2%-overhead floor is 4,000, so an uncapped rule evaluates ZERO times and
-    # the run reports no curve at all.
-    ceiling = max(1, steps // MIN_EVALS)
     return min(max(floor, max(1, steps // target_count)), ceiling)
 
 

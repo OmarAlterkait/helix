@@ -168,7 +168,7 @@ def dist_calibration(kind, stat, width, err, true_q, view):
 
 def load_denoiser(path, device=None):
     """``(predict, tokenizer)`` from a denoiser run (``configs/pimm/denoise.py``): its run
-    directory -- the checkpoint of the lowest validation loss -- or one checkpoint in it
+    directory -- its last checkpoint, ``model/last`` -- or one checkpoint in it
     (:func:`helix.model.checkpoint.load_run`). ``predict.provenance`` is that run's,
     ``predict.dist`` its charge head; a distributional head also gives ``predict.calib``."""
     import torch
@@ -176,7 +176,7 @@ def load_denoiser(path, device=None):
     from helix.model.checkpoint import load_run
     from helix.model.denoise import calibration_stats
 
-    run = load_run(path, "best", device=device)
+    run = load_run(path, "last", device=device)
     model, cfg = run.model, run.tokenizer
     if not hasattr(model, "head"):
         raise ValueError(f"{path}: not a denoiser run (model type {run.config['model'].get('type')!r})")
