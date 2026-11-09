@@ -25,6 +25,14 @@ The other four campaign groups (j001000-j004000) are **not built**. No clean sha
 
 ### Results (fm_cooldown; [16, 84]% event-bootstrap intervals in the JSON)
 
+**Superseded reference column.** These floors were set on background windows centred on a
+random token-kept cell (`helix/eval/windows.py`, the `bg` loop). That samples noise peaks, which
+raises the amplitude reference's 1%-FPR threshold far more than the probe's. helix-nersc's
+uniform-area background rule (unify d4a8301) moves fm_cooldown's 0.1-0.2 MeV clear floor to
+amplitude 0.262 vs presence 0.343. On Y (collection) the amplitude beats the frozen probe
+(-0.057); the probe's edge is on U and V. The "amplitude 0.08 vs 0.35-0.40" gap below is
+mostly the background rule. unify's docs/DECISIONS.md holds the current numbers.
+
 | metric | reference (no fit) | fm (stable, last) | fm (stable, EMA) | fm_cooldown (last) |
 |---|---|---|---|---|
 | floor eff @1% FPR/view, < 0.1 MeV | amplitude 0.08 | 0.35 | 0.40 | 0.40 |
