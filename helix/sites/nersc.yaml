@@ -33,7 +33,9 @@ roots:
   HELIX_EXP:           $CFS/m5238/users/oalter/exp/helix
   # $SCRATCH is Lustre and is PURGED on inactivity. Nothing durable belongs here.
   HELIX_SCRATCH:       $SCRATCH
-  HELIX_PIMM_ROOT:     $HOME/nu/pimm-private
+  # A detached worktree of pimm-private at the pinned commit (scheduler.train.pimm_rev): training
+  # runs the pimm that was tested, not whatever branch the development checkout is on.
+  HELIX_PIMM_ROOT:     $HOME/nu/pimm-pin
   HELIX_PIMM_DATA_SRC: $HOME/nu/pimm-data/src
   # Not present at this site. Declared as null so `python -m helix.paths` reports
   # "not configured" rather than inheriting an S3DF path that cannot exist here
@@ -120,6 +122,12 @@ scheduler:
   train:
     account: m5238_g
     constraint: gpu
+    # The pimm commit training runs (pimm-private branch helix-launch, local and never pushed:
+    # 5 helix commits on 39512a9). scripts/submit.sh refuses another HEAD or a dirty checkout
+    # at HELIX_PIMM_ROOT; HELIX_PIMM_UNPINNED=1 overrides. Per site, because the commits exist
+    # only in this site's checkout. Move it by `git -C $HELIX_PIMM_ROOT checkout --detach <sha>`
+    # and editing this line, together.
+    pimm_rev: 42ced25efce9fde6c6e4460139d8f6a4d48c6d44
     # NERSC runs PreemptMode=REQUEUE (scontrol show config), the OPPOSITE of
     # S3DF's CANCEL. So a preempted job comes back: submitit requeues the
     # chain (pimm submit) under the same job id. GraceTime on preempt/gpu_preempt is 60s -- below pimm's default

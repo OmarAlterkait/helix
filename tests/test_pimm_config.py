@@ -483,3 +483,23 @@ def test_init_warm_starts_from_a_runs_last_and_is_not_reread(tmp_path):
     cool["model"]["init"] = str(tmp_path / "gone")
     assert "init" not in model_config(cool)
     assert model_config(cool) == model_config(_config())
+
+
+def test_training_runs_a_pinned_pimm():
+    """A site that pins pimm names a full commit, and scripts/submit.sh refuses any other HEAD or a
+    dirty checkout at HELIX_PIMM_ROOT. Where that checkout is reachable, it IS at the pin."""
+    import re
+    import subprocess
+    import yaml
+    root = pathlib.Path(CONFIG).parent.parent.parent
+    src = (root / "scripts" / "submit.sh").read_text()
+    assert "HELIX_SLURM_TRAIN_PIMM_REV" in src and "rev-parse HEAD" in src and "status --porcelain" in src
+    site = yaml.safe_load((root / "helix" / "sites" / "nersc.yaml").read_text())
+    rev = site["scheduler"]["train"]["pimm_rev"]
+    assert re.fullmatch(r"[0-9a-f]{40}", rev)
+    pimm = os.path.expandvars(site["roots"]["HELIX_PIMM_ROOT"]) if "roots" in site else None
+    import shutil
+    if not pimm or not os.path.isdir(pimm) or shutil.which("git") is None:
+        pytest.skip("the pinned pimm checkout is not reachable here")
+    head = subprocess.run(["git", "-C", pimm, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    assert head == rev, f"{pimm} is at {head}, the NERSC profile pins {rev}"

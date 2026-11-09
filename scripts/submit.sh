@@ -26,6 +26,20 @@ H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=/dev/null
 source "$H/scripts/helix_env.sh"
 : "${HELIX_PIMM_ROOT:?helix.paths did not resolve HELIX_PIMM_ROOT; run python -m helix.paths}"
+# pimm at the site's pinned commit (helix/sites/<site>.yaml scheduler.train.pimm_rev), clean: a
+# run trains with the pimm that was tested. A site without a pin is not checked.
+if [ -n "${HELIX_SLURM_TRAIN_PIMM_REV:-}" ] && [ "${HELIX_PIMM_UNPINNED:-0}" != 1 ]; then
+  got=$(git -C "$HELIX_PIMM_ROOT" rev-parse HEAD 2>/dev/null)
+  if [ "$got" != "$HELIX_SLURM_TRAIN_PIMM_REV" ]; then
+    echo "submit.sh: pimm at $HELIX_PIMM_ROOT is at ${got:-<not a git checkout>}; site $HELIX_SITE pins $HELIX_SLURM_TRAIN_PIMM_REV" >&2
+    echo "           (HELIX_PIMM_UNPINNED=1 to submit anyway)" >&2
+    exit 2
+  fi
+  if [ -n "$(git -C "$HELIX_PIMM_ROOT" status --porcelain --untracked-files=no)" ]; then
+    echo "submit.sh: pimm at $HELIX_PIMM_ROOT has uncommitted changes" >&2
+    exit 2
+  fi
+fi
 : "${HELIX_EXP:?helix.paths did not resolve HELIX_EXP; run python -m helix.paths}"
 
 [ $# -gt 0 ] && [ "${1#-}" = "$1" ] || { sed -n '2,9p' "$0" >&2; exit 2; }
