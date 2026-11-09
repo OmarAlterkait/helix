@@ -486,3 +486,21 @@ def test_training_runs_a_pinned_pimm():
         pytest.skip("the pinned pimm checkout is not reachable here")
     head = subprocess.run(["git", "-C", pimm, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     assert head == rev, f"{pimm} is at {head}, the NERSC profile pins {rev}"
+
+
+def test_the_pimm_checkout_pins_helixs_pimm_data():
+    """The forward-model registration is LOCKSTEP (pimm_data/_registry.py raises KeyError on a
+    duplicate), so the pimm that trains must pin the pimm-data revision helix pins in pyproject.toml
+    (which container/install.sh reads; CI's ``uv lock --check`` holds the lockfile to it). This is
+    the copy in another repository, checked where that checkout is reachable."""
+    import re
+    pat = r'pimm-data\s*=\s*\{[^}]*rev\s*=\s*"([0-9a-f]{40})"'
+    ours = re.search(pat, (pathlib.Path(CONFIG).parent.parent.parent / "pyproject.toml").read_text())
+    assert ours, "pyproject.toml no longer pins pimm-data by an explicit 40-char rev"
+    p = pathlib.Path(PIMM) / "pyproject.toml" if PIMM else None
+    if p is None or not p.exists():
+        pytest.skip("no pimm checkout reachable (HELIX_PIMM_ROOT)")
+    theirs = re.search(pat, p.read_text())
+    if theirs is None:
+        pytest.skip(f"{p} does not pin pimm-data by an explicit rev")
+    assert theirs.group(1) == ours.group(1), f"{p} pins pimm-data {theirs.group(1)[:8]}, helix {ours.group(1)[:8]}"

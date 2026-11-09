@@ -1,7 +1,7 @@
 name: CI
 
-# The cheap checks: the lockfile resolves, and the pimm-data pin is still a
-# single source. These need no image and no GPU, so they run on every push.
+# The cheap checks: the lockfile resolves, and pyproject pins pimm-data by a full revision.
+# These need no image and no GPU, so they run on every push.
 #
 # The expensive ones -- building the image, the suite, the no-data smoke -- live
 # in docker.yml, which is path-filtered because a 9 GB build is not free.
@@ -39,22 +39,11 @@ jobs:
       - name: uv lock --check
         run: uv lock --check
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      # tests/test_lockstep_pin.py reads pyproject.toml, container/install.sh,
-      # the def and the Dockerfile -- stdlib only. --noconftest because
-      # tests/conftest.py imports numpy and helix.tpc.config, which this job
-      # deliberately does not install: the SUITE runs inside the built image
-      # (docker.yml), where everything is present. This job only guards the pin,
-      # which is worth checking on every push because the failure it prevents
-      # does not degrade quietly -- a pimm-data from before the forward-model
-      # move plus a current helix raises KeyError at import.
-      - name: the revision is named once, and the build reads it
-        run: |
-          python -m pip install --quiet pytest
-          python -m pytest tests/test_lockstep_pin.py -q --noconftest
+      # container/install.sh reads the pimm-data revision out of pyproject.toml with this grep and
+      # refuses to build without it; the pimm checkout's copy is held to it by the suite
+      # (tests/test_pimm_config.py).
+      - name: pyproject pins pimm-data by a full revision (install.sh reads it)
+        run: grep -qE 'pimm-data[^#]*rev[[:space:]]*=[[:space:]]*"[0-9a-f]{40}"' pyproject.toml
 
       # install.sh is what both packaging front-ends run. A syntax error in it
       # fails an 11-minute apptainer build on a cluster, or a 20-minute image

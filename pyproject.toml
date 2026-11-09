@@ -42,7 +42,7 @@ probe = ["hdf5plugin>=4.0", "torch>=2.0"]
 # is numpy/h5py/PyWavelets/scipy/PyYAML and torch is optional.
 #
 # pimm-data is not on PyPI; [tool.uv.sources] below pins its revision, and that
-# line is the only place the revision is named (tests/test_lockstep_pin.py).
+# line is the only place the revision is named (container/install.sh reads it).
 # NOTE this covers the DATA layer only. helix/integrations/pimm/* also imports
 # the `pimm` training framework itself, which is not declared here because it is
 # not on PyPI either; installing this extra does NOT give you a working training
@@ -92,6 +92,6 @@ include = ["helix*"]
 # AddNoise/Digitize -- transforms helix then registered too -- and that pair raised
 # KeyError on the second registration.
 #
-# THIS REVISION IS LOCKSTEP WITH helix. It must equal PIMM_DATA_REV in
-# container/helix-train.def; tests/test_lockstep_pin.py asserts that.
+# THIS REVISION IS LOCKSTEP WITH helix. container/install.sh reads it from here, and the pimm
+# checkout that trains must pin the same one (tests/test_pimm_config.py).
 pimm-data = { git = "https://github.com/OmarAlterkait/pimm-data", rev = "2b20573ca14f1d06bcc40df8ee8c4e38b13fd94a" }
