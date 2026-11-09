@@ -186,6 +186,18 @@ The goal is to move to NERSC. `helix/sites/nersc.yaml` holds its roots, containe
   f0d2ed39 production/save.py casts center_wires to int16 (and delta_wires to int8) unchecked, and
   the pixel keys were already wrong upstream of the cast. helix rejects such an event (the
   dataset's off-plane share > 1e-3); a busier sample would hit it more often.
+* **Denoiser runs hang: one whole node goes silent (2 of 4 d1m_denoise arms, 2026-11-08).**
+  - point_l0 (job 60986199): node 0 stalled right after its step-1429 checkpoint (save complete).
+  - gauss_l30 (job 60986206): node 1 stalled mid-step near step 5050.
+  - Both times the other 12 ranks timed out on the head's gradient bucket after 600 s.
+  - The only main-thread frames dumped were `linecache.checkcache`: ranks stat-ing source files
+    while formatting an exception. The pimm code snapshot is on CFS (`$HELIX_EXP/<run>/code`).
+  - A CFS metadata stall on that node fits both, but it is unproven, and no FM run hung on the
+    same layout. What the denoiser adds: it reads the cells shards and does heavier per-event
+    CPU work (DenoiseRows).
+  - Next time: `TORCH_NCCL_TRACE_BUFFER_SIZE` (flight recorder) and `faulthandler` stacks from
+    every rank, so the stuck node's own frames are captured.
+  - The chain stops at a failure, so each hang costs a manual resubmit.
 * **A data error should fail the job fast.** One DataLoader worker's exception (the off-plane
   truth cells, 2026-11-07) stopped its rank, and every other rank sat in an ALLREDUCE until the
   NCCL watchdog's 600 s timeout: ten minutes of a 4-node allocation, then a crash with the cause

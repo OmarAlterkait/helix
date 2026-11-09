@@ -336,6 +336,18 @@ number still under its own key, the new ones beside it):*
     paired comparison, and no account of the floor or the haze. A fine-tuned evaluation sees full
     density anyway. Groups sized by physical span would make training and inference match by
     construction, as a pretraining choice.
+  - *With one background rule, the frozen FM's margin over amplitude is small and lives on U/V
+    (2026-11-08, fm_cooldown `last`, d4a8301).* The old kept-weighted far windows sat on dense
+    noise clusters, which raised the threshold of every score that reacts to large noise values,
+    amplitude most of all. Clear 0.1-0.2 MeV, old -> new rule: amplitude 0.087 -> 0.262, raw MSE
+    arm 0.038 -> 0.181, presence 0.373 -> 0.343. Paired, presence - amplitude: clear <0.1
+    +0.050, clear 0.1-0.2 +0.081 (U +0.167, V +0.117, **Y -0.057**), crowded@near 0.1-0.2 +0.041
+    (Y -0.051). On the collection plane a plain amplitude threshold beats the frozen FM; its
+    advantage is on the induction planes, where a bipolar signal makes amplitude weak. The FM
+    hazes far more (auc_near_vs_far +0.37 over amplitude). `presence_raw` (0.105) is below
+    amplitude: a weak reference, so amplitude is the one to quote. The earlier "0.35 vs 0.10"
+    headline was mostly the background rule. The frozen s0/s1 gap survives the change (+0.045
+    [+0.040, +0.049], every view the same sign).
   - *d1m_lr: training-seed noise exceeds the LR effect* (paired presence clear@far 0.1-0.2 MeV,
     each cooled arm minus fm_cooldown on identical windows): lr4.4e-3 seed 0 -0.049, seed 1
     -0.005 (n.s.), lr3.1e-3 -0.009, lr2.2e-3 -0.036. The two seeds of ONE recipe differ by
