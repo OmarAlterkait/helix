@@ -112,7 +112,10 @@ to ~1e-3, so an analytic grid is feasible.
   - Reproduced by squeezing the cgroup: 30-36 of 42 processes in D state in `squashfs_decompress`.
   - Not the evaluator, the data, CFS writes, OOM or NCCL. The FM fit node 0, which is why it never hung.
   - Fix: configs/launch/_common.yaml gives the step the whole node (`cpus_per_proc 32`, `mem "0"`; measured 0.374 vs 0.51 s/step).
-  - To verify: the squeezed repro at 128 CPUs, then several runs gated on sacct major faults < 10k.
+  - Verified (2026-11-10, jobs 61094774 / 61094776) under the same 88 GiB squeeze that froze the old shape at step 2304:
+    - the whole-node shape ran 4 x 4096 steps with 2.9-6.7k faults and no freeze, ~29 vs 45-48 min per run;
+    - the new code's smaller footprint also survived on the old 24-CPU shape (2.3-4.6k faults). That is a margin, not a fix.
+  - Keep gating production runs on sacct major faults (TRESUsageInMax `pages`) < 10k per step.
   - Still open: the 600 s NCCL timeout turns a survivable freeze into a lost run; persistent val workers no longer exist (v2).
 - **Memory:** the denoiser peaks at 28.0-28.7 GB on d1m's largest events (40 GB A100); it runs
   out before the FM on a busier corpus.
