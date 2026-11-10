@@ -25,6 +25,10 @@ arms:
   ft_lr44s1_s1:  {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_s1_cool/model/last, seed: 1}}
   ft_lr44s0:     {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_cool/model/last}}
   ft_lr44s0_s1:  {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr4.4e-3_cool/model/last, seed: 1}}
+  ft_lr31:       {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr3.1e-3_cool/model/last}}
+  ft_lr31_s1:    {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr3.1e-3_cool/model/last, seed: 1}}
+  ft_lr22:       {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr2.2e-3_cool/model/last}}
+  ft_lr22_s1:    {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr2.2e-3_cool/model/last, seed: 1}}
   ft_scratch:    {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false}}
   ft_scratch_s1: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false, seed: 1}}
 after_each:
