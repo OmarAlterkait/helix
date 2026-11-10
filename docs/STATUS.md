@@ -22,12 +22,17 @@ is in git (`docs/DECISIONS.md` and `TODO.md` up to a550748) and in the tags `arc
 
 | | clear | crowded@near |
 |---|---|---|
-| fine-tuned (`ft_cool` and three other encoders, all within 0.003) | 0.53 (U 0.46 / V 0.36 / Y 0.79) | 0.54 |
+| fine-tuned, pretrained (5 runs: cool x2, stable EMA, lr4.4e-3 s1 x2) | 0.527-0.531 (U 0.46 / V 0.36 / Y 0.79) | 0.536-0.538 |
+| fine-tuned, pretrained, lr4.4e-3 training seed 0 | 0.544 (U 0.48 / V 0.39 / Y 0.79) | 0.546 |
+| **fine-tuned from scratch** (2 seeds) | **0.449 / 0.426** (U 0.35 / V 0.21-0.26 / Y 0.76) | **0.417 / 0.408** |
 | frozen probe (removed) | 0.34 | 0.10 |
 | plain amplitude threshold | 0.26 (Y 0.65) | 0.06 |
 
-The fine-tune seed spread is 0.003; encoders that differed on frozen probes are identical
-fine-tuned. uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) <
+So the key is sensitive: pretraining adds ~+0.09 clear and ~+0.12 near activity, mostly on the
+induction planes (U +0.11, V +0.12, Y +0.03), as on r1. The fine-tune seed spread is 0.003 (scratch
+0.023). Pretrained encoders that differed on frozen probes are within 0.003-0.017 fine-tuned: the
+pretraining choices tested so far matter little next to pretraining vs none. All scored with one
+frozen eval (d4a8301, best checkpoint). uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) <
 0.483 (3.1e-3) < 0.489 / 0.505 (4.4e-3, two seeds). The NERSC pipeline reproduces
 `fm_cooldown` (paired frozen difference -0.005, not significant).
 
@@ -87,9 +92,8 @@ to ~1e-3, so an analytic grid is feasible.
 
 ## Open work
 
-- **From-scratch ft_eval arm** (`ft_scratch`, `ft_scratch_s1` in `configs/sweeps/ft_eval.yaml`):
-  pending. It decides whether the fine-tune key can rank pretrainings; if scratch is close,
-  rerun at 256 / 64 labels.
+- **Rescore every ft arm under the new eval** (the windows moved, `last` checkpoint) before
+  pairing anything new with them.
 - **LR:** run the 6.2e-3 arm. The "training-seed noise 0.04" seen on the presence probe is not
   seen on the MSE probe (s0 0.350 vs s1 0.346), so it was likely probe noise.
 - **Recipe re-tests on the fine-tune key:** token size (e.g. `pw x pt = 32 x 16`), width,
@@ -100,12 +104,16 @@ to ~1e-3, so an analytic grid is feasible.
   from `fm_cooldown`'s EMA. The d1m port lacks M11's linear amplitude by default, augmentation,
   complete truth and volume-aware layouts; `dist` is undecided (point / gauss / cat). Its sweep
   scores `last`; the arms in flight (trained at 9f34c74, before the trim) are scored by hand.
-- **Hangs.** Three denoiser-type runs hung (one rank or node silent until NCCL's 600 s), likely
-  rank-0 checkpoint I/O on CFS during the collective DCP save (point_l30: a GLOO
-  `gather_object` timeout in `save_dcp_checkpoint`). Eval-step saves and `model_best` are gone;
-  StepWatchdog and the flight recorder are on. Single-file `checkpoint_format="legacy"` would
-  avoid the collective but needs a forced-resume smoke test first. A DataLoader exception still
-  stalls the other ranks for 600 s; decide on fail-fast before the next long run.
+- **Hangs: root cause found (2026-11-10, /pscratch/sd/o/oalter/helix_work/hang_diag/).**
+  - pimm's NERSC site default gave the step 24 CPUs (`cpus_per_proc 6`), all on NUMA node 0 (63 GB of 251).
+  - 4 ranks plus 32 DataLoader workers (the old denoiser: ~72 GB anon+shmem) overflowed it. The kernel evicted the container's code pages and refaulted them through the image's single-threaded squashfs (on Lustre), freezing the job for minutes.
+  - Uneven freezes hit NCCL's 600 s timeout; freezes inside a DCP save hit GLOO's 1800 s.
+  - Major page faults separate the runs perfectly: hung or stalled steps 0.19-2.1M; every clean step 2.9k-7.8k (FM, ft, v2).
+  - Reproduced by squeezing the cgroup: 30-36 of 42 processes in D state in `squashfs_decompress`.
+  - Not the evaluator, the data, CFS writes, OOM or NCCL. The FM fit node 0, which is why it never hung.
+  - Fix: configs/launch/_common.yaml gives the step the whole node (`cpus_per_proc 32`, `mem "0"`; measured 0.374 vs 0.51 s/step).
+  - To verify: the squeezed repro at 128 CPUs, then several runs gated on sacct major faults < 10k.
+  - Still open: the 600 s NCCL timeout turns a survivable freeze into a lost run; persistent val workers no longer exist (v2).
 - **Memory:** the denoiser peaks at 28.0-28.7 GB on d1m's largest events (40 GB A100); it runs
   out before the FM on a busier corpus.
 - **Container:** rebuild the NERSC image without jax, repoint `nersc.yaml`'s image (by digest),

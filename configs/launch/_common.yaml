@@ -18,6 +18,16 @@
 setup:
   - 'export PYTHONPATH="${HELIX_ROOT:?HELIX_ROOT did not reach the job; submit with scripts/submit.sh}:${HELIX_PIMM_ROOT:?HELIX_PIMM_ROOT did not reach the job}${PYTHONPATH:+:$PYTHONPATH}"'
   - 'export TORCH_NCCL_DUMP_ON_TIMEOUT=1 TORCH_NCCL_TRACE_BUFFER_SIZE=2000'
+# The whole node to the training step: CPUs on all four NUMA nodes and all of its memory. pimm's
+# NERSC site default (cpus_per_proc 6 x 4 = 24 CPUs, mem 192G) puts the step on NUMA node 0 alone
+# (63 GB), where 4 ranks + their DataLoader workers overflowed it: the kernel then evicted the
+# container's code pages, refaulted them through one single-threaded squashfs decompressor, and
+# froze the job for minutes -- the denoiser "hangs" (2026-11-10, docs/STATUS.md; hang_diag/). The
+# nodes are exclusive, so this costs nothing; measured 0.374 vs 0.51 s/step. `mem: "0"` is Slurm's
+# "all the node's memory" (a string: pimm skips a falsy 0).
+resources:
+  cpus_per_proc: 32
+  mem: "0"
 run:
   timestamp: false            # the run dir is $HELIX_EXP/<name>, which other configs name (fm_cooldown, denoise)
 chain:
