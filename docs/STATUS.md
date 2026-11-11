@@ -47,7 +47,7 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
 |---|---|---|---|
 | 1 | Pretraining is noisy-only: the target is the input, no clean modality exists | real data has no noise-free counterpart | a real-data target |
 | 2 | Pretraining never reads `cells` (`tests/test_boundary.py`) | truth is simulation-only | nothing on the data side |
-| 3 | Basis: coif3 L4, D1 dropped, gate tau 0.05, kappa 1.0 | tau 0.05 won on denoising and support cleanliness (r1) | kappa 0.75 raises the faint bound 0.19 -> 0.34; a rebuild and new digest, the user's call |
+| 3 | Basis: coif3 L4, D1 dropped, gate tau 0.05; hysteresis threshold: seeds at kappa 1.0 (3.35 / 3.35 / 3.55 / 3.74 sigma for A4 / D4 / D3 / D2), grown through 8-connected coefficients >= 2 sigma | tau 0.05 won on denoising and support cleanliness (r1) | a d1m measurement that a lower seed or floor recovers faint deposits the model then finds (the r1 "kappa 0.75: 0.19 -> 0.34" was measured WITHOUT hysteresis and with D1 kept: it does not transfer) |
 | 4 | One GPU type per corpus (turing for d1m) | turing and A100 differ on 0.016% of kept coefficients | deterministic reductions |
 | 5 | One noise realisation per event, seeded from its identity at build | real data has one | a reason to vary noise in pretraining |
 | 6 | No charge-scaling augmentation or fresh noise in the d1m denoiser (user decision) | it needs clean shards, which data never has | the user; r1 cost: gain response 0.87 without vs 0.97 with |
@@ -57,7 +57,7 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
 | 10 | Value grid frozen per corpus, verified by digest, not copied | re-deriving moves it less than its own sampling noise and breaks comparability | the analytic grid (feasible; changes training, the user's call) |
 | 11 | Categorical value head + occupancy BCE; MSE / NLL heads removed | the categorical head is calibrated (PIT mean 0.512, sd 0.289) | a continuous target that ranks better on the fine-tune key |
 | 12 | One attention path: flash varlen in four orders, sm80+ | 6% faster and 0.005 better cooled loss than padded groups | none |
-| 13 | Recipe: d768, 12 + 4 blocks, QK-norm, muP, mask 0.75, plane masking 0.1, K = 128 | measured on r1 (QK-norm: d768 went NaN without) | token size, width, decoder depth, plane masking re-tested on the fine-tune key |
+| 13 | Recipe: d768, 12 + 4 blocks, QK-norm, muP, mask 0.75 random on 90% of steps and one whole view per volume on 10% (cross-plane), K = 128 | measured on r1 (QK-norm: d768 went NaN without; plane masking recorded at plane_frac 0.25 vs 0, not 0.1) | token size, width, decoder depth, plane masking re-tested on the fine-tune key |
 | 14 | Peak LR 4.4e-3 at 16 ranks, x sqrt(world / 16) | sqrt(batch) scaling; muP transfers width only | the 6.2e-3 arm, or the fine-tune key ordering LR differently |
 | 15 | WSD: the cooldown is a separate run, warm-started by `model.init`, read at `last` | the stable phase commits to no length; resume would skip the anneal | none |
 | 16 | No in-training evaluation, no `model_best`, no EMA; the weight is `model/last` | val loss ranks representations at 0.15; EMA and cooldown `last` fine-tune the same (0.530 +- 0.003) | a task where val loss agrees with the fine-tune |
@@ -80,7 +80,18 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
 - **Recipe re-tests on the fine-tune key:** token size (e.g. `pw x pt = 32 x 16`), width,
   decoder depth, plane masking; most were chosen on r1 with metrics later found biased.
 - **Value grid:** extend to the observed maximum or switch to the analytic grid (user decision).
-- **Corpus threshold:** kappa 0.75 (user decision; rebuild, new digest).
+- **Corpus threshold:** untested on d1m. The r1 bound (no hysteresis) does not transfer. A d1m bound needs the raw waveforms (at S3DF).
+- **U-plane time offset is wrong on d1m (audit 2026-11-11; /pscratch/sd/o/oalter/helix_work/audit/an_61143223.out).**
+  - Strong U coefficients land on truth-charged cells one fine cell (16 ticks) early: D3 / D2 0.90 / 0.96 at dt = -1, against 0.67 / 0.74 at dt = 0. V and Y peak at dt = 0.
+  - Cause: `PatchConfig.toff` U = -17.4 (`tokenize.py:88`), r1's response lag, which does not hold for d1m's JAXTPC f0d2ed39.
+  - It misaligns U's token-cell join (cell_inputs, coeff_cells, the amplitude baseline, the far windows' coefficient test) and U's RoPE time relative to V and Y.
+  - U is the weakest plane. Test with a fine-tune at a corrected offset before changing the tokenizer, since a change affects pretrained models.
+- **d1m compression facts (audit):**
+  - 2.05% of the tokenized bands' coefficients are kept (10.1% token-slot occupancy, ~479k per event); 29.9% of them are hysteresis-grown, below the seed threshold.
+  - Hysteresis adds only +0.01 to +0.065 to faint-deposit footprint retention, against a +0.035 null.
+  - 61-67% of 0-0.1 MeV deposits and 12-33% of 0.1-0.2 MeV deposits leave no kept coefficient in their footprint; only context can find them.
+- **Cross-plane reconstruction** (unmeasured until now; audit job 61142279, 200 events): variance explained with one view masked per volume 0.597 (lr4.4e-3) / 0.581 (`fm_cooldown`), against 0.70 random. Two views masked: ~0 (collapse, as on r1). Forced U / V / Y 0.61-0.63 / 0.54-0.56 / 0.52-0.54.
+  - Caveat: plane-mask queries carry the hidden plane's occupied-patch layout, so it is not purely cross-plane.
 - **d1m denoiser at full length.** The `d1m_denoise` arms crashed or hung and were initialised
   from `fm_cooldown`'s EMA. The d1m port lacks M11's linear amplitude by default, augmentation,
   complete truth and volume-aware layouts; `dist` is undecided (point / gauss / cat). Its sweep
