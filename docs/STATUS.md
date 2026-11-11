@@ -18,45 +18,28 @@ is in git (`docs/DECISIONS.md` and `TODO.md` up to a550748) and in the tags `arc
 | denoiser | reference results on r1 (below); no full-length d1m result yet |
 | other corpora (S3DF) | `sbnd_data/coeff_sbnd_v1` (SBND data, production); `coeff_tpc_r2` (superseded simulation: readable, not rebuildable); r1 and older are retired |
 
-**Evaluation of encoders** (ft_eval fine-tune, d1m, 0.1-0.2 MeV, efficiency at 1% FPR per view):
+**Evaluation of encoders.** ft_eval fine-tune on d1m, one eval version (397ec16), `last` checkpoint, 2 fine-tune seeds each. Presence efficiency at 1% FPR per view, 0.1-0.2 MeV, 2026-11-10:
 
-| | clear | crowded@near |
+| encoder | clear | crowded@near |
 |---|---|---|
-| fine-tuned, pretrained (5 runs: cool x2, stable EMA, lr4.4e-3 s1 x2) | 0.527-0.531 (U 0.46 / V 0.36 / Y 0.79) | 0.536-0.538 |
-| fine-tuned, pretrained, lr4.4e-3 training seed 0 | 0.544 (U 0.48 / V 0.39 / Y 0.79) | 0.546 |
-| **fine-tuned from scratch** (2 seeds) | **0.449 / 0.426** (U 0.35 / V 0.21-0.26 / Y 0.76) | **0.417 / 0.408** |
-| frozen probe (removed) | 0.34 | 0.10 |
-| plain amplitude threshold | 0.26 (Y 0.65) | 0.06 |
+| lr4.4e-3 cooled, training seed 0 | 0.534 / 0.534 | 0.537 / 0.536 |
+| S3DF stable phase, EMA | 0.521 / 0.521 | 0.529 / 0.531 |
+| lr4.4e-3 cooled, training seed 1 | 0.519 / 0.520 | 0.529 / 0.531 |
+| lr3.1e-3 cooled | 0.519 / 0.518 | 0.524 / 0.525 |
+| `fm_cooldown` (S3DF) | 0.518 / 0.517 | 0.528 / 0.530 |
+| lr2.2e-3 cooled | 0.513 / 0.517 | 0.523 / 0.523 |
+| **from scratch** | **0.452 / 0.434** | **0.415 / 0.409** |
 
-So the key is sensitive: pretraining adds ~+0.09 clear and ~+0.12 near activity, mostly on the
-induction planes (U +0.11, V +0.12, Y +0.03), as on r1. The fine-tune seed spread is 0.003 (scratch
-0.023). Pretrained encoders that differed on frozen probes are within 0.003-0.017 fine-tuned: the
-pretraining choices tested so far matter little next to pretraining vs none. All scored with one
-frozen eval (d4a8301, best checkpoint). uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) <
-0.483 (3.1e-3) < 0.489 / 0.505 (4.4e-3, two seeds). The NERSC pipeline reproduces
-`fm_cooldown` (paired frozen difference -0.005, not significant).
+- Pretraining adds ~+0.075 clear and ~+0.115 near activity, mostly on the induction planes (U ~0.44 vs 0.35, V ~0.35 vs 0.25; Y 0.80 vs 0.77).
+- The fine-tune seed spread is <= 0.004.
+- The training-seed spread (lr4.4e-3, s0 vs s1) is 0.015. It is the largest pretraining effect seen, and it holds at `last` with both fine-tune seeds.
+- LR orders as uprobe does (2.2e-3 < 3.1e-3 <= 4.4e-3), but by 0.004-0.007, inside the training-seed spread. So the key cannot resolve LR at 1024 labels.
+- The knobs swept so far (cooldown vs stable, LR 2.2-4.4e-3, seed) all sit within one training-seed spread.
+- Earlier tables (d4a8301, best checkpoint, other windows) do not pair with this one.
 
-**Denoiser on r1** (full labels; the reference). Best overall, M11: decoder + hurdle head,
-complete truth at c = 25, linear-amplitude input, volume-aware layouts, charge-scaling
-augmentation, near-activity sampling, fine-tuned from the pretrained encoder. Bright median
-1.002, res68 0.038; gain response 0.97; presence ECE 0.003 after the case-control correction;
-near-activity detection 0.57-0.63 by definition. Best bright: M13, res68 0.035. A classical
-matched filter on the same planes: 0.02 near activity. 64 fine-tuned labels beat 16,384 from
-scratch; with all labels pretraining adds ~+0.03. Induction is weaker than collection by
-physics (SNR per electron).
+Frozen references (removed probes, d4a8301 windows): frozen presence 0.34 / 0.10, plain amplitude 0.26 / 0.06 (Y 0.65).
 
-**What sets the faint floor:** the corpus threshold. A stage replay on r1: matched-filter
-known-location efficiency at SNR 3-5 falls 0.92 -> 0.19 at the sparsification stage, and the
-model sits at that limit; kappa = 0.75 would raise the bound to 0.34.
-
-**What the loss measures:** far tokens sit 3% below their context-free floor (noise is not
-learnt); signal tokens carry 87% of the value term. Validation loss tracks bright dense charge,
-not faint detection (rank correlation 0.15 with probes over 17 r1 models).
-
-**Value-grid saturation:** 57-94% of cells >= 256k e- sit in tokens with a slot beyond the top
-finite edge. Top finite edges t = 7.17 / 6.26 / 5.75 / 4.91 by band against the largest |t|
-9.1 / 8.3 / 7.8 / 7.9. The analytic uniform-in-asinh centroid matches the measured centroids
-to ~1e-3, so an analytic grid is feasible.
+uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) < 0.483 (3.1e-3) < 0.489 / 0.505 (4.4e-3). The fine-tune agrees in direction but cannot resolve it, so uprobe stays as a non-ranking diagnostic of 3D information. The NERSC pipeline reproduces `fm_cooldown` (paired frozen difference -0.005, not significant).
 
 ## Standing decisions
 
@@ -92,8 +75,6 @@ to ~1e-3, so an analytic grid is feasible.
 
 ## Open work
 
-- **Rescore every ft arm under the new eval** (the windows moved, `last` checkpoint) before
-  pairing anything new with them.
 - **LR:** run the 6.2e-3 arm. The "training-seed noise 0.04" seen on the presence probe is not
   seen on the MSE probe (s0 0.350 vs s1 0.346), so it was likely probe noise.
 - **Recipe re-tests on the fine-tune key:** token size (e.g. `pw x pt = 32 x 16`), width,
