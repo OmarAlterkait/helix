@@ -30,8 +30,15 @@ roots:
   HELIX_ARCHIVE:       $CFS/m5238/users/oalter/archive
   HELIX_EXP:           $CFS/m5238/users/oalter/exp/helix
   # A detached worktree of pimm-private at the pinned commit (scheduler.train.pimm_rev): training
-  # runs the pimm that was tested, not whatever branch the development checkout is on.
-  HELIX_PIMM_ROOT:     $HOME/nu/pimm-pin
+  # runs the pimm that was tested, not whatever branch the development checkout is on. A new pin
+  # is a NEW worktree (pimm-pin3, ...): runs in flight reference the old one by path.
+  HELIX_PIMM_ROOT:     $HOME/nu/pimm-pin2
+  # Everything transient, in one place, on Lustre (purged on inactivity; all of it rebuildable):
+  #   launcher-venv/   the submitting host's venv (scripts/make_host_env.sh; submit.sh's default)
+  #   trees/run-<sha>  frozen helix trees a chain trains from: git worktree add --detach (RUNBOOK §6)
+  #   cache/           XDG_CACHE_HOME (env: below): pip, uv, wandb, matplotlib, torch hub
+  # Run directories are NOT here: they are durable, under HELIX_EXP on $CFS.
+  HELIX_SCRATCH:       $SCRATCH/helix
   # Not present at this site. Declared as null so `python -m helix.paths` reports
   # "not configured" rather than inheriting an S3DF path that cannot exist here
   # and then reporting it MISSING, which reads like breakage rather than absence.
@@ -49,6 +56,9 @@ env:
   # reason; helix needs it outside pimm's launcher too (corpus build, tests,
   # helix.data.verify), so it is declared here rather than borrowed from there.
   HDF5_USE_FILE_LOCKING: "FALSE"
+  # Caches off $HOME (a 40 GB quota, and visible inside every container) onto scratch. Lustre
+  # takes the flock that uv's and pip's caches need, which GPFS ($CFS) would refuse.
+  XDG_CACHE_HOME: $HELIX_SCRATCH/cache
 
 container:
   # There is NO apptainer and NO singularity at NERSC -- not installed, not a
@@ -116,12 +126,14 @@ scheduler:
   train:
     account: m5238_g
     constraint: gpu
-    # The pimm commit training runs (pimm-private branch helix-launch, local and never pushed:
-    # 5 helix commits on 39512a9). scripts/submit.sh refuses another HEAD or a dirty checkout
-    # at HELIX_PIMM_ROOT; HELIX_PIMM_UNPINNED=1 overrides. Per site, because the commits exist
-    # only in this site's checkout. Move it by `git -C $HELIX_PIMM_ROOT checkout --detach <sha>`
-    # and editing this line, together.
-    pimm_rev: 42ced25efce9fde6c6e4460139d8f6a4d48c6d44
+    # The pimm commit training runs: pimm-private branch helix-min (local, never pushed; a bundle
+    # is at $HELIX_ARCHIVE/pimm-helix-min.bundle), 39512a9 plus only what helix needs -- the
+    # launch preflight without custom imports, external configs by absolute path, and the
+    # interactive chain driver (python -m pimm.cli, the submit environment, state in
+    # submit.folder). scripts/submit.sh refuses another HEAD or a dirty checkout at
+    # HELIX_PIMM_ROOT; HELIX_PIMM_UNPINNED=1 overrides. Move it with a NEW detached worktree
+    # (git -C <pimm-private> worktree add --detach <path> <sha>) and both lines, together.
+    pimm_rev: a7ee1c269007f0f2abc436eb4c5e895fb704f2ba
     # NERSC runs PreemptMode=REQUEUE (scontrol show config), the OPPOSITE of
     # S3DF's CANCEL. So a preempted job comes back: submitit requeues the
     # chain (pimm submit) under the same job id. GraceTime on preempt/gpu_preempt is 60s -- below pimm's default

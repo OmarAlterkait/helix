@@ -41,9 +41,11 @@ export HELIX_ROOT
 # So: search, and say so when nothing is suitable.
 _helix_env_pick_py() {
   local c
-  # helix.paths reads the site file with PyYAML, so a candidate must import it. The host
-  # venv (scripts/make_host_env.sh) is one; a login node's system python may not be.
-  for c in "${HELIX_PYTHON:-}" "${SCRATCH:-/nonexistent}/helix-host-venv/bin/python" \
+  # helix.paths reads the site file with PyYAML, so a candidate must import it. The launcher
+  # venv (scripts/make_host_env.sh) is one; a login node's system python may not be. Its path is
+  # $HELIX_SCRATCH/launcher-venv, and HELIX_SCRATCH is what we are about to ask helix.paths for,
+  # so the NERSC value ($SCRATCH/helix, helix/sites/nersc.yaml) is the fallback here.
+  for c in "${HELIX_PYTHON:-}" "${HELIX_SCRATCH:-${SCRATCH:-/nonexistent}/helix}/launcher-venv/bin/python" \
            python3 python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python; do
     [ -n "$c" ] || continue
     command -v "$c" >/dev/null 2>&1 || continue

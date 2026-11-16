@@ -4,14 +4,19 @@
 # (tyro, submitit, ...), so scripts/submit.sh can run `pimm submit`, whose preflight reads the
 # training config. No torch: jobs run in the container; the host only renders and calls sbatch.
 #
-#   scripts/make_host_env.sh            create or update it ($SCRATCH/helix-host-venv)
+#   scripts/make_host_env.sh            create or update it ($HELIX_SCRATCH/launcher-venv)
 #
 # Needed where no system python has PyYAML (S3DF interactive nodes: python3 is 3.6, python3.12 has no
-# yaml). helix_env.sh finds it there without being told. On SCRATCH, not in the checkout or $HOME:
-# both are visible inside the container and would shadow its packages.
+# yaml). helix_env.sh and submit.sh find it there without being told. On scratch, not in the
+# checkout or $HOME: both are visible inside the container and would shadow its packages.
 set -euo pipefail
 H=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-VENV=${HELIX_HOST_VENV:-${SCRATCH:?SCRATCH is not set}/helix-host-venv}
+if [ -z "${HELIX_HOST_VENV:-}" ]; then
+  # shellcheck source=/dev/null
+  source "$H/scripts/helix_env.sh"
+  : "${HELIX_SCRATCH:?site ${HELIX_SITE:-?} declares no HELIX_SCRATCH; set it, or HELIX_HOST_VENV}"
+fi
+VENV=${HELIX_HOST_VENV:-$HELIX_SCRATCH/launcher-venv}
 PY=${PYTHON:-}
 if [ -z "$PY" ]; then
   for c in python3.13 python3.12 python3.11 python3.10 python3; do

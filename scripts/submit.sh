@@ -76,11 +76,13 @@ case "${HELIX_CONTAINER_RUNTIME:-}" in
   *) PIMM_SITE=${HELIX_PIMM_SITE:?cannot map container runtime ${HELIX_CONTAINER_RUNTIME:-unset} to a pimm site; set HELIX_PIMM_SITE} ;;
 esac
 
-PY=${HELIX_PIMM_PYTHON:-${HELIX_HOST_VENV:-${SCRATCH:-/nonexistent}/helix-host-venv}/bin/python}
+PY=${HELIX_PIMM_PYTHON:-${HELIX_HOST_VENV:-${HELIX_SCRATCH:-/nonexistent}/launcher-venv}/bin/python}
 [ -x "$PY" ] || { echo "submit.sh: no launcher environment at $PY; run scripts/make_host_env.sh" >&2; exit 2; }
-# Preflight reads the training config on this host; it imports helix.
+# Preflight reads the training config on this host, and the job inherits this environment (sbatch;
+# an interactive chain's scron driver restores it), so this is also how helix and pimm reach the
+# job: configs/launch/_common.yaml.
 export PYTHONPATH="$HELIX_PIMM_ROOT:$H${PYTHONPATH:+:$PYTHONPATH}"
-export HELIX_ROOT=$H                       # the job's setup: line reads it (configs/launch/_common.yaml)
+export HELIX_ROOT=$H
 
 # Logs and submitit's pickles beside the run, not in the pimm checkout (pimm's default is relative
 # to its repo root).

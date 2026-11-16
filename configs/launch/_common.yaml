@@ -6,18 +6,19 @@
 # and `env:` values are shell-quoted), so site facts reach pimm as CLI flags
 # from scripts/submit.sh, which reads them from helix/sites/<site>.yaml.
 #
-# `setup:` is the one seam that IS shell, evaluated inside the job, on every link
-# of a chain: it puts helix and pimm on PYTHONPATH there. pimm's code snapshot
-# copies only its own scripts/ tools/ pimm/, so helix must come from the
-# environment; pimm's train.sh prepends the snapshot and keeps the rest, so a
-# resumed link imports helix too.
+# helix and pimm reach the job on PYTHONPATH, which scripts/submit.sh exports with HELIX_ROOT and
+# every HELIX_* root: a batch job inherits the submitting environment (sbatch), and so does an
+# interactive chain (pimm's scron driver restores it from <run>/submitit/watchdog/env.sh). pimm's
+# code snapshot copies only its own scripts/ tools/ pimm/, and train.sh prepends it to PYTHONPATH,
+# keeping the rest, so every link of a chain imports helix. No `setup:` here: a recipe's list
+# replaces the site's, and pimm's nersc-container `setup:` puts the image's parallel HDF5
+# (/opt/hdf5/lib) on LD_LIBRARY_PATH.
 #
-# The NCCL flight recorder: on a collective timeout every rank dumps its last
-# 2000 NCCL calls, which names the rank that stopped (the StepWatchdog hook dumps
-# that rank's Python stacks first).
-setup:
-  - 'export PYTHONPATH="${HELIX_ROOT:?HELIX_ROOT did not reach the job; submit with scripts/submit.sh}:${HELIX_PIMM_ROOT:?HELIX_PIMM_ROOT did not reach the job}${PYTHONPATH:+:$PYTHONPATH}"'
-  - 'export TORCH_NCCL_DUMP_ON_TIMEOUT=1 TORCH_NCCL_TRACE_BUFFER_SIZE=2000'
+# The NCCL flight recorder: on a collective timeout every rank dumps its last 2000 NCCL calls,
+# which names the rank that stopped (the StepWatchdog hook dumps that rank's Python stacks first).
+env:
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  TORCH_NCCL_TRACE_BUFFER_SIZE: "2000"
 # The whole node to the training step: CPUs on all four NUMA nodes and all of its memory. pimm's
 # NERSC site default (cpus_per_proc 6 x 4 = 24 CPUs, mem 192G) puts the step on NUMA node 0 alone
 # (63 GB), where 4 ranks + their DataLoader workers overflowed it: the kernel then evicted the

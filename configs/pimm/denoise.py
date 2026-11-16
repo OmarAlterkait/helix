@@ -75,15 +75,15 @@ data = dict(
 )
 
 # ---------------------------------------------------------------------------- hooks
-hooks = [
-    dict(type="HelixProvenance"),
+hooks = [                                   # the order is fm.py's, and why
     dict(type="CheckpointLoader"),
+    dict(type="HelixProvenance"),
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),
     dict(type="InformationWriter", log_frequency=50),
     dict(type="FiniteGuard", check_every=100, max_skips=20),
-    dict(type="StepWatchdog", timeout=300),     # a stuck rank dumps its stacks before NCCL's 600 s
     dict(type="CheckpointSaverIteration", save_freq="auto"),
+    dict(type="StepWatchdog", timeout=300),     # a stuck rank dumps its stacks before NCCL's 600 s
 ]
 
 del _root, _tokenize, _collect, _SUPPORT_MIN_Q

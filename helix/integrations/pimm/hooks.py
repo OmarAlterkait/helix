@@ -17,7 +17,8 @@ class HelixProvenance(HookBase):
     """Record which code and corpus produced this run; refuse to continue it on another corpus.
 
     Rank 0, in ``before_train`` -- on every link of a chain, so a link resumed from a different
-    tree or against a different corpus is on record (and the latter refused).
+    tree or against a different corpus is on record (and the latter refused). List it after
+    ``CheckpointLoader``, which restores ``global_step``: the record's ``step`` is the link's.
     """
 
     def before_train(self):
@@ -126,8 +127,8 @@ class HelixProvenance(HookBase):
 @HOOKS.register_module()
 class HelixPathBootstrap(HelixProvenance):
     """The old name of :class:`HelixProvenance`, kept so a config dumped by a run started before
-    the rename still resolves. It no longer rewrites the dumped config: the launcher exports
-    helix on PYTHONPATH for every link (``configs/launch/_common.yaml``)."""
+    the rename still resolves. It no longer rewrites the dumped config: helix reaches every link
+    on the PYTHONPATH scripts/submit.sh exports (``configs/launch/_common.yaml``)."""
 
     def __init__(self, root=None):                  # ``root`` was the rewrite's; ignored
         pass
@@ -204,6 +205,8 @@ class StepWatchdog(HookBase):
     name. Re-armed after every step -- from the end of step 1, so the first step's torch.compile
     is not timed -- ``faulthandler`` fires on the stuck rank itself, before NCCL's timeout,
     and its stderr shows where it was. No collectives: it cannot hang or desynchronise a run.
+    List it AFTER the checkpoint saver (configs/pimm/fm.py), so the timer starts once a save is
+    done and a slow save is not a killed run.
     """
 
     def __init__(self, timeout=300):
