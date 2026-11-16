@@ -177,6 +177,20 @@ def test_hidden_lr_scales_as_one_over_width_multiplier(d, d_base):
     assert lrs == sorted({1e-3, 1e-3 / mult}) if mult != 1 else lrs == [1e-3]
 
 
+def test_mup_leaves_the_init_at_the_default():
+    """muP's hidden init is variance ~ 1/fan_in, which PyTorch's default already is; one more
+    1/m on top made it 1/(fan_in m), 6x too small in variance at d768. So muP changes the LRs
+    and the readout multiplier, never a drawn weight."""
+    torch.manual_seed(0)
+    a = build_fm(dict(SMALL, d=256, heads=16, mup=True, d_base=64))
+    torch.manual_seed(0)
+    b = build_fm(dict(SMALL, d=256, heads=16, mup=False))
+    for (n, p), q in zip(a.named_parameters(), b.parameters()):
+        assert torch.equal(p, q), n
+    w = a.enc[0].mlp[0].weight
+    assert float(w.var()) == pytest.approx(1 / (3 * w.shape[1]), rel=0.05)
+
+
 def test_weight_decay_is_decoupled_from_the_mup_lr_scaling():
     """AdamW applies decay as lr*wd*p, so a hidden lr of base/m would shrink
     effective decay by 1/m across width -- a width-scaling confound. The hidden

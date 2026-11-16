@@ -146,15 +146,15 @@ class FMModel(nn.Module):
             self.register_buffer(_nm, torch.full((n_band, n_bins), float("nan")))
         # --- muP (Yang & Hu, Tensor Programs V, arXiv:2203.03466) ---
         # m = d/d_base is the width multiplier. Under muP the optimal Adam LR is
-        # width-invariant: hidden init var and Adam LR are divided by m; readout
-        # forward is divided by m; input/embedding untouched.
+        # width-invariant: hidden init var ~ 1/fan_in (PyTorch's default init
+        # already is, so it is left alone) and hidden Adam LR / m; readout
+        # forward / m; input/embedding untouched.
         #
         # ATTENTION SCALE: muP replaces 1/sqrt(d_head) with 1/d_head ("8/d_head" in
         # the mup pkg, backward-compatible at d_head=64) ONLY when d_head GROWS with
         # width. HERE d_head is FIXED (=64; heads=d/64), so q.k over a fixed d_head is
         # already O(1) under the standard 1/sqrt(d_head) — that scaling is width-correct
-        # and we keep it (forcing 1/d_head would just shrink logits ~8x, verified by the
-        # coord check). So attention keeps SDPA's default 1/sqrt(head_dim).
+        # and we keep it. So attention keeps SDPA's default 1/sqrt(head_dim).
         self.mup, self.d_base = mup, d_base
         self.m = d / d_base if mup else 1.0
         self.readout_mult = 1.0 / self.m         # output multiplier (1 if mup=False)
@@ -168,8 +168,6 @@ class FMModel(nn.Module):
         self.dec_norm = nn.LayerNorm(d)
         self.occ_head = nn.Linear(d, n_slot)
         self.val_head = nn.Linear(d, n_slot * n_bins)        # K logits per slot
-        if mup:
-            self._mup_init()
         # Widened LAST, so every other parameter draws the same random numbers as at S = 0;
         # the old columns are the S = 0 embedding's, the amplitude columns zero.
         self.lin_amp_scale = float(lin_amp_scale)
@@ -183,8 +181,10 @@ class FMModel(nn.Module):
 
     # ---- muP machinery (Tensor Programs V, arXiv:2203.03466; mup pkg; EleutherAI guide) ----
     # Category map for THIS model. INPUT = fixed-fan_in maps into width-d space
-    # (LR const, init unchanged). HIDDEN = fan_in,fan_out both O(d) (init var /m, LR /m).
-    # OUTPUT = fixed-fan_out readouts (init unchanged, forward mult 1/m, LR const).
+    # (LR const). HIDDEN = fan_in,fan_out both O(d) (LR /m). OUTPUT = fixed-fan_out
+    # readouts (forward mult 1/m, LR const). Every init is PyTorch's default, var
+    # 1/(3 fan_in): muP's for input and hidden weights; for the readout, with the 1/m
+    # multiplier, below muP's, which is allowed (zero-init readouts are the limit).
     # LayerNorm gains/biases and all biases: no width treatment (LR const).
     def _mup_categories(self):
         """-> dict name->('input'|'hidden'|'output') for WEIGHT params (2-D).
@@ -201,19 +201,6 @@ class FMModel(nn.Module):
             elif n in output:     cats[n] = "output"
             else:                 cats[n] = "input"     # embed/emb/mask_tok/film/all biases/LN
         return cats
-
-    def _mup_init(self):
-        """Rescale hidden WEIGHT init so var = base_var / m (std /= sqrt(m)).
-        Input/output init left at the framework default (= base param at m=1 => the
-        mup=False path is reproduced exactly when d==d_base). Query/readout are NOT
-        zero-init'd here: FiLM is already zero-init'd, and a plain (non-zero)
-        readout is a valid muP choice as long as the 1/m multiplier is applied."""
-        import math as _m
-        cats = self._mup_categories()
-        with torch.no_grad():
-            for n, p in self.named_parameters():
-                if cats.get(n) == "hidden" and p.dim() == 2:
-                    p.mul_(1.0 / _m.sqrt(self.m))       # var -> var / m
 
     def param_groups(self, base_lr, weight_decay=None):
         """AdamW param groups with muP per-category LR multipliers.
