@@ -5,8 +5,8 @@
 #   scripts/truth.sh task   GRID OUT CORPUS       (inside an array task: its block of shards)
 #
 # It reads the campaign's hits / step / labl at HELIX_SIM_ROOT, so it runs only at a site that
-# has them: S3DF (/sdf/data/neutrino/omara/doraemon_2026_1M_lartpc/data/jaxtpc_wire). NERSC
-# has none (helix/sites/nersc.yaml). CORPUS defaults to HELIX_CORPUS (the coeff shards whose
+# has them: S3DF (/sdf/data/neutrino/omara/doraemon_2026_1M_lartpc/data/jaxtpc_wire) and NERSC
+# (j000000 only, $SCRATCH/sim_d1m; helix/sites/nersc.yaml). CORPUS defaults to HELIX_CORPUS (the coeff shards whose
 # /ident names the events). The build is numpy only: no GPU.
 #
 # Each task builds SHARDS_PER_TASK shards with WORKERS processes (one shard each); a shard whose
