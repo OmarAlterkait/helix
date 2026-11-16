@@ -475,7 +475,8 @@ def _need_pimm():
 
 
 def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
-    """configs/pimm/denoise.py loads, states the M6d recipe, and its tokenizer reference is filled
+    """configs/pimm/denoise.py loads, states the recipe (cat head, linear amplitude, conditional
+    charge), and its tokenizer reference is filled
     from the model built on the FM run (FMTrainer's resolve_tokenizer)."""
     _need_pimm()
     from pimm.utils.config import Config
@@ -487,8 +488,8 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
         pytest.skip(f"config needs a root this site does not configure: {exc}")
     m = cfg.model
     assert m["type"] == "Coeff-Denoise" and "bins" not in m and m["pretrained"] and not m["freeze_encoder"]
-    assert not m["cond_charge"] and m["lr_head"] == 1e-2 and cfg.optimizer["lr"] == 3e-3
-    assert m["dist"] == "point" and m["lin_amp_scale"] == 0.0                # until measured on d1m
+    assert m["cond_charge"] and m["lr_head"] == 1e-2 and cfg.optimizer["lr"] == 3e-3
+    assert m["dist"] == "cat" and m["lin_amp_scale"] == 30.0                 # the full-length d1m comparison
     assert cfg.scheduler["type"] == "WarmupCosineLR" and cfg.scheduler["warmup"] == "auto"
     assert cfg.train["type"] == "FMTrainer" and not cfg.evaluate and set(cfg.data) == {"train"}
     dd = cfg.data["train"]
@@ -538,3 +539,4 @@ def test_the_readout_is_fp32_under_bf16_autocast(fm_run, sample, dist):
         y, _ = m.predict(B, B["q_idx"], B["q_aux"], B["q_nbr"])
     assert y.dtype == torch.float32
     assert (y - y.bfloat16().float()).abs().max() > 1e-4
+

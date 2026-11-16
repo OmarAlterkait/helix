@@ -1,22 +1,23 @@
 """pimm config: the supervised denoiser -- a pretrained FM run plus a per-cell head.
 
 Noisy coefficient tokens -> pre-response charge per 2-wire x 16-tick cell, with a presence head
-(helix.model.denoise; labels: helix.data.denoise.DenoiseRows on the ``cells`` truth). The recipe
-is M6d of DENOISE at tag archive-2026-11, and it is the default:
+(helix.model.denoise; labels: helix.data.denoise.DenoiseRows on the ``cells`` truth). The default
+is the categorical head with the linear-amplitude input and conditional charge, chosen by the
+full-length d1m comparison (docs/STATUS.md, 2026-11-13):
 
 * the encoder is the FM run ``model.fm`` (default ``$HELIX_EXP/fm_cooldown``, the cooled FM): its architecture, its
   tokenizer (``CoeffTokenize(cfg="model")``, filled by FMTrainer from that run) and, with
   ``model.pretrained=True``, its last weights; ``pretrained=False`` is the from-scratch baseline
   on the same architecture; ``model.freeze_encoder=True`` keeps the encoder fixed;
-* ``model.cond_charge``: False = M6d (detection, maps), True = M6dc (calorimetry: charge
-  regressed on charged cells only);
-* ``model.lin_amp_scale``: 0 = the FM's input alone (asinh per slot); S > 0 (M10lin: 30) adds
-  the linear amplitude sinh(inp) / S as input columns, zero at the start (docs/STATUS.md:
-  0 until a d1m run confirms r1's gain);
-* ``model.dist``: the charge head -- ``"point"`` (squared error, the default), ``"gauss"`` (a
-  learned per-cell width, Gaussian likelihood) or ``"cat"`` (one categorical over no-charge +
-  256 charge bins, in place of both heads; needs ``cond_charge=True``). One of the two will be
-  chosen by a full-length comparison;
+* ``model.cond_charge``: True (default; charge regressed on charged cells only); False = M6d;
+* ``model.lin_amp_scale``: 30 (default) adds the linear amplitude sinh(inp) / S as input
+  columns, zero at the start; 0 = the FM's input alone (asinh per slot). On d1m it tightened
+  bright charge (64-256k e- hw68 0.033 -> 0.027) at unchanged detection;
+* ``model.dist``: the charge head -- ``"cat"`` (default: one categorical over no-charge + 256
+  charge bins; needs ``cond_charge=True``), ``"point"`` (squared error) or ``"gauss"`` (learned
+  width). Full-length d1m (all labels, `last`), clear / crowded@near 0.1-0.2 MeV and 64-256k e-
+  hw68 U/V/Y: point+lin 0.616 / 0.609, 0.027/0.031/0.024; cat+lin 0.601 / 0.591,
+  0.015/0.019/0.010; gauss+lin 0.571 / 0.567, 0.018/0.022/0.012;
 * presence = q > 25 e- (``_SUPPORT_MIN_Q``: the cells-3 truth's own cut, the evaluation's
   ``--presence-q``), shared by ``DenoiseRows`` and the model (cat's bin 0);
 * encoder LR 3e-3 (muP-scaled), head LR 1e-2 (``model.lr_head``), linear warmup ("auto") then a
@@ -53,10 +54,10 @@ model = dict(
     fm=str(_root("HELIX_EXP") / "fm_cooldown"),
     pretrained=True,
     freeze_encoder=False,
-    cond_charge=False,
+    cond_charge=True,
     lr_head=1e-2,
-    lin_amp_scale=0.0,
-    dist="point",
+    lin_amp_scale=30.0,
+    dist="cat",
     support_min_q=_SUPPORT_MIN_Q,
     compile_blocks=True,
 )

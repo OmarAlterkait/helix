@@ -92,10 +92,19 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
   - 61-67% of 0-0.1 MeV deposits and 12-33% of 0.1-0.2 MeV deposits leave no kept coefficient in their footprint; only context can find them.
 - **Cross-plane reconstruction** (unmeasured until now; audit job 61142279, 200 events): variance explained with one view masked per volume 0.597 (lr4.4e-3) / 0.581 (`fm_cooldown`), against 0.70 random. Two views masked: ~0 (collapse, as on r1). Forced U / V / Y 0.61-0.63 / 0.54-0.56 / 0.52-0.54.
   - Caveat: plane-mask queries carry the hidden plane's occupied-patch layout, so it is not purely cross-plane.
-- **d1m denoiser at full length.** The `d1m_denoise` arms crashed or hung and were initialised
-  from `fm_cooldown`'s EMA. The d1m port lacks M11's linear amplitude by default, augmentation,
-  complete truth and volume-aware layouts; `dist` is undecided (point / gauss / cat). Its sweep
-  scores `last`; the arms in flight (trained at 9f34c74, before the trim) are scored by hand.
+- **d1m denoiser at full length: done (2026-11-13; $CFS/m5238/users/oalter/exp/helix_d1m_v2, run-397ec16, all labels, `last`, encoder fm_cooldown `last`).**
+  Presence at 1% FPR per view, 0.1-0.2 MeV; charge hw68 of log(pred/true) at 64-256k e-:
+
+  | run | clear (U / V / Y) | crowded@near | clear <0.1 | hw68 64-256k U / V / Y |
+  |---|---|---|---|---|
+  | point | 0.618 (0.56 / 0.50 / 0.81) | 0.606 | 0.182 | 0.033 / 0.035 / 0.030 |
+  | point + lin_amp 30 | 0.616 | 0.609 | 0.182 | 0.027 / 0.031 / 0.024 |
+  | gauss + lin_amp | 0.571 | 0.567 | 0.163 | 0.018 / 0.022 / 0.012 |
+  | **cat + lin_amp (now the default)** | 0.601 | 0.591 | 0.179 | **0.015 / 0.019 / 0.010** |
+
+  - All labels lift detection from the 1024-label fine-tune's ~0.52 / 0.53 to ~0.60-0.62.
+  - lin_amp tightens charge at no detection cost. cat trades -0.015 detection for 2-3x tighter charge.
+  - Charge binned by TRUTH at 1-4k e- is dominated by cells with no visible evidence (crit/denoise audit). Read charge binned by prediction.
 - **Hangs: root cause found (2026-11-10, /pscratch/sd/o/oalter/helix_work/hang_diag/).**
   - pimm's NERSC site default gave the step 24 CPUs (`cpus_per_proc 6`), all on NUMA node 0 (63 GB of 251).
   - 4 ranks plus 32 DataLoader workers (the old denoiser: ~72 GB anon+shmem) overflowed it. The kernel evicted the container's code pages and refaulted them through the image's single-threaded squashfs (on Lustre), freezing the job for minutes.
