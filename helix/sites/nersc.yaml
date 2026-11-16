@@ -73,14 +73,14 @@ container:
   # interchangeable with pimm's own pimm-nersc base, which has no helix, no
   # PyWavelets, and a pimm-data on the wrong side of the forward-model boundary.
   #
-  # This is a mutable tag while helix pins digests everywhere else. Shifter's
-  # store is keyed by the tag it was pulled under, so resolve the digest at
-  # submit time and record it WITH the run: `shifterimg lookup <tag>`.
-  # STALE: this tag names an image built WITH jax. helix no longer has a jax
-  # backend and container/ no longer installs it; the image must be rebuilt
-  # without jax (.github/workflows/docker.yml no longer publishes a jax-* tag),
-  # and this line pointed at the new tag or, better, its digest.
-  image: ghcr.io/omaralterkait/helix-nersc:jax-cuda12
+  # PINNED BY DIGEST: a tag is mutable (helix-nersc:jax-cuda12 named a 2026-10-11 build on GHCR
+  # while shifter still ran the 2026-09-19 one pulled under the same tag). Both runtimes take the
+  # digest reference as it is -- `shifterimg pull`, `shifter --image=`, `#SBATCH --image=`,
+  # `podman-hpc pull/run` -- and shifter's image id IS the digest, so `shifterimg images` shows
+  # what ran. The digest reaches provenance.json as HELIX_CONTAINER_IMAGE.
+  # Built by .github/workflows/docker.yml from 395c9d6 (fix-infra): no jax. To move it: push,
+  # read the digest from the workflow (or GHCR), `shifterimg pull` and `podman-hpc pull` it.
+  image: ghcr.io/omaralterkait/helix-nersc@sha256:8a4fbb6f8593808575069ca454b037505314baf4b49bd0c5f9c72a0aa9cbdaff
   python: /opt/pimm/.venv/bin/python
   # shifter needs no -B: NERSC mounts $HOME, $CFS and $SCRATCH into every image.
   binds: []

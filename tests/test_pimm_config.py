@@ -281,7 +281,8 @@ def test_no_config_evaluates_during_training():
             continue
         types = [kw.value.value for h in hooks.elts for kw in h.keywords if kw.arg == "type"]
         assert not any(t.endswith("Evaluator") for t in types), f"{path.name}: {types}"
-        assert types[-1] == "CheckpointSaverIteration", f"{path.name}: saver is {types[-1]}"
+        savers = [t for t in types if "Saver" in t]
+        assert savers == ["CheckpointSaverIteration"], f"{path.name}: savers {savers}"
     assert ast.literal_eval(names["fm.py"]["evaluate"]) is False
     assert all("evaluate" not in v or ast.literal_eval(v["evaluate"]) is False for v in names.values())
 
@@ -506,7 +507,7 @@ def test_a_failing_arm_leaves_the_earlier_arms_evaluated(monkeypatch, tmp_path):
     monkeypatch.setattr(sweep.subprocess, "run", run)
     monkeypatch.setattr(sweep, "site_env", lambda: {"HELIX_SLURM_EVAL_GPUS": "1", "HELIX_EXP": str(tmp_path)})
     study = tmp_path / "s.yaml"
-    study.write_text("config: fm\narms: {a: {}, b: {}}\nafter_each: {command: echo {run}}\n")
+    study.write_text("config: fm\narms: {a: {}, b: {}}\nafter_each:\n  command: echo {run}\n")
     monkeypatch.setattr(sweep.sys, "argv", ["sweep.py", str(study)])
     with pytest.raises(sweep.subprocess.CalledProcessError):
         sweep.main()

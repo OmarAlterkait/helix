@@ -501,7 +501,7 @@ def test_config_is_the_recipe_and_resolves_its_tokenizer(fm_run):
     assert dd["transform"][1]["support_min_q"] == m["support_min_q"] == DenoiseRows().support_min_q == PRESENCE_Q
     assert "seed" not in dd["transform"][1]
     hooks = [h["type"] for h in cfg.hooks]
-    assert hooks[-1] == "CheckpointSaverIteration" and "FiniteGuard" in hooks
+    assert [h for h in hooks if "Saver" in h] == ["CheckpointSaverIteration"] and "FiniteGuard" in hooks
     assert not any(h.endswith("Evaluator") for h in hooks) and "WeightEMA" not in hooks
 
     from helix.integrations.pimm.trainer import resolve_tokenizer
