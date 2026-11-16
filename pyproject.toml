@@ -53,6 +53,8 @@ dev = ["pytest>=7.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Every skip prints its reason: a missing pimm, corpus or GPU is visible in every run, CI included.
+addopts = "-rs"
 norecursedirs = ["temp", ".git", "*.egg-info"]
 
 [build-system]

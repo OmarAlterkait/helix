@@ -1,7 +1,8 @@
 """Shared test configuration: torch threads, site environment, data-root guards.
 
 ``HELIX_REQUIRE_PIMM=1`` makes an unimportable pimm an error and ``HELIX_REQUIRE_DATA=1`` a
-missing data root one, instead of silent skips (both once hid dozens of tests behind a green run).
+missing data root one, instead of silent skips (both once hid dozens of tests behind a green run);
+a root the site declares null is not missing. Every skip's reason is listed (``-rs`` in pyproject).
 The header naming the site and the data roots reached is printed even under ``-q``: it is what
 tells "passed against the real corpus" from "passed against nothing".
 
@@ -60,7 +61,16 @@ def _require_data():
     if os.environ.get("HELIX_REQUIRE_DATA") != "1":
         return
     from helix import paths
-    missing = {n: v for n, v in _roots()[:2] if not (v and os.path.isdir(v))}
+    # A root the site declares null (NERSC has no campaign copy) is absence, not breakage: its
+    # tests skip and say so under -rs. A configured root that is not a directory is an error,
+    # and the corpus is required everywhere.
+    missing = {}
+    for label, name in (("corpus", "HELIX_CORPUS"), ("sim", "HELIX_SIM_ROOT")):
+        value, src = paths.resolve(name)
+        if value is None and src.endswith("(null)") and label != "corpus":
+            continue
+        if not (value and os.path.isdir(value)):
+            missing[label] = value
     if missing:
         detail = "; ".join(f"{k}={v or '(unset)'}" for k, v in missing.items())
         raise pytest.UsageError(f"HELIX_REQUIRE_DATA=1 but these roots do not resolve to a directory: "

@@ -20,22 +20,38 @@ Any `HELIX_*` in the environment wins over the profile (e.g. `HELIX_CORPUS=<root
 Set `HELIX_SITE` in batch jobs. **NERSC:** the system `python3` is 3.6, so the venv is needed.
 
     scripts/helix_run.sh python -m pytest tests -q
-    HELIX_REQUIRE_PIMM=1 HELIX_REQUIRE_DATA=1 scripts/helix_run.sh python -m pytest tests -q -rs   # skips become errors
 
-Read the skips: pimm, real data, CUDA and `HELIX_JAXTPC_ROOT` tests skip when absent. A
-collection error means the environment is wrong. `HELIX_FORWARD_ENV="VAR ..."` forwards more
-variables into the container. To test a pimm-data working tree instead of the image's copy:
+Every skip prints its reason (`-rs`, pyproject). Two levels:
+
+* **CI** (`.github/workflows/ci.yml`, job `tests-cpu`, every push): the suite on a plain runner,
+  helix from the lockfile with CPU torch -- no pimm, pimm-data, GPU or data. What needs those
+  skips there, listed.
+* **The gate** (before a merge, after an image or pimm pin change): the whole suite in the
+  container on a GPU node, with pimm and the data REQUIRED. `HELIX_REQUIRE_PIMM=1` makes an
+  unimportable pimm, and `HELIX_REQUIRE_DATA=1` a configured corpus or campaign root that is not
+  a directory, an error before any test runs. What may still skip is what the site does not have:
+  a root its profile declares `null` (**NERSC:** `HELIX_SIM_ROOT`, `HELIX_JAXTPC_ROOT`: the
+  campaign and JAXTPC tests) -- read the `-rs` list; anything else skipping is a broken gate.
+
+**NERSC** has no usable CPU allocation; a shared GPU also runs the CUDA tests:
+
+    sbatch -A m5238_g -C gpu -q shared --gpus=1 -c 32 -t 02:00:00 --output=$HELIX_EXP/tests-%j.out \
+        --wrap="cd $HELIX_ROOT && HELIX_INTERACTIVE=0 HELIX_REQUIRE_PIMM=1 HELIX_REQUIRE_DATA=1 \
+                scripts/helix_run.sh python -m pytest tests -q -p no:cacheprovider"
+
+`HELIX_CORPUS=<run dir>` points the real-data tests at another corpus (they read its first
+shards and their `cells` truth; the CFS sample `coeff_tpc_d1m_sample/j000000` is enough).
+
+**S3DF**, on a CPU node (the CUDA tests skip, saying so):
+
+    sbatch --account=mli:cider-ml --partition=milano -c 8 --mem=32G -t 02:00:00 \
+        --wrap="cd $HELIX_ROOT && HELIX_REQUIRE_PIMM=1 HELIX_REQUIRE_DATA=1 \
+                scripts/helix_run.sh python -m pytest -q -p no:cacheprovider tests"
+
+A collection error means the environment is wrong. `HELIX_FORWARD_ENV="VAR ..."` forwards more
+variables into the container (every `HELIX_*` is forwarded already). To test a pimm-data working
+tree instead of the image's copy:
 `HELIX_FORWARD_ENV=PYTHONPATH PYTHONPATH=<pimm-data>/src scripts/helix_run.sh python -m pytest -q`.
-
-**S3DF**, on a CPU node:
-
-    sbatch --account=mli:cider-ml --partition=milano -c 8 --mem=32G -t 01:00:00 \
-        --wrap="$HELIX_ROOT/scripts/helix_run.sh python -m pytest -q -p no:cacheprovider tests"
-
-**NERSC** has no usable CPU allocation; use a shared GPU:
-
-    sbatch -A m5238_g -C gpu -q shared --gpus=1 -c 32 --mem=56G -t 01:00:00 \
-        --wrap="HELIX_INTERACTIVE=0 $HELIX_ROOT/scripts/helix_run.sh python -m pytest -q tests"
 
 ## 2. Build a corpus
 
