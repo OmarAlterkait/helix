@@ -35,21 +35,24 @@ Windows, per event, from the cells record (no tokenizer, no checkpoint): 32 wire
 
 Each kind is drawn after the ones above it, so earlier windows do not depend on later kinds.
 
-The numbers (:func:`window_stat`): a window's score is its largest cell score. The MATCHED pair,
-iso against background at the same distance from charge:
+The numbers (:func:`window_stat`, defined there): a window's score is its largest cell score;
+the MATCHED pairs are iso against background at the same distance from charge -- clear iso
+against the FAR windows, crowded iso against the NEAR windows (the far background alone lets a
+prediction that hazes charge around tracks gain efficiency at no cost; the near background
+prices the haze) -- each view against its OWN background (the views differ in noise: a pooled
+threshold is set by the views with most background; Y ran at 2.4-3.2% under a pooled 1%).
 
-  clear          clear iso windows detected above the 99th percentile of the FAR windows OF
-                 THEIR VIEW (U, V or Y, both volumes) -- a 1% false-positive rate per view,
-                 since the views differ in noise and one pooled threshold is set by the views
-                 with most background (measured: Y ran at 2.4-3.2% under a pooled 1%)
-  crowded_near   crowded iso windows detected above each view's 99th percentile of its NEAR
-                 windows: the far background alone lets a prediction that hazes charge around
-                 tracks gain efficiency at no cost; the near background prices the haze
+The headline is the LAUC: the efficiency averaged over log10(false-positive rate) in [1e-3,
+1e-1], view-mean, of the two pairs at 0.1-0.2 MeV (:data:`HEADLINE`). Beside it, always: the
+per-view curve at 1e-3 ... 1e-1, the efficiency at 1% (the old headline, :data:`SECONDARY`), the
+energy at 50% efficiency at 1% (E50) and the share of positive windows holding a kept
+coefficient. Intervals are central 95% over an event bootstrap (:func:`bootstrap`; with several
+training seeds, seeds then events).
 
-each by the particle's deposited energy (its whole track's step energy; Spearman 0.94-0.96 with
-the charge in the window on every view at ~20k e/MeV), per view, their mean and pooled, with a
-[16, 84]% interval over an event bootstrap; and per view the rate at which the far threshold
-fires on near windows (1% if near and far look alike to the prediction).
+The area under the whole ROC is NOT reported: every background window holds a kept coefficient by
+construction while many low-energy signal windows hold none (d1m, 600 events: 28-38% of the clear
+windows below 0.1 MeV, 9-14% at 0.1-0.2 MeV; ``frac_kept``), so for the amplitude those positives
+sit below every background window whatever their charge, and the full-range area measures that.
 
 numpy at import; torch and pimm-data only when events are read.
 """
@@ -64,7 +67,7 @@ from helix.data.cells import FT, FW, fkey, unkey
 
 @dataclass
 class Event:
-    index: int                 # position in the evaluated sequence, 0..n-1
+    index: int                 # its position in the dataset (a rejected position is skipped, not refilled)
     cells: dict                # helix.data.cells record
     coeff_cells: np.ndarray    # fine cells of the kept coefficients (helix.model.cells_join.coeff_cells)
     coeff_amp: tuple           # (those cells, their largest |coefficient| / sigma): coeff_amplitude
@@ -85,14 +88,14 @@ class Event:
         return self._raw
 
     def features(self, model):
-        """``model.encode(batch)`` (all tokens visible), float32, cached: an evaluation probes
-        one encoder."""
-        if self._feats is None:
+        """``model.encode(batch)`` (all tokens visible), float32, cached for THAT model: asked
+        for another model's features, the event encodes again rather than return the first's."""
+        if self._feats is None or self._feats[0] is not model:
             import torch
             from helix.eval.recon import autocast
             with torch.no_grad(), autocast(self.batch["plane_id"].device):
-                self._feats = model.encode(self.batch).float()
-        return self._feats
+                self._feats = (model, model.encode(self.batch).float())
+        return self._feats[1]
 
     def truth(self, seed):
         """:func:`event_truth` of the event, drawn with ``[seed, index]``, cached."""
@@ -156,16 +159,27 @@ def _text(x):
     return x.decode() if isinstance(x, bytes) else str(x)
 
 
-def events(ds, tokenizer, device, max_events=None):
-    """:class:`Event` for each of the first ``max_events`` events of ``ds``, in its order."""
+def events(ds, tokenizer, device, max_events=None, rejected=None):
+    """:class:`Event` for each of the first ``max_events`` positions of ``ds``, in its order,
+    ``Event.index`` the position.
+
+    A position the dataset REJECTS (:meth:`helix.data.CoeffTPCDataset._get_data` gives None: its
+    truth is off its planes) is skipped and its position appended to ``rejected``. ``get_data``
+    is not used: it replaces a rejected event by the next one -- right for a DataLoader, which
+    must never fail an index, and wrong here, where that next event would be scored twice."""
     import torch
     from helix.model.cells_join import coeff_amplitude
     from helix.model.tokenize import CoeffTokenize
 
     tokenize = CoeffTokenize(part="coeff", cfg=tokenizer)          # the training transform itself
+    read = getattr(ds, "_get_data", None) or ds.get_data
     n = len(ds) if not max_events else min(int(max_events), len(ds))
     for i in range(n):
-        s = ds.get_data(i)
+        s = read(i)
+        if s is None:
+            if rejected is not None:
+                rejected.append(i)
+            continue
         c = dict(s["coeff"])
         meta = c["_meta"]
         fm = tokenize(dict(s))["coeff"]
@@ -335,8 +349,229 @@ def event_truth(cells, coeff_cells, rng):
 
     wkey = np.concatenate([window_cells(g, w0, t0) for _, g, w0, t0, _, _ in wins]) if wins \
         else np.zeros(0, np.int64)
-    meta = [dict(kind=k, g=g, w0=w0, t0=t0, E=e, ctx=c) for k, g, w0, t0, e, c in wins]
+    # kept: the window holds at least one kept coefficient (every bg and near window does, by
+    # construction; an iso window without one is beyond the amplitude's reach)
+    kept = np.isin(wkey, ck).reshape(len(wins), -1).any(1) if wins else np.zeros(0, bool)
+    meta = [dict(kind=k, g=g, w0=w0, t0=t0, E=e, ctx=c, kept=bool(kp))
+            for (k, g, w0, t0, e, c), kp in zip(wins, kept)]
     return dict(wkey=wkey, meta=meta)
+
+
+def _diff(a, b):
+    return {k: a[k] - b[k] for k in a}
+
+
+#: The headline's false-positive range: efficiency averaged over log10(FPR) in [1e-3, 1e-1].
+LAUC_RANGE = (1e-3, 1e-1)
+#: Where the LAUC integrand is evaluated: 41 points uniform in log10(FPR) over LAUC_RANGE.
+LAUC_GRID = np.logspace(np.log10(LAUC_RANGE[0]), np.log10(LAUC_RANGE[1]), 41)
+#: The operating points of the per-view curves (each view at its own threshold).
+CURVE_FPRS = (1e-3, 2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1)
+#: The fine energy bins (MeV) of the turn-on, E50: 15 bins uniform in log E over 0.01-10 MeV.
+E50_BINS = np.logspace(-2, 1, 16)
+#: The false-positive rate E50 is quoted at, and the (weighted) windows a fine bin needs to count.
+E50_FPR, E50_MIN = 1e-2, 20
+#: The bootstrap interval's coverage: [2.5, 97.5] percentiles.
+LEVEL = 0.95
+#: The matched pairs: (name, positives, background kind). See :func:`window_stat`.
+POPS = (("clear", "far"), ("crowded_near", "near"))
+_FPRS = np.concatenate([LAUC_GRID, CURVE_FPRS])           # every threshold one resample needs
+_DLOG = np.diff(np.log10(LAUC_GRID))
+
+
+def _fpr_name(f):
+    return f"{f:g}"
+
+
+def wquantile(xs, cw, q):
+    """The ``q`` quantiles of sorted values ``xs`` carrying integer weights whose cumulative sum
+    is ``cw``: exactly ``np.quantile(np.repeat(xs, w), q)`` (linear interpolation), without the
+    repeat. A bootstrap resample weighs a window by its event's draw count."""
+    n = cw[-1]
+    h = (n - 1) * np.asarray(q, np.float64)
+    lo = np.floor(h)
+    frac = h - lo
+    i = np.searchsorted(cw, lo, side="right")
+    j = np.searchsorted(cw, np.minimum(lo + 1, n - 1), side="right")
+    return xs[i] + frac * (xs[j] - xs[i])
+
+
+def _above(ps, cw, t):
+    """Of sorted scores ``ps`` with cumulative weights ``cw`` (0 prepended): the weight strictly
+    above each threshold ``t``."""
+    return cw[-1] - cw[np.searchsorted(ps, t, side="right")]
+
+
+def e50(eff, centers):
+    """The energy at which the turn-on ``eff`` (per fine bin, NaN where a bin has too few windows)
+    first reaches 50%, interpolated linearly in log E between that bin's centre and the populated
+    bin below it. NaN when no bin reaches 50% or the lowest populated bin already does (the
+    crossing is outside the bins)."""
+    ok = np.isfinite(eff)
+    e, c = eff[ok], centers[ok]
+    hit = np.nonzero(e >= 0.5)[0]
+    if not len(hit) or hit[0] == 0:
+        return float("nan")
+    i = hit[0]
+    x = np.interp(0.5, [e[i - 1], e[i]], np.log([c[i - 1], c[i]]))
+    return float(np.exp(x))
+
+
+def window_stat(score, meta, events=None):
+    """``(stat, n_events, n_windows)`` of one per-cell ``score`` (flat over the windows' cells in
+    window order; larger = more charge): ``stat(m)`` the numbers under per-event weights ``m``
+    (:func:`bootstrap`; one weight per event of ``events``, default every event a window names,
+    in sorted order). A window's score is its largest cell score.
+
+    Two matched pairs (:data:`POPS`), each scored per view (U, V, Y; both volumes) against that
+    view's OWN background, since the views differ in noise:
+
+      clear          clear iso windows (and the extra clear draws, ``isox``) against the FAR
+                     windows (``bg``)
+      crowded_near   crowded iso windows against the NEAR windows; a view without near windows
+                     is left out
+
+    At a false-positive rate ``f`` the threshold is the ``1 - f`` quantile of the view's
+    background window scores (``np.quantile``, linear), and the efficiency the share of the
+    positives scoring strictly above it. Keys, each with a view suffix -- ``_U`` / ``_V`` /
+    ``_Y``, ``_mean`` (the mean of the three views) or none (pooled over views, each at its own
+    threshold) -- and per energy bin ``<E>`` of the iso particle's deposited energy:
+
+      lauc_<pop>_<E>             THE HEADLINE (``lauc_clear_0.1-0.2_mean`` and
+                                 ``lauc_crowded_near_0.1-0.2_mean``): the efficiency averaged
+                                 over log10(FPR) in [1e-3, 1e-1] (:data:`LAUC_RANGE`) -- the
+                                 trapezoid integral over the 41 points of :data:`LAUC_GRID`,
+                                 divided by the two decades. One operating point ranks similar
+                                 arms differently from the next; the average over the range
+                                 where the pretraining gain sits does not depend on one choice
+      eff<f>_<pop>_<E>           the efficiency at each FPR ``f`` of :data:`CURVE_FPRS`: the
+                                 per-view curve (1e-3 rests on ~0.001 x the view's background
+                                 windows: ~80 at 4113 events, ~12 at 600)
+      floor_eff1pct_<pop>_<E>    the efficiency at 1% FPR: the pre-2026-11-16 headline, kept so
+                                 past runs compare (equal to ``eff0.01_<pop>_<E>``)
+      e50_<pop>                  the deposited energy (MeV) at which the efficiency at 1% FPR
+                                 reaches 50% (:func:`e50` over :data:`E50_BINS`)
+      frac_kept_<pop>_<E>        the share of the positive windows holding at least one kept
+                                 coefficient (only when the windows record ``kept``): the
+                                 amplitude's ceiling. Every background window holds one by
+                                 construction, which is why the area under the whole ROC is not
+                                 reported: a positive with no kept coefficient sits below every
+                                 background window for the amplitude
+      near_fpr_at_far_<V>        the share of near windows above the view's far 1% threshold
+                                 (1% if near and far look alike to the prediction)
+
+    ``n_windows``: each kind per view, and the clear and crowded windows per energy bin and view.
+    ``meta``: one dict per window, its event as ``ev``."""
+    n = len(meta)
+    s = np.asarray(score, np.float64).reshape(n, -1).max(1) if n else np.zeros(0)
+    ev = np.array([m["ev"] for m in meta], np.int64)
+    kind = np.array([m["kind"] for m in meta], dtype=object)
+    view = np.array([m["g"] % 3 for m in meta], np.int64)
+    E = np.array([m["E"] if m["kind"] in ("iso", "isox") else np.nan for m in meta], np.float64)
+    eb = np.where(np.isfinite(E), np.searchsorted(ENERGY_BINS, np.nan_to_num(E), side="right") - 1, -1)
+    fb = np.where(np.isfinite(E), np.searchsorted(E50_BINS, np.nan_to_num(E), side="right") - 1, -1)
+    ctx = np.array([m.get("ctx") or "" for m in meta], dtype=object)
+    has_kept = n > 0 and all(m.get("kept") is not None and m.get("kept") != "" for m in meta)
+    kept = np.array([bool(m["kept"]) for m in meta]) if has_kept else None
+    evs = np.unique(ev) if events is None else np.unique(np.asarray(events, np.int64))
+    we = np.searchsorted(evs, ev)
+    if n and (we >= len(evs)).any() or n and (evs[np.minimum(we, len(evs) - 1)] != ev).any():
+        raise ValueError("window_stat: a window's event is not among `events`")
+    clear = ((ctx == "clear") & (kind == "iso")) | (kind == "isox")
+    crowded = (ctx == "crowded") & (kind == "iso")
+    pos_of = {"clear": clear, "crowded_near": crowded}
+    neg_of = {"far": kind == "bg", "near": kind == "near"}
+    i_far = len(LAUC_GRID) + CURVE_FPRS.index(E50_FPR)       # the 1% threshold (E50, floor_eff1pct, near_fpr)
+    e_cent = np.sqrt(E50_BINS[1:] * E50_BINS[:-1])
+
+    def sort(idx):
+        o = idx[np.argsort(s[idx], kind="stable")]
+        return s[o], we[o], o
+
+    # per (pop, view): the sorted background; per (pop, view, E bin): the sorted positives
+    plan = {}
+    for pop, bgk in POPS:
+        for v in range(3):
+            neg = sort(np.nonzero(neg_of[bgk] & (view == v))[0])
+            pos = {k: sort(np.nonzero(pos_of[pop] & (view == v) & (eb == k))[0]) for k in range(len(ENERGY_NAMES))}
+            allp = np.nonzero(pos_of[pop] & (view == v) & (fb >= 0) & (fb < len(e_cent)))[0]
+            plan[pop, v] = (neg, pos, allp)
+    near_v = [np.nonzero((kind == "near") & (view == v))[0] for v in range(3)]
+
+    def stat(m):
+        mw = np.asarray(m, np.float64)
+        w = mw[we]
+        out = {}
+        far_thr = {}
+        for pop, bgk in POPS:
+            e1 = {}                                          # E bin -> (n_pos[3], n_above[3, n_fpr])
+            kp = {}
+            e50v = []
+            pooled_turn = np.zeros((2, len(e_cent)))
+            for v in range(3):
+                (ns, nwe, _), pos, allp = plan[pop, v]
+                cw = np.cumsum(mw[nwe])
+                if len(ns) and cw[-1] > 0:
+                    thr = wquantile(ns, cw, 1.0 - _FPRS)
+                elif bgk == "far":
+                    thr = np.full(len(_FPRS), np.inf)        # a view without far windows: none detected
+                else:
+                    thr = None                               # a view without near windows: left out
+                if bgk == "far":
+                    far_thr[v] = thr
+                for k in range(len(ENERGY_NAMES)):
+                    ps, pwe, o = pos[k]
+                    pw = mw[pwe] if thr is not None else np.zeros(len(ps))     # left out: no positive
+                    cwp = np.concatenate([[0.0], np.cumsum(pw)])
+                    n_pos = cwp[-1]
+                    above = _above(ps, cwp, thr) if thr is not None else np.zeros(len(_FPRS))
+                    e1.setdefault(k, ([], []))
+                    e1[k][0].append(n_pos)
+                    e1[k][1].append(above)
+                    if kept is not None:
+                        kp.setdefault(k, []).append(((mw[pwe] * kept[o]).sum(), mw[pwe].sum()))
+                # the turn-on at E50_FPR over the fine energy bins
+                if thr is not None and len(allp):
+                    pw = w[allp]
+                    det = s[allp] > thr[i_far]
+                    num = np.bincount(fb[allp], pw * det, len(e_cent))
+                    den = np.bincount(fb[allp], pw, len(e_cent))
+                    pooled_turn += [num, den]
+                    e50v.append(e50(np.where(den >= E50_MIN, num / np.maximum(den, 1e-12), np.nan), e_cent))
+                else:
+                    e50v.append(float("nan"))
+            for k, nm in enumerate(ENERGY_NAMES):
+                n_pos, above = np.array(e1[k][0]), np.array(e1[k][1])            # (3,), (3, n_fpr)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    eff_v = above / n_pos[:, None]                                # NaN where no positive
+                    eff_p = above.sum(0) / n_pos.sum()
+                for tag, curve in [("", eff_p)] + [(f"_{VIEWS[v]}", eff_v[v]) for v in range(3)] + [("_mean", eff_v.mean(0))]:
+                    g = curve[:len(LAUC_GRID)]
+                    out[f"lauc_{pop}_{nm}{tag}"] = float(((g[1:] + g[:-1]) / 2 * _DLOG).sum() / _DLOG.sum())
+                    for j, f in enumerate(CURVE_FPRS):
+                        out[f"eff{_fpr_name(f)}_{pop}_{nm}{tag}"] = float(curve[len(LAUC_GRID) + j])
+                    out[f"floor_eff1pct_{pop}_{nm}{tag}"] = float(curve[i_far])
+                if kept is not None:
+                    a = np.array(kp[k])                                            # (3, 2)
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        fv = a[:, 0] / a[:, 1]
+                    out[f"frac_kept_{pop}_{nm}"] = _ratio(a[:, 0].sum(), a[:, 1].sum())
+                    out[f"frac_kept_{pop}_{nm}_mean"] = float(fv.mean())
+                    out.update({f"frac_kept_{pop}_{nm}_{VIEWS[v]}": float(fv[v]) for v in range(3)})
+            num, den = pooled_turn
+            out[f"e50_{pop}"] = e50(np.where(den >= E50_MIN, num / np.maximum(den, 1e-12), np.nan), e_cent)
+            out[f"e50_{pop}_mean"] = float(np.mean(e50v))
+            out.update({f"e50_{pop}_{VIEWS[v]}": e50v[v] for v in range(3)})
+        for v in range(3):
+            nv = near_v[v]
+            out[f"near_fpr_at_far_{VIEWS[v]}"] = _frac(w[nv], s[nv] > far_thr[v][i_far], slice(None))
+        return out
+
+    counts = {f"{k}_{VIEWS[v]}": int(((kind == k) & (view == v)).sum()) for k in KINDS for v in range(3)}
+    counts.update({f"{c}_{nm}_{VIEWS[v]}": int((sel & (eb == k) & (view == v)).sum())
+                   for c, sel in (("clear", clear), ("crowded", crowded))
+                   for k, nm in enumerate(ENERGY_NAMES) for v in range(3)})
+    return stat, len(evs), counts
 
 
 def _ratio(a, b):
@@ -347,76 +582,17 @@ def _frac(w, hit, sel):
     return _ratio((w * hit)[sel].sum(), w[sel].sum())
 
 
-def _diff(a, b):
-    return {k: a[k] - b[k] for k in a}
+#: The window numbers every evaluation leads with: the LAUC of the two matched pairs at
+#: 0.1-0.2 MeV, view-mean; and the pre-2026-11-16 headline (efficiency at 1% FPR), secondary.
+HEADLINE = ("lauc_clear_0.1-0.2_mean", "lauc_crowded_near_0.1-0.2_mean")
+SECONDARY = ("floor_eff1pct_clear_0.1-0.2_mean", "floor_eff1pct_crowded_near_0.1-0.2_mean")
 
 
-def window_stat(score, meta):
-    """``(stat, n_events, n_windows)`` of one per-cell ``score`` (flat over the windows' cells in
-    window order; larger = more charge): ``stat(m)`` the floor's numbers under per-event weights
-    ``m`` (:func:`bootstrap`), keyed by ``<E bin>`` and a view suffix -- ``_U`` / ``_V`` / ``_Y``,
-    ``_mean`` (of the three views) or none (pooled over views, each at its own threshold):
-
-      floor_eff1pct_clear_<E>         clear iso windows (and the extra clear draws, ``isox``)
-                                      above each view's 99th percentile of its FAR windows
-      floor_eff1pct_crowded_near_<E>  crowded iso windows above each view's 99th percentile of
-                                      its NEAR windows; a view without near windows is left out
-      near_fpr_at_far_<V>             the fraction of near windows above the far threshold
-
-    ``n_windows``: each kind per view, and the clear and crowded windows per energy bin and view.
-    ``meta``: one dict per window, its event as ``ev``."""
-    n = len(meta)
-    s = np.asarray(score, np.float64).reshape(n, -1).max(1) if n else np.zeros(0)
-    ev = np.array([m["ev"] for m in meta], np.int64)
-    kind = np.array([m["kind"] for m in meta], dtype=object)
-    view = np.array([m["g"] % 3 for m in meta], np.int64)
-    eb = np.array([np.searchsorted(ENERGY_BINS, m["E"], side="right") - 1 if m["kind"] in ("iso", "isox") else -1
-                   for m in meta], np.int64)
-    ctx = np.array([m.get("ctx") or "" for m in meta], dtype=object)
-    evs, we = np.unique(ev, return_inverse=True)
-    bg, near = kind == "bg", kind == "near"
-    clear = ((ctx == "clear") & (kind == "iso")) | (kind == "isox")
-    crowded = (ctx == "crowded") & (kind == "iso")
-
-    def thresholds(w, ref):
-        thr = np.full(3, np.nan)
-        for v in range(3):
-            b = np.repeat(s[ref & (view == v)], w[ref & (view == v)])
-            if len(b):
-                thr[v] = np.quantile(b, 0.99)
-        return thr
-
-    def stat(m):
-        w = m[we]
-        far, thr_n = thresholds(w, bg), thresholds(w, near)
-        det = s > np.where(np.isnan(far), np.inf, far)[view]           # a view without bg: none detected
-        det_n = s > np.where(np.isnan(thr_n), np.inf, thr_n)[view]
-        has_n = ~np.isnan(thr_n)[view]
-        out = {}
-        for k, nm in enumerate(ENERGY_NAMES):
-            for key, d, sel in (("clear", det, clear), ("crowded_near", det_n, crowded & has_n)):
-                sel = sel & (eb == k)
-                base = f"floor_eff1pct_{key}_{nm}"
-                pv = [_frac(w, d, sel & (view == v)) for v in range(3)]
-                out[base] = _frac(w, d, sel)
-                out[f"{base}_mean"] = float(np.mean(pv))
-                out.update({f"{base}_{VIEWS[v]}": pv[v] for v in range(3)})
-        for v in range(3):
-            out[f"near_fpr_at_far_{VIEWS[v]}"] = _frac(w, det, near & (view == v))
-        return out
-
-    counts = {f"{k}_{VIEWS[v]}": int(((kind == k) & (view == v)).sum()) for k in KINDS for v in range(3)}
-    counts.update({f"{c}_{nm}_{VIEWS[v]}": int((sel & (eb == k) & (view == v)).sum())
-                   for c, sel in (("clear", clear), ("crowded", crowded))
-                   for k, nm in enumerate(ENERGY_NAMES) for v in range(3)})
-    return stat, len(evs), counts
-
-
-def score_windows(score, meta, n_boot=200, seed=0):
-    """The floor of one per-cell ``score``: :func:`window_stat`'s numbers (each ``[point, lo,
-    hi]``) and the window counts ``n_windows``."""
-    stat, n_ev, n_win = window_stat(score, meta)
-    out = bootstrap(stat, n_ev, n_boot, seed)
+def score_windows(score, meta, n_boot=200, seed=0, events=None, level=LEVEL):
+    """The numbers of one per-cell ``score``: :func:`window_stat`'s (each ``[point, lo, hi]``,
+    the ``level`` event-bootstrap interval) and the window counts ``n_windows``."""
+    stat, n_ev, n_win = window_stat(score, meta, events)
+    out = bootstrap(stat, n_ev, n_boot, seed, level=level)
     out["n_windows"] = n_win
     return out
 
@@ -432,39 +608,30 @@ def amplitude(ev, keys):
 
 
 #: The per-window metadata a windows dump carries: what places a window (a far window's kind,
-#: plane and NaN energy alone do not).
-WINDOW_META = ("ev", "kind", "g", "E", "ctx", "w0", "t0")
+#: plane and NaN energy alone do not), and whether it holds a kept coefficient.
+WINDOW_META = ("ev", "kind", "g", "E", "ctx", "w0", "t0", "kept")
 
 
 class Scored:
     """The scored events' windows and named per-cell scores on them, scored by
-    :func:`score_windows`."""
+    :func:`score_windows`. ``events``: every scored event's index, windows or not, so the
+    bootstrap resamples the same events as the evaluation's other numbers."""
 
     def __init__(self):
-        self.meta, self.s = [], {}
+        self.meta, self.s, self.events = [], {}, []
 
     def add(self, ev, tr, scores):
         """``tr``: the event's truth; ``scores``: ``{name: score per window cell}``."""
+        self.events.append(int(ev.index))
         self.meta += [dict(m, ev=ev.index) for m in tr["meta"]]
         for k, s in scores.items():
             self.s.setdefault(k, []).append(np.asarray(s, np.float32))
 
-    def stat(self, name):
-        """:func:`window_stat` of score ``name``: ``(stat, n_events, n_windows)``."""
+    def result(self, n_boot, seed, names=None, level=LEVEL):
         if not self.meta:
             raise ValueError("no scored window")
-        return window_stat(np.concatenate(self.s[name]), self.meta)
-
-    def paired(self, a, b, n_boot, seed):
-        """``a - b`` of every number, each ``[point, lo, hi]`` over the SAME resamples."""
-        sa, n, _ = self.stat(a)
-        sb = self.stat(b)[0]
-        return bootstrap(lambda m: _diff(sa(m), sb(m)), n, n_boot, seed)
-
-    def result(self, n_boot, seed, names=None):
-        if not self.meta:
-            raise ValueError("no scored window")
-        return {k: score_windows(np.concatenate(self.s[k]), self.meta, n_boot, seed) for k in (names or self.s)}
+        return {k: score_windows(np.concatenate(self.s[k]), self.meta, n_boot, seed, self.events, level)
+                for k in (names or self.s)}
 
     def windows(self):
         """Every scored window once: its metadata as arrays and each named score's window score
@@ -477,16 +644,31 @@ class Scored:
         return out
 
 
-def bootstrap(stat, n_events, n_boot=200, seed=0):
-    """``{key: [point, lo, hi]}``: ``stat(m) -> {key: value}`` of per-event weights ``m`` (the
-    point: every event once), and its [16, 84]% interval over ``n_boot`` resamples of the
-    events with replacement (``m``: how often each was drawn)."""
-    point = stat(np.ones(n_events, np.int64))
+def bootstrap(stat, n_events, n_boot=200, seed=0, n_seeds=None, level=LEVEL):
+    """``{key: [point, lo, hi]}``: the point is ``stat`` with every event (and seed) once; ``[lo,
+    hi]`` the central ``level`` interval (percentiles, NaNs ignored) over ``n_boot`` resamples.
+
+    ``stat(m) -> {key: value}`` of per-event weights ``m`` (how often each event was drawn, with
+    replacement). With ``n_seeds`` -- the training seeds of an arm, scored on the same events --
+    ``stat(m, s)`` also takes per-seed weights: each resample first draws the seeds with
+    replacement, then the events, so the interval carries the training-seed spread as well as the
+    events'."""
+    if n_seeds:
+        point = stat(np.ones(n_events, np.int64), np.ones(n_seeds, np.int64))
+    else:
+        point = stat(np.ones(n_events, np.int64))
     rng = np.random.default_rng(seed)
-    boots = [stat(np.bincount(rng.integers(0, n_events, n_events), minlength=n_events)) for _ in range(n_boot)]
+    boots = []
+    for _ in range(n_boot):
+        if n_seeds:
+            sw = np.bincount(rng.integers(0, n_seeds, n_seeds), minlength=n_seeds)
+            boots.append(stat(np.bincount(rng.integers(0, n_events, n_events), minlength=n_events), sw))
+        else:
+            boots.append(stat(np.bincount(rng.integers(0, n_events, n_events), minlength=n_events)))
+    a = 100 * (1 - level) / 2
     out = {}
     for k, v in point.items():
         bv = np.array([b.get(k, np.nan) for b in boots], float)
-        lo, hi = np.nanpercentile(bv, [16, 84]) if np.isfinite(bv).any() else (np.nan, np.nan)
+        lo, hi = np.nanpercentile(bv, [a, 100 - a]) if np.isfinite(bv).any() else (np.nan, np.nan)
         out[k] = [round(float(v), 4), round(float(lo), 4), round(float(hi), 4)]
     return out

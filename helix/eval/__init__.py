@@ -7,13 +7,16 @@
 The evaluation of a pretrained encoder is a fixed-budget FINE-TUNE: the denoiser trained on
 1,024 labelled events (``configs/pimm/ft_eval.py``; a study is ``configs/sweeps/ft_eval.yaml``),
 scored by :mod:`helix.eval.denoise` -- detection on the windows (the presence log-odds against
-the fit-free amplitude, on identical windows) and charge accuracy on every charged cell. The same
-protocol with ``model.freeze_encoder=True`` is the frozen diagnostic: one scoring path.
+the fit-free amplitude, on identical windows; the headline is the LAUC, the efficiency averaged
+over log-FPR in [1e-3, 1e-1]) and per cell, charge accuracy in bins of the predicted charge, and
+the presence calibration, on the natural covered cells. The same protocol with
+``model.freeze_encoder=True`` is the frozen diagnostic: one scoring path.
 
 ``DENOISER_RUN`` is a pimm run directory (its ``model/last``, the end of the budget, unless
 ``weights`` says otherwise) or one checkpoint inside it. Everything else comes from the run: the
 events are its config's corpus restricted to the ``probe`` role of its holdout -- every probe
-event is scored, since nothing is fitted here -- tokenized as its FM run tokenizes
+event is scored, since nothing is fitted here, except one the dataset rejects (its truth off its
+planes; recorded under ``rejected``) -- tokenized as its FM run tokenizes
 (:mod:`helix.eval.events`).
 
 ``uprobe`` (:mod:`helix.eval.probe`) is the one frozen-feature key kept: the along-wire
@@ -40,12 +43,15 @@ __all__ = ["Context", "evaluate", "evaluate_uprobe", "resolve_exp"]
 @dataclass
 class Context:
     """What the denoiser's metric is built from: the run (its tokenizer), the predictor, the
-    window seed and the bootstrap."""
+    window seed, the bootstrap and the per-cell sampling (:mod:`helix.eval.denoise`)."""
     run: object
-    denoiser: object                 # predict(event, keys) -> (y, logit)
+    denoiser: object                 # predict(event, keys) -> (y, logit[, q_mean[, y_sd]])
     seed: int = 0
     n_boot: int = 200
     presence_q: float = 25.0         # the presence label, q > presence_q (e-)
+    empty_frac: float = 0.05         # the share of the uncharged covered cells sampled per event
+    level: float = 0.95              # the bootstrap interval's coverage
+    dump_cells: str = None           # a directory for each event's per-cell outputs, or None
 
 
 def resolve_exp(recorded, *, override=None):
@@ -90,31 +96,38 @@ def _corpus(run, override):
 
 
 def _score(run, ds, metric, max_events, log):
-    """Feed the first ``max_events`` probe events to ``metric``; ``(n_events, identity)``."""
+    """Feed the probe events at the first ``max_events`` positions to ``metric``, a position the
+    dataset rejects skipped (:func:`helix.eval.events.events`); ``(n_scored, rejected positions,
+    identity)``."""
     from helix.eval.events import events, identity
 
     n = len(ds) if not max_events else min(int(max_events), len(ds))
     if not n:
         raise ValueError(f"{run.provenance['run']}: the probe split of the run's corpus is empty")
     dev = next(run.model.parameters()).device
-    for ev in events(ds, run.tokenizer, dev, n):
+    rejected, k = [], 0
+    for ev in events(ds, run.tokenizer, dev, n, rejected=rejected):
         metric.add(ev)
+        k += 1
         if ev.index % 100 == 0 or ev.index + 1 == n:
             log(f"  event {ev.index + 1}/{n}")
-    return n, identity(ds)
+    if rejected:
+        log(f"  rejected (truth off its planes, not scored): positions {rejected}")
+    return k, rejected, identity(ds)
 
 
-def _record(run, n, ident, corpus, seed, n_boot):
+def _record(run, n, rejected, ident, corpus, seed, n_boot):
     from helix.integrations._bootstrap import provenance
-    return dict(run=run.provenance, tokenizer=asdict(run.tokenizer), n_events=n, seed=seed, n_boot=n_boot,
-                code=provenance(), corpus=dict(corpus, basis_digest=ident["basis_digest"]),
+    return dict(run=run.provenance, tokenizer=asdict(run.tokenizer), n_events=n, rejected=rejected, seed=seed,
+                n_boot=n_boot, code=provenance(), corpus=dict(corpus, basis_digest=ident["basis_digest"]),
                 truth=dict(q_cut=ident["truth_q_cut"], q_cut_source=ident["truth_q_cut_source"]))
 
 
 def evaluate(path, *, weights="last", corpus=None, fm=None, max_events=None, seed=0, n_boot=200,
-             presence_q=25.0, device=None, log=print):
+             presence_q=25.0, empty_frac=0.05, level=0.95, dump_cells=None, device=None, log=print):
     """Score the fine-tuned denoiser at ``path`` on its own probe events; returns the results as
-    one JSON-able dict, the window scores under ``metrics.denoise._windows``."""
+    one JSON-able dict, the window scores under ``metrics.denoise._windows``; ``dump_cells`` a
+    directory for each event's per-cell outputs (:meth:`helix.eval.denoise.Denoise.dump`)."""
     import json
 
     from helix.eval.denoise import Denoise, load_denoiser
@@ -127,11 +140,11 @@ def evaluate(path, *, weights="last", corpus=None, fm=None, max_events=None, see
     ds, cinfo = _corpus(run, corpus)
     log(f"[helix.eval] {run.provenance['run']} weights={run.provenance['weights']} step={run.provenance['step']}"
         f" corpus={cinfo['resolved']} ({cinfo['check']}) fm={fm_path} ({fm_note})")
-    m = Denoise(Context(run, predict, seed, n_boot, float(presence_q)))
-    n, ident = _score(run, ds, m, max_events, log)
-    out = _record(run, n, ident, cinfo, seed, n_boot)
+    m = Denoise(Context(run, predict, seed, n_boot, float(presence_q), float(empty_frac), float(level), dump_cells))
+    n, rejected, ident = _score(run, ds, m, max_events, log)
+    out = _record(run, n, rejected, ident, cinfo, seed, n_boot)
     out.update(fm=dict(recorded=recorded, resolved=fm_path, note=fm_note), presence_q=float(presence_q),
-               metrics={"denoise": m.result()})
+               level=float(level), dump_cells=dump_cells, metrics={"denoise": m.result()})
     return out
 
 
@@ -152,7 +165,7 @@ def evaluate_uprobe(path, *, weights="last", corpus=None, max_events=None, seed=
     log(f"[helix.eval] uprobe {run.provenance['run']} weights={run.provenance['weights']} "
         f"step={run.provenance['step']} events={n} (fit on {ctx.n_train}) corpus={cinfo['resolved']} ({cinfo['check']})")
     m = UProbe(ctx)
-    n, ident = _score(run, ds, m, n, log)
-    out = _record(run, n, ident, cinfo, seed, n_boot)
+    n, rejected, ident = _score(run, ds, m, n, log)
+    out = _record(run, n, rejected, ident, cinfo, seed, n_boot)
     out.update(probe_seeds=int(probe_seeds), metrics={"uprobe": m.result()})
     return out
