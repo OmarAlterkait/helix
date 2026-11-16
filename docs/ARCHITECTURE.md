@@ -169,6 +169,8 @@ scale of every `log1p(q / Q0)`) is defined here once. ~197 MB per 200-event shar
   re-test, because a disabled axis leaves its half of each head unrotated (`rope_tables`).
 - **Masking** (`make_mask`): 75% of tokens at random; with probability `plane_frac` (0.1) a
   step hides whole planes instead. Grouped by `plane_id`, the token set is order-free.
+  `mask_mode="loc"` (or `loc_frac` per step) hides 75% of locations -- a plane's 16-wire patch
+  column over a `loc_ticks` (128) bin of time -- with every band's tokens in each.
 - **Decoder:** 4 CrossMAE blocks; masked queries cross-attend the visible encoded tokens in
   drift-time groups: the keys in equal counts, each query in the group covering its time.
 - **Head and loss** (`loss.py`): per slot an occupancy logit and a **categorical value head**

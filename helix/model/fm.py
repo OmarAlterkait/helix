@@ -20,9 +20,10 @@ from helix.model.loss import cat_head_sparse
 # the architecture, which keeps a checkpoint's architecture metadata and its
 # parameter tree in exact correspondence. build_fm() sets them as attributes.
 #
-# plane_frac mixes the two masking modes PER STEP: whole-plane masking with that
-# probability, mask_mode otherwise. It is NOT the same as mask_mode="plane",
-# which would mask planes every step.
+# plane_frac and loc_frac mix the masking modes PER STEP: whole-plane masking
+# with probability plane_frac, whole-location masking with loc_frac, mask_mode
+# otherwise. They are NOT mask_mode="plane" / "loc", which mask that way every
+# step. loc_ticks is a location's length in time (make_mask).
 #
 # act_ckpt recomputes each block's activations in the backward pass instead of
 # storing them: ~1.3x the step for a fraction of the activation memory, which is
@@ -37,8 +38,8 @@ from helix.model.loss import cat_head_sparse
 # (helix.model.kernels); the same arithmetic to ~1e-5, so it is an
 # implementation choice, not an architecture one. Needs qk_norm and head dim 64.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
-                   plane_frac=0.0, compile_blocks=False, act_ckpt=False,
-                   fused_qk=False)
+                   plane_frac=0.0, loc_frac=0.0, loc_ticks=128.0,
+                   compile_blocks=False, act_ckpt=False, fused_qk=False)
 
 
 # ---- MAE token masking ----------------------------------------------------------------------
@@ -51,10 +52,16 @@ _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
 VIEWS_PER_VOLUME = 3
 
 
-def make_mask(B, mode, ratio, n_planes, gen=None):
-    """mode: random | plane.
+def make_mask(B, mode, ratio, n_planes, gen=None, loc_ticks=128.0):
+    """mode: random | loc | plane.
 
     * ``random`` — ``ratio`` of tokens, drawn independently.
+    * ``loc``    — ``ratio`` of LOCATIONS, each hidden with every band's tokens in
+      it. A location is one plane's 16-wire patch column (``wire_pos``, which all
+      bands share) over a ``loc_ticks`` bin of ``t_phys``; 128 ticks is the
+      coarsest band's patch (8 ticks at level 4). A token belongs to the bin of
+      its time, so a coarse token centred next door can still reach up to half
+      its span (64 ticks) into a hidden location.
     * ``plane``  — ``n_planes`` whole planes PER VOLUME; every volume punctured
       (``ratio`` is unused).
     """
@@ -63,8 +70,16 @@ def make_mask(B, mode, ratio, n_planes, gen=None):
         else (lambda *s: torch.rand(*s, device=dev))
     if mode == "random":
         return rnd(n) < ratio
+    if mode == "loc":
+        # Random per-token masking leaves 57% of hidden tokens overlapping, in ticks, a
+        # visible token of another band in their patch column -- the same signal at
+        # another scale; whole locations leave 18%, at their edges (d1m, 120 events).
+        t = torch.div(B["t_phys"].double(), loc_ticks, rounding_mode="floor").long()
+        loc = torch.stack([B["plane_id"].long(), B["wire_pos"].long(), t], 1)
+        u, inv = torch.unique(loc, dim=0, return_inverse=True)
+        return (rnd(u.shape[0]) < ratio)[inv]
     if mode != "plane":
-        raise ValueError(f"mask mode must be 'random' or 'plane', got {mode!r}")
+        raise ValueError(f"mask mode must be 'random', 'loc' or 'plane', got {mode!r}")
     # Cross-plane: hide whole planes. Puncturing EVERY volume, measured on a real
     # R1 event (gids 0..5 = 2 volumes x 3 views):
     #
@@ -436,29 +451,32 @@ class FMModel(nn.Module):
     def make_mask(self, B, ratio=None, mode=None, n_planes=None, gen=None):
         """Draw a token mask for this batch under the model's configured policy.
 
-        ``plane_frac`` mixes the two modes PER STEP: with that probability the
-        step masks whole planes (``"plane"``), otherwise it uses ``mask_mode``.
-        That mix is the point — a run that only ever masks randomly never has to
-        reconstruct a plane it cannot see, so nothing forces cross-plane
-        triangulation, and a run that only ever masks planes never learns the
-        within-plane task.
+        ``plane_frac`` and ``loc_frac`` mix the modes PER STEP: with those
+        probabilities the step masks whole planes (``"plane"``) or whole
+        locations (``"loc"``), otherwise it uses ``mask_mode``. That mix is the
+        point — a run that only ever masks randomly never has to reconstruct a
+        plane it cannot see, so nothing forces cross-plane triangulation, and a
+        run that only ever masks planes never learns the within-plane task.
 
         An explicit ``mode=`` overrides the policy and skips the draw, so callers
         that want one specific mode (evaluation, tests) are unaffected.
         """
         m = self.mask_mode if mode is None else mode
-        if mode is None and self.plane_frac > 0:
+        if mode is None and (self.plane_frac > 0 or self.loc_frac > 0):
             # torch, not numpy's global RNG: the draw stays on the batch's device
             # and honours `gen`.
             dev = B["plane_id"].device
-            r = (torch.rand((), generator=gen, device=dev)
-                 if (gen is not None and gen.device.type == dev.type)
-                 else torch.rand((), device=dev))
-            if float(r) < self.plane_frac:
+            r = float(torch.rand((), generator=gen, device=dev)
+                      if (gen is not None and gen.device.type == dev.type)
+                      else torch.rand((), device=dev))
+            if r < self.plane_frac:
                 m = "plane"
+            elif r < self.plane_frac + self.loc_frac:
+                m = "loc"
         return make_mask(B, m,
                          self.mask_ratio if ratio is None else ratio,
-                         self.n_planes if n_planes is None else n_planes, gen=gen)
+                         self.n_planes if n_planes is None else n_planes, gen=gen,
+                         loc_ticks=self.loc_ticks)
 
     def require_batch_keys(self, B):
         """Raise a named KeyError for anything the objective needs and lacks.
