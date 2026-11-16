@@ -1,8 +1,8 @@
 """Supervised denoising: noisy coefficient tokens -> pre-response charge per fine cell.
 
 A denoiser is a pretrained FM run plus a task head. The target is the simulation's ``hits``
-(charge arriving at each wire before the field response) on the fine grid of
-:mod:`helix.data.cells` (``FW`` wires x ``FT`` ticks), predicted as ``log1p(q / Q0)``, together
+(charge arriving at each wire before the field response) on the cell grid of
+the truth (:mod:`helix.data.cells`; the record's ``grid``, 2 wires x 16 ticks for d1m), predicted as ``log1p(q / Q0)``, together
 with a presence logit for "this cell carries charge" (a hurdle model: the floor is a detection
 question, and a regression alone pulls an ambiguous blip to an intermediate value). The input is
 exactly what the FM sees -- every noisy token of an event, none masked. The query cells and their

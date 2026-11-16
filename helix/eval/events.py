@@ -6,26 +6,29 @@ are computed once per event however many metrics use them.
 
 WINDOWS
 =======
-The evaluation windows and the detection floor, on the fixed fine grid.
+The evaluation windows and the detection floor, on the truth's cell grid.
 
-Every model is scored on the same 2-wire x 16-tick cells (:mod:`helix.data.cells`) whatever its
-patch size, so a bigger patch cannot lose sub-patch detail without the score moving. A cell no
+Every model is scored on the same cells -- the truth's (:mod:`helix.data.cells`; 2 wires x 16
+ticks for the d1m truth, carried by the cells record as ``grid``) -- whatever its patch size, so
+a bigger patch cannot lose sub-patch detail without the score moving. Every window, padding and
+margin below is in wires and ticks (:data:`WW`, :data:`WT`, :data:`PAD`, :data:`MARGIN`), so it
+is the same box on any grid that divides it. A cell no
 token covers is scored as its predictor's floor (0, or a large negative log-odds), never dropped:
 which cells are scored never depends on the tokenizer.
 
 Windows, per event, from the cells record (no tokenizer, no checkpoint): 32 wires x 128 ticks
-(16 x 8 fine cells), all cells kept:
+(16 x 8 cells at 2 x 16), all cells kept:
 
   iso   one isolated, compact particle (>=90% of its plane charge inside, <5% of the window from
         anything else), placed at a RANDOM offset around it (a window centred on truth would put
         a blurred prediction's centre on the answer); ``ctx`` says where it sits relative to
         OTHER particles' charge: ``clear`` (none in the padding a far window keeps empty),
-        ``crowded`` (some in that padding, none within a cell: the near windows' own rule) or
+        ``crowded`` (some in that padding, none within :data:`MARGIN`: the near windows' own rule) or
         ``mixed`` (other charge in or right beside the window; not scored)
   bg    the FAR background: origin uniform over the plane's kept-coefficient extent, no truth
         charge within +-16 w / +-128 t and at least one kept coefficient inside; up to
         :data:`N_BG_PLANE` per plane, so every view has its own background
-  near  the NEAR background: no truth charge in the window or within one cell of it, but some
+  near  the NEAR background: no truth charge in the window or within :data:`MARGIN` of it, but some
         within +-16 w / +-128 t -- exactly the surroundings ``bg`` must keep empty
         (:func:`helix.data.denoise.near_windows`, the denoiser's own training windows) -- and at
         least one kept coefficient inside, as every ``bg`` window has (both uniform in area: they
@@ -60,7 +63,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from helix.data.cells import FT, FW, fkey, unkey
+from helix.data.cells import fkey, grid_of, unkey
 
 @dataclass
 class Event:
@@ -74,6 +77,11 @@ class Event:
     _feats: object = field(default=None, repr=False)
     _raw: object = field(default=None, repr=False)
     _truth: tuple = field(default=None, repr=False)         # (seed, truth)
+
+    @property
+    def grid(self):
+        """The cell grid of this event's truth (and so of every key on it)."""
+        return grid_of(self.cells)
 
     def raw_inputs(self):
         """Per token, the tokenizer's own input to the encoder -- ``inp`` and ``occ``
@@ -171,7 +179,7 @@ def events(ds, tokenizer, device, max_events=None):
         fm = tokenize(dict(s))["coeff"]
         B = {k: torch.as_tensor(v).to(device) for k, v in fm.items() if isinstance(v, np.ndarray)}
         B["n_cells"] = B["plane_id"].shape[0]
-        amp = coeff_amplitude(c, tokenizer)
+        amp = coeff_amplitude(c, tokenizer, grid_of(s["cells"]))
         yield Event(index=i, cells=s["cells"], coeff_cells=amp[0], coeff_amp=amp,
                     band_lengths=np.asarray(meta["band_lengths"]), cell_key=np.asarray(fm["cell_key"]), batch=B)
 
@@ -179,6 +187,9 @@ def events(ds, tokenizer, device, max_events=None):
 # ---- windows ---------------------------------------------------------------------------------
 
 WW, WT = 32, 128                     # window, wires x raw ticks
+#: The padding a far window keeps free of charge and a near window must have some charge in, and
+#: the margin right beside a window (one 2 x 16 cell); wires x raw ticks.
+PAD, MARGIN = (16, 128), (2, 16)
 ENERGY_BINS = (0.0, 0.1, 0.2, 0.5, 1e9)                  # MeV
 #: per event: iso windows at most, bg (and near) windows per plane at most
 N_ISO, N_BG_PLANE = 60, 10
@@ -188,10 +199,12 @@ VIEWS = ("U", "V", "Y")
 ENERGY_NAMES = tuple(f"{ENERGY_BINS[i]:g}-{ENERGY_BINS[i + 1]:g}" for i in range(len(ENERGY_BINS) - 1))
 
 
-def window_cells(g, w0, t0):
-    """The 16 x 8 fine-cell keys of the window at pixel origin (w0, t0), wire-major."""
-    fw = w0 // FW + np.arange(WW // FW)
-    ft = t0 // FT + np.arange(WT // FT)
+def window_cells(g, w0, t0, grid):
+    """The cell keys on ``grid`` (16 x 8 at 2 x 16) of the window at pixel origin (w0, t0),
+    wire-major."""
+    nw, nt = grid.cells(WW, WT)
+    fw = w0 // grid.fw + np.arange(nw)
+    ft = t0 // grid.ft + np.arange(nt)
     W, T = np.meshgrid(fw, ft, indexing="ij")
     return fkey(np.full(W.size, g), W.ravel(), T.ravel())
 
@@ -219,16 +232,18 @@ def event_truth(cells, coeff_cells, rng):
     for an iso window ``clear`` / ``crowded`` / ``mixed`` by other particles' charge around it,
     None otherwise).
     """
+    grid = grid_of(cells)
+    nw, nt = grid.cells(WW, WT)
     E = dict(enumerate(np.asarray(cells["trk_energy"], np.float64).tolist()))
     uk = np.asarray(cells["key"], np.int64)
     fq = np.asarray(cells["q"], np.float64)
     ck = np.unique(np.asarray(coeff_cells, np.int64))
 
     # One row per (cell, particle), placed at the cell's origin. Every box below is grid-aligned
-    # (origins are multiples of FW / FT, paddings too), so a row is inside a box exactly when its
-    # pixels are.
+    # (origins are multiples of the grid's sides, paddings too), so a row is inside a box exactly
+    # when its pixels are.
     G, cw_, ct_ = unkey(uk[np.asarray(cells["ct_cell"], np.int64)])
-    W, T = cw_ * FW, ct_ * FT
+    W, T = cw_ * grid.fw, ct_ * grid.ft
     Q, TRK = np.asarray(cells["ct_q"], np.float64), np.asarray(cells["ct_track"], np.int64)
 
     # per (plane, particle): charge, and its pixel charge centroid (stored: finer than a cell)
@@ -249,14 +264,15 @@ def event_truth(cells, coeff_cells, rng):
         return idx[(T[idx] >= t0 - pad_t) & (T[idx] < t0 + WT + pad_t)]
 
     def origin(cw, ct):            # clamped at 0: a negative wire corrupts the packed key
-        return max(0, int(round((cw - WW / 2) / FW)) * FW), max(0, int(round((ct - WT / 2) / FT)) * FT)
+        return (max(0, int(round((cw - WW / 2) / grid.fw)) * grid.fw),
+                max(0, int(round((ct - WT / 2) / grid.ft)) * grid.ft))
 
     def iso_window(j):
         """Particle ``j``'s window at a jittered origin if it passes the iso criteria (>= 90% of
         its plane charge inside, < 5% of the window foreign), else None; with ``ctx``, where it
         sits relative to OTHER particles' charge, for the matched comparison: "clear" none in the
         padding a far (bg) window must keep empty (its own particle may reach there, which a far
-        window never has); "crowded" none within the window and a one-cell margin but some in
+        window never has); "crowded" none within the window and its MARGIN but some in
         the padding -- the near windows' own rule; "mixed" other charge in or right beside the
         window (an iso window allows 5% inside), in neither."""
         g = int(pu[j] >> 40)
@@ -269,7 +285,7 @@ def event_truth(cells, coeff_cells, rng):
         if qin < 0.9 * pq[j] or qall - qin > 0.05 * qall:
             return None
         other = lambda pw, pt: bool((pinv[contents(g, w0, t0, pw, pt)] != j).any())   # noqa: E731
-        ctx = "clear" if not other(16, 128) else "mixed" if other(FW, FT) else "crowded"
+        ctx = "clear" if not other(*PAD) else "mixed" if other(*MARGIN) else "crowded"
         return g, w0, t0, E.get(int(TRK[idx[mine][0]]), 0.0), ctx
 
     wins, has_clear = [], set()
@@ -293,15 +309,15 @@ def event_truth(cells, coeff_cells, rng):
         cg, cw, ct = unkey(ck)
         for g in np.unique(cg).tolist():
             m = cg == g
-            wl, wh = int(cw[m].min()) - WW // FW + 1, int(cw[m].max())
-            tl, th = int(ct[m].min()) - WT // FT + 1, int(ct[m].max())
+            wl, wh = int(cw[m].min()) - nw + 1, int(cw[m].max())
+            tl, th = int(ct[m].min()) - nt + 1, int(ct[m].max())
             n_b = 0
             for _ in range(N_BG_TRIES):
                 if n_b >= N_BG_PLANE:
                     break
-                w0, t0 = int(rng.integers(wl, wh + 1)) * FW, int(rng.integers(tl, th + 1)) * FT
-                if w0 < 0 or t0 < 0 or len(contents(g, w0, t0, 16, 128)) \
-                        or not np.isin(window_cells(g, w0, t0), ck).any():
+                w0, t0 = int(rng.integers(wl, wh + 1)) * grid.fw, int(rng.integers(tl, th + 1)) * grid.ft
+                if w0 < 0 or t0 < 0 or len(contents(g, w0, t0, *PAD)) \
+                        or not np.isin(window_cells(g, w0, t0, grid), ck).any():
                     continue
                 wins.append(("bg", g, w0, t0, np.nan, None))
                 n_b += 1
@@ -312,8 +328,8 @@ def event_truth(cells, coeff_cells, rng):
     from helix.data.denoise import near_windows
     planes = np.unique(unkey(uk[fq > 0])[0])
     n_near = dict.fromkeys(planes.tolist(), 0)
-    for g, w0, t0 in (near_windows(uk, fq, rng, n=4 * N_BG_PLANE * len(planes)) if len(planes) and len(ck) else []):
-        if n_near[g] >= N_BG_PLANE or not np.isin(window_cells(g, w0, t0), ck).any():
+    for g, w0, t0 in (near_windows(uk, fq, rng, grid, n=4 * N_BG_PLANE * len(planes)) if len(planes) and len(ck) else []):
+        if n_near[g] >= N_BG_PLANE or not np.isin(window_cells(g, w0, t0, grid), ck).any():
             continue
         wins.append(("near", g, w0, t0, np.nan, None))
         n_near[g] += 1
@@ -333,7 +349,7 @@ def event_truth(cells, coeff_cells, rng):
             wins.append(("isox",) + w)
             n_x += 1
 
-    wkey = np.concatenate([window_cells(g, w0, t0) for _, g, w0, t0, _, _ in wins]) if wins \
+    wkey = np.concatenate([window_cells(g, w0, t0, grid) for _, g, w0, t0, _, _ in wins]) if wins \
         else np.zeros(0, np.int64)
     meta = [dict(kind=k, g=g, w0=w0, t0=t0, E=e, ctx=c) for k, g, w0, t0, e, c in wins]
     return dict(wkey=wkey, meta=meta)

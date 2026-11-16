@@ -27,6 +27,8 @@ roots:
   HELIX_EXP:           /sdf/data/neutrino/omara/exp/helix
   HELIX_PIMM_ROOT:     /sdf/group/neutrino/omara/pimm-fm
   HELIX_JAXTPC_ROOT:   /sdf/group/neutrino/omara/JAXTPC
+  # 1 x 1 truth of 10 d1m shards (2,000 events; REPORT.md one level up)
+  HELIX_FINETRUTH:     /sdf/data/neutrino/omara/helix_audit_2026-11/finetruth/pixels
 
 # The container, as four facts rather than one path. `HELIX_IMAGE` used to be a
 # single root typed as a filesystem path to a .sif, which cannot describe a site

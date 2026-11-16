@@ -4,7 +4,10 @@ A synthetic campaign task (tests/_fixtures.py). Pinned: the stored record is the
 reduced (per cell, per (cell, track), per (plane, track), per track, and each cell's dominant
 group with its 3D centroid), computed here independently; each track carries its labl classes; it is complete for the evaluation's
 windows (a grid-aligned box holds per track exactly its pixels' charge); the build is resumable
-and atomic; the dataset serves it identity-checked.
+and atomic; the dataset serves it identity-checked. The grid is the file's: written by the
+builder, read back with every record, refused when absent or mixed; a finer truth (1 x 4, 1 x 1)
+sums to the 2 x 16 one exactly (helix.data.cells.aggregate), on the synthetic task and, where the
+1 x 1 finetruth is reachable, on the stored d1m events.
 """
 import os
 import sys
@@ -23,6 +26,7 @@ from helix.eval import events as Wn  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 RUN, N_EV, FIRST_JOB = "j000000", 3, 85
+GRID = C.Grid(2, 16)                  # the d1m truth's grid
 EV0 = FIRST_JOB * 200                 # the task's first campaign event id
 BASIS = dict(wavelet="db2", dwt_level=2, dwt_mode="periodization", n_ticks_raw=32, pad=0, sigma_norm=2.6,
              removal_json="{}", threshold_json="{}")
@@ -60,7 +64,7 @@ def corpus(tmp_path_factory):
     run_dir = d / "corpus" / RUN
     run_dir.mkdir(parents=True)
     _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", [EV0 + i for i in range(N_EV)])
-    out, msg = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(d / "sim"))
+    out, msg = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(d / "sim"), grid=GRID)
     return dict(dir=d, run_dir=run_dir, hits=hits, labl=task["labl"], cells=out, msg=msg)
 
 
@@ -96,7 +100,7 @@ def test_record_is_the_pixels_reduced(corpus):
     rec, _ = _event(corpus["cells"], 1)
     trk = list(zip(rec["trk_volume"].tolist(), rec["trk_id"].tolist()))
     assert trk == sorted(set(trk))
-    cell = C.fkey(G, W // C.FW, T // C.FT)
+    cell = C.fkey(G, W // GRID.fw, T // GRID.ft)
     t_of = {(v, t): i for i, (v, t) in enumerate(trk)}
     ti = np.array([t_of[(v, t)] for v, t in zip(V.tolist(), TID.tolist())])
     want = {}
@@ -152,7 +156,7 @@ def test_each_cell_records_its_dominant_group_and_its_centroid(corpus):
     charge-weighted (y, z)."""
     G, W, T, Q, _, _, GRP, YZ = _pixels(corpus["hits"], 0)
     rec, _ = _event(corpus["cells"], 0)
-    cell = C.fkey(G, W // C.FW, T // C.FT)
+    cell = C.fkey(G, W // GRID.fw, T // GRID.ft)
     pos = {int(k): i for i, k in enumerate(rec["key"])}
     per = {}
     for c, g, q, yz in zip(cell.tolist(), GRP.tolist(), Q.tolist(), YZ):
@@ -178,9 +182,9 @@ def test_grid_aligned_boxes_see_the_same_charge_per_track_as_pixels(corpus):
     ti = np.array([t_of[(v, t)] for v, t in zip(V.tolist(), TID.tolist())])
     rng = np.random.default_rng(0)
     for _ in range(200):
-        g, w0, t0 = int(rng.integers(0, 6)), int(rng.integers(0, 450)) * C.FW, int(rng.integers(0, 190)) * C.FT
+        g, w0, t0 = int(rng.integers(0, 6)), int(rng.integers(0, 450)) * GRID.fw, int(rng.integers(0, 190)) * GRID.ft
         pin = (G == g) & (W >= w0) & (W < w0 + Wn.WW) & (T >= t0) & (T < t0 + Wn.WT)
-        cin = (cg == g) & (cw * C.FW >= w0) & (cw * C.FW < w0 + Wn.WW) & (ct * C.FT >= t0) & (ct * C.FT < t0 + Wn.WT)
+        cin = (cg == g) & (cw * GRID.fw >= w0) & (cw * GRID.fw < w0 + Wn.WW) & (ct * GRID.ft >= t0) & (ct * GRID.ft < t0 + Wn.WT)
         for t in np.unique(np.concatenate([ti[pin], rec["ct_track"][cin]])):
             assert rec["ct_q"][cin & (rec["ct_track"] == t)].sum() == pytest.approx(Q[pin & (ti == t)].sum(), rel=1e-5)
 
@@ -192,6 +196,7 @@ def test_the_windows_of_a_record(corpus):
     rng = np.random.default_rng(3)
     coeff = np.concatenate([rec["key"][::3], C.fkey(rng.integers(0, 6, 400), rng.integers(0, 500, 400),
                                                     rng.integers(0, 200, 400))])
+    assert rec["grid"] == GRID
     a = Wn.event_truth(rec, coeff, np.random.default_rng(7))
     b = Wn.event_truth(rec, coeff, np.random.default_rng(7))
     assert {"iso", "bg"} <= {m["kind"] for m in a["meta"]}
@@ -209,23 +214,30 @@ def test_file_layout_resume_and_atomic_write(corpus):
     assert not any(p.name.endswith(".part") for p in corpus["run_dir"].iterdir())
     with h5py.File(corpus["cells"], "r") as f:
         cfg = f["config"]
-        assert cfg.attrs["format"] == C.FORMAT and (cfg.attrs["grid_fw"], cfg.attrs["grid_ft"]) == (C.FW, C.FT)
+        assert cfg.attrs["format"] == C.FORMAT and (cfg.attrs["grid_fw"], cfg.attrs["grid_ft"]) == (GRID.fw, GRID.ft)
         import json
         assert json.loads(cfg.attrs["label_json"])["hits_threshold"] == 25.0
         assert C.read_ident(f)["event"].tolist() == [EV0 + i for i in range(N_EV)]
         for g in C.GROUPS:
             assert f[g]["event_offset"].shape == (N_EV + 1,)
     before = os.stat(corpus["cells"]).st_mtime_ns
-    assert C.build_shard(str(corpus["run_dir"] / "sim_wire_coeff_0000.h5"), str(corpus["dir"] / "sim"))[1] == "exists"
+    assert C.build_shard(str(corpus["run_dir"] / "sim_wire_coeff_0000.h5"), str(corpus["dir"] / "sim"),
+                         grid=GRID)[1] == "exists"
     assert os.stat(corpus["cells"]).st_mtime_ns == before
+    with pytest.raises(ValueError, match="grid 2x16, not 1x4"):            # another grid is another truth
+        C.build_shard(str(corpus["run_dir"] / "sim_wire_coeff_0000.h5"), str(corpus["dir"] / "sim"), grid=(1, 4))
 
 
-def test_reader_refuses_another_format(corpus, tmp_path):
+def test_reader_refuses_another_format_or_no_grid(corpus, tmp_path):
     p = tmp_path / "sim_wire_cells_0000.h5"
     p.write_bytes(open(corpus["cells"], "rb").read())
     with h5py.File(p, "a") as f:
-        f["config"].attrs["grid_ft"] = 8
-    with pytest.raises(ValueError, match="grid"):
+        del f["config"].attrs["grid_ft"]
+    with pytest.raises(ValueError, match="records no grid"):
+        _event(str(p), 0)
+    with h5py.File(p, "a") as f:
+        f["config"].attrs["grid_ft"] = 0
+    with pytest.raises(ValueError, match=">= 1"):
         _event(str(p), 0)
     with h5py.File(p, "a") as f:
         f["config"].attrs["format"] = "helix-cells-1"
@@ -248,7 +260,7 @@ def test_dataset_serves_cells_identity_checked(corpus, tmp_path):
     # training reads only key and q (configs/pimm/denoise.py)
     two = CoeffTPCDataset(data_root=str(corpus["run_dir"]), dataset_name="sim_wire", modalities=("coeff", "cells"),
                           cells_columns=("key", "q")).get_data(1)["cells"]
-    assert set(two) == {"key", "q"}
+    assert set(two) == {"key", "q", "grid"} and two["grid"] == GRID
     for k in two:
         np.testing.assert_array_equal(two[k], _event(corpus["cells"], 1)[0][k])
     assert "cells" not in CoeffTPCDataset(data_root=str(corpus["run_dir"]), dataset_name="sim_wire").get_data(0)
@@ -285,7 +297,7 @@ def test_real_events_reduce_consistently():
     with h5py.File(hp, "r") as fh, h5py.File(sp, "r") as fs, h5py.File(lp, "r") as fl:
         ids = io.event_ids(fh)
         for pos in (0, 1, 202):
-            rec = C.event_record(*(io.entry(f, pos, ids[pos]) for f in (fh, fs, fl)))
+            rec = C.event_record(*(io.entry(f, pos, ids[pos]) for f in (fh, fs, fl)), GRID)
             assert len(rec["key"]) > 1_000 and (np.diff(rec["key"]) > 0).all()
             np.testing.assert_allclose(np.bincount(rec["ct_cell"], weights=rec["ct_q"], minlength=len(rec["key"])),
                                        rec["q"], rtol=1e-5)
@@ -307,7 +319,7 @@ def test_a_volume_with_no_deposit_adds_nothing(tmp_path):
     run_dir = tmp_path / "corpus" / RUN
     run_dir.mkdir(parents=True)
     _coeff_shard(run_dir / "sim_wire_coeff_0000.h5", [EV0, EV0 + 1])
-    out, _ = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(tmp_path / "sim"))
+    out, _ = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(tmp_path / "sim"), grid=GRID)
     rec, _ = _event(out, 1)
     assert len(rec["key"]) and (C.unkey(rec["key"])[0] < 3).all()       # volume 0's planes only
     assert (rec["trk_volume"] == 0).all()
@@ -339,7 +351,7 @@ def test_cell_truth_drops_samples_off_the_plane():
     from helix.data.cells import cell_truth, unkey
     g = np.array([0, 0, 0]); w = np.array([4, -1, 5]); t = np.array([32, 32, 33])
     q = np.array([1.0, 9.0, 2.0]); trk = np.array([0, 0, 1]); grp = np.array([0, 0, 1])
-    rec = cell_truth(g, w, t, q, trk, grp, np.zeros((3, 2)))
+    rec = cell_truth(g, w, t, q, trk, grp, np.zeros((3, 2)), GRID)
     assert (np.asarray(rec["key"]) >= 0).all() and np.asarray(rec["q"]).sum() == 3.0
     assert set(unkey(rec["key"])[1].tolist()) == {2}                 # wires 4 and 5 share fine wire 2
 
@@ -347,12 +359,172 @@ def test_cell_truth_drops_samples_off_the_plane():
 def test_valid_cells_keeps_only_the_events_planes_wires_and_ticks():
     """With the event's planes: a cell beyond its plane's last wire, on a plane the event lacks, or
     outside [0, n_ticks) goes."""
-    from helix.data.cells import FT, FW, fkey, valid_cells
-    keys = np.array([fkey(0, 10, 5), fkey(0, 500 // FW, 5), fkey(3, 1, 5), fkey(1, 2, 4352 // FT),
-                     fkey(1, 2, 1)], np.int64)
-    rec = dict(key=keys, q=np.arange(5, dtype=np.float32), dom_frac=np.ones(5, np.float32),
-               dom_y=np.zeros(5, np.float32), dom_z=np.zeros(5, np.float32),
-               ct_cell=np.arange(5, dtype=np.int32), ct_track=np.arange(5, dtype=np.int32),
-               ct_q=np.ones(5, np.float32))
-    out = valid_cells(rec, gids=[0, 1], n_wires=[400, 300], n_ticks=4336)
-    assert out["key"].tolist() == [keys[0], keys[4]] and out["ct_cell"].tolist() == [0, 1]
+    from helix.data.cells import fkey, valid_cells
+    for grid in (GRID, C.Grid(1, 4)):                               # in wires and ticks, on the record's grid
+        fw, ft = grid
+        keys = np.array([fkey(0, 10, 5), fkey(0, 500 // fw, 5), fkey(3, 1, 5), fkey(1, 2, 4352 // ft),
+                         fkey(1, 2, 1), fkey(0, 398 // fw, 5)], np.int64)
+        rec = dict(key=keys, q=np.arange(6, dtype=np.float32), dom_frac=np.ones(6, np.float32),
+                   dom_y=np.zeros(6, np.float32), dom_z=np.zeros(6, np.float32),
+                   ct_cell=np.arange(6, dtype=np.int32), ct_track=np.arange(6, dtype=np.int32),
+                   ct_q=np.ones(6, np.float32), grid=grid)
+        out = valid_cells(rec, gids=[0, 1], n_wires=[400, 300], n_ticks=4336)
+        assert out["key"].tolist() == [keys[0], keys[4], keys[5]] and out["ct_cell"].tolist() == [0, 1, 2]
+        assert out["grid"] == grid
+
+
+# ------------------------------------------------------------------------------------ derived grids
+def _within_ulp(a, b):
+    """``a`` and ``b`` (float32) at most one float32 ulp apart, elementwise: the residue of
+    rounding each sub-cell before summing them where the coarse build rounds once per cell."""
+    a, b = np.asarray(a, np.float32), np.asarray(b, np.float32)
+    return bool((np.abs(a.astype(np.float64) - b) <= np.spacing(np.maximum(np.abs(a), np.abs(b)))).all())
+
+
+def _assert_derives(fine, coarse):
+    """``aggregate(fine)`` is ``coarse`` -- both stored records -- where the rule says it is exact:
+    the same cells and (cell, track) rows, charges within one float32 ulp, the grid-free tables
+    equal, and every cell's class; ``dom_frac`` a lower bound, equal where a coarse cell has one
+    sub-cell."""
+    got = C.as_stored(C.aggregate(fine, coarse["grid"]))
+    assert got["grid"] == coarse["grid"]
+    np.testing.assert_array_equal(got["key"], coarse["key"])
+    assert _within_ulp(got["q"], coarse["q"])
+    for k in ("ct_cell", "ct_track"):
+        np.testing.assert_array_equal(got[k], coarse[k])
+    assert _within_ulp(got["ct_q"], coarse["ct_q"])
+    for k in ("pt_gid", "pt_track", "pt_wire", "pt_tick", "trk_volume", "trk_id", "trk_energy", "trk_motif", "trk_pid"):
+        np.testing.assert_array_equal(got[k], coarse[k])
+    for col in ("trk_motif", "trk_pid"):
+        np.testing.assert_array_equal(C.cell_class(got, col), C.cell_class(coarse, col))
+    assert (got["dom_frac"] <= coarse["dom_frac"] * (1 + 1e-6) + 1e-7).all()
+    g, w, t = C.unkey(fine["key"])
+    r = (coarse["grid"].fw // fine["grid"].fw, coarse["grid"].ft // fine["grid"].ft)
+    alone = np.bincount(np.searchsorted(coarse["key"], C.fkey(g, w // r[0], t // r[1])), minlength=len(coarse["key"])) == 1
+    np.testing.assert_allclose(got["dom_frac"][alone], coarse["dom_frac"][alone], rtol=1e-6)
+    np.testing.assert_array_equal(got["dom_y"][alone], coarse["dom_y"][alone])
+    return got
+
+
+@pytest.mark.parametrize("fine", [(1, 1), (1, 4), (2, 8)])
+def test_a_finer_build_sums_to_the_2x16_build(corpus, tmp_path, fine):
+    """The builder writes any grid; a finer one, summed (helix.data.cells.aggregate), is the
+    2 x 16 build of the same events -- cells, (cell, track) split, classes, tracks."""
+    run_dir = corpus["run_dir"]
+    out, msg = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(corpus["dir"] / "sim"),
+                             str(tmp_path), grid=fine)
+    assert msg.endswith(f"({fine[0]}x{fine[1]})")
+    with h5py.File(out, "r") as f:
+        assert C.require_format(f["config"]) == fine
+    for pos in range(N_EV):
+        fr, cr = _event(out, pos)[0], _event(corpus["cells"], pos)[0]
+        assert fr["grid"] == fine and len(fr["key"]) > len(cr["key"])
+        _assert_derives(fr, cr)
+
+
+def test_derive_shard_writes_the_coarser_truth(corpus, tmp_path):
+    """derive_shard: a 1 x 4 truth summed to 2 x 16 is a file the reader takes as the 2 x 16 one."""
+    run_dir = corpus["run_dir"]
+    fine, _ = C.build_shard(str(run_dir / "sim_wire_coeff_0000.h5"), str(corpus["dir"] / "sim"),
+                            str(tmp_path / "f"), grid=(1, 4))
+    out, msg = C.derive_shard(fine, str(tmp_path / "sim_wire_cells_0000.h5"), GRID)
+    assert "1x4 -> 2x16" in msg and C.derive_shard(fine, out, GRID)[1] == "exists"
+    import json
+    with h5py.File(out, "r") as f, h5py.File(corpus["cells"], "r") as g:
+        assert C.require_format(f["config"]) == GRID
+        np.testing.assert_array_equal(C.read_ident(f)["event"], C.read_ident(g)["event"])
+        assert json.loads(f["config"].attrs["provenance_json"])["derived_from"]["grid"] == "1x4"
+    for pos in range(N_EV):
+        a, b = _event(out, pos)[0], _event(corpus["cells"], pos)[0]
+        np.testing.assert_array_equal(a["key"], b["key"])
+        assert _within_ulp(a["q"], b["q"]) and _within_ulp(a["ct_q"], b["ct_q"])
+
+
+def test_aggregate_refuses_a_grid_that_splits_cells_and_keeps_only_given_columns():
+    rec = C.cell_truth(np.zeros(4, int), np.array([0, 1, 2, 3]), np.array([0, 5, 9, 17]), np.ones(4),
+                       np.zeros(4, int), np.arange(4), np.zeros((4, 2)), (1, 4))
+    with pytest.raises(ValueError, match="not a multiple"):
+        C.aggregate(rec, (2, 6))                                    # 6 ticks are not whole 4-tick cells
+    two = C.aggregate(dict(key=rec["key"], q=rec["q"], grid=rec["grid"]), GRID)
+    assert set(two) == {"key", "q", "grid"}
+    assert two["key"].tolist() == [C.fkey(0, 0, 0), C.fkey(0, 1, 0), C.fkey(0, 1, 1)] and two["q"].tolist() == [2.0, 1.0, 1.0]
+    with pytest.raises(KeyError, match="grid"):
+        C.aggregate(dict(key=rec["key"], q=rec["q"]), GRID)          # a record without its grid
+
+
+def test_a_dataset_serves_a_1x4_truth_whole_and_refuses_mixed_grids(corpus, tmp_path):
+    """The dataset reads the grid from the file: a 1 x 4 truth keeps every wire of the plane
+    (on a hard-coded 2 x 16, wires beyond n_wires / 2 read as off the plane), and shards of two
+    grids are not one truth."""
+    pytest.importorskip("pimm_data")
+    from helix.data.dataset import CoeffTPCDataset
+    d = tmp_path / RUN
+    d.mkdir()
+    _coeff_shard(d / "sim_wire_coeff_0000.h5", [EV0 + i for i in range(N_EV)])
+    C.build_shard(str(d / "sim_wire_coeff_0000.h5"), str(corpus["dir"] / "sim"), grid=(1, 4))
+    ds = CoeffTPCDataset(data_root=str(d), dataset_name="sim_wire", modalities=("coeff", "cells"))
+    for i in range(N_EV):
+        rec = ds.get_data(i)["cells"]
+        assert rec["grid"] == (1, 4)
+        np.testing.assert_array_equal(rec["key"], _event(str(d / "sim_wire_cells_0000.h5"), i)[0]["key"])
+    _coeff_shard(d / "sim_wire_coeff_0001.h5", [EV0 + i for i in range(N_EV)],
+                 source="sim_wire_sensor_jaxtpc_wire_j000090-000094.h5")
+    (d / "sim_wire_cells_0001.h5").write_bytes(open(corpus["cells"], "rb").read())
+    with pytest.raises(ValueError, match="grid"):
+        CoeffTPCDataset(data_root=str(d), dataset_name="sim_wire", modalities=("coeff", "cells"))
+
+
+# The 1 x 1 finetruth (HELIX_FINETRUTH: per-pixel cells files of 10 d1m shards, built from the same
+# hits as the stored 2 x 16 truth beside the corpus) against that stored truth, on the events of
+# every shard both hold. Event 132912 (shard 0664) is left out: its stored 2 x 16 plane 3 is
+# off the plane (helix.data.cells.valid_cells), its 1 x 1 plane 3 dropped by the finetruth's guard
+# (/event_qc/reject).
+N_FINE_EVENTS = int(os.environ.get("HELIX_FINETRUTH_EVENTS", "3"))
+
+
+def _finetruth_pairs():
+    from _fixtures import CORPUS, FINETRUTH
+    if not (FINETRUTH and os.path.isdir(FINETRUTH) and CORPUS and os.path.isdir(CORPUS)):
+        return []
+    out = []
+    for p in sorted(os.listdir(FINETRUTH)):
+        if p.endswith(".h5") and "_pixels_" in p:
+            c = os.path.join(CORPUS, p.replace("_pixels_", "_cells_"))
+            if os.path.exists(c):
+                out.append((os.path.join(FINETRUTH, p), c))
+    return out
+
+
+@pytest.mark.skipif(not _finetruth_pairs(), reason="no finetruth shard with its stored truth reachable "
+                                                   "(HELIX_FINETRUTH, HELIX_CORPUS)")
+@pytest.mark.parametrize("via", [None, (1, 4)])
+def test_the_finetruth_sums_to_the_stored_2x16_truth(via):
+    """The stored d1m events: the 1 x 1 truth summed to 2 x 16 -- directly, or through a STORED
+    1 x 4 truth (rounded to float32 at 1 x 4, as a 1 x 4 file holds it) -- is the 2 x 16 truth
+    beside the corpus: the same cells and (cell, track) rows, charge within one float32 ulp
+    directly and within two through 1 x 4 (one more rounding), tracks and classes equal."""
+    n = 0
+    for fp, cp in _finetruth_pairs():
+        with h5py.File(fp, "r") as ff, h5py.File(cp, "r") as fc:
+            assert C.require_format(ff["config"], fp) == (1, 1) and C.require_format(fc["config"], cp) == GRID
+            reject = ff["event_qc/reject"][:] if "event_qc" in ff else np.zeros(len(ff["ident/event"]), np.int8)
+            assert np.array_equal(C.read_ident(ff)["event"], C.read_ident(fc)["event"])
+            for pos in [i for i in range(len(reject)) if not reject[i]][:N_FINE_EVENTS]:
+                fine, coarse = C.read_event(ff, pos), C.read_event(fc, pos)
+                if via is not None:
+                    fine = C.as_stored(C.aggregate(fine, via))
+                    assert fine["grid"] == via
+                got = C.as_stored(C.aggregate(fine, GRID))
+                np.testing.assert_array_equal(got["key"], coarse["key"])
+                np.testing.assert_array_equal(got["ct_cell"], coarse["ct_cell"])
+                np.testing.assert_array_equal(got["ct_track"], coarse["ct_track"])
+                ulps = 1 if via is None else 2
+                for k in ("q", "ct_q"):
+                    a, b = got[k].astype(np.float64), coarse[k].astype(np.float64)
+                    assert (np.abs(a - b) <= ulps * np.spacing(np.maximum(np.abs(got[k]), np.abs(coarse[k])))).all(), k
+                for k in ("pt_gid", "pt_track", "pt_wire", "pt_tick", "trk_id", "trk_energy", "trk_motif", "trk_pid"):
+                    np.testing.assert_array_equal(got[k], coarse[k])
+                for col in ("trk_motif", "trk_pid"):
+                    np.testing.assert_array_equal(C.cell_class(got, col), C.cell_class(coarse, col))
+                n += 1
+    assert n > 0

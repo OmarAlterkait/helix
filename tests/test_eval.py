@@ -32,6 +32,7 @@ from helix.eval import events as W
 SMALL = dict(n_slot=8, n_band=4, n_plane=6, d=32, blocks=2, dec_blocks=1, heads=2, n_bins=16, gp=64, gd=128)
 TOK = dict(cell_t="grid_center", pw=4, pt=2)
 BL = np.array([216, 216, 432, 864, 1728])
+GRID = C.Grid(2, 16)                 # the synthetic truth's cell grid (the d1m truth's)
 
 
 def _config(data_root="/nowhere"):
@@ -137,9 +138,10 @@ def test_load_run_refuses_what_it_cannot_read(tmp_path):
 
 
 # ------------------------------------------------------------------------------ synthetic events
-def _sample(rng, i, n_trk=60):
-    """One event: compact particles on all six planes, each with a 3D point; coefficients under
-    the charge in every tokenized band plus noise coefficients."""
+def _sample(rng, i, n_trk=60, grid=GRID):
+    """One event: compact particles on all six planes, each with a 3D point, its truth on
+    ``grid``; coefficients under the charge in every tokenized band plus noise coefficients
+    (placed on the 2 x 16 grid whatever the truth's, so the coefficients do not depend on it)."""
     G, W, T, Q, TRK, YZ = [], [], [], [], [], []
     yz = rng.uniform(-2000, 2000, (n_trk, 2))
     for k in range(n_trk):
@@ -149,16 +151,16 @@ def _sample(rng, i, n_trk=60):
             G.append(np.full(ww.size, g)); W.append(ww.ravel()); T.append(tt.ravel())
             Q.append(rng.uniform(10, 300, ww.size)); TRK.append(np.full(ww.size, k)); YZ.append(np.tile(yz[k], (ww.size, 1)))
     G, W, T, Q, TRK, YZ = (np.concatenate(x) for x in (G, W, T, Q, TRK, YZ))
-    rec = C.cell_truth(G, W, T, Q, TRK, TRK, YZ)
+    rec = C.cell_truth(G, W, T, Q, TRK, TRK, YZ, grid)
     rec.update(trk_volume=(np.arange(n_trk) % 2).astype(np.int16), trk_id=np.arange(n_trk),
                trk_energy=rng.uniform(0.01, 2.0, n_trk), trk_motif=np.arange(n_trk) % 5, trk_pid=np.arange(n_trk) % 6)
-    rec = {name: np.asarray(rec[name]).astype(dt) for _, _, name, dt in C.SCHEMA}
+    rec = C.as_stored(rec)
     cfg = patch_config(TOK)
-    g, fw, ft = C.unkey(rec["key"])
+    g, fw, ft = C.unkey(np.unique(C.fkey(G, W // GRID.fw, T // GRID.ft)))
     n = 3000                                       # noise: coefficients in every band, like charge
     g, fw, ft = (np.concatenate([a, b]) for a, b in zip((g, fw, ft), (rng.integers(0, 6, n), rng.integers(0, 480, n),
                                                                      rng.integers(5, 190, n))))
-    rows = [(np.full(len(g), b), g, fw * C.FW, tau_of_tick(ft * C.FT + 8, g, np.full(len(g), b), BL, cfg))
+    rows = [(np.full(len(g), b), g, fw * GRID.fw, tau_of_tick(ft * GRID.ft + 8, g, np.full(len(g), b), BL, cfg))
             for b in range(4)]
     band, pg, wire, tau = (np.concatenate([r[j] for r in rows]) for j in range(4))
     key = np.unique(np.stack([band, pg, wire, tau], 1), axis=0)
@@ -200,7 +202,7 @@ def _dctx(run, denoiser, n_boot=20):
 def _token_feature(ev, values, d=SMALL["d"], seed=0):
     """Per-token features whose column 0 is the mean of ``values`` over the cells a token covers
     in band 0 (the rest noise): what a representation that knows ``values`` would carry."""
-    idx, _ = J.cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, patch_config(TOK))
+    idx, _ = J.cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, patch_config(TOK), ev.grid)
     n = len(ev.cell_key)
     s, c = np.zeros(n), np.zeros(n)
     ok = idx[:, 0] >= 0
@@ -222,7 +224,7 @@ def test_events_are_the_training_tokens_with_their_cells(synth):
     assert f1 is e.features(run.model) and f1.shape == (len(e.cell_key), SMALL["d"])
     keys, amp = e.coeff_amp                          # norm_sigma 1: |value| itself, the largest per cell
     assert np.array_equal(keys, e.coeff_cells) and (amp > 0).all()
-    k0 = J.coeff_cells(*(ds[0]["coeff"][x][:1] for x in ("band", "plane_gid", "wire", "tau")), run.tokenizer)
+    k0 = J.coeff_cells(*(ds[0]["coeff"][x][:1] for x in ("band", "plane_gid", "wire", "tau")), run.tokenizer, GRID)
     assert amp[np.searchsorted(keys, k0[0])] >= abs(ds[0]["coeff"]["value"][0, 0]) - 1e-6
 
 
@@ -262,7 +264,7 @@ def test_patch_rows_label_is_the_dominant_cells_charge_weighted_u():
     from helix.eval.probe import patch_rows, u_of
     cells = dict(key=C.fkey([0, 0, 0, 1], [1, 2, 3, 1], [5, 5, 5, 5]), q=np.array([1.0, 3.0, 5.0, 2.0]),
                  dom_frac=np.array([0.9, 0.8, 0.2, 1.0]), dom_y=np.array([0.0, 1000.0, 50.0, 0.0]),
-                 dom_z=np.zeros(4))
+                 dom_z=np.zeros(4), grid=GRID)
     tok = np.array([[0, 1, -1, -1], [0, 1, -1, -1], [0, 1, -1, -1], [-1, -1, -1, -1]])   # one patch; one uncovered
     pr = patch_rows(cells, tok, 6)
     u = u_of([0, 0], [0.0, 1000.0], [0.0, 0.0])
@@ -279,7 +281,7 @@ def _oracle(scale=1.0, q_present=25.0, covered_only=True):
 
     def predict(ev, keys):
         q = dict(zip(ev.cells["key"].tolist(), ev.cells["q"].tolist()))
-        idx, _ = J.cell_inputs(keys, ev.cell_key, ev.band_lengths, patch_config(TOK))
+        idx, _ = J.cell_inputs(keys, ev.cell_key, ev.band_lengths, patch_config(TOK), ev.grid)
         ok = (idx >= 0).any(1)
         t = np.array([q.get(k, 0.0) for k in keys.tolist()]) * (ok if covered_only else 1)
         logit = np.where(ok, np.where(t > q_present, 20.0, -20.0), UNCOVERED_LOGIT)
@@ -384,7 +386,7 @@ def test_an_uncovered_charged_cell_is_a_miss(synth):
         e.cell_key = e.cell_key[len(e.cell_key) // 2:]
         k, qq = np.asarray(e.cells["key"]), np.asarray(e.cells["q"], np.float64)
         k, qq = k[qq > 25], qq[qq > 25]
-        cov.append((J.cell_inputs(k, e.cell_key, e.band_lengths, run.tokenizer)[0] >= 0).any(1)); q.append(qq)
+        cov.append((J.cell_inputs(k, e.cell_key, e.band_lengths, run.tokenizer, e.grid)[0] >= 0).any(1)); q.append(qq)
     cov, q = np.concatenate(cov), np.concatenate(q)
     assert 0.05 < cov.mean() < 0.95
     m = Denoise(_dctx(run, _oracle(covered_only=False), n_boot=5))
@@ -620,8 +622,9 @@ def test_keys_round_trip_including_negative_ticks():
     assert all((a == b).all() for a, b in zip(C.unkey(C.fkey(g, fw, ft)), (g, fw, ft)))
 
 
-def _event(rng, n_part=40):
-    """Compact particles (a few wires x a few ticks) scattered over one plane, as a cells record."""
+def _event(rng, n_part=40, grid=GRID):
+    """Compact particles (a few wires x a few ticks) scattered over one plane, as a cells record
+    on ``grid``, and kept-coefficient cells (placed on the 2 x 16 grid whatever ``grid``)."""
     g, w, t, q, trk = [], [], [], [], []
     for i in range(n_part):
         cw, ct = rng.integers(40, 900), rng.integers(200, 3000)
@@ -629,14 +632,15 @@ def _event(rng, n_part=40):
         g.append(np.zeros(ww.size, int)); w.append(ww.ravel()); t.append(tt.ravel())
         q.append(np.full(ww.size, 100.0)); trk.append(np.full(ww.size, i))
     g, w, t, q, trk = map(np.concatenate, (g, w, t, q, trk))
-    rec = C.cell_truth(g, w, t, q, trk, trk, np.zeros((len(q), 2)))
+    rec = C.cell_truth(g, w, t, q, trk, trk, np.zeros((len(q), 2)), grid)
     rec["trk_energy"] = 0.05 * (np.arange(n_part) + 1)
-    cells = C.fkey(g, w // C.FW, t // C.FT)
-    noise = C.fkey(np.zeros(500, int), rng.integers(0, 500, 500), rng.integers(0, 250, 500))
+    cells = C.fkey(g, w // grid.fw, t // grid.ft)
+    nw, nt = rng.integers(0, 500, 500) * GRID.fw, rng.integers(0, 250, 500) * GRID.ft      # pixel origins
+    noise = C.fkey(np.zeros(500, int), nw // grid.fw, nt // grid.ft)
     return rec, np.concatenate([cells, noise])
 
 
-N_CELL = (W.WW // C.FW) * (W.WT // C.FT)
+N_CELL = (W.WW // GRID.fw) * (W.WT // GRID.ft)
 
 
 def _charge(rec, keys):
@@ -674,7 +678,7 @@ def test_truth_has_both_window_kinds_and_valid_keys():
     near_charge = _haze(rec, tr["wkey"], 1.0) > 0                 # charge within 8 cells
     for i, m in enumerate(tr["meta"]):
         cells = slice(i * N_CELL, (i + 1) * N_CELL)
-        assert np.array_equal(tr["wkey"][cells], W.window_cells(m["g"], m["w0"], m["t0"]))
+        assert np.array_equal(tr["wkey"][cells], W.window_cells(m["g"], m["w0"], m["t0"], GRID))
         if m["kind"] == "bg":
             assert q[cells].sum() == 0 and np.isnan(m["E"]) and not near_charge[cells].any()
             assert np.isin(tr["wkey"][cells], ck).any()
@@ -694,6 +698,51 @@ def test_truth_has_both_window_kinds_and_valid_keys():
     assert keep(old["meta"]) == keep(tr["meta"])
 
 
+def test_a_window_is_the_same_box_on_any_grid():
+    """window_cells takes its box in wires and ticks: the same window holds the same charge on a
+    1 x 4 truth as on the 2 x 16 one of the same pixels, in 8x as many cells."""
+    rec2, _ = _event(np.random.default_rng(0))
+    rec4, _ = _event(np.random.default_rng(0), grid=C.Grid(1, 4))
+    rng = np.random.default_rng(5)
+    held = 0
+    for _ in range(300):
+        w0, t0 = int(rng.integers(0, 470)) * 2, int(rng.integers(0, 200)) * 16
+        k2, k4 = W.window_cells(0, w0, t0, GRID), W.window_cells(0, w0, t0, C.Grid(1, 4))
+        assert len(k4) == 8 * len(k2) == 8 * N_CELL
+        q2, q4 = _charge(rec2, k2).sum(), _charge(rec4, k4).sum()
+        assert q4 == pytest.approx(q2, rel=1e-12, abs=1e-9)
+        held += q2 > 0
+    assert held > 10
+    with pytest.raises(ValueError, match="whole number"):
+        W.window_cells(0, 0, 0, C.Grid(3, 16))                     # 32 wires are not whole 3-wire cells
+
+
+def test_the_windows_of_a_1x4_truth_keep_their_physical_rules():
+    """event_truth on a 1 x 4 truth: every window is 32 wires x 128 ticks; a far window has no
+    charge within PAD of it, a near one none within MARGIN but some within PAD -- checked on the
+    pixels, so the rules are the same boxes as on the 2 x 16 truth."""
+    grid = C.Grid(1, 4)
+    rec, ck = _event(np.random.default_rng(0), grid=grid)
+    tr = W.event_truth(rec, ck, np.random.default_rng(1))
+    assert {"iso", "bg", "near"} <= {m["kind"] for m in tr["meta"]}
+    n = (W.WW // grid.fw) * (W.WT // grid.ft)
+    assert len(tr["wkey"]) == len(tr["meta"]) * n
+    g, cw, ct = C.unkey(rec["key"][np.asarray(rec["q"]) > 0])
+    pw, pt = cw * grid.fw, ct * grid.ft                            # each charged cell's first pixel
+
+    def charge_near(m, box):
+        return ((g == m["g"]) & (pw >= m["w0"] - box[0]) & (pw < m["w0"] + W.WW + box[0])
+                & (pt >= m["t0"] - box[1]) & (pt < m["t0"] + W.WT + box[1])).any()
+    for i, m in enumerate(tr["meta"]):
+        wk = tr["wkey"][i * n:(i + 1) * n]
+        assert np.array_equal(wk, W.window_cells(m["g"], m["w0"], m["t0"], grid))
+        assert m["w0"] % grid.fw == 0 and m["t0"] % grid.ft == 0
+        if m["kind"] == "bg":
+            assert not charge_near(m, W.PAD)
+        elif m["kind"] == "near":
+            assert not charge_near(m, W.MARGIN) and charge_near(m, W.PAD)
+
+
 def test_every_plane_gets_its_own_background():
     rec, ck = _event(np.random.default_rng(0))
     g, fw, ft = C.unkey(ck)
@@ -708,7 +757,7 @@ def test_far_background_is_uniform_in_area_not_in_kept_count():
     window-sized block elsewhere (100): a far window lands on the patch at about its share of the
     AREA (a few %), not its share of the kept cells (128/228, which centring on a kept cell gave)."""
     rec, ck = _event(np.random.default_rng(0))
-    nw, nt = W.WW // C.FW, W.WT // C.FT
+    nw, nt = W.WW // GRID.fw, W.WT // GRID.ft
     bw, bt = np.meshgrid(np.arange(10) * nw, np.arange(10) * nt, indexing="ij")
     sparse = C.fkey(np.full(100, 3), bw.ravel() + 3, bt.ravel() + 2)
     pw, pt = np.meshgrid(np.arange(nw), np.arange(nt), indexing="ij")
@@ -728,9 +777,9 @@ def test_far_background_is_uniform_in_area_not_in_kept_count():
 def test_windows_are_not_centred_on_the_particle():
     rec, ck = _event(np.random.default_rng(0))
     tr = W.event_truth(rec, ck, np.random.default_rng(1))
-    q = _charge(rec, tr["wkey"]).reshape(len(tr["meta"]), W.WW // C.FW, W.WT // C.FT)
-    wire = np.arange(W.WW // C.FW)[:, None]
-    off = [(qi * wire).sum() / qi.sum() - (W.WW // C.FW - 1) / 2 for qi, m in zip(q, tr["meta"]) if m["kind"] == "iso"]
+    q = _charge(rec, tr["wkey"]).reshape(len(tr["meta"]), W.WW // GRID.fw, W.WT // GRID.ft)
+    wire = np.arange(W.WW // GRID.fw)[:, None]
+    off = [(qi * wire).sum() / qi.sum() - (W.WW // GRID.fw - 1) / 2 for qi, m in zip(q, tr["meta"]) if m["kind"] == "iso"]
     assert np.std(off) > 0.5
 
 
@@ -874,10 +923,10 @@ def test_cell_inputs_matches_the_gather_arithmetic():
     bl = np.array([280, 280, 560, 1120])
     keys = C.fkey(rng.integers(0, 6, 400), rng.integers(0, 900, 400), rng.integers(0, 260, 400))
     g, fw, ft = C.unkey(keys)
-    w, t = fw * C.FW, ft * C.FT + C.FT // 2
+    w, t = fw * GRID.fw, ft * GRID.ft + GRID.ft // 2
     pc = pixel_cells(g, w, t, bl, cfg)
     tok_keys = np.unique(pc[rng.random(pc.shape) < 0.5])        # a token set covering about half
-    idx, aux = J.cell_inputs(keys, tok_keys, bl, cfg)
+    idx, aux = J.cell_inputs(keys, tok_keys, bl, cfg, GRID)
     order = np.argsort(tok_keys); cks = tok_keys[order]
     pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
     ref_idx = np.where(cks[pos] == pc, order[pos], -1)
@@ -899,9 +948,9 @@ def test_coeff_cells_are_the_cells_under_the_kept_coefficients():
     from helix.model.tokenize import PatchConfig, tick_of_tau
     cfg = PatchConfig()
     band, g, wire, tau = np.array([0, 3, 4, 0]), np.array([1, 2, 2, 1]), np.array([10, 11, 12, 10]), np.array([5, 9, 9, 5])
-    got = J.coeff_cells(band, g, wire, tau, cfg)
+    got = J.coeff_cells(band, g, wire, tau, cfg, GRID)
     k = band < cfg.n_bands                                              # D1 is not tokenized
-    want = np.unique(C.fkey(g[k], wire[k] // C.FW, np.floor(tick_of_tau(tau[k], g[k], band[k], cfg) / C.FT)))
+    want = np.unique(C.fkey(g[k], wire[k] // GRID.fw, np.floor(tick_of_tau(tau[k], g[k], band[k], cfg) / GRID.ft)))
     np.testing.assert_array_equal(got, want)
     assert len(got) == 2
 
@@ -916,17 +965,17 @@ def test_near_windows_are_empty_but_beside_charge():
             keys.append(C.fkey(np.full(ww.size, g), ww.ravel(), tt.ravel())); q.append(np.full(ww.size, 500.0))
     keys, q = np.concatenate(keys), np.concatenate(q)
     order = np.argsort(keys); keys, q = keys[order], q[order]
-    wins = near_windows(keys, q, np.random.default_rng(0), n=20)
+    wins = near_windows(keys, q, np.random.default_rng(0), GRID, n=20)
     assert 0 < len(wins) <= 20 and {g for g, _, _ in wins} == {0, 4}
     G, CW, CT = C.unkey(keys)
     for g, w0, t0 in wins:
-        assert w0 % C.FW == 0 and t0 % C.FT == 0
-        fw, ft = w0 // C.FW, t0 // C.FT
+        assert w0 % GRID.fw == 0 and t0 % GRID.ft == 0
+        fw, ft = w0 // GRID.fw, t0 // GRID.ft
         on = G == g
-        inside = (CW >= fw - 1) & (CW < fw + W.WW // C.FW + 1) & (CT >= ft - 1) & (CT < ft + W.WT // C.FT + 1)
-        near = (CW >= fw - 8) & (CW < fw + W.WW // C.FW + 8) & (CT >= ft - 8) & (CT < ft + W.WT // C.FT + 8)
+        inside = (CW >= fw - 1) & (CW < fw + W.WW // GRID.fw + 1) & (CT >= ft - 1) & (CT < ft + W.WT // GRID.ft + 1)
+        near = (CW >= fw - 8) & (CW < fw + W.WW // GRID.fw + 8) & (CT >= ft - 8) & (CT < ft + W.WT // GRID.ft + 8)
         assert not (on & inside).any() and (on & near).any()
-    assert wins == near_windows(keys, q, np.random.default_rng(0), n=20)
+    assert wins == near_windows(keys, q, np.random.default_rng(0), GRID, n=20)
 
 
 def test_cell_neighbors_centre_is_the_covering_token_and_shifts_by_one_patch():
@@ -941,11 +990,11 @@ def test_cell_neighbors_centre_is_the_covering_token_and_shifts_by_one_patch():
                 toks.append(cell_key(1, b, wb * cfg.pw, tb * cfg.pt, cfg))
     ck = np.array(rng.permutation(toks), np.int64)
     keys = C.fkey(np.full(40, 1), rng.integers(40, 100, 40), rng.integers(20, 60, 40))
-    nbr = J.cell_neighbors(keys, ck, bl, cfg)
-    idx, _ = J.cell_inputs(keys, ck, bl, cfg)
+    nbr = J.cell_neighbors(keys, ck, bl, cfg, GRID)
+    idx, _ = J.cell_inputs(keys, ck, bl, cfg, GRID)
     assert nbr.shape == (40, cfg.n_bands, 9) and np.array_equal(nbr[:, :, 4], idx)
     g, fw, ft = C.unkey(keys)
-    pc = pixel_cells(g, fw * C.FW, ft * C.FT + C.FT // 2, bl, cfg)
+    pc = pixel_cells(g, fw * GRID.fw, ft * GRID.ft + GRID.ft // 2, bl, cfg)
     for j, (dw, dt) in enumerate([(a, c) for a in (-1, 0, 1) for c in (-1, 0, 1)]):
         hit = nbr[:, :, j] >= 0
         _, _, wb, tb = unpack_cell_key(ck[nbr[:, :, j][hit]])

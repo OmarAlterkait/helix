@@ -285,10 +285,11 @@ def test_an_event_whose_plane_truth_is_off_the_plane_is_measured_by_its_lost_sha
     keys = np.array([fkey(0, 10, 5), fkey(0, 11, 5), fkey(1, 5000, 5), fkey(1, 6000, 6)], np.int64)
     rec = dict(key=keys, q=np.array([10.0, 10.0, 7.0, 3.0], np.float32), dom_frac=np.ones(4, np.float32),
                dom_y=np.zeros(4, np.float32), dom_z=np.zeros(4, np.float32),
-               ct_cell=np.arange(4, dtype=np.int32), ct_track=np.zeros(4, np.int32), ct_q=np.ones(4, np.float32))
+               ct_cell=np.arange(4, dtype=np.int32), ct_track=np.zeros(4, np.int32), ct_q=np.ones(4, np.float32),
+               grid=(2, 16))
     after = valid_cells(rec, gids=[0, 1], n_wires=[400, 400], n_ticks=4336)
     assert _offplane_share(rec, after) == 1.0                      # plane 1 lost everything
     assert _offplane_share(rec, rec) == 0.0
     # the training read (key and q only) drops the same cells
-    kq = valid_cells(dict(key=keys, q=rec["q"]), gids=[0, 1], n_wires=[400, 400], n_ticks=4336)
-    assert set(kq) == {"key", "q"} and np.array_equal(kq["key"], after["key"])
+    kq = valid_cells(dict(key=keys, q=rec["q"], grid=(2, 16)), gids=[0, 1], n_wires=[400, 400], n_ticks=4336)
+    assert set(kq) == {"key", "q", "grid"} and np.array_equal(kq["key"], after["key"])

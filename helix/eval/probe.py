@@ -42,7 +42,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from helix.data.cells import FT, FW, unkey
+from helix.data.cells import grid_of, unkey
 from helix.model.cells_join import cell_inputs
 from helix.eval.events import VIEWS, bootstrap
 
@@ -259,6 +259,7 @@ def patch_rows(cells, cell_rows, n_planes):
     Returns ``tok`` (the rows' token tuples), ``y`` (u, m), ``geo`` and ``plane``; rows whose
     tuple is all -1 (no covering token) or that have no dominant cell are dropped.
     """
+    grid = grid_of(cells)
     g, fw, ft = unkey(cells["key"])
     q = np.asarray(cells["q"], np.float64)
     dom = np.asarray(cells["dom_frac"], np.float64) >= DOM_THRESHOLD
@@ -273,8 +274,8 @@ def patch_rows(cells, cell_rows, n_planes):
     keep = np.bincount(grp, weights=dom.astype(float), minlength=ng) > 0
     y = np.bincount(grp, weights=wq * u, minlength=ng) / np.maximum(wsum, 1e-12)
     n = np.bincount(grp, minlength=ng)
-    wmean = np.bincount(grp, weights=fw * FW + FW / 2, minlength=ng) / np.maximum(n, 1)
-    tmean = np.bincount(grp, weights=ft * FT + FT / 2, minlength=ng) / np.maximum(n, 1)
+    wmean = np.bincount(grp, weights=fw * grid.fw + grid.fw / 2, minlength=ng) / np.maximum(n, 1)
+    tmean = np.bincount(grp, weights=ft * grid.ft + grid.ft / 2, minlength=ng) / np.maximum(n, 1)
     plane = np.zeros(ng, np.int64)
     plane[grp] = g                                     # a token tuple names its plane
     geo = np.concatenate([np.eye(n_planes, dtype=np.float32)[plane],
@@ -324,7 +325,7 @@ class UProbe:
     def add(self, ev):
         import torch
         c = self.ctx
-        idx, _ = cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, c.run.tokenizer)
+        idx, _ = cell_inputs(ev.cells["key"], ev.cell_key, ev.band_lengths, c.run.tokenizer, ev.grid)
         pr = patch_rows(ev.cells, idx, self.n_planes)
         n = len(pr["y"])
         self.n_patch += n

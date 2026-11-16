@@ -4,34 +4,39 @@ The evaluation's frozen probes (:mod:`helix.eval`) and the trainable denoising h
 (:mod:`helix.model.denoise`, labels from :mod:`helix.data.denoise`) read exactly these features, so
 a frozen and a fine-tuned number differ only in what was trained. numpy only; next to the
 tokenizer whose cell keys and patch geometry it inverts.
+
+Every function takes the cell ``grid`` (:class:`helix.data.cells.Grid`) the keys are on: it is
+the truth's (``grid_of(cells_record)``), never a constant of this module.
 """
 from __future__ import annotations
 
 import numpy as np
 
-from helix.data.cells import FT, FW, fkey, unkey
+from helix.data.cells import Grid, fkey, unkey
 from helix.model.tokenize import cell_key as pack, pixel_cells, sigma_for_rows, tick_of_tau, unpack_cell_key
 
 
-def _coeff_keys(band, plane_gid, wire, tau, cfg):
-    """``(k, key)``: which coefficients are in the tokenized bands, and their fine cells."""
+def _coeff_keys(band, plane_gid, wire, tau, cfg, grid):
+    """``(k, key)``: which coefficients are in the tokenized bands, and their cells on ``grid``."""
+    grid = Grid(*grid)
     band, plane_gid, wire, tau = (np.asarray(x) for x in (band, plane_gid, wire, tau))
     k = band < cfg.n_bands
     ct = tick_of_tau(tau[k], plane_gid[k], band[k], cfg)
-    return k, fkey(plane_gid[k], wire[k] // FW, np.floor(ct / FT).astype(np.int64))
+    return k, fkey(plane_gid[k], wire[k] // grid.fw, np.floor(ct / grid.ft).astype(np.int64))
 
 
-def coeff_cells(band, plane_gid, wire, tau, cfg):
-    """Fine-cell keys (sorted, unique) of an event's kept coefficients in the tokenized bands."""
-    return np.unique(_coeff_keys(band, plane_gid, wire, tau, cfg)[1])
+def coeff_cells(band, plane_gid, wire, tau, cfg, grid):
+    """Cell keys on ``grid`` (sorted, unique) of an event's kept coefficients in the tokenized
+    bands."""
+    return np.unique(_coeff_keys(band, plane_gid, wire, tau, cfg, grid)[1])
 
 
-def coeff_amplitude(c, cfg):
+def coeff_amplitude(c, cfg, grid):
     """``(keys, amp)``: :func:`coeff_cells` of a coeff part ``c`` (``band, plane_gid, wire, tau,
     value`` and its ``_meta``) and, per cell, the largest ``|value| / sigma`` of the kept
     coefficients in it -- the compressor's own detection statistic, in the units the tokenizer
     normalises by (:func:`helix.model.tokenize.sigma_for_rows`)."""
-    k, key = _coeff_keys(c["band"], c["plane_gid"], c["wire"], c["tau"], cfg)
+    k, key = _coeff_keys(c["band"], c["plane_gid"], c["wire"], c["tau"], cfg, grid)
     m = c["_meta"]
     band, g = np.asarray(c["band"])[k], np.asarray(c["plane_gid"])[k]
     a = np.abs(np.asarray(c["value"], np.float64).reshape(-1)[k]) \
@@ -47,10 +52,11 @@ def _fourier(x):
     return np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(x.shape[0], -1)
 
 
-def cell_inputs(keys, cell_key, band_lengths, cfg):
-    """Per fine cell: which token covers it in each band, and where inside it.
+def cell_inputs(keys, cell_key, band_lengths, cfg, grid):
+    """Per cell: which token covers it in each band, and where inside it.
 
-    ``keys``: fine-cell keys (:func:`fkey`). ``cell_key``: the tokenized event's per-token cell
+    ``keys``: cell keys (:func:`fkey`) on ``grid``; a cell is placed at its first wire and its
+    centre tick. ``cell_key``: the tokenized event's per-token cell
     keys (``B["cell_key"]``). Returns ``idx`` (n, n_bands) int64 -- the covering token's row,
     -1 if none -- and ``aux`` (n, 13 * n_bands) float32: a presence bit per band, then the cell's
     continuous offset inside each band's token (wire, tau), Fourier-encoded. The frozen probes
@@ -58,8 +64,9 @@ def cell_inputs(keys, cell_key, band_lengths, cfg):
     exactly this, so a frozen and a fine-tuned number differ only in what was trained.
     """
     nb, pw, pt = cfg.n_bands, cfg.pw, cfg.pt
+    grid = Grid(*grid)
     g, fw, ft = unkey(np.asarray(keys, np.int64))
-    w, t = fw * FW, ft * FT + FT // 2
+    w, t = fw * grid.fw, ft * grid.ft + grid.ft // 2
     pc = pixel_cells(g, w, t, band_lengths, cfg)
     ck = np.asarray(cell_key, np.int64)
     order = np.argsort(ck); cks = ck[order]
@@ -78,8 +85,8 @@ def cell_inputs(keys, cell_key, band_lengths, cfg):
     return idx.astype(np.int64), aux.astype(np.float32)
 
 
-def cell_neighbors(keys, cell_key, band_lengths, cfg, radius=1):
-    """Per fine cell and band: the tokens of the (2r+1) x (2r+1) patches around the one covering
+def cell_neighbors(keys, cell_key, band_lengths, cfg, grid, radius=1):
+    """Per cell (keys on ``grid``) and band: the tokens of the (2r+1) x (2r+1) patches around the one covering
     it, -> (n, n_bands, (2r+1)**2) int64, -1 where no token.
 
     Found by shifting the covering PATCH's block coordinates, so a cell with no token of its own
@@ -87,8 +94,9 @@ def cell_neighbors(keys, cell_key, band_lengths, cfg, radius=1):
     same index :func:`cell_inputs` returns. Order: wire offset major, tick offset minor, each from
     -r to r.
     """
+    grid = Grid(*grid)
     g, fw, ft = unkey(np.asarray(keys, np.int64))
-    pc = pixel_cells(g, fw * FW, ft * FT + FT // 2, band_lengths, cfg)          # (n, nb)
+    pc = pixel_cells(g, fw * grid.fw, ft * grid.ft + grid.ft // 2, band_lengths, cfg)          # (n, nb)
     pg, pb, wb, tb = unpack_cell_key(pc.ravel())
     ck = np.asarray(cell_key, np.int64)
     order = np.argsort(ck); cks = ck[order]

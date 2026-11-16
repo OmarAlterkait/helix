@@ -154,12 +154,12 @@ def load_denoiser(path, device=None, *, weights="last", fm=None):
     t = lambda a: torch.as_tensor(a).to(dev)                            # noqa: E731
 
     def predict(ev, keys):
-        idx, aux = cell_inputs(keys, ev.cell_key, ev.band_lengths, cfg)
+        idx, aux = cell_inputs(keys, ev.cell_key, ev.band_lengths, cfg, ev.grid)
         ok = (idx >= 0).any(1)
         y = np.zeros(len(keys), np.float32)
         logit = np.full(len(keys), UNCOVERED_LOGIT, np.float32)
         if ok.any():
-            nbr = cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg)
+            nbr = cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg, ev.grid)
             with torch.no_grad(), autocast(dev):
                 yy, lg = model.predict(ev.batch, t(idx[ok]), t(aux[ok]), t(nbr))
             y[ok], logit[ok] = yy.float().cpu().numpy(), lg.float().cpu().numpy()
@@ -189,7 +189,7 @@ class Denoise:
     def add(self, ev):
         c = self.ctx
         cfg = c.run.tokenizer
-        covered = lambda k: (cell_inputs(k, ev.cell_key, ev.band_lengths, cfg)[0] >= 0).any(1)   # noqa: E731
+        covered = lambda k: (cell_inputs(k, ev.cell_key, ev.band_lengths, cfg, ev.grid)[0] >= 0).any(1)   # noqa: E731
         tr = ev.truth(c.seed)
         y, lg = c.denoiser(ev, tr["wkey"])
         self.scored.add(ev, tr, {"presence": lg, "amplitude": amplitude(ev, tr["wkey"])})

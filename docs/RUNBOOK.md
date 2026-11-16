@@ -85,15 +85,25 @@ as distinct identities, not by summing `n_events`.
 
 ## 4. Truth
 
-`scripts/build_truth.py` writes `{name}_cells_<k>.h5` beside each coeff shard from the campaign's
-`hits` / `step` / `labl` at `HELIX_SIM_ROOT`; existing files are skipped, so a rerun resumes.
-CPU work, one process per core, per run directory. **S3DF only** (NERSC has no campaign; copy
-the cells shards with the corpus):
+`scripts/build_truth.py --grid WxT` writes `{name}_cells_<k>.h5` for each coeff shard from the
+campaign's `hits` / `step` / `labl` at `HELIX_SIM_ROOT`, on a cell grid of W wires x T ticks
+that the file records (d1m: `2x16`, beside the shards; any other grid with `--out`). Existing
+files are skipped, so a rerun resumes. CPU work, one process per shard. **S3DF only** (NERSC
+has no campaign; copy the cells shards with the corpus):
 
     for d in $HELIX_CORPUS_ROOT/coeff_tpc_new/j00*; do
       sbatch --account=mli:cider-ml --partition=milano -c 16 --mem=64G -t 12:00:00 \
-          --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/build_truth.py --corpus $d"
+          --wrap="$HELIX_ROOT/scripts/helix_run.sh python scripts/build_truth.py --corpus $d --grid 2x16"
     done
+
+A finer grid as a job array of shard blocks (`scripts/truth.sh`), read with the corpus as the
+dataset's two modalities:
+
+    SBATCH_ARGS="--account=mli:cider-ml --partition=milano" scripts/truth.sh submit 1x4 <root>/cells
+    ln -s $HELIX_CORPUS <root>/coeff                   # CoeffTPCDataset(data_root=<root>, ...)
+
+A finer truth sums exactly to a coarser one (`helix.data.cells.aggregate`; `build_truth.py --from
+<dir> --grid 2x16 --out <dir>` writes the files), so 2x16 numbers stay derivable from it.
 
 **NERSC:** `$SCRATCH` is purged on inactivity. Re-stage from the durable copy:
 `rsync -a $CFS/m5238/users/oalter/coeff_tpc_d1m/ $SCRATCH/coeff_tpc_d1m/`.

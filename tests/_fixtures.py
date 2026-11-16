@@ -43,6 +43,7 @@ from helix.build import build
 #     HELIX_PIMM_ROOT       the pimm checkout the config/step contracts import
 #     HELIX_CORPUS          a built coeff corpus
 #     HELIX_SIM_ROOT        the JAXTPC wire campaign (<campaign>/data/jaxtpc_wire)
+#     HELIX_FINETRUTH       a 1 x 1 cells truth of some corpus shards
 #
 
 def _opt(name):
@@ -78,6 +79,9 @@ CORPUS = _opt("HELIX_CORPUS")
 #: The JAXTPC wire campaign the corpus is built from. Each test picks its own task beneath
 #: it, so this is a ROOT, not one file.
 SIM_ROOT = _opt("HELIX_SIM_ROOT")
+
+#: The 1 x 1 truth of some corpus shards, which a derived grid is checked against.
+FINETRUTH = _opt("HELIX_FINETRUTH")
 
 #: The task the real-data tests read: it holds an event with an empty volume (entry 202).
 SIM_GROUP, SIM_TASK = "j000000", "jaxtpc_wire_j000085-000089"
