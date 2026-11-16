@@ -1,6 +1,6 @@
 # Status
 
-Where HELIX stands (2026-11-09): what exists, the decisions in force, what is open. History
+Where HELIX stands (2026-11-16): what exists, the decisions in force, what is open. History
 is in git (`docs/DECISIONS.md` and `TODO.md` up to a550748) and in the tags `archive-2026-11`
 (design notes and study records, `git show archive-2026-11:docs/archive/<NAME>.md`) and
 `eval-probes-final` (the frozen floor / labels probes, removed).
@@ -15,7 +15,7 @@ is in git (`docs/DECISIONS.md` and `TODO.md` up to a550748) and in the tags `arc
 | value grid | `coeff_bins_d1m_j000000_noisy`: K = 128 per band, uniform in asinh with one gap bin, from 120 events of j000000 (`helix/data/data/reference_bins.json`, digests recorded) |
 | size cap | 1.2M coefficients per event: every d1m event. The S3DF `fm` / `fm_cooldown` trained at 600k and never saw the largest 18.9% of events |
 | FM runs | S3DF `fm` (stable, 115,488 steps = 3 epochs, 4 A100, LR 2.2e-3) and `fm_cooldown` (9,386 steps), at NERSC under `$CFS/m5238/users/oalter/exp_s3df/`. NERSC `d1m_lr` arms (`lr2.2e-3_cool`, `lr3.1e-3_cool`, `lr4.4e-3_cool`, `lr4.4e-3_s1_cool`; 16 GPUs) under `$HELIX_EXP` |
-| denoiser | reference results on r1 (below); no full-length d1m result yet |
+| denoiser | full-length d1m runs (below); the default is the categorical head + linear amplitude |
 | other corpora (S3DF) | `sbnd_data/coeff_sbnd_v1` (SBND data, production); `coeff_tpc_r2` (superseded simulation: readable, not rebuildable); r1 and older are retired |
 
 **Evaluation of encoders.** ft_eval fine-tune on d1m, one eval version (397ec16), `last` checkpoint, 2 fine-tune seeds each. Presence efficiency at 1% FPR per view, 0.1-0.2 MeV, 2026-11-10:
@@ -63,17 +63,37 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
 | 16 | No in-training evaluation, no `model_best`, no EMA; the weight is `model/last` | val loss ranks representations at 0.15; EMA and cooldown `last` fine-tune the same (0.530 +- 0.003) | a task where val loss agrees with the fine-tune |
 | 17 | Configs are world-size-free; batch = rank count, one event per rank | the FM has no event separation | multi-event batching |
 | 18 | Event cap 1.2M coefficients, a guard not a filter | the largest d1m event needs 13.9 GB in a d768 step | a busier corpus |
-| 19 | The primary encoder evaluation is the ft_eval fine-tune, keyed on clear and crowded@near at 1% FPR per view | an MAE is pretrained to be fine-tuned; frozen probes measured their own extrapolation | the from-scratch arm landing close (then 256 / 64 labels) |
+| 19 | The primary encoder evaluation is the ft_eval fine-tune, keyed on LAUC (efficiency averaged over log FPR 1e-3..1e-1, view-mean) for clear and crowded@near at 0.1-0.2 MeV; per-view curves and eff@1% always reported | an MAE is pretrained to be fine-tuned; frozen probes measured their own extrapolation | the from-scratch arm landing close (then 256 / 64 labels) |
 | 20 | Backgrounds uniform in area with >= 1 kept coefficient; thresholds per view | kept-weighted far windows biased every arm; pooled thresholds ran Y at 2-3% | none |
 | 21 | uprobe stays as the second, frozen key | the only frozen key that ordered pretraining arms; it measures 3D information | the fine-tune key validated against it |
 | 22 | Comparisons are paired (`compare`), seed-averaged, read per view | a pooled gain carried by one view is not a win | none |
 | 23 | Presence is q > 25 e- everywhere | it is the truth's own cut | a truth with a lower cut |
 | 24 | Train and score on cells-3 `q` as built, recording `q_cut` (user decision) | re-simulating is expensive | r1: complete truth gave +0.035-0.05 detection; re-simulate if that matters |
-| 25 | Denoiser defaults: M6d recipe, `lin_amp_scale` 0, `dist` point, encoder `fm_cooldown` | r1 numbers do not transfer to d1m | a d1m run reproducing M10lin / M11 gains |
-| 26 | Training launches through `pimm submit` (`scripts/submit.sh`), pimm pinned per site | multi-node shifter with `nccl-plugin`: 4.9 GiB/s vs podman-hpc 1.23 | none |
+| 25 | Denoiser defaults: `dist` cat, `lin_amp_scale` 30, `cond_charge`, encoder `fm_cooldown` | full-length d1m: 2-3x tighter bright charge for -0.013 LAUC (the loss is on V) | a presence head beside cat recovering V |
+| 26 | Training launches through `pimm submit` (`scripts/submit.sh`) at NERSC, pimm pinned (`helix-min`, pimm-pin2; the image by digest); no training at S3DF for now | multi-node shifter with `nccl-plugin`: 4.9 GiB/s vs podman-hpc 1.23 | none |
 | 27 | Reading a run has one owner, `load_run`, from pimm's run directory | an export layer duplicated what the run records | none |
 
+**Re-scored with the 2026-11-16 evaluation** (fbe0d8a; 4113 events offline from the dumps, 95% intervals; /pscratch/sd/o/oalter/helix_work/fixeval/). LAUC view-mean, clear / crowded@near, 0.1-0.2 MeV:
+
+| run | LAUC | eff@1% (old key) |
+|---|---|---|
+| point + lin, all labels | 0.638 / 0.625 | 0.623 / 0.616 |
+| cat + lin, all labels | 0.625 / 0.607 | 0.608 / 0.599 |
+| ft_cool, 1024 labels (2 seeds) | 0.551 / 0.544 | 0.528 / 0.537 |
+| ft_scratch, 1024 labels (2 seeds) | 0.478 / 0.432 | 0.455 / 0.422 |
+| amplitude | 0.293 / 0.137 | 0.284 / 0.066 |
+
+- Pretrained - scratch: +0.072 [0.062, 0.082] clear; larger at 1e-3 FPR (+0.11 / +0.16). Read at `last`; at step 2048 the gap is about twice that, since the pretrained fine-tunes overfit and scratch is still improving. A fair comparison needs checkpoint selection on held-out labels and scratch trained to convergence.
+- The six pretrained arms stay within ~0.016 LAUC: not resolvable.
+- Charge, binned by the CALLED charge over all covered cells: calls below 1k e- are 35-58% on cells without charge. 43% of 25-1k e- truth cells are detected, and 39% of their charge has no kept coefficient. Closure over all cells 1.02 (haze 0.024).
+- Calibration on natural cells: ECE 0.054 raw, 0.003 after one global log-odds offset (a prior shift).
+
+**Fixed in the training code 2026-11-16 (affect new runs only):** the decoder's time groups (above); the muP hidden init, which was 2.45x too small in std (72a82e3; the 4.4e-3 LR was tuned under the old init); `fm_cooldown.py` states the 57,600-event cooldown that was run (327907c). New: whole-location masking (`mask_mode="loc"`, `configs/sweeps/d1m_locmask.yaml`).
+
 ## Open work
+
+- **Next pretraining round (d1m, one seed per arm, ~60 GPU-h each):** the current recipe with the fixes, whole-location masking, plane_frac 0 and 0.3; scored on the fine-tune with held-out checkpoint selection and a converged scratch arm.
+- **1x4 truth:** the grid is a property of the truth file and finer truths sum exactly to 2x16 (414b3e0). The full-corpus build needs the campaign hits, which are only at S3DF (`scripts/truth.sh`; ~130-270 CPU-h, ~640 GB, 130 GB key+q only). The 2,000 finetruth events can be summed to 1x4 at NERSC now.
 
 - **LR:** run the 6.2e-3 arm. The "training-seed noise 0.04" seen on the presence probe is not
   seen on the MSE probe (s0 0.350 vs s1 0.346), so it was likely probe noise.
@@ -81,17 +101,24 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
   decoder depth, plane masking; most were chosen on r1 with metrics later found biased.
 - **Value grid:** extend to the observed maximum or switch to the analytic grid (user decision).
 - **Corpus threshold:** untested on d1m. The r1 bound (no hysteresis) does not transfer. A d1m bound needs the raw waveforms (at S3DF).
-- **U-plane time offset is wrong on d1m (audit 2026-11-11; /pscratch/sd/o/oalter/helix_work/audit/an_61143223.out).**
-  - Strong U coefficients land on truth-charged cells one fine cell (16 ticks) early: D3 / D2 0.90 / 0.96 at dt = -1, against 0.67 / 0.74 at dt = 0. V and Y peak at dt = 0.
-  - Cause: `PatchConfig.toff` U = -17.4 (`tokenize.py:88`), r1's response lag, which does not hold for d1m's JAXTPC f0d2ed39.
-  - It misaligns U's token-cell join (cell_inputs, coeff_cells, the amplitude baseline, the far windows' coefficient test) and U's RoPE time relative to V and Y.
-  - U is the weakest plane. Test with a fine-tune at a corrected offset before changing the tokenizer, since a change affects pretrained models.
+- **Tokenizer time constants (root cause found 2026-11-16; /pscratch/sd/o/oalter/helix_work/align/).**
+  The simulation is aligned: truth and wire signal share each plane's clock. The coefficient-to-truth
+  offsets are fully explained, to ~1 tick with no fitted parameter, by the wavelet basis (each band's
+  atom position) plus each plane's detector response. Two of our constants are wrong:
+  - `toff` U = -17.4 (`tokenize.py:88`) is r1's response lag, copied; d1m's is about -1 to -2. It places
+    U coefficients ~15 ticks late in every band (V and Y match their responses).
+  - `delta` A4 = -2.38 and D2 = 0.50 do not match the basis (-1.859, 1.0; the energy centroid of the
+    unit-coefficient reconstruction); D4 and D3 do.
+  - Proposed (awaiting decision): `toff` = 0 and `delta` from the basis, i.e. the simulation's time
+    taken as given, the response lag left to the denoiser. Old runs record neither constant, and
+    `patch_config` fills missing fields from today's defaults, so the old values must be pinned first.
 - **d1m compression facts (audit):**
   - 2.05% of the tokenized bands' coefficients are kept (10.1% token-slot occupancy, ~479k per event); 29.9% of them are hysteresis-grown, below the seed threshold.
   - Hysteresis adds only +0.01 to +0.065 to faint-deposit footprint retention, against a +0.035 null.
   - 61-67% of 0-0.1 MeV deposits and 12-33% of 0.1-0.2 MeV deposits leave no kept coefficient in their footprint; only context can find them.
 - **Cross-plane reconstruction** (unmeasured until now; audit job 61142279, 200 events): variance explained with one view masked per volume 0.597 (lr4.4e-3) / 0.581 (`fm_cooldown`), against 0.70 random. Two views masked: ~0 (collapse, as on r1). Forced U / V / Y 0.61-0.63 / 0.54-0.56 / 0.52-0.54.
-  - Caveat: plane-mask queries carry the hidden plane's occupied-patch layout, so it is not purely cross-plane.
+  - These numbers carry a decoder bug, fixed 2026-11-16 (69fc22b): queries and keys were cut into equal-count time groups separately, and a hidden view's tokens sit at different times than the visible views', so 23% of plane-mode queries attended keys from another time range. Same weights, fixed decoder (120 events): one view hidden 0.589 -> 0.614; hidden U / V / Y 0.625 / 0.558 / 0.538 -> 0.638 / 0.583 / 0.612; random 0.701 -> 0.703.
+  - Mask queries exist only at occupied patches, so each query knows that its own patch is occupied (one bit; queries never attend each other).
 - **d1m denoiser at full length: done (2026-11-13; $CFS/m5238/users/oalter/exp/helix_d1m_v2, run-397ec16, all labels, `last`, encoder fm_cooldown `last`).**
   Presence at 1% FPR per view, 0.1-0.2 MeV; charge hw68 of log(pred/true) at 64-256k e-:
 
