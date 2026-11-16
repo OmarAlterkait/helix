@@ -43,7 +43,9 @@ import yaml
 
 H = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUBMIT = os.path.join(H, "scripts", "submit.sh")
-JOB_ID = re.compile(r"job id:\s+(\d+)")
+#: pimm submit's "job id: <n>" line, its only statement of the id; the pinned pimm's wording is
+#: checked by tests/test_pimm_config.py.
+JOB_ID = re.compile(r"^\s*job id:\s+(\d+)\s*$", re.M)
 
 
 def _flags(xs):
@@ -106,7 +108,8 @@ def submit_after(spec, deps, name, fmt, env, dry):
         raise SystemExit("sweep: this site declares no scheduler.eval (helix/sites/<site>.yaml); "
                          "evaluation jobs need a GPU")
     if deps:
-        sb.append("--dependency=afterok:" + ":".join(deps))
+        # cancelled, not pending forever, when an arm fails (no kill_invalid_depend in slurm.conf)
+        sb += ["--dependency=afterok:" + ":".join(deps), "--kill-on-invalid-dep=yes"]
     wrap = (f"cd {shlex.quote(H)} && HELIX_INTERACTIVE=0 HDF5_USE_FILE_LOCKING=FALSE "
             f"scripts/helix_run.sh {command}")
     sb.append(f"--wrap={wrap}")
@@ -132,6 +135,8 @@ def main():
         arms = {k: arms[k] for k in keep}
     env = site_env()
     jobs = {}
+    # Each arm is complete (its run, its `then`, its after_each) before the next is submitted: a
+    # failing submission stops the study, and the arms already submitted keep their evaluation.
     for tag, arm in arms.items():
         jid = submit_arm(study, tag, arm or {}, a.dry_run, env)
         then = study.get("then")
@@ -146,7 +151,6 @@ def main():
             tag = tag + then.get("suffix", "_then")
             jid = submit_arm(stage, tag, {}, a.dry_run, env, after=jid)
         jobs[tag] = jid
-    for tag, jid in jobs.items():
         if study.get("after_each"):
             submit_after(study["after_each"], [jid] if jid else [], f"{tag}-after", dict(run=tag), env, a.dry_run)
     if study.get("after_all"):

@@ -81,6 +81,27 @@ def test_provenance_covers_helix_and_pimm_data():
         f"provenance recorded neither a commit nor a real root: {p['helix']}"
 
 
+
+def test_provenance_names_the_commits_and_the_image_without_checkouts(tmp_path, monkeypatch):
+    """A launched run imports pimm's code snapshot and the image's installed pimm-data, neither a
+    git checkout: every record said commit null. pimm-data's commit comes from its install record
+    (PEP 610), pimm's from the pinned worktree it was copied from, the image from the site."""
+    pytest.importorskip("pimm_data")
+    src = tmp_path / "pin"
+    src.mkdir()
+    for args in (["init", "-q"], ["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q",
+                                  "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", "-C", str(src), *args], check=True)
+    monkeypatch.setenv("HELIX_PIMM_ROOT", str(src))
+    monkeypatch.setenv("HELIX_CONTAINER_IMAGE", "registry/img@sha256:" + "0" * 64)
+    p = provenance()
+    assert p["env"]["HELIX_CONTAINER_IMAGE"].endswith("0" * 64)
+    from importlib import metadata
+    if (metadata.distribution("pimm-data").read_text("direct_url.json") or "").find("commit_id") >= 0:
+        assert re.fullmatch(r"[0-9a-f]{40}", p["pimm_data"]["commit"] or ""), p["pimm_data"]
+    if p.get("pimm") and p["pimm"]["commit"] is None:
+        assert p["pimm"]["source"]["commit"], p["pimm"]
+
 @needs_pimm
 def test_stamp_appends_so_a_resumed_link_does_not_erase_the_first(tmp_path):
     """A run resumed from a DIFFERENT tree is the case worth catching."""
