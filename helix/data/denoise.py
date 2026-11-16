@@ -16,17 +16,20 @@
 Query cells follow the evaluation's row recipe, plus what the floor's windows score:
 
 * every charged cell (``q > support_min_q``), up to ``sig_cap``;
-* as many cells within +-8 cells of them under a kept coefficient, and as many random cells
-  under kept coefficients (the noise-only cells a model must keep at zero);
+* as many cells within +-16 wires / +-128 ticks of them (:data:`helix.eval.events.PAD`) under a
+  kept coefficient, and as many random cells under kept coefficients (the noise-only cells a
+  model must keep at zero);
 * ``cov_per_sig`` per charged cell anywhere inside a kept coefficient's token -- the
   coefficient-free cells the floor's noise windows are mostly made of;
 * every cell of ``win_per_event`` charge-free windows (the floor's noise windows);
-* ``near_any_per_sig`` per charged cell within +-8 cells of charge, coefficient or not, and every
+* ``near_any_per_sig`` per charged cell within the same box of charge, coefficient or not, and every
   cell of ``win_near_per_event`` charge-free windows NEAR activity
   (:func:`near_windows`): the surroundings of activity, where a regression
   left to extrapolate predicts a haze.
 
-Cells no token covers are not queried: the model predicts zero there by construction, as the
+The cells are the truth's own (its ``grid``, carried by the cells record), and every box above
+is in wires and ticks, so it is the same box at any grid; at the 2 x 16 truth the draws are
+those of the recipe below, number for number. Cells no token covers are not queried: the model predicts zero there by construction, as the
 evaluation does. ``seed=None`` draws afresh at every access (training); an int fixes each event's
 draw by its name (validation). The defaults are the M6d / M6dc recipe (DENOISE, at git tag
 archive-2026-11), except ``support_min_q``: 25 e-, the cells-3 truth's own cut.
@@ -38,7 +41,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from helix.data.cells import FT, FW, Q0, fkey, unkey
+from helix.data.cells import Q0, Grid, fkey, grid_of, unkey
 from helix.model.cells_join import cell_inputs, cell_neighbors, coeff_cells
 
 #: The keys this transform adds to the token part.
@@ -84,21 +87,26 @@ class DenoiseRows:
         if "cells" not in data:
             raise KeyError("DenoiseRows: no 'cells' in the sample -- the dataset needs modalities=('coeff', 'cells')")
         cfg, bl = meta["cfg"], np.asarray(meta["band_lengths"])
+        grid = grid_of(data["cells"])
         rng = np.random.default_rng(None if self.seed is None else [int(self.seed), _name_hash(str(data.get("name", "")))])
         rows, q = self.rows(kept_coefficients(tok, cfg), data["cells"], cfg, rng)
-        idx, aux = cell_inputs(rows, tok["cell_key"], bl, cfg)
+        idx, aux = cell_inputs(rows, tok["cell_key"], bl, cfg, grid)
         ok = (idx >= 0).any(1)                                  # uncovered cells are not queried
         y = np.log1p(q[ok] / Q0).astype(np.float32)
-        tok.update(q_idx=idx[ok], q_aux=aux[ok], q_nbr=cell_neighbors(rows[ok], tok["cell_key"], bl, cfg),
+        tok.update(q_idx=idx[ok], q_aux=aux[ok], q_nbr=cell_neighbors(rows[ok], tok["cell_key"], bl, cfg, grid),
                    q_y=y, q_present=(y > np.log1p(self.support_min_q / Q0)).astype(np.float32))
         return data
 
     def rows(self, coeffs, cells, cfg, rng):
-        """``(keys, q)``: the query cells (sorted, unique) and their truth charge (e-)."""
+        """``(keys, q)``: the query cells (sorted, unique, on the truth's grid) and their truth
+        charge (e-)."""
+        from helix.eval.events import PAD
         from helix.model.tokenize import tick_of_tau
         band, gid, wire, tau = coeffs
+        grid = grid_of(cells)
+        rw, rt = grid.cells(*PAD)                                # "near": +-PAD, in cells
         tkeys, tq = np.asarray(cells["key"], np.int64), np.asarray(cells["q"], np.float64)
-        ck = coeff_cells(band, gid, wire, tau, cfg)              # cells under a kept coefficient
+        ck = coeff_cells(band, gid, wire, tau, cfg, grid)        # cells under a kept coefficient
         sup = tq > self.support_min_q
         sig = tkeys[sup]
         if len(sig) > self.sig_cap:
@@ -107,7 +115,7 @@ class DenoiseRows:
         if len(sig):                                            # as many cells near them, under a coefficient
             n = len(sig)
             g, w, t = unkey(rng.choice(sig, n, replace=True))
-            near = fkey(g, np.maximum(w + rng.integers(-8, 9, n), 0), np.maximum(t + rng.integers(-8, 9, n), 0))
+            near = fkey(g, np.maximum(w + rng.integers(-rw, rw + 1, n), 0), np.maximum(t + rng.integers(-rt, rt + 1, n), 0))
             parts.append(near[np.isin(near, ck)])
         if len(ck):                                             # as many random cells under a coefficient
             parts.append(rng.choice(ck, min(len(sig) + 1, len(ck)), replace=False))
@@ -122,17 +130,17 @@ class DenoiseRows:
             w = (wire[j] // cfg.pw) * cfg.pw + rng.integers(0, cfg.pw, n)
             ta = (tau[j] // cfg.pt) * cfg.pt + rng.integers(0, cfg.pt, n)
             tick = tick_of_tau(ta, g, b, cfg) + rng.random(n) * (1 << np.asarray(cfg.lev))[b]
-            parts.append(fkey(g, np.maximum(w, 0) // FW, np.floor(np.maximum(tick, 0) / FT).astype(np.int64)))
+            parts.append(fkey(g, np.maximum(w, 0) // grid.fw, np.floor(np.maximum(tick, 0) / grid.ft).astype(np.int64)))
         if self.win_per_event > 0 and len(ck):
-            parts.append(self._noise_windows(ck, tkeys[sup], rng))
+            parts.append(self._noise_windows(ck, tkeys[sup], rng, grid))
         if len(sig) and self.near_any_per_sig > 0:
             n = int(len(sig) * self.near_any_per_sig)
             g, w, t = unkey(rng.choice(sig, n, replace=True))
-            parts.append(fkey(g, np.maximum(w + rng.integers(-8, 9, n), 0), np.maximum(t + rng.integers(-8, 9, n), 0)))
+            parts.append(fkey(g, np.maximum(w + rng.integers(-rw, rw + 1, n), 0), np.maximum(t + rng.integers(-rt, rt + 1, n), 0)))
         if self.win_near_per_event > 0:
             from helix.eval.events import window_cells
-            for g, w0, t0 in near_windows(tkeys, np.where(sup, tq, 0.0), rng, n=self.win_near_per_event):
-                parts.append(window_cells(g, w0, t0))
+            for g, w0, t0 in near_windows(tkeys, np.where(sup, tq, 0.0), rng, grid, n=self.win_near_per_event):
+                parts.append(window_cells(g, w0, t0, grid))
         keys = np.unique(np.concatenate(parts).astype(np.int64))
         q = np.zeros(len(keys))
         if len(tkeys):
@@ -141,48 +149,53 @@ class DenoiseRows:
             q[hit] = tq[pos[hit]]
         return keys, q
 
-    def _noise_windows(self, ck, charged, rng):
+    def _noise_windows(self, ck, charged, rng, grid):
         """Every cell of up to ``win_per_event`` charge-free windows (WW x WT), each centred on a
         kept coefficient with no charged cell within the padding the evaluation's noise windows
-        keep empty (16 wires, 128 ticks). The floor scores the MAX over such a window."""
-        from helix.eval.events import WT, WW
+        keep empty (:data:`helix.eval.events.PAD`). The floor scores the MAX over such a window."""
+        from helix.eval.events import PAD, WT, WW
         tg, tw, tt = unkey(charged)
         by_plane = {int(g): (tw[tg == g], tt[tg == g]) for g in np.unique(tg)}
-        pw_, pt_ = 16 // FW, 128 // FT
+        pw_, pt_ = grid.cells(*PAD)
+        nw, nt = grid.cells(WW, WT)
         out = []
         for x in rng.permutation(ck)[:20 * self.win_per_event]:
             g, fw, ft = (int(v[0]) for v in unkey(np.array([x])))
-            w0, t0 = max(0, fw - WW // FW // 2), max(0, ft - WT // FT // 2)        # in fine-cell units
+            w0, t0 = max(0, fw - nw // 2), max(0, ft - nt // 2)                    # in cells
             cw, ct = by_plane.get(g, (np.zeros(0, int), np.zeros(0, int)))
-            if ((cw >= w0 - pw_) & (cw < w0 + WW // FW + pw_) & (ct >= t0 - pt_) & (ct < t0 + WT // FT + pt_)).any():
+            if ((cw >= w0 - pw_) & (cw < w0 + nw + pw_) & (ct >= t0 - pt_) & (ct < t0 + nt + pt_)).any():
                 continue
-            ww, tt_ = np.meshgrid(np.arange(w0, w0 + WW // FW), np.arange(t0, t0 + WT // FT), indexing="ij")
+            ww, tt_ = np.meshgrid(np.arange(w0, w0 + nw), np.arange(t0, t0 + nt), indexing="ij")
             out.append(fkey(np.full(ww.size, g), ww.ravel(), tt_.ravel()))
             if len(out) >= self.win_per_event:
                 break
         return np.concatenate(out) if out else np.zeros(0, np.int64)
 
 
-def near_windows(keys, q, rng, n=60, margin=1, pad=(8, 8)):
+def near_windows(keys, q, rng, grid, n=60, margin=None, pad=None):
     """Charge-free windows NEAR activity, as pixel origins ``[(g, w0, t0)]``.
 
-    No charge cell within ``margin`` cells of the window, but at least one within ``pad`` (wire,
-    tick) cells -- 16 wires / 128 ticks at the default, exactly the surroundings the floor's own
-    noise windows must keep EMPTY. ``keys``/``q``: the event's fine cells and charge. Up to ``n``
-    windows, shared equally over the planes that carry charge.
+    No charge cell within ``margin`` (wires, ticks; default :data:`helix.eval.events.MARGIN`) of
+    the window, but at least one within ``pad`` (default :data:`helix.eval.events.PAD`, 16 wires /
+    128 ticks) -- exactly the surroundings the floor's own noise windows must keep EMPTY.
+    ``keys``/``q``: the event's cells (on ``grid``) and charge. Up to ``n`` windows, shared
+    equally over the planes that carry charge.
     """
-    from helix.eval.events import WT, WW
+    from helix.eval.events import MARGIN, PAD, WT, WW
+    grid = Grid(*grid)
     keys = np.asarray(keys, np.int64)[np.asarray(q) > 0]
     if not len(keys):
         return []
     G, CW, CT = unkey(keys)
-    ww, wt = WW // FW, WT // FT
+    ww, wt = grid.cells(WW, WT)
+    mw, mt = grid.cells(*(MARGIN if margin is None else margin))
+    pw, pt = grid.cells(*(PAD if pad is None else pad))
     planes = np.unique(G)
     per = -(-n // len(planes))
     out = []
     for g in planes.tolist():
         m = G == g
-        o = max(pad) + margin + 1                                 # grid offset: origins may sit left of 0
+        o = max(pw, pt) + max(mw, mt) + 1                         # grid offset: origins may sit left of 0
         occ = np.zeros((int(CW[m].max()) + ww + 2 * o + 1, int(CT[m].max()) + wt + 2 * o + 1), np.int32)
         occ[CW[m] + o, CT[m] + o] = 1
         S = np.pad(occ.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
@@ -194,9 +207,9 @@ def near_windows(keys, q, rng, n=60, margin=1, pad=(8, 8)):
 
         I, J = np.meshgrid(np.arange(o, occ.shape[0] - ww), np.arange(o, occ.shape[1] - wt), indexing="ij")
         I, J = I.ravel(), J.ravel()
-        empty = box(I - margin, I + ww + margin, J - margin, J + wt + margin) == 0
-        near = box(I - pad[0], I + ww + pad[0], J - pad[1], J + wt + pad[1]) > 0
+        empty = box(I - mw, I + ww + mw, J - mt, J + wt + mt) == 0
+        near = box(I - pw, I + ww + pw, J - pt, J + wt + pt) > 0
         cand = np.nonzero(empty & near)[0]
         for c in rng.permutation(cand)[:per].tolist():
-            out.append((int(g), int(I[c] - o) * FW, int(J[c] - o) * FT))
+            out.append((int(g), int(I[c] - o) * grid.fw, int(J[c] - o) * grid.ft))
     return out[:n] if len(out) > n else out

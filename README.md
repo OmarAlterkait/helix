@@ -27,7 +27,7 @@ evaluation `.[pimm]` plus a pimm checkout, and the truth step `.[probe]`.
     scripts/corpus.sh all sim $HELIX_CORPUS_ROOT/coeff_tpc_new $HELIX_SIM_ROOT/j00*   # plan, calibrate, build
     scripts/helix_run.sh python -m helix.data.verify $HELIX_CORPUS_ROOT/coeff_tpc_new
     export HELIX_CORPUS=$HELIX_CORPUS_ROOT/coeff_tpc_new/j000000                   # train on it
-    scripts/helix_run.sh python scripts/build_truth.py --corpus $HELIX_CORPUS      # cells truth, per run (S3DF)
+    scripts/helix_run.sh python scripts/build_truth.py --corpus $HELIX_CORPUS --grid 2x16   # cells truth, per run (S3DF)
 
     scripts/submit.sh fm --resources.nnodes 4                   # pretrain: the stable phase
     scripts/submit.sh fm_cooldown --resources.nnodes 4          # then the cooldown

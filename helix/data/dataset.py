@@ -259,7 +259,7 @@ class CellsReader(ShardReaderBase):
     def __init__(self, data_root, split="", dataset_name="coeff_tpc", columns=None):
         self.data_root, self.split, self.dataset_name = data_root, split, dataset_name
         self.columns = None if columns is None else tuple(columns)
-        self._ident_by_path, self._id2pos, self._bad = {}, {}, {}
+        self._ident_by_path, self._id2pos, self._bad, self._grid_by_path = {}, {}, {}, {}
         self._init_shards()
         for path, why in self._bad.items():             # recorded, not raised: see _dup_ident above
             raise ValueError(why)
@@ -268,10 +268,15 @@ class CellsReader(ShardReaderBase):
         from helix.data.cells import read_ident, require_format
         with h5py.File(h5_path, "r") as f:
             try:
-                require_format(f["config"], str(h5_path))
+                grid = require_format(f["config"], str(h5_path))
+                # one truth, one grid: a dataset mixing grids would score some events on other cells
+                first = next(iter(self._grid_by_path.values()), grid)
+                if grid != first:
+                    raise ValueError(f"{h5_path}: cells grid {grid}, other shards of this dataset are {first}")
             except ValueError as e:
                 self._bad[str(h5_path)] = str(e)
                 return np.zeros(0, np.int64)
+            self._grid_by_path[str(h5_path)] = grid
             ident = read_ident(f)
         self._ident_by_path[str(h5_path)] = ident
         ev = _identity_ids(ident["source_file"], ident["event"], run=ident["run"])
@@ -279,8 +284,8 @@ class CellsReader(ShardReaderBase):
         return np.asarray(ev, np.int64)
 
     def read_event(self, idx):
-        """One event's record (:data:`helix.data.cells.SCHEMA` names, or ``columns`` of them) plus
-        ``_ident``."""
+        """One event's record (:data:`helix.data.cells.SCHEMA` names, or ``columns`` of them, and
+        its ``grid``) plus ``_ident``."""
         from helix.data.cells import read_event
         self._ensure_open()
         file_idx, event_id = self.locate(idx)

@@ -30,6 +30,8 @@ roots:
   # Not chosen here (training at S3DF is not set up): set HELIX_SCRATCH, or HELIX_HOST_VENV
   # for scripts/make_host_env.sh alone.
   HELIX_SCRATCH:       null
+  # 1 x 1 truth of 10 d1m shards (2,000 events; REPORT.md one level up)
+  HELIX_FINETRUTH:     /sdf/data/neutrino/omara/helix_audit_2026-11/finetruth/pixels
 
 # The container, as four facts rather than one path. `HELIX_IMAGE` used to be a
 # single root typed as a filesystem path to a .sif, which cannot describe a site

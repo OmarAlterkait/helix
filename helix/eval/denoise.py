@@ -91,9 +91,9 @@ import os
 
 import numpy as np
 
-from helix.data.cells import FT, FW, Q0, fkey, unkey
+from helix.data.cells import Q0, Grid, fkey, unkey
 from helix.model.cells_join import cell_inputs, cell_neighbors, covering_tokens
-from helix.eval.events import HEADLINE, LEVEL, SECONDARY, VIEWS, Scored, amplitude, bootstrap, cell_charge
+from helix.eval.events import HEADLINE, LEVEL, PAD, SECONDARY, VIEWS, Scored, amplitude, bootstrap, cell_charge
 
 #: Truth-charge bins of the diagnostic (e-), from the presence label; the last is open.
 TRUTH_BINS = (25.0, 1e3, 4e3, 16e3, 64e3, 256e3, np.inf)
@@ -106,8 +106,9 @@ CALL_P = 0.5
 #: The share of the uncharged covered cells sampled per event (each weighted by its inverse).
 EMPTY_FRAC = 0.05
 #: The near stratum's reach (cells, Chebyshev): the near windows' +-16 wires / +-128 ticks.
-NEAR_CELLS = 8
-#: The distance strata of the uncharged covered cells: 1 cell, 2..NEAR_CELLS, beyond.
+#: The distance strata of the uncharged covered cells: the adjacent cell, then within the near
+#: windows' box (:data:`helix.eval.events.PAD`, wires x ticks, so it is the same physical box at
+#: every truth grid), then beyond.
 STRATA = ("adjacent", "near", "far")
 #: The log-odds quantisation of the per-cell detection and calibration, and its clipped range.
 LOGIT_STEP, LOGIT_MAX = 0.025, 40.0
@@ -203,6 +204,7 @@ def covered_cells(ev, cfg):
     g, b, wb, tb = unpack_cell_key(np.asarray(ev.cell_key, np.int64))
     if not len(g):
         return np.zeros(0, np.int64)
+    FW, FT = ev.grid.fw, ev.grid.ft                   # the truth's own grid
     nwc = -(-cfg.pw // FW)
     cand = []
     for band in np.unique(b).tolist():
@@ -219,14 +221,18 @@ def covered_cells(ev, cfg):
     cand = np.unique(np.concatenate(cand))
     keep = np.zeros(len(cand), bool)
     for s in range(0, len(cand), 500_000):
-        keep[s:s + 500_000] = (covering_tokens(cand[s:s + 500_000], ev.cell_key, ev.band_lengths, cfg) >= 0).any(1)
+        keep[s:s + 500_000] = (covering_tokens(cand[s:s + 500_000], ev.cell_key, ev.band_lengths, cfg, ev.grid) >= 0).any(1)
     return cand[keep]
 
 
-def activity_class(keys, pos_keys, r=NEAR_CELLS):
-    """Per fine cell of ``keys``: 0 if it is one of ``pos_keys`` (the charged cells), else its
-    distance stratum by the Chebyshev distance (cells) to the nearest of them on its plane --
-    1 ``adjacent`` (1), 2 ``near`` (2..r), 3 ``far`` (beyond r, or none on the plane)."""
+def activity_class(keys, pos_keys, grid, near=None):
+    """Per cell of ``keys`` (on ``grid``): 0 if it is one of ``pos_keys`` (the charged cells),
+    else its distance stratum to the nearest of them on its plane -- 1 ``adjacent`` (within one
+    cell), 2 ``near`` (within ``near`` = (wires, ticks), default :data:`~helix.eval.events.PAD`),
+    3 ``far`` (beyond, or none on the plane)."""
+    grid = Grid(*grid)
+    rw, rt = grid.cells(*(PAD if near is None else near))
+    r = max(rw, rt)
     keys, pos_keys = np.asarray(keys, np.int64), np.asarray(pos_keys, np.int64)
     out = np.full(len(keys), 3, np.int8)
     if not len(keys) or not len(pos_keys):
@@ -240,14 +246,14 @@ def activity_class(keys, pos_keys, r=NEAR_CELLS):
         w0 = int(min(w[m].min(), pw[pm].min())) - r - 1
         t0 = int(min(t[m].min(), pt[pm].min())) - r - 1
         shape = (int(max(w[m].max(), pw[pm].max())) - w0 + r + 2, int(max(t[m].max(), pt[pm].max())) - t0 + r + 2)
-        grid = np.zeros(shape, np.int32)
-        grid[pw[pm] - w0, pt[pm] - t0] = 1
-        S = np.pad(grid.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+        occ = np.zeros(shape, np.int32)
+        occ[pw[pm] - w0, pt[pm] - t0] = 1
+        S = np.pad(occ.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
         i, j = w[m] - w0, t[m] - t0
 
-        def box(rr):
-            return S[i + rr + 1, j + rr + 1] - S[i - rr, j + rr + 1] - S[i + rr + 1, j - rr] + S[i - rr, j - rr]
-        out[m] = np.where(grid[i, j] > 0, 0, np.where(box(1) > 0, 1, np.where(box(r) > 0, 2, 3)))
+        def box(a, b):
+            return S[i + a + 1, j + b + 1] - S[i - a, j + b + 1] - S[i + a + 1, j - b] + S[i - a, j - b]
+        out[m] = np.where(occ[i, j] > 0, 0, np.where(box(1, 1) > 0, 1, np.where(box(rw, rt) > 0, 2, 3)))
     return out
 
 
@@ -359,13 +365,13 @@ def load_denoiser(path, device=None, *, weights="last", fm=None):
 
     def predict(ev, keys):
         keys = np.asarray(keys, np.int64)
-        idx, aux = cell_inputs(keys, ev.cell_key, ev.band_lengths, cfg)
+        idx, aux = cell_inputs(keys, ev.cell_key, ev.band_lengths, cfg, ev.grid)
         ok = (idx >= 0).any(1)
         y = np.zeros(len(keys), np.float32)
         logit = np.full(len(keys), UNCOVERED_LOGIT, np.float32)
         qm, sd = np.zeros(len(keys)), np.full(len(keys), np.nan)
         if ok.any():
-            nbr = cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg)
+            nbr = cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg, ev.grid)
             feats = ev.features(model.fm)                            # what DenoiseModel.outputs encodes
             with torch.no_grad(), autocast(dev):
                 out = model.head(feats, t(idx[ok]), t(aux[ok]), t(nbr), ev.batch)
@@ -448,7 +454,7 @@ class Denoise:
         sk = ek[np.random.default_rng([c.seed, ev.index, 1]).random(len(ek)) < f]
         sy, sl, sqm, ssd = self._predict(ev, sk)
         sq, sp = cell_charge(ev.cells, sk), sigmoid(sl)
-        scls = activity_class(sk, ck)
+        scls = activity_class(sk, ck, ev.grid)
         sview = (unkey(sk)[0] % 3).astype(np.int64)
         sqp = Q0 * np.expm1(np.maximum(sy.astype(np.float64), 0))
 
@@ -509,7 +515,7 @@ class Denoise:
                             key=key, q=np.concatenate([cq, sq, cell_charge(ev.cells, rk)]).astype(np.float32),
                             y=cat(y, sy, wy), logit=cat(lg, sl, wl), q_mean=cat(qm, sqm, wqm), y_sd=cat(sd, ssd, wsd),
                             w=w, flags=fl,
-                            dclass=np.concatenate([np.zeros(len(ck), np.int8), scls, activity_class(rk, ck)]),
+                            dclass=np.concatenate([np.zeros(len(ck), np.int8), scls, activity_class(rk, ck, ev.grid)]),
                             index=ev.index, n_covered=len(K), presence_q=self.presence_q,
                             empty_frac=self.empty_frac,
                             q_total=np.bincount(unkey(allk)[0] % 3, np.asarray(ev.cells["q"], np.float64), 3))

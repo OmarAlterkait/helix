@@ -43,6 +43,9 @@ roots:
   # "not configured" rather than inheriting an S3DF path that cannot exist here
   # and then reporting it MISSING, which reads like breakage rather than absence.
   HELIX_JAXTPC_ROOT:   null
+  # 1 x 1 truth of 10 d1m shards (2,000 events), built at S3DF from the campaign's hits
+  # (its REPORT.md, one level up); copied here. Read-only reference.
+  HELIX_FINETRUTH:     $CFS/m5238/users/oalter/finetruth_1x1_d1m/pixels
 
 # Environment this site needs set for helix to work at all. Not paths, not
 # scheduler flags -- facts about the machine that some library reads.

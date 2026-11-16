@@ -125,8 +125,9 @@ rows following the POSITION of a gid in `gids`. `sigma_threshold` (per event, de
 set) and `norm_sigma` (per corpus, normalises) are different tables. `provenance_json` records
 the helix `git` commit and `git_dirty`.
 
-**`helix-cells-3`** (`helix/data/cells.py`): simulation truth on the fine grid of 2 wires x 16
-ticks, one `{name}_cells_<k>.h5` per coeff shard (same events and order, `/ident` copied),
+**`helix-cells-3`** (`helix/data/cells.py`): simulation truth on a cell grid the file records
+(`/config` `grid_fw`, `grid_ft`; the d1m truth is 2 wires x 16 ticks, a finer one sums to it
+exactly), one `{name}_cells_<k>.h5` per coeff shard (same events and order, `/ident` copied),
 built by `scripts/build_truth.py` from the campaign's `hits`, `step` and pysupera `labl`.
 Four per-event CSR tables: `/cells` (charge `q`, the dominant hits group's share and (y, z)),
 `/cell_track`, `/plane_track` (per-track charge centroids), `/tracks` (energy, motif, pid).

@@ -43,6 +43,8 @@ ROOTS: dict[str, str] = {
     "HELIX_PIMM_ROOT":     "the pimm checkout training runs (the site's pinned worktree)",
     "HELIX_SCRATCH":       "transient, rebuildable state: the launcher venv, frozen code trees, caches",
     "HELIX_JAXTPC_ROOT":   "JAXTPC checkout (noise spectrum, geometry)",
+    "HELIX_FINETRUTH":     "per-pixel (1 x 1) cells truth of some corpus shards ({name}_pixels_<k>.h5): the "
+                           "reference a derived grid is checked against (helix.data.cells.aggregate)",
 }
 
 #: Job kinds :func:`scheduler` knows.

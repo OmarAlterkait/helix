@@ -8,11 +8,16 @@ separately from the corpus build: labels change more often than the corpus. Same
 (``/ident``) as the dataset modality ``cells`` (``CoeffTPCDataset(modalities=("coeff",
 "cells"))``). Pretraining never opens it (tests/test_boundary.py).
 
-Grid: ``FW`` = 2 wires x ``FT`` = 16 raw ticks, finer than any patch under test, so models
-with different tokenizers are scored on the same cells. Every quantity the evaluation uses is
-decided per cell (every window and padding box is aligned to the grid) except two sub-cell
-ones, stored at their own granularity: each particle's charge centroid per (plane, track),
-and each cell's dominant hits group's 3D centroid (the along-wire probe's label).
+Grid: a cell is ``fw`` wires x ``ft`` raw ticks (:class:`Grid`), a property of the FILE: written
+in its ``/config`` (``grid_fw``, ``grid_ft``) by the builder, read back with every record
+(``rec["grid"]``, :func:`read_event`) and taken from there by every consumer -- nothing holds a
+grid of its own. The d1m truth everything has been scored on is 2 x 16 (finer than any patch
+under test, so models with different tokenizers are scored on the same cells); a finer truth
+(1 x 4, 1 x 1) sums EXACTLY to it (:func:`aggregate`), so 2 x 16 numbers stay derivable from
+it. Every quantity the evaluation uses is decided per cell (every window and padding box is
+given in wires and ticks and aligned to the grid) except two sub-cell ones, stored at their own
+granularity: each particle's charge centroid per (plane, track), and each cell's dominant hits
+group's 3D centroid (the along-wire probe's label).
 
 Layout (four tables, each a per-event CSR with its own ``event_offset``)::
 
@@ -48,13 +53,13 @@ from __future__ import annotations
 
 import json
 import os
+from typing import NamedTuple
 
 import h5py
 import numpy as np
 
 FORMAT = "helix-cells-3"
 
-FW, FT = 2, 16                       # fine cell, wires x raw ticks
 _TOFF = 4096                         # fine-tick offset inside the packed key
 
 #: The charge scale of every per-cell charge target and prediction: ``y = log1p(q / Q0)``.
@@ -113,9 +118,55 @@ _STR = h5py.string_dtype(encoding="utf-8")
 
 
 # ------------------------------------------------------------------------------------------- grid
+class Grid(NamedTuple):
+    """A cell grid: ``fw`` wires x ``ft`` raw ticks per cell. Cell ``(fw_i, ft_i)`` holds wires
+    ``[fw_i * fw, (fw_i + 1) * fw)`` and ticks ``[ft_i * ft, (ft_i + 1) * ft)``."""
+    fw: int
+    ft: int
+
+    def cells(self, wires, ticks):
+        """A box of ``wires`` x ``ticks`` in cells of this grid; refused unless it is a whole
+        number of cells (a box that is not would mean something different on this grid)."""
+        if wires % self.fw or ticks % self.ft:
+            raise ValueError(f"{wires} wires x {ticks} ticks is not a whole number of {self.fw} x {self.ft} cells")
+        return wires // self.fw, ticks // self.ft
+
+    def __str__(self):
+        return f"{self.fw}x{self.ft}"
+
+
+def parse_grid(text):
+    """``"1x4"`` -> ``Grid(1, 4)``."""
+    try:
+        fw, ft = (int(x) for x in str(text).lower().split("x"))
+    except ValueError:
+        raise ValueError(f"grid {text!r}: expected WIRESxTICKS, e.g. 2x16") from None
+    if fw < 1 or ft < 1:
+        raise ValueError(f"grid {text!r}: both sides must be >= 1")
+    return Grid(fw, ft)
+
+
+def grid_of(rec):
+    """The grid a record's keys are on (``rec["grid"]``, put there by whatever read or built it)."""
+    g = rec.get("grid") if hasattr(rec, "get") else None
+    if g is None:
+        raise KeyError("cells record carries no 'grid': read it with helix.data.cells.read_event, or "
+                       "build it with cell_truth / aggregate, which record the grid with the keys")
+    return Grid(*(int(x) for x in g))
+
+
+def read_grid(cfg, where=""):
+    """The grid a cells file's ``/config`` records. Every cells file has carried ``grid_fw`` /
+    ``grid_ft`` since the format's first version; one without them is refused, not assumed."""
+    if "grid_fw" not in cfg.attrs or "grid_ft" not in cfg.attrs:
+        raise ValueError(f"{where or 'cells shard'}: /config records no grid (grid_fw, grid_ft)")
+    return parse_grid(f"{int(cfg.attrs['grid_fw'])}x{int(cfg.attrs['grid_ft'])}")
+
+
 def fkey(g, fw, ft):
-    """Pack (plane_gid, fine wire, fine tick) into one int64. Coordinates must be >= 0 (wire) /
-    > -4096 (tick): a negative wire sets the plane bits."""
+    """Pack (plane_gid, cell wire, cell tick) -- cell coordinates on the record's grid -- into
+    one int64. Coordinates must be >= 0 (wire) / > -4096 (tick): a negative wire sets the plane
+    bits."""
     return (np.asarray(g, np.int64) << 40) | (np.asarray(fw, np.int64) << 20) \
         | (np.asarray(ft, np.int64) + _TOFF)
 
@@ -167,14 +218,15 @@ def group_centroids(pos, q, deposit_to_group, n_groups):
     return out
 
 
-def cell_truth(g, w, t, q, trk, grp, grp_yz):
-    """Per-pixel-sample truth -> the cell record (:data:`SCHEMA` names, without the track table).
+def cell_truth(g, w, t, q, trk, grp, grp_yz, grid):
+    """Per-pixel-sample truth -> the cell record on ``grid`` (:data:`SCHEMA` names, without the
+    track table, plus ``grid``).
 
     ``g`` (plane_gid), ``w``, ``t``, ``q``, ``trk`` (any integer particle id >= 0) and ``grp``
     (any integer hits group id, unique within the event) per sample; ``grp_yz``: per sample, its
     group's (y, z) centroid (mm). Returns
 
-      key, q                     every fine cell a sample falls in (sorted) and its charge,
+      key, q                     every cell a sample falls in (sorted) and its charge,
                                  summed in sample order (float64)
       dom_frac, dom_y, dom_z     the cell's largest group: its share of the cell's charge and
                                  its (y, z)
@@ -183,6 +235,7 @@ def cell_truth(g, w, t, q, trk, grp, grp_yz):
       pt_gid, pt_track,          per (plane, particle), sorted: its charge-weighted PIXEL
       pt_wire, pt_tick           centroid (wire, tick)
     """
+    grid = Grid(*grid)
     G, W, T = (np.asarray(x, np.int64) for x in (g, w, t))
     Q, TRK, GRP = np.asarray(q, np.float64), np.asarray(trk, np.int64), np.asarray(grp, np.int64)
     YZ = np.asarray(grp_yz, np.float64).reshape(-1, 2)
@@ -192,7 +245,7 @@ def cell_truth(g, w, t, q, trk, grp, grp_yz):
     on = (W >= 0) & (T >= 0)
     if not on.all():
         G, W, T, Q, TRK, GRP, YZ = G[on], W[on], T[on], Q[on], TRK[on], GRP[on], YZ[on]
-    key, inv = np.unique(fkey(G, W // FW, T // FT), return_inverse=True)
+    key, inv = np.unique(fkey(G, W // grid.fw, T // grid.ft), return_inverse=True)
     inv = inv.astype(np.int64).ravel()
     qc = np.bincount(inv, weights=Q, minlength=len(key))
     tu, tinv = np.unique(TRK, return_inverse=True)
@@ -213,7 +266,7 @@ def cell_truth(g, w, t, q, trk, grp, grp_yz):
     first = np.zeros(len(cg), np.int64)
     first[cginv[::-1]] = np.arange(len(Q))[::-1]                     # one sample of each (cell, group)
     dyz = YZ[first[top]] if len(key) else np.zeros((0, 2))
-    return dict(key=key, q=qc,
+    return dict(grid=grid, key=key, q=qc,
                 dom_frac=cgq[top] / np.maximum(qc, 1e-12) if len(key) else np.zeros(0),
                 dom_y=dyz[:, 0], dom_z=dyz[:, 1],
                 ct_cell=cu // nt, ct_track=tu[cu % nt], ct_q=np.bincount(cinv.ravel(), weights=Q),
@@ -262,13 +315,78 @@ def cell_class(rec, col):
 
 
 def require_format(cfg, where=""):
-    """Refuse a file that is not :data:`FORMAT` on this grid."""
+    """Refuse a file that is not :data:`FORMAT` or records no grid; its :class:`Grid`."""
     got = cfg.attrs.get("format")
     got = got.decode() if isinstance(got, bytes) else got
     if got != FORMAT:
         raise ValueError(f"{where or 'cells shard'}: format {got!r}, not {FORMAT!r}; rebuild it (scripts/build_truth.py)")
-    if (int(cfg.attrs["grid_fw"]), int(cfg.attrs["grid_ft"])) != (FW, FT):
-        raise ValueError(f"{where}: grid {cfg.attrs['grid_fw']} x {cfg.attrs['grid_ft']}, helix scores on {FW} x {FT}")
+    return read_grid(cfg, where)
+
+
+def aggregate(rec, grid):
+    """``rec`` summed onto the coarser ``grid``, which its own grid must nest in (each side a
+    multiple). The rule per field:
+
+      key, q          a cell's charge is the sum of its sub-cells' (float64). Exact: equal to a
+                      build at ``grid`` up to the float32 rounding of the stored sub-cell
+                      charges (within one float32 ulp of the coarse charge)
+      ct_cell, ct_track, ct_q
+                      the charge split by track, summed per (cell, track): exact likewise. So is
+                      every per-cell class (:func:`cell_class`: the motif / pid of the track
+                      carrying most of the cell's charge), which reads these
+      pt_*, trk_*     unchanged: per (plane, track) PIXEL centroids and per-track rows do not
+                      depend on the grid
+      dom_frac, dom_y, dom_z
+                      NOT derivable exactly: a sub-cell keeps only its own largest hits group, as
+                      its charge share and (y, z). Groups are told apart by that (y, z) (each
+                      group's deposit centroid); each group's charge in the cell is summed over
+                      the sub-cells it dominates, and the largest wins: its (y, z), and that
+                      charge over the cell's as ``dom_frac`` -- a lower bound on the true share
+                      (a group's charge in sub-cells it does not dominate is not stored), exact
+                      where the cell's largest group dominates every sub-cell it touches
+
+    Columns ``rec`` does not carry are left out (training reads ``key`` and ``q`` alone). Keys
+    must be valid cells (:func:`valid_cells`)."""
+    src, grid = grid_of(rec), Grid(*grid)
+    if grid.fw % src.fw or grid.ft % src.ft:
+        raise ValueError(f"grid {grid} is not a multiple of the record's {src}: a cell would split")
+    per_cell = ("key", "q", "dom_frac", "dom_y", "dom_z", "ct_cell", "ct_track", "ct_q")
+    out = {k: v for k, v in rec.items() if k not in per_cell}             # grid-free columns as they are
+    out["grid"] = grid
+    key = np.asarray(rec["key"], np.int64)
+    if (key < 0).any():
+        raise ValueError("record holds invalid cell keys; drop them first (valid_cells)")
+    g, w, t = unkey(key)
+    nk, inv = np.unique(fkey(g, w // (grid.fw // src.fw), t // (grid.ft // src.ft)), return_inverse=True)
+    inv = inv.astype(np.int64).ravel()
+    out["key"] = nk
+    if "q" in rec:
+        q = np.asarray(rec["q"], np.float64)
+        out["q"] = np.bincount(inv, weights=q, minlength=len(nk))
+        if all(c in rec for c in ("dom_frac", "dom_y", "dom_z")) and len(key):
+            dq = np.asarray(rec["dom_frac"], np.float64) * q
+            dy, dz = np.asarray(rec["dom_y"]), np.asarray(rec["dom_z"])
+            # (cell, group) by the group's centroid bits (a NaN centroid is one group too)
+            yb = dy.astype(np.float32).view(np.int32).astype(np.int64) & 0xFFFFFFFF
+            zb = dz.astype(np.float32).view(np.int32).astype(np.int64) & 0xFFFFFFFF
+            _, first, ginv = np.unique(np.stack([inv, yb, zb], 1), axis=0, return_index=True, return_inverse=True)
+            ginv = ginv.ravel()
+            gq = np.bincount(ginv, weights=dq)                 # per (cell, group): its dominated charge
+            gcell = inv[first]
+            o = np.lexsort((gq, gcell))                        # per cell, the largest group last
+            top = np.zeros(len(nk), np.int64)
+            top[gcell[o]] = o
+            out["dom_frac"] = gq[top] / np.maximum(out["q"], 1e-12) if len(nk) else np.zeros(0)
+            out["dom_y"], out["dom_z"] = dy[first[top]], dz[first[top]]
+        elif all(c in rec for c in ("dom_frac", "dom_y", "dom_z")):
+            out.update(dom_frac=np.zeros(0), dom_y=np.zeros(0, np.float32), dom_z=np.zeros(0, np.float32))
+    if all(c in rec for c in ("ct_cell", "ct_track", "ct_q")):
+        cc, tr = inv[np.asarray(rec["ct_cell"], np.int64)], np.asarray(rec["ct_track"], np.int64)
+        nt = int(tr.max()) + 1 if len(tr) else 1
+        u, cinv = np.unique(cc * nt + tr, return_inverse=True)
+        out["ct_cell"], out["ct_track"] = u // nt, u % nt
+        out["ct_q"] = np.bincount(cinv.ravel(), weights=np.asarray(rec["ct_q"], np.float64), minlength=len(u))
+    return out
 
 
 def cells_path(coeff_shard, out_dir=None):
@@ -288,9 +406,9 @@ def step_positions(sv):
     return sv["positions"][:].astype(np.float64) * float(sv.attrs["pos_step_mm"]) + origin
 
 
-def event_record(hits_ev, step_ev, labl_ev):
-    """One simulation event (its ``hits``, ``step`` and ``labl`` entry groups) -> a record
-    (:data:`SCHEMA` names).
+def event_record(hits_ev, step_ev, labl_ev, grid):
+    """One simulation event (its ``hits``, ``step`` and ``labl`` entry groups) -> a record on
+    ``grid`` (:data:`SCHEMA` names, plus ``grid``).
 
     Samples are concatenated volume by volume (sorted by name), plane by plane, in stored order,
     so each cell's charge is summed in that order.
@@ -324,20 +442,32 @@ def event_record(hits_ev, step_ev, labl_ev):
         gbase += len(g2t)
     cat = lambda xs: np.concatenate(xs) if xs else np.zeros(0, np.int64)
     rec = cell_truth(cat(G), cat(W), cat(T), cat(Q), cat(TRK), cat(GRP),
-                     np.concatenate(YZ) if YZ else np.zeros((0, 2)))
+                     np.concatenate(YZ) if YZ else np.zeros((0, 2)), grid)
     motif, pid = track_classes(labl_ev, cat(tid))
     rec.update(trk_volume=cat(vol), trk_id=cat(tid), trk_energy=cat(energy), trk_motif=motif, trk_pid=pid)
-    return {name: np.asarray(rec[name]).astype(dt) for _, _, name, dt in SCHEMA}
+    return as_stored(rec)
 
 
-def write_shard(path, ident, records, *, label, provenance):
-    """Write ``records`` (one per event of ``ident``) to ``path``, whole or not at all."""
+def as_stored(rec):
+    """``rec`` (with every :data:`SCHEMA` column) in the stored dtypes, as :func:`read_event`
+    returns it."""
+    out = {name: np.asarray(rec[name]).astype(dt) for _, _, name, dt in SCHEMA}
+    out["grid"] = grid_of(rec)
+    return out
+
+
+def write_shard(path, ident, records, *, grid, label, provenance):
+    """Write ``records`` (one per event of ``ident``, each on ``grid``) to ``path``, whole or not
+    at all."""
+    grid = Grid(*grid)
     if len(records) != len(ident["event"]):
         raise ValueError(f"{len(records)} records for {len(ident['event'])} events")
+    if any(grid_of(r) != grid for r in records):
+        raise ValueError(f"records on another grid than {grid}")
     part = str(path) + ".part"
     with h5py.File(part, "w") as f:
         cfg = f.create_group("config")
-        cfg.attrs.update(format=FORMAT, n_events=len(records), grid_fw=FW, grid_ft=FT,
+        cfg.attrs.update(format=FORMAT, n_events=len(records), grid_fw=grid.fw, grid_ft=grid.ft,
                          key="fkey(plane_gid, wire // grid_fw, tick // grid_ft) = g << 40 | fw << 20 | (ft + 4096)",
                          label_json=json.dumps(label, sort_keys=True),
                          provenance_json=json.dumps(provenance, sort_keys=True))
@@ -377,8 +507,9 @@ def labl_path(hits_file):
     return os.path.join(task, "labl", os.path.basename(p).replace("_hits_", "_labl_"))
 
 
-def build_shard(coeff_shard, source_root, out_dir=None):
-    """Write the cells shard of ``coeff_shard``; ``(path, message)``. An existing one is kept.
+def build_shard(coeff_shard, source_root, out_dir=None, *, grid):
+    """Write the cells shard of ``coeff_shard`` on ``grid``; ``(path, message)``. An existing one
+    on that grid is kept (one on another grid is refused: it is a different truth).
 
     Events come from the coeff shard's ``/ident`` (any number of source files): ``source_file`` of
     run (campaign group) ``run`` under the campaign root ``source_root``
@@ -389,8 +520,15 @@ def build_shard(coeff_shard, source_root, out_dir=None):
     from helix.core.coeff_event import code_version
     from helix.tpc import io
 
+    grid = Grid(*grid)
     out = cells_path(coeff_shard, out_dir)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     if os.path.exists(out):
+        with h5py.File(out, "r") as f:
+            have = require_format(f["config"], out)
+        if have != grid:
+            raise ValueError(f"{out} exists on grid {have}, not {grid}: write a {grid} truth elsewhere (out_dir)")
         return out, "exists"
     with h5py.File(coeff_shard, "r") as f:
         ident = read_ident(f)
@@ -416,7 +554,7 @@ def build_shard(coeff_shard, source_root, out_dir=None):
                 raise KeyError(f"{run}/{sf}: no event {ev}")
             hits_ev = io.entry(fh, pos[ev], ev)
             threshold.add(float(hits_ev.attrs["threshold"]))
-            records.append(event_record(hits_ev, io.entry(fs, pos[ev], ev), io.entry(fl, pos[ev], ev)))
+            records.append(event_record(hits_ev, io.entry(fs, pos[ev], ev), io.entry(fl, pos[ev], ev), grid))
     finally:
         for handles in files.values():
             for x in handles[:3]:
@@ -424,19 +562,44 @@ def build_shard(coeff_shard, source_root, out_dir=None):
     if len(threshold) > 1:
         raise ValueError(f"{coeff_shard}: hits written with different sample thresholds {sorted(threshold)}")
     label = dict(LABEL, hits_threshold=threshold.pop() if threshold else None)
-    write_shard(out, ident, records, label=label,
+    write_shard(out, ident, records, grid=grid, label=label,
                 provenance=dict(code=code_version(), coeff_shard=os.path.basename(str(coeff_shard)), sim=sim))
     n = sum(len(r["key"]) for r in records)
-    return out, f"{len(records)} events, {n:,} cells"
+    return out, f"{len(records)} events, {n:,} cells ({grid})"
+
+
+def derive_shard(src, out, grid):
+    """Write the cells file ``src`` summed onto the coarser ``grid`` (:func:`aggregate`) to
+    ``out``; ``(path, message)``. Same events, order and identity; the label is ``src``'s, the
+    provenance names it. An existing ``out`` on that grid is kept."""
+    from helix.core.coeff_event import code_version
+    grid = Grid(*grid)
+    if os.path.exists(out):
+        with h5py.File(out, "r") as f:
+            have = require_format(f["config"], out)
+        if have != grid:
+            raise ValueError(f"{out} exists on grid {have}, not {grid}")
+        return out, "exists"
+    with h5py.File(src, "r") as f:
+        have = require_format(f["config"], str(src))
+        ident = read_ident(f)
+        label = json.loads(_text([f["config"].attrs["label_json"]])[0])
+        prov = json.loads(_text([f["config"].attrs["provenance_json"]])[0])
+        records = [as_stored(aggregate(read_event(f, i), grid)) for i in range(len(ident["event"]))]
+    label["grid"] = f"summed from the {have} truth (helix.data.cells.aggregate)"
+    write_shard(out, ident, records, grid=grid, label=label,
+                provenance=dict(code=code_version(), derived_from=dict(file=os.path.basename(str(src)),
+                                                                        grid=str(have), provenance=prov)))
+    return out, f"{len(records)} events, {sum(len(r['key']) for r in records):,} cells ({have} -> {grid})"
 
 
 # ------------------------------------------------------------------------------------------- read
 def read_event(f, pos, columns=None):
     """Event at write position ``pos`` of an open cells file -> a record (:data:`SCHEMA` names;
-    ``columns`` of them, plus ``key``, when given: training reads ``key`` and ``q`` only), without
-    cells whose key is not a real cell (:func:`valid_cells`)."""
+    ``columns`` of them, plus ``key``, when given: training reads ``key`` and ``q`` only) and its
+    ``grid`` (the file's), without cells whose key is not a real cell (:func:`valid_cells`)."""
     want = None if columns is None else set(columns) | {"key"}
-    out = {}
+    out = {"grid": read_grid(f["config"], f.filename)}
     for grp in GROUPS:
         cols = [(col, name) for g, col, name, _ in SCHEMA if g == grp and (want is None or name in want)]
         if cols:
@@ -452,7 +615,8 @@ def valid_cells(rec, gids=None, n_wires=None, n_ticks=None):
     fine wire below 0 or a tick below -4096 -- which unkey reads as plane -1 and every key consumer
     refuses (:func:`helix.model.tokenize.cell_key`). With the event's planes (``gids`` and their
     ``n_wires``, the raw tick span ``n_ticks``, all from the paired coeff shard): also cells on no
-    plane of the event, beyond its last wire, or outside [0, n_ticks). d1m's first truth build wrote
+    plane of the event, beyond its last wire, or outside [0, n_ticks) -- in wires and ticks, on
+    the record's own grid (``rec["grid"]``). d1m's first truth build wrote
     such cells in ONE event of 200,000 (sim_wire_cells_0664 event 112): 368 with negative keys, and
     16,333 on plane 3 at fine wires up to 16,374 against 984, 12.8% of that event's charge; the
     negative ones stopped every denoiser run that drew the event. ``ct_cell`` rows of dropped cells
@@ -466,9 +630,10 @@ def valid_cells(rec, gids=None, n_wires=None, n_ticks=None):
         on = pos < len(gids)
         lim = np.where(on, nw[np.minimum(pos, len(gids) - 1)], 0)
         on &= gids[np.minimum(pos, len(gids) - 1)] == g
-        ok &= on & (w * FW < lim) & (t >= 0)
+        grid = grid_of(rec)
+        ok &= on & (w * grid.fw < lim) & (t >= 0)
         if n_ticks is not None:
-            ok &= t * FT < int(n_ticks)
+            ok &= t * grid.ft < int(n_ticks)
     if ok.all():
         return rec
     out = dict(rec)

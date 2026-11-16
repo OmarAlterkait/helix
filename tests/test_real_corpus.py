@@ -58,17 +58,18 @@ def test_the_corpus_wires_are_the_geometrys_and_the_truths():
         assert {int(g): int(n) for g, n in zip(gids, nw)} == {g: reg[g]["n_wires"] for g in map(int, gids)}
         assert meta["n_ticks"] == reg[int(gids[0])]["n_ticks"]
         G, fw, ft = C.unkey(np.asarray(rec["key"]))
+        FW, FT = rec["grid"].fw, rec["grid"].ft                      # the truth file's own grid
         q = np.asarray(rec["q"], np.float64)
         prof = {}
         for g, n in zip(gids.tolist(), nw.tolist()):
-            nf = (n + 1) // C.FW
+            nf = (n + 1) // FW
             on = G == g
             assert on.any(), f"plane {g}: no truth charge"
-            assert fw[on].max() < nf and ft[on].min() >= 0 and ft[on].max() * C.FT < meta["n_ticks"]
+            assert fw[on].max() < nf and ft[on].min() >= 0 and ft[on].max() * FT < meta["n_ticks"]
             sel = c["plane_gid"] == g
             assert c["wire"][sel].max() < n
             prof[g] = (np.bincount(fw[on], weights=q[on], minlength=nf),
-                       np.bincount(c["wire"][sel] // C.FW, weights=np.abs(c["value"][sel]), minlength=nf))
+                       np.bincount(c["wire"][sel] // FW, weights=np.abs(c["value"][sel]), minlength=nf))
         for g, (truth, kept) in prof.items():
             r = lambda x: np.corrcoef(x, kept)[0, 1]                       # noqa: E731
             r0 = r(truth)

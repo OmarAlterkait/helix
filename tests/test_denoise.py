@@ -28,7 +28,7 @@ from helix.model.denoise import (ENCODER_PREFIXES, CellDecoder, build_denoise, c
                                  cat_cdf, cat_edges, cat_loss, cat_mean, cat_median, cat_presence_logit,
                                  cat_targets, gauss_nll_loss)
 from helix.model.tokenize import CoeffTokenize, PatchConfig, _name_hash, patch_config  # noqa: E402
-from test_eval import SMALL, TOK, _DS, _sample, _same, _write_run  # noqa: E402
+from test_eval import GRID, SMALL, TOK, _DS, _sample, _same, _write_run  # noqa: E402
 
 CFG = patch_config(TOK)
 
@@ -43,6 +43,12 @@ def fm_run(tmp_path_factory):
 @pytest.fixture(scope="module")
 def sample():
     return _sample(np.random.default_rng(3), 0)
+
+
+@pytest.fixture(scope="module")
+def sample_1x4():
+    """The same event with its truth on a 1 x 4 grid (the coefficients are the same)."""
+    return _sample(np.random.default_rng(3), 0, grid=C.Grid(1, 4))
 
 
 def _rows(s, **kw):
@@ -65,9 +71,13 @@ def test_the_tokens_hold_the_kept_coefficients(sample):
     np.testing.assert_array_equal(got, want)                       # same rows, same order
 
 
-def test_query_cells_shapes_and_labels(sample):
-    s = _rows(sample, seed=0)
+@pytest.mark.parametrize("which", ["sample", "sample_1x4"])
+def test_query_cells_shapes_and_labels(request, which):
+    """On the truth's own grid, whichever it is: the 2 x 16 truth and a 1 x 4 one of the same event."""
+    sample = request.getfixturevalue(which)
+    s = _rows(sample, seed=0, sig_cap=10**6)                      # every charged cell (1 x 4: > 20,000)
     t, rec = s["coeff"], sample["cells"]
+    grid = rec["grid"]
     n, nb = len(t["q_y"]), CFG.n_bands
     assert n > 0 and t["q_idx"].shape == (n, nb) and t["q_aux"].shape == (n, 13 * nb)
     assert t["q_nbr"].shape == (n, nb, 9)
@@ -75,15 +85,15 @@ def test_query_cells_shapes_and_labels(sample):
     np.testing.assert_array_equal(t["q_nbr"][:, :, 4], t["q_idx"])  # slot 4 is the covering token
     # the labels are the cells' truth: recover each row's key from the transform's own draw
     rng = np.random.default_rng([0, _name_hash(sample["name"])])
-    keys, q = DenoiseRows(seed=0).rows(kept_coefficients(t, CFG), rec, CFG, rng)
-    idx, _ = J.cell_inputs(keys, t["cell_key"], t["_meta"]["band_lengths"], CFG)
+    keys, q = DenoiseRows(seed=0, sig_cap=10**6).rows(kept_coefficients(t, CFG), rec, CFG, rng)
+    idx, _ = J.cell_inputs(keys, t["cell_key"], t["_meta"]["band_lengths"], CFG, grid)
     ok = (idx >= 0).any(1)
     np.testing.assert_array_equal(idx[ok], t["q_idx"])
     np.testing.assert_allclose(t["q_y"], np.log1p(q[ok] / C.Q0).astype(np.float32))
     truth = dict(zip(rec["key"].tolist(), rec["q"].tolist()))
     np.testing.assert_allclose(q, [truth.get(k, 0.0) for k in keys.tolist()])
     np.testing.assert_array_equal(t["q_present"], (t["q_y"] > np.log1p(25.0 / C.Q0)).astype(np.float32))
-    covered = (J.cell_inputs(rec["key"], t["cell_key"], t["_meta"]["band_lengths"], CFG)[0] >= 0).any(1)
+    covered = (J.cell_inputs(rec["key"], t["cell_key"], t["_meta"]["band_lengths"], CFG, grid)[0] >= 0).any(1)
     assert set(rec["key"][covered & (rec["q"] > 25.0)].tolist()) <= set(keys[ok].tolist())  # every charged cell
     assert (t["q_present"] == 0).sum() > (t["q_present"] == 1).sum()  # and more empty ones beside them
 
@@ -96,11 +106,39 @@ def test_a_seed_fixes_the_draw_and_none_draws_afresh(sample):
     assert len(c["q_y"]) != len(d["q_y"]) or not np.array_equal(c["q_aux"], d["q_aux"])
 
 
+def test_a_1x4_truth_gives_1x4_labels(sample, sample_1x4):
+    """The labels follow the truth's grid: a 1 x 4 truth of the same event gives 1 x 4 query
+    cells carrying their 1 x 4 charge, placed by their own wire and tick (cell_inputs on 1 x 4,
+    which differs from reading the same keys as 2 x 16), every charged covered cell among them;
+    and the 1 x 4 truth sums to the 2 x 16 one."""
+    s4, s2 = _rows(sample_1x4, seed=0, sig_cap=10**6)["coeff"], _rows(sample, seed=0, sig_cap=10**6)["coeff"]
+    rec4, rec2 = sample_1x4["cells"], sample["cells"]
+    assert rec4["grid"] == (1, 4) and rec2["grid"] == GRID
+    rng = np.random.default_rng([0, _name_hash(sample_1x4["name"])])
+    keys, q = DenoiseRows(seed=0, sig_cap=10**6).rows(kept_coefficients(s4, CFG), rec4, CFG, rng)
+    truth = dict(zip(rec4["key"].tolist(), rec4["q"].tolist()))
+    np.testing.assert_allclose(q, [truth.get(k, 0.0) for k in keys.tolist()])
+    bl = s4["_meta"]["band_lengths"]
+    idx4, aux4 = J.cell_inputs(keys, s4["cell_key"], bl, CFG, (1, 4))
+    ok = (idx4 >= 0).any(1)
+    np.testing.assert_array_equal(s4["q_idx"], idx4[ok])
+    np.testing.assert_array_equal(s4["q_aux"], aux4[ok])
+    np.testing.assert_allclose(s4["q_y"], np.log1p(q[ok] / C.Q0).astype(np.float32))
+    assert not np.array_equal(J.cell_inputs(keys, s4["cell_key"], bl, CFG, GRID)[1], aux4)
+    sup = rec4["q"] > 25.0
+    cov = (J.cell_inputs(rec4["key"], s4["cell_key"], bl, CFG, (1, 4))[0] >= 0).any(1)
+    assert set(rec4["key"][cov & sup].tolist()) <= set(keys[ok].tolist())
+    summed = C.aggregate(rec4, GRID)
+    np.testing.assert_array_equal(summed["key"], rec2["key"])
+    np.testing.assert_allclose(summed["q"], rec2["q"], rtol=1e-6)
+    assert len(s4["q_y"]) > len(s2["q_y"])                          # finer cells, more of them
+
+
 def test_support_threshold_decides_charged_not_the_target():
     """Sampling and presence count a cell as charged only above ``support_min_q``; the
     regression target stays its full charge."""
     tkeys = C.fkey(np.zeros(3, np.int64), np.array([10, 20, 30]), np.array([5, 5, 5]))
-    cells = dict(key=tkeys, q=np.array([0.5, 30.0, 4000.0]))        # a tail, a faint cell, a bright cell
+    cells = dict(key=tkeys, q=np.array([0.5, 30.0, 4000.0]), grid=GRID)   # a tail, a faint cell, a bright cell
     coeffs = tuple(np.zeros(1, np.int64) for _ in range(4))
     kw = dict(cov_per_sig=0, win_per_event=0, near_any_per_sig=0, win_near_per_event=0)
     rng = np.random.default_rng
@@ -383,8 +421,8 @@ def _write_denoise_run(d, fm_dir, **model):
 
 def _model_logits(model, ev, keys, ok):
     """The presence logits of ``model`` on the covered ``keys``, straight from the model."""
-    idx, aux = J.cell_inputs(keys[ok], ev.cell_key, ev.band_lengths, CFG)
-    nbr = J.cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, CFG)
+    idx, aux = J.cell_inputs(keys[ok], ev.cell_key, ev.band_lengths, CFG, ev.grid)
+    nbr = J.cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, CFG, ev.grid)
     with torch.no_grad():
         return model.predict(ev.batch, *(torch.as_tensor(a) for a in (idx, aux, nbr)))[1].numpy()
 
@@ -405,7 +443,7 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
     y, pr, qm, sd = predict(ev, keys)
-    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG, ev.grid)[0] >= 0).any(1)
     assert y.shape == pr.shape == qm.shape == sd.shape == (len(keys),) and ok.any()
     assert (y[~ok] == 0).all() and (pr[~ok] == UNCOVERED_LOGIT).all() and (qm[~ok] == 0).all()
     from helix.data.cells import Q0                              # a point head: its mean charge is the point
@@ -438,7 +476,7 @@ def test_load_denoiser_reads_last_and_scores_presence_as_a_logit(fm_run, sample,
     assert pb.provenance["weights"] == "best" and _same(pb.run.model, best)
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
-    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG, ev.grid)[0] >= 0).any(1)
     top = predict(ev, keys)[1][ok]
     p = torch.sigmoid(torch.from_numpy(top)).numpy()
     assert (p == 1.0).all() and top.min() > 20 and not (p > np.quantile(p, 0.99)).any()   # tied: nothing above
@@ -458,7 +496,7 @@ def test_a_distributional_run_reads_back_and_predicts(fm_run, sample, tmp_path, 
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
     y, pr, qm, sd = predict(ev, keys)
-    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
+    ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG, ev.grid)[0] >= 0).any(1)
     assert predict.dist == dist and ok.any() and np.isfinite(y).all() and np.isfinite(pr).all()
     np.testing.assert_allclose(pr[ok], _model_logits(m, ev, keys, ok), rtol=1e-5, atol=1e-5)
     # the mean charge comes from the distribution: at least the point's (Jensen: E[expm1 y] >= expm1 E[y])
