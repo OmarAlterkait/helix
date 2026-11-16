@@ -404,10 +404,13 @@ def test_a_denoiser_run_reads_back_with_its_fm_runs_tokenizer(fm_run, sample, tm
     assert cfg == CFG and predict.dist == "point" and predict.run.tokenizer == CFG
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
-    y, pr = predict(ev, keys)
+    y, pr, qm, sd = predict(ev, keys)
     ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
-    assert y.shape == pr.shape == (len(keys),) and ok.any()
-    assert (y[~ok] == 0).all() and (pr[~ok] == UNCOVERED_LOGIT).all()
+    assert y.shape == pr.shape == qm.shape == sd.shape == (len(keys),) and ok.any()
+    assert (y[~ok] == 0).all() and (pr[~ok] == UNCOVERED_LOGIT).all() and (qm[~ok] == 0).all()
+    from helix.data.cells import Q0                              # a point head: its mean charge is the point
+    np.testing.assert_allclose(qm[ok], Q0 * np.expm1(np.maximum(y[ok].astype(np.float64), 0)), rtol=1e-5)
+    assert np.isnan(sd).all() and predict.conditional == bool(m.cond_charge)
     np.testing.assert_allclose(pr[ok], _model_logits(m, ev, keys, ok), rtol=1e-5, atol=1e-5)   # log-odds, as is
     with pytest.raises(ValueError, match="not a denoiser"):
         load_denoiser(os.path.join(d, "model", "iter_3.pth"), "cpu")
@@ -454,10 +457,14 @@ def test_a_distributional_run_reads_back_and_predicts(fm_run, sample, tmp_path, 
     predict, _ = load_denoiser(str(tmp_path), "cpu")
     ev = next(events(_DS([sample]), CFG, torch.device("cpu")))
     keys = sample["cells"]["key"]
-    y, pr = predict(ev, keys)
+    y, pr, qm, sd = predict(ev, keys)
     ok = (J.cell_inputs(keys, ev.cell_key, ev.band_lengths, CFG)[0] >= 0).any(1)
     assert predict.dist == dist and ok.any() and np.isfinite(y).all() and np.isfinite(pr).all()
     np.testing.assert_allclose(pr[ok], _model_logits(m, ev, keys, ok), rtol=1e-5, atol=1e-5)
+    # the mean charge comes from the distribution: at least the point's (Jensen: E[expm1 y] >= expm1 E[y])
+    from helix.data.cells import Q0
+    assert np.isfinite(qm[ok]).all() and (sd[ok] > 0).all() and predict.conditional
+    assert (qm[ok] >= Q0 * np.expm1(y[ok].astype(np.float64)) * (1 - 1e-4) - 1e-3).all()
 
 
 def test_the_fm_run_is_required_to_be_an_fm(tmp_path, fm_run):

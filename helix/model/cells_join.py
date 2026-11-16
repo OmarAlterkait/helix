@@ -47,6 +47,20 @@ def _fourier(x):
     return np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(x.shape[0], -1)
 
 
+def covering_tokens(keys, cell_key, band_lengths, cfg):
+    """Per fine cell (``keys``), the row of the token covering it in each band, -1 where none:
+    ``(n, n_bands)`` int64 -- :func:`cell_inputs`' ``idx`` alone. A cell is placed by its first
+    wire and its centre tick, through the tokenizer's own :func:`pixel_cells`."""
+    g, fw, ft = unkey(np.asarray(keys, np.int64))
+    pc = pixel_cells(g, fw * FW, ft * FT + FT // 2, band_lengths, cfg)
+    ck = np.asarray(cell_key, np.int64)
+    order = np.argsort(ck); cks = ck[order]
+    if not len(cks):
+        return np.full(pc.shape, -1, np.int64)
+    pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
+    return np.where(cks[pos] == pc, order[pos], -1).astype(np.int64)
+
+
 def cell_inputs(keys, cell_key, band_lengths, cfg):
     """Per fine cell: which token covers it in each band, and where inside it.
 
@@ -60,14 +74,7 @@ def cell_inputs(keys, cell_key, band_lengths, cfg):
     nb, pw, pt = cfg.n_bands, cfg.pw, cfg.pt
     g, fw, ft = unkey(np.asarray(keys, np.int64))
     w, t = fw * FW, ft * FT + FT // 2
-    pc = pixel_cells(g, w, t, band_lengths, cfg)
-    ck = np.asarray(cell_key, np.int64)
-    order = np.argsort(ck); cks = ck[order]
-    if len(cks):
-        pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
-        idx = np.where(cks[pos] == pc, order[pos], -1)
-    else:
-        idx = np.full(pc.shape, -1, np.int64)
+    idx = covering_tokens(keys, cell_key, band_lengths, cfg)
     dec = (1 << np.asarray(cfg.lev)).astype(np.float64)
     toff = np.asarray(cfg.toff)[g % 3]
     offs = []
