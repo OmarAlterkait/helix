@@ -237,7 +237,7 @@ def test_the_truth_script_builds_every_shard_of_a_run(corpus, tmp_path):
     _coeff_shard(run / "sim_wire_coeff_0000.h5", [EV0, EV0 + 1])
     _coeff_shard(run / "sim_wire_coeff_0001.h5", [EV0 + 2])
     script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "build_truth.py")
-    r = subprocess.run([sys.executable, script, "--corpus", str(run)], capture_output=True, text=True,
+    r = subprocess.run([sys.executable, script, "--corpus", str(run), "--grid", str(GRID)], capture_output=True, text=True,
                        env=dict(os.environ, HELIX_SIM_ROOT=str(corpus["dir"] / "sim")))
     assert r.returncode == 0, r.stderr
     for k, events in ((0, [EV0, EV0 + 1]), (1, [EV0 + 2])):

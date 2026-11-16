@@ -88,7 +88,7 @@ def test_the_evaluation_windows_come_out_whole_on_real_events():
     from helix.model.tokenize import PatchConfig
     cfg, ctxs = PatchConfig(), set()
     for i, (meta, c, rec) in enumerate(_events()):
-        ck = coeff_cells(c["band"], c["plane_gid"], c["wire"], c["tau"], cfg)
+        ck = coeff_cells(c["band"], c["plane_gid"], c["wire"], c["tau"], cfg, rec["grid"])
         t = event_truth(rec, ck, np.random.default_rng([0, i]))
         again = event_truth(rec, ck, np.random.default_rng([0, i]))
         assert np.array_equal(t["wkey"], again["wkey"]) and t["meta"] == again["meta"]
