@@ -3,7 +3,7 @@ name: CI
 # The cheap checks: the lockfile resolves, pyproject pins pimm-data by a full revision, and the
 # suite on CPU without pimm, pimm-data, a GPU or data. These need no image, so they run on every push.
 #
-# The expensive ones -- building the image, the suite, the no-data smoke -- live
+# The expensive ones -- building the images and the suite inside each -- live
 # in docker.yml, which is path-filtered because a 9 GB build is not free.
 
 on:
