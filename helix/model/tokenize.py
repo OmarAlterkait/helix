@@ -357,28 +357,10 @@ def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,
 
 # ---- the inverse: tokens -> coefficient rows -------------------------------
 
-def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *,
-                    gids, norm_sigma, cfg, space="asinh"):
-    """Shared core: an occupancy mask over the (cell, slot) grid -> coeff rows.
-
-    ``space`` says what ``values`` holds, because the inverse differs:
-
-      ``"asinh"``  the token, ``arcsinh(raw/sigma)`` -> ``sinh(v) * sigma``.
-                   Correct for ``inp``/``tgt``.
-      ``"ratio"``  the dimensionless coefficient ``raw/sigma`` -> ``v * sigma``.
-                   Correct for the CATEGORICAL head, whose read-back is
-                   ``sum_k p_k * E[raw/sigma | bin k]`` and is ALREADY an
-                   expectation of ``sinh``.
-
-    Passing a categorical posterior mean with ``space="asinh"`` applies ``sinh``
-    to a mean over many bins, which is Jensen-biased ~31% low; hence the
-    explicit parameter rather than a convention.
-
-    ``(cell, slot)`` is a bijection with ``(plane_gid, band, wire, tau)`` given
-    the per-cell block indices, so this inverts the scatter exactly. What differs
-    between the two public entry points is only WHERE the mask comes from: known
-    occupancy (``detokenize``) or predicted occupancy (``decode_prediction``).
-    """
+def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *, gids, norm_sigma, cfg):
+    """An occupancy mask over the (cell, slot) grid -> coeff rows, the token ``arcsinh(raw/sigma)``
+    read back as ``sinh(v) * sigma``. ``(cell, slot)`` is a bijection with ``(plane_gid, band,
+    wire, tau)`` given the per-cell block indices, so this inverts the scatter exactly."""
     cfg = _require_cfg(cfg)
     pw, pt = cfg.pw, cfg.pt
     cell, slot = np.nonzero(np.asarray(occ_mask))
@@ -386,14 +368,8 @@ def _rows_from_grid(occ_mask, values, cell_band, cell_gid, cell_wb, cell_tb, *,
     plane_gid = np.asarray(cell_gid, np.int64)[cell]
     wire = np.asarray(cell_wb, np.int64)[cell] * pw + slot // pt
     tau = np.asarray(cell_tb, np.int64)[cell] * pt + slot % pt
-    # undo the per-(plane, band) normalisation; see `space` above for which one
-    sig = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), 1e-6)
-    v = np.asarray(values, np.float32)[cell, slot]
-    if space == "asinh":
-        v = np.sinh(v)
-    elif space != "ratio":
-        raise ValueError(f"space must be 'asinh' or 'ratio', got {space!r}")
-    value = (v * sig).astype(np.float32)
+    sig = np.maximum(sigma_for_rows(plane_gid, band, gids, norm_sigma), 1e-6)   # undo the normalisation
+    value = (np.sinh(np.asarray(values, np.float32)[cell, slot]) * sig).astype(np.float32)
     return dict(band=band.astype(np.uint8), plane_gid=plane_gid.astype(np.int32),
                 wire=wire.astype(np.int32), tau=tau.astype(np.int32), value=value)
 
@@ -406,10 +382,6 @@ def detokenize(tok, *, gids, norm_sigma, cfg=None, values_key="inp"):
     rows that went in (up to ordering, and minus the bands ``assemble`` drops:
     it keeps only ``band < cfg.n_bands``).
 
-    This is the verifiable half of the inverse. ``decode_prediction`` handles
-    model output, where occupancy is predicted rather than known; that one cannot
-    be checked against ground truth, so it is built on this.
-
     Exact only for ``dead_frac == 0``: the wire-kill augmentation zeroes ``inp``
     and clears ``occ``, which is deliberately destructive.
     """
@@ -418,32 +390,6 @@ def detokenize(tok, *, gids, norm_sigma, cfg=None, values_key="inp"):
                            tok["cell_band"], tok["cell_gid"],
                            tok["cell_wb"], tok["cell_tb"],
                            gids=gids, norm_sigma=norm_sigma, cfg=cfg)
-
-
-def decode_prediction(occ_logit, values, tok, *, gids, norm_sigma,
-                      cfg=None, threshold=0.0, respect_valid=True,
-                      space="asinh"):
-    """Model output -> coefficient rows.
-
-    ``occ_logit`` and ``values`` are the FM's two heads over the ``(cell, slot)``
-    grid. A coefficient is emitted where the occupancy logit exceeds
-    ``threshold`` (0.0 == probability 0.5) and, unless ``respect_valid=False``,
-    where the slot is geometrically real — a slot past the plane's wire count or
-    the band's length cannot hold a coefficient no matter what the head says.
-
-    For a CATEGORICAL head, pass ``decode_categorical(...)`` output with
-    ``space="ratio"``. Do NOT pass bin centres with the default ``space="asinh"``:
-    that applies ``sinh`` to a posterior mean over many bins and reads back ~31%
-    of the charge.
-    """
-    cfg = _require_cfg(cfg)
-    occ = np.asarray(occ_logit) > threshold
-    if respect_valid and "valid" in tok:
-        occ = occ & np.asarray(tok["valid"]).astype(bool)
-    return _rows_from_grid(occ, values, tok["cell_band"], tok["cell_gid"],
-                           tok["cell_wb"], tok["cell_tb"],
-                           gids=gids, norm_sigma=norm_sigma, cfg=cfg, space=space)
-
 
 
 def bin_centroids_ratio(edges, cent_ratio=None):
@@ -510,34 +456,6 @@ def _close_open_edges(edges):
     if np.abs(e).max() >= BIG:
         raise ValueError(f"edges still hold a sentinel: max|e| = {np.abs(e).max():.3e}")
     return e
-
-
-def decode_categorical(logits, cell_band, centroids, readout="mean"):
-    """Categorical head -> value in UNITS OF SIGMA (i.e. ``space="ratio"``).
-
-    ``logits`` is ``(n_cells, n_slot, K)``; ``centroids`` is ``(n_band, K)`` from
-    :func:`bin_centroids_ratio`. Returns ``(n_cells, n_slot)``.
-
-    ``readout="mean"`` is ``sum_k p_k * centroid_k`` — the CHARGE-closing
-    estimate. ``readout="mode"`` takes the modal bin's centroid (bright-pixel
-    fidelity).
-
-    Never apply ``sinh`` to the result: the centroids are already an expectation
-    of ``sinh``, so ``sinh(mean)`` double-applies it and reads back ~31% of the
-    charge. That is exactly the bug this function exists to make unavailable —
-    feed the output to ``_rows_from_grid(..., space="ratio")``.
-    """
-    x = np.asarray(logits, np.float32)
-    x = x - x.max(-1, keepdims=True)
-    p = np.exp(x)
-    p /= p.sum(-1, keepdims=True)
-    c = np.asarray(centroids, np.float32)[np.asarray(cell_band, np.int64)]  # (n_cells, K)
-    if readout == "mean":
-        return np.einsum("csk,ck->cs", p, c).astype(np.float32)
-    if readout == "mode":
-        k = p.argmax(-1)                                   # (n_cells, n_slot)
-        return np.take_along_axis(c[:, None, :], k[..., None], -1)[..., 0].astype(np.float32)
-    raise ValueError(f"readout must be 'mean' or 'mode', got {readout!r}")
 
 
 # ---- model-side key contract ----------------------------------------------

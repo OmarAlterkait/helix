@@ -1,4 +1,4 @@
-"""The categorical objective: its contracts, the per-band binning, and decoding a prediction."""
+"""The categorical objective: its contracts, the per-band binning, and the bin centroids."""
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -8,8 +8,7 @@ import numpy as np
 
 from helix.model.loss import bucketize_bins, losses_cat            # noqa: E402
 from helix.model.loss import bucketize_bins, losses_cat  # noqa: E402
-from helix.model.tokenize import (PatchConfig, bin_centroids_ratio,
-                                  decode_categorical, _rows_from_grid)
+from helix.model.tokenize import bin_centroids_ratio
 
 
 # ---- loss contracts ----------------------------------------------------------------------
@@ -231,25 +230,12 @@ def test_losses_cat_uses_this_function():
         "losses_cat did not route through bucketize_bins; the test pins a copy"
 
 
-# ---- decoding a categorical prediction ---------------------------------------------------
+# ---- the categorical head's bin centroids ------------------------------------------------
 
-# The categorical head's read-back: centroids, decode, and the space it lives in.
-#
-# These pin the read-back against one bug: feeding a posterior mean over
-# *arcsinh-space* bin centres into `sinh(v) * sigma` -- an inverse for a Gaussian
-# head applied to a CATEGORICAL one. Because `sinh(E[t]) != E[sinh t]` and the
-# posterior spans many bins, that reads back 68% of the charge (0.674 against
-# 0.918).
-#
-# The correct read-back is `sum_k p_k * centroid_k`, with the centroid table
-# measured in LINEAR space: an expectation of sinh, never a sinh of an
-# expectation.
-#
-# `test_jensen_gap_is_real` is the one that would have caught it: it asserts the
-# two estimators genuinely differ on a spread posterior, so a future "simplification"
-# back to `sinh(mean)` fails here rather than in a figure nobody checks.
+# ``bin_centroids_ratio``: per bin, E[raw/sigma | bin] in LINEAR space -- an expectation of sinh,
+# never a sinh of an expectation (the model registers it with its bin table).
 
-K_D = 64                                # the decode tests' bin count (the binning tests above use K)
+K_D = 64                                # the centroid tests' bin count (the binning tests above use K)
 
 
 def _dec_edges(lo=-6.84699, hi=7.10671, open_ends=True):
@@ -292,98 +278,3 @@ def test_measured_table_is_preferred_over_the_closed_form():
     assert np.allclose(bin_centroids_ratio(e, fake), 3.25)
     nan = np.full((N_BAND, K_D), np.nan, np.float32)
     assert np.allclose(bin_centroids_ratio(e, nan), bin_centroids_ratio(e))
-
-
-def test_onehot_posterior_returns_that_bins_centroid():
-    """A delta posterior must decode to exactly the bin's centroid."""
-    cent = bin_centroids_ratio(_dec_edges())
-    band = np.array([0, 1, 2, 3], np.int64)
-    want_k = np.array([[3, 17], [K_D - 1, 0], [8, 8], [40, 2]])
-    logits = np.full((4, 2, K_D), -30.0, np.float32)
-    for c in range(4):
-        for s in range(2):
-            logits[c, s, want_k[c, s]] = 30.0
-    got = decode_categorical(logits, band, cent, readout="mean")
-    exp = cent[band[:, None], want_k]
-    np.testing.assert_allclose(got, exp, rtol=1e-5)
-    np.testing.assert_allclose(
-        decode_categorical(logits, band, cent, readout="mode"), exp, rtol=1e-5)
-
-
-def test_jensen_gap_is_real():
-    """A SPREAD posterior must not decode to sinh(mean-of-asinh-centres).
-
-    This is the shipped bug, in miniature. If someone "simplifies"
-    decode_categorical back to that form, this fails.
-    """
-    e = _dec_edges()
-    cent = bin_centroids_ratio(e)
-    # asinh-space midpoints, the thing the buggy path averaged
-    ee = e.copy()
-    for b in range(N_BAND):
-        ee[b, 0] = ee[b, 1] - (ee[b, 2] - ee[b, 1])
-        ee[b, -1] = ee[b, -2] + (ee[b, -2] - ee[b, -3])
-    mid = 0.5 * (ee[:, :-1] + ee[:, 1:])
-
-    band = np.zeros(1, np.int64)
-    x = np.linspace(-3, 3, K_D).astype(np.float32)      # broad posterior
-    logits = (-0.5 * x[None, None, :] ** 2).repeat(1, 0).reshape(1, 1, K_D)
-    p = np.exp(logits - logits.max()); p /= p.sum()
-
-    correct = float(decode_categorical(logits, band, cent, "mean")[0, 0])
-    buggy = float(np.sinh((p[0, 0] * mid[0]).sum()))
-    assert abs(correct) > 1e-6
-    assert abs(buggy - correct) / abs(correct) > 0.05, (
-        f"sinh(mean)={buggy:.4g} vs E[sinh]={correct:.4g} — the estimators "
-        f"agree here, so this test cannot catch the bug it exists for")
-
-
-def test_rows_from_grid_space_argument():
-    """`ratio` multiplies by sigma; `asinh` sinh-es first. They must differ."""
-    cfg = PatchConfig()
-    n_cells, n_slot = 3, cfg.n_slot
-    occ = np.zeros((n_cells, n_slot), bool); occ[:, :4] = True
-    vals = np.full((n_cells, n_slot), 1.5, np.float32)
-    kw = dict(cell_band=np.zeros(n_cells, np.int64),
-              cell_gid=np.zeros(n_cells, np.int64),
-              cell_wb=np.arange(n_cells, dtype=np.int64),
-              cell_tb=np.zeros(n_cells, np.int64),
-              gids=np.array([0]), norm_sigma=np.array([[2.0, 2.0, 2.0, 2.0]]),
-              cfg=cfg)
-    ratio = _rows_from_grid(occ, vals, space="ratio", **kw)["value"]
-    asinh = _rows_from_grid(occ, vals, space="asinh", **kw)["value"]
-    np.testing.assert_allclose(ratio, 1.5 * 2.0, rtol=1e-6)
-    np.testing.assert_allclose(asinh, np.sinh(1.5) * 2.0, rtol=1e-6)
-    assert not np.allclose(ratio, asinh)
-    with pytest.raises(ValueError):
-        _rows_from_grid(occ, vals, space="nonsense", **kw)
-
-
-def test_decode_rejects_unknown_readout():
-    cent = bin_centroids_ratio(_dec_edges())
-    with pytest.raises(ValueError):
-        decode_categorical(np.zeros((1, 1, K_D), np.float32),
-                           np.zeros(1, np.int64), cent, readout="median")
-
-def test_mean_and_mode_differ_on_a_skewed_posterior():
-    """`readout` must actually select an estimator.
-
-    A one-hot posterior makes mean and mode identical, so the delta test above
-    cannot tell them apart -- a mutation that ignores `readout` survives it. The
-    reference reports BOTH for a reason: mean closes charge, mode is the
-    bright-signal estimate, and on a skewed posterior they are far apart.
-    """
-    cent = bin_centroids_ratio(_dec_edges())
-    band = np.zeros(1, np.int64)
-    # skewed: modal bin near the middle, a long heavy tail toward the top
-    w = np.zeros(K_D, np.float32)
-    w[K_D // 2] = 3.0
-    w[K_D - 8:] = 1.0
-    logits = np.log(w + 1e-9)[None, None, :].astype(np.float32)
-
-    mean = float(decode_categorical(logits, band, cent, "mean")[0, 0])
-    mode = float(decode_categorical(logits, band, cent, "mode")[0, 0])
-    assert mode == pytest.approx(float(cent[0, K_D // 2]), rel=1e-5)
-    assert abs(mean - mode) / max(abs(mean), 1e-9) > 0.5, (
-        f"mean {mean:.4g} and mode {mode:.4g} are too close for this test to "
-        f"distinguish the two read-outs")

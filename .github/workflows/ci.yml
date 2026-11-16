@@ -1,7 +1,7 @@
 name: CI
 
-# The cheap checks: the lockfile resolves, and pyproject pins pimm-data by a full revision.
-# These need no image and no GPU, so they run on every push.
+# The cheap checks: the lockfile resolves, pyproject pins pimm-data by a full revision, and the
+# suite on CPU without pimm, pimm-data, a GPU or data. These need no image, so they run on every push.
 #
 # The expensive ones -- building the image, the suite, the no-data smoke -- live
 # in docker.yml, which is path-filtered because a 9 GB build is not free.
@@ -50,3 +50,31 @@ jobs:
       # build here; shellcheck-free bash -n costs a second.
       - name: the install recipe parses
         run: bash -n container/install.sh
+
+  # The suite as far as a plain runner can take it: helix's base install from the lockfile, CPU
+  # torch at the locked version and hdf5plugin; no pimm, no pimm-data, no GPU, no data. What
+  # needs those skips, and -rs (pyproject) lists every skip with its reason. The rest -- pimm,
+  # the corpus, CUDA -- is the batch gate in docs/RUNBOOK.md section 1.
+  tests-cpu:
+    name: suite (CPU; no pimm, GPU or data)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: 0.11.28
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # The lock's torch is the CUDA build (several GB of nvidia wheels a CPU runner cannot use),
+      # so torch comes from PyTorch's CPU index at the version the lock names.
+      - name: environment (lockfile + CPU torch)
+        run: |
+          uv sync --frozen --extra dev --python 3.12
+          locked() { uv run --no-sync python -c "import sys, tomllib; print({p['name']: p.get('version') for p in tomllib.load(open('uv.lock', 'rb'))['package']}[sys.argv[1]])" "$1"; }
+          uv pip install --index-url https://download.pytorch.org/whl/cpu "torch==$(locked torch)"
+          uv pip install "hdf5plugin==$(locked hdf5plugin)"
+
+      - name: pytest
+        run: uv run --no-sync python -m pytest tests -q -p no:cacheprovider

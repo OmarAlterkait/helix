@@ -6,7 +6,7 @@ loop and the probes.
 The tokenizer lives here because the patch geometry IS a property of the model —
 pw/pt/n_bands, the RoPE time coordinate, and the arcsinh normalisation are all
 dictated by what the FM consumes. It carries both directions: ``assemble`` (rows
--> tokens) and ``detokenize`` / ``decode_prediction`` (tokens -> rows).
+-> tokens) and ``detokenize`` (tokens -> rows).
 
 **Model attributes are imported lazily, on purpose.** ``helix.model.tokenize`` is
 pure numpy and must stay importable WITHOUT torch — pimm-data runs it inside

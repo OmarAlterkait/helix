@@ -511,6 +511,7 @@ def test_the_cli_scores_a_fine_tuned_denoiser_run(synth, tmp_path, monkeypatch):
     """``python -m helix.eval DENOISER_RUN``: the run's ``last`` weights, its FM run where recorded,
     the corpus as resolved, one JSON and the two window scores beside it -- which compare pairs
     within the run (presence against amplitude)."""
+    pytest.importorskip("pimm_data", reason="the result records provenance, which names pimm-data")
     import helix.eval as E
     from helix.eval.__main__ import main
     from test_denoise import _write_denoise_run
@@ -540,6 +541,7 @@ def test_the_cli_scores_a_fine_tuned_denoiser_run(synth, tmp_path, monkeypatch):
 
 
 def test_the_cli_runs_the_along_wire_probe_on_an_fm_run(synth, tmp_path, monkeypatch):
+    pytest.importorskip("pimm_data", reason="the result records provenance, which names pimm-data")
     import helix.eval as E
     from helix.eval.__main__ import main
     d, ds = synth
