@@ -97,6 +97,19 @@ def _even(order, nb):
     return [order[(i * T) // nb:((i + 1) * T) // nb] for i in range(nb)]
 
 
+def _time_groups(qt, kt, oq, okv, nb):
+    """The decoder's (query, key) groups, written per group: the keys' time order cut into nb
+    equal counts; group j holds the queries from its first key's time up to (not including)
+    the next group's, the first and last groups open-ended. Queries in time order."""
+    kg = _even(okv, nb)
+    lo = [float(kt[g].min()) for g in kg]
+    qs = qt[oq]
+    qg = [oq[((qs >= lo[j]) if j else torch.ones_like(qs, dtype=torch.bool))
+             & ((qs < lo[j + 1]) if j + 1 < nb else torch.ones_like(qs, dtype=torch.bool))]
+          for j in range(nb)]
+    return qg, kg
+
+
 def _qkn(blk, q, k):
     """QK-norm where the reference applies it: per head, before RoPE. The norm
     modules themselves are the block's -- what is under test is the placement."""
@@ -116,13 +129,13 @@ def _self_ref(blk, x, at, aw, order, g):
     return x + blk.mlp(blk.n2(x))
 
 
-def _cross_ref(blk, q, kv, qat, qaw, kat, kaw, oq, okv, g):
+def _cross_ref(blk, q, kv, qat, qaw, kat, kaw, qt, kt, oq, okv, g):
     Tq, Tk = q.shape[0], kv.shape[0]
     k, v = blk.kv(blk.nk(kv)).chunk(2, -1)
     qh, kh = _qkn(blk, blk.q(blk.nq(q)).view(Tq, blk.h, blk.hd), k.view(Tk, blk.h, blk.hd))
     qh, kh = _rope_ref(qh, qat, qaw), _rope_ref(kh, kat, kaw)
-    nb = max(1, min((max(Tq, Tk) + g - 1) // g, Tq, Tk))
-    o = _attn_groups(qh, kh, v.view(Tk, blk.h, blk.hd), _even(oq, nb), _even(okv, nb))
+    nb = max(1, min((max(Tq, Tk) + g - 1) // g, Tk))
+    o = _attn_groups(qh, kh, v.view(Tk, blk.h, blk.hd), *_time_groups(qt, kt, oq, okv, nb))
     q = q + blk.proj(o.reshape(Tq, blk.h * blk.hd))
     return q + blk.mlp(blk.n2(q))
 
@@ -160,11 +173,11 @@ def _forward_feat_ref(m, B, tok_mask):
     g_, b_ = m.film(B["band_id"][tok_mask], B["plane_id"][tok_mask], B["wirefeat"][tok_mask])
     qm = g_ * m.mask_tok.expand(mask_idx.numel(), m.d) + b_
     qm = qm + m.band_emb(B["band_id"][tok_mask]) + m.plane_emb(B["plane_id"][tok_mask])
-    oq = torch.argsort(B["t_phys"][tok_mask].double())
-    okv = torch.argsort(B["t_phys"][vis].double())
+    qt, kt = B["t_phys"][tok_mask], B["t_phys"][vis]
+    oq, okv = torch.argsort(qt.double()), torch.argsort(kt.double())
     for blk in m.dec:
         qm = _cross_ref(blk, qm, xv, at[tok_mask], sel(aw, tok_mask), at[vis], sel(aw, vis),
-                        oq, okv, m.gd)
+                        qt, kt, oq, okv, m.gd)
     x = torch.zeros(B["inp"].shape[0], m.d, dtype=xv.dtype)
     return m.dec_norm(x.index_copy(0, vis_idx, xv).index_copy(0, mask_idx, qm))
 
@@ -216,6 +229,15 @@ def test_encode_layers_is_bit_exact(kw, n_cells):
         assert torch.equal(m.encode(B), x)
 
 
+@pytest.mark.parametrize("kw", [{}, dict(qk_norm=True)], ids=["default", "qk_norm"])
+def test_forward_feat_is_bit_exact_with_a_hidden_view(kw):
+    """A hidden view later in time than the visible ones: uneven query groups, some empty."""
+    B, m = _hidden_view_batch(), _model(**kw)
+    mask = B["plane_id"] % 3 == 2
+    with torch.no_grad():
+        assert torch.equal(m.forward_feat(B, mask), _forward_feat_ref(m, B, mask))
+
+
 def test_masked_only_is_the_masked_rows():
     B, m = make_batch(), _model()
     mask = _mask(B["n_cells"])
@@ -224,6 +246,69 @@ def test_masked_only_is_the_masked_rows():
         rows_feat, rows = m.forward_feat(B, mask, masked_only=True)
     assert torch.equal(rows, mask.nonzero(as_tuple=True)[0])
     assert torch.equal(rows_feat, full[rows])
+
+
+# ------------------------------------------------------------ decoder groups
+
+def _hidden_view_batch(n_cells=600):
+    """View Y (gid % 3 == 2) later in time and narrower than U and V, as a hidden view's
+    tokens are not distributed in time like the views left visible."""
+    B = make_batch(n_cells=n_cells)
+    y = B["plane_id"] % 3 == 2
+    B["t_phys"] = torch.where(y, 0.3 * B["t_phys"] + 400.0, B["t_phys"])
+    return B
+
+
+def _decoder_groups(monkeypatch, m, B, mask):
+    """(sorted query times, sorted key times, cuq, cuk) of the decoder's first block."""
+    from helix.model import blocks
+    seen, cross = [], blocks.cross_block
+
+    def spy(blk, q, kv, qcos, qsin, kcos, ksin, cuq, cuk, *a):
+        seen.append((cuq.long(), cuk.long()))
+        return cross(blk, q, kv, qcos, qsin, kcos, ksin, cuq, cuk, *a)
+    monkeypatch.setattr(blocks, "cross_block", spy)
+    with torch.no_grad():
+        m.forward_feat(B, mask)
+    t = B["t_phys"]
+    return torch.sort(t[mask])[0], torch.sort(t[~mask])[0], *seen[0]
+
+
+def test_every_query_is_in_its_key_groups_time_range_with_a_hidden_view(monkeypatch):
+    """Group j covers [its first key, the next group's first key): every query of a hidden
+    view inside it. Equal-count query groups -- the old split -- leave queries outside."""
+    from helix.model.blocks import _cu_even
+    B, m = _hidden_view_batch(), _model()
+    mask = B["plane_id"] % 3 == 2
+    qt, kt, cuq, cuk = _decoder_groups(monkeypatch, m, B, mask)
+    nb = cuk.numel() - 1
+    assert nb > 2 and cuq[-1] == qt.numel() and torch.equal(cuk, _cu_even(kt.numel(), nb, "cpu").long())
+    lo = kt[cuk[:-1]]
+    hi = torch.cat([lo[1:], lo.new_full((1,), float("inf"))])
+    lo = torch.cat([lo.new_full((1,), -float("inf")), lo[1:]])
+
+    def outside(cu):
+        g = torch.repeat_interleave(torch.arange(nb), cu[1:] - cu[:-1])
+        return int(((qt < lo[g]) | (qt >= hi[g])).sum())
+    assert outside(cuq) == 0
+    assert (cuq[1:] == cuq[:-1]).any()                      # an empty query group, carried
+    assert outside(_cu_even(qt.numel(), nb, "cpu").long()) > 0.2 * qt.numel()
+
+
+def test_random_masking_keeps_near_equal_groups(monkeypatch):
+    """Random masking draws queries and keys from one time distribution, so the key-bounded
+    groups are the old equal-count split up to sampling noise: the same key groups and
+    nearly the same query groups."""
+    from helix.model.blocks import _cu_even
+    B, m = make_batch(n_cells=4000), _model(gd=512)
+    mask = torch.rand(4000, generator=torch.Generator().manual_seed(3)) < 0.75
+    qt, kt, cuq, cuk = _decoder_groups(monkeypatch, m, B, mask)
+    nb, Tq = cuk.numel() - 1, qt.numel()
+    assert nb == (Tq + 511) // 512 and torch.equal(cuk, _cu_even(kt.numel(), nb, "cpu").long())
+    g_new = torch.repeat_interleave(torch.arange(nb), cuq[1:] - cuq[:-1])
+    old = _cu_even(Tq, nb, "cpu").long()
+    g_old = torch.repeat_interleave(torch.arange(nb), old[1:] - old[:-1])
+    assert float((g_new != g_old).float().mean()) < 0.1
 
 
 # ------------------------------------------------------------ objective
@@ -377,7 +462,7 @@ def _vl_model(seed=0, **kw):
 
 
 # 288 cells, every third visible: 96 visible (6 x gp=16, 3 x gd=32) and 192
-# masked; the decoder makes 6 groups of 32 queries x 16 keys.
+# masked; the decoder makes 6 groups of 16 keys, each with the queries in its time range.
 EXACT = dict(n_cells=288)
 
 
@@ -402,6 +487,26 @@ def test_flash_varlen_matches_the_per_group_reference():
     out = _vl_attn(q, k, v, cu, cu, 128, 128)
     ref = _vl_attn(q.float(), k.float(), v.float(), cu, cu, 128, 128)
     torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)
+
+
+@cuda
+def test_flash_varlen_handles_uneven_and_empty_query_groups():
+    """The decoder's query groups: uneven, one empty; forward and backward vs fp32 per group."""
+    from helix.model.blocks import _vl_attn
+    g = torch.Generator(device="cuda").manual_seed(0)
+    mk = lambda T: torch.randn(T, 4, 64, device="cuda", generator=g)
+    q, k, v = mk(300), mk(120), mk(120)
+    cuq = torch.tensor([0, 10, 10, 260, 300], device="cuda", dtype=torch.int32)
+    cuk = torch.tensor([0, 30, 60, 90, 120], device="cuda", dtype=torch.int32)
+    up = mk(300)
+    res = []
+    for dt in (torch.bfloat16, torch.float32):
+        xs = [t.to(dt).requires_grad_() for t in (q, k, v)]
+        out = _vl_attn(*xs, cuq, cuk, 250, 30)
+        (out.float() * up).sum().backward()
+        res.append([out.float()] + [x.grad.float() for x in xs])
+    for a, b in zip(*res):
+        torch.testing.assert_close(a, b, rtol=3e-2, atol=3e-2)
 
 
 @cuda

@@ -10,8 +10,9 @@ one of four orders (plane x time, time, plane x wire x time, time shifted by
 half a group); the decoder's masked queries cross-attend visible tokens in
 drift-time groups. A layout's groups are its consecutive g-token chunks with the
 LAST ONE SHORTER, run through flash varlen attention with cumulative group
-boundaries (``cu``) -- no padding, so no token is attended twice. The decoder's
-time groups are split evenly.
+boundaries (``cu``) -- no padding, so no token is attended twice. The decoder
+splits the keys evenly in time order and gives each query the key group
+covering its time, so its query groups are uneven and may be empty.
 
 The residual stream is CARRIED in layout order. LayerNorm, qkv, the projection,
 the MLP and both residual adds are row-wise, so only attention cares about

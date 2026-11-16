@@ -3,8 +3,9 @@
 A masked autoencoder over patch tokens of sparse wavelet coefficients: the
 encoder runs on the visible tokens only, in grouped attention along four token
 orders (:mod:`helix.model.blocks`); a CrossMAE decoder's masked queries
-cross-attend the encoded visible tokens in drift-time groups; a categorical head
-predicts each slot's occupancy and its value's bin. ``forward`` implements the
+cross-attend the encoded visible tokens in drift-time groups bounded by the
+keys' times; a categorical head predicts each slot's occupancy and its value's
+bin. ``forward`` implements the
 pimm Trainer contract (``model(batch) -> dict`` with a ``loss`` key).
 """
 import torch
@@ -327,18 +328,31 @@ class FMModel(nn.Module):
         return _permute(xp, inv), out
 
     def _decode(self, qm, xv, qpos, kpos):
-        """The grouped-cross decoder with even time groups. ``qpos`` / ``kpos``
-        are (t_phys, ang_t, ang_w) of the queries / keys.
+        """The grouped-cross decoder. ``qpos`` / ``kpos`` are (t_phys, ang_t, ang_w)
+        of the queries / keys.
+
+        The visible keys, in time order, form ``nb`` near-equal groups; group j
+        covers the times from its first key to the next group's first key (the
+        first and last groups are open-ended), and each query attends the group
+        covering ITS time. The boundaries are the keys', never the queries' own
+        quantiles: a hidden view is not distributed in time like the views left
+        visible, and splitting the queries into equal counts as well put 61% of
+        hidden-Y queries outside their keys' time range. Query groups are
+        therefore uneven and may be empty; the varlen ``cu`` boundaries carry both.
 
         ``rope_split`` does not reach the decoder: it keeps the wire rotation,
         since it needs the wire address to know which wire it reconstructs
         (dropping it froze reconstruction, var_expl ~2%)."""
         (qt, qat, qaw), (kt, kat, kaw) = qpos, kpos
         Tq, Tk, dev = qm.shape[0], xv.shape[0], xv.device
-        oq = torch.argsort(qt.double()); okv = torch.argsort(kt.double())
-        nb = max(1, min((max(Tq, Tk) + self.gd - 1) // self.gd, Tq, Tk))
-        cuq, cuk = _cu_even(Tq, nb, dev), _cu_even(Tk, nb, dev)
-        mq, mk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
+        qts, oq = torch.sort(qt.double()); kts, okv = torch.sort(kt.double())
+        nb = max(1, min((max(Tq, Tk) + self.gd - 1) // self.gd, Tk))
+        cuk = _cu_even(Tk, nb, dev)
+        # cuq[j] = the queries earlier than key group j's first key
+        cuq = torch.cat([cuk.new_zeros(1),
+                         torch.searchsorted(qts, kts[cuk[1:-1].long()]).to(torch.int32),
+                         cuk.new_full((1,), Tq)])
+        mq, mk = int((cuq[1:] - cuq[:-1]).max()), (Tk + nb - 1) // nb
         qcos, qsin = rope_tables(qat[oq], None if qaw is None else qaw[oq], qm.dtype)
         kcos, ksin = rope_tables(kat[okv], None if kaw is None else kaw[okv], xv.dtype)
         cross_blk, fused = _ckpt(_blocks(self)[1], self), self._fused()
