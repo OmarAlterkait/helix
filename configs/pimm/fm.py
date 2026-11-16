@@ -15,9 +15,9 @@ split, the corpus and the GPU count) through :mod:`helix.model.schedule`. Anythi
     scripts/submit.sh fm --resources.nnodes 4 [pimm submit flags] [-- key=value ...]
 """
 
-# helix is importable because the launcher puts it on PYTHONPATH (configs/launch/_common.yaml's
-# setup:; pimm's train.sh prepends its code snapshot and keeps the rest, on every link of a
-# chain); by hand, scripts/helix_run.sh.
+# helix is importable because scripts/submit.sh puts it on the PYTHONPATH the job inherits
+# (configs/launch/_common.yaml; pimm's train.sh prepends its code snapshot and keeps the rest, on
+# every link of a chain); by hand, scripts/helix_run.sh.
 from helix.paths import root as _root                            # noqa: E402
 
 custom_imports = dict(imports=["helix.integrations.pimm"], allow_failed_imports=False)
@@ -118,15 +118,19 @@ data = dict(
 )
 
 # ---------------------------------------------------------------------------- hooks
+# Order matters twice. HelixProvenance after CheckpointLoader, so a resumed link records the
+# step it resumed at. StepWatchdog after the saver, so its timer is armed once a save has
+# finished: a checkpoint to $CFS took 16-20 s, but a slow filesystem must not kill a run that
+# would otherwise resume (a save stuck in a collective still hits NCCL's 600 s timeout).
 hooks = [
-    dict(type="HelixProvenance"),       # provenance.json; refuses a resume on another corpus
     dict(type="CheckpointLoader"),
+    dict(type="HelixProvenance"),       # provenance.json; refuses a resume on another corpus
     dict(type="ModelHook"),
     dict(type="IterationTimer", warmup_iter=1),
     dict(type="InformationWriter", log_frequency=200),
     dict(type="FiniteGuard", check_every=100, max_skips=20),
-    dict(type="StepWatchdog", timeout=300),     # a stuck rank dumps its stacks before NCCL's 600 s
     dict(type="CheckpointSaverIteration", save_freq="auto"),   # model/last only, no iter_N.pth
+    dict(type="StepWatchdog", timeout=300),     # a stuck rank dumps its stacks before NCCL's 600 s
 ]
 train = dict(type="FMTrainer")
 

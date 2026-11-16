@@ -281,7 +281,8 @@ def test_no_config_evaluates_during_training():
             continue
         types = [kw.value.value for h in hooks.elts for kw in h.keywords if kw.arg == "type"]
         assert not any(t.endswith("Evaluator") for t in types), f"{path.name}: {types}"
-        assert types[-1] == "CheckpointSaverIteration", f"{path.name}: saver is {types[-1]}"
+        savers = [t for t in types if "Saver" in t]
+        assert savers == ["CheckpointSaverIteration"], f"{path.name}: savers {savers}"
     assert ast.literal_eval(names["fm.py"]["evaluate"]) is False
     assert all("evaluate" not in v or ast.literal_eval(v["evaluate"]) is False for v in names.values())
 
@@ -454,3 +455,73 @@ def test_the_pimm_checkout_pins_helixs_pimm_data():
     if theirs is None:
         pytest.skip(f"{p} does not pin pimm-data by an explicit rev")
     assert theirs.group(1) == ours.group(1), f"{p} pins pimm-data {theirs.group(1)[:8]}, helix {ours.group(1)[:8]}"
+
+
+def _sweep_module():
+    spec = importlib.util.spec_from_file_location(
+        "sweep", pathlib.Path(CONFIG).parent.parent.parent / "scripts" / "sweep.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pimm_required
+def test_sweep_reads_the_job_id_the_pinned_pimm_prints(monkeypatch, tmp_path):
+    """scripts/sweep.py takes each arm's job id from pimm submit's output; the wording is pimm's,
+    so it is checked against the pimm that trains (a submitit executor stands in for sbatch)."""
+    import pimm.launch.submit as submit_mod
+
+    class Executor:
+        def __init__(self, **kw):
+            pass
+
+        def update_parameters(self, **kw):
+            pass
+
+        def submit(self, job):
+            return type("Job", (), {"job_id": "4242"})()
+
+    monkeypatch.setattr(submit_mod.submitit, "AutoExecutor", Executor)
+    cfg = {"site": "x", "paths": {"repo_root": str(tmp_path), "exp_root": str(tmp_path / "exp")},
+           "resources": {"scheduler": "slurm", "nnodes": 1, "nproc_per_node": 4, "cpus_per_proc": 8,
+                         "gpu_directive": "gres", "time": "00:30:00"},
+           "container": {"runtime": "none"}, "train": {"config": CONFIG}, "run": {}, "submit": {}}
+    out = submit_mod.submit(cfg, "arm")
+    assert _sweep_module().JOB_ID.search(out).group(1) == "4242"
+
+
+def test_a_failing_arm_leaves_the_earlier_arms_evaluated(monkeypatch, tmp_path):
+    """Each arm's after_each is submitted with the arm, so a later submission that fails cannot
+    strand the arms already queued without their evaluation; dependents die with their arm."""
+    sweep = _sweep_module()
+    calls = []
+
+    def run(cmd, check=False, text=False, stdout=None):
+        calls.append(cmd)
+        if cmd[0] == sweep.SUBMIT:
+            if "b" in cmd:
+                raise sweep.subprocess.CalledProcessError(2, cmd)
+            return type("R", (), {"stdout": "  job id:       11\n"})()
+        return type("R", (), {"stdout": "12\n"})()
+
+    monkeypatch.setattr(sweep.subprocess, "run", run)
+    monkeypatch.setattr(sweep, "site_env", lambda: {"HELIX_SLURM_EVAL_GPUS": "1", "HELIX_EXP": str(tmp_path)})
+    study = tmp_path / "s.yaml"
+    study.write_text("config: fm\narms: {a: {}, b: {}}\nafter_each:\n  command: echo {run}\n")
+    monkeypatch.setattr(sweep.sys, "argv", ["sweep.py", str(study)])
+    with pytest.raises(sweep.subprocess.CalledProcessError):
+        sweep.main()
+    sb = [c for c in calls if c[0] == "sbatch"]
+    assert len(sb) == 1 and "--dependency=afterok:11" in sb[0] and "--kill-on-invalid-dep=yes" in sb[0]
+
+
+def test_hook_order_records_the_resumed_step_and_does_not_time_saves():
+    """HelixProvenance after CheckpointLoader (which restores global_step: the record's step was
+    always 0), StepWatchdog after the saver (its timer otherwise runs through every save)."""
+    for name in ("fm.py", "denoise.py"):
+        src = (pathlib.Path(CONFIG).parent / name).read_text()
+        hooks = src[src.index("\nhooks = ["):]
+        at = {h: hooks.index(f'type="{h}"') for h in
+              ("CheckpointLoader", "HelixProvenance", "CheckpointSaverIteration", "StepWatchdog")}
+        assert at["CheckpointLoader"] < at["HelixProvenance"], name
+        assert at["CheckpointSaverIteration"] < at["StepWatchdog"], name

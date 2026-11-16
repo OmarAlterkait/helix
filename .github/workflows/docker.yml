@@ -18,7 +18,10 @@ name: Docker
 
 on:
   push:
-    branches: [main]
+    # Every branch, not main alone: an image is half of a lockstep pair, so a branch that changes
+    # what goes into it pins the result (helix/sites/nersc.yaml, by digest) before it merges, and
+    # needs the image built from it to do that. Each build is tagged with its branch name.
+    branches: ['**']
     tags: ['v*']
     # The IMAGE changes with container/**, pyproject.toml and uv.lock. But the
     # test and smoke jobs run helix and scripts INSIDE it -- neither is baked in,

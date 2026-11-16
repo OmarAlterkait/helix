@@ -12,7 +12,7 @@ train (§6), evaluate (§7, §8).
 
 The submitting host needs a Python with PyYAML and `sbatch`; jobs run in the container.
 
-    scripts/make_host_env.sh           # once: $SCRATCH/helix-host-venv (helix base + pimm's launch deps, no torch)
+    scripts/make_host_env.sh           # once: $HELIX_SCRATCH/launcher-venv (helix base + pimm's launch deps, no torch)
     source scripts/helix_env.sh        # exports HELIX_*, HELIX_CONTAINER_*, HELIX_SLURM_<KIND>_*, HELIX_PYTHON
     $HELIX_PYTHON -m helix.paths       # site, every root and where it came from, container, scheduler
 
@@ -148,6 +148,19 @@ requeued under the same job id. **S3DF:** QOS normal (not preempted); links end 
   NCCL flight recorder dumps on the collective timeout. The chain stops at a failure: resubmit
   the same command, which resumes.
 - **GPU type:** sm80+ (A100) only for training and evaluation; never turing.
+- **Train from a frozen tree.** A chain imports helix from the tree it was submitted from, on
+  every link, for days: submit from a detached worktree, never from a checkout you keep editing.
+  They live in `$HELIX_SCRATCH/trees/`:
+
+      T=$HELIX_SCRATCH/trees/run-$(git rev-parse --short HEAD)
+      git worktree add --detach "$T" HEAD && "$T"/scripts/submit.sh fm --resources.nnodes 4
+
+- **Retries are pimm's, and only for walltime and preemption.** A batch chain is one submitit
+  job: on the timeout signal or a preemption (NERSC requeues, same job id) the next link resumes
+  from `model/last`, up to `--chain.jobs`. An interactive chain is a scron driver
+  (`$HELIX_EXP/NAME/submitit/watchdog/`: `driver.log`, and `env.sh`, the submitting environment
+  it runs in) that takes the next 4 h slot when the last one ended having written a newer
+  checkpoint; three exits without progress mark it FAILED. A crash is not retried.
 
 **A study** is a file: `$HELIX_PYTHON scripts/sweep.py configs/sweeps/<study>.yaml [--dry-run]
 [--only A,B]` submits each arm through `submit.sh`, an optional second stage per arm (`then:`,
@@ -202,9 +215,10 @@ arm), so run one evaluation per job.
 | runs | `HELIX_EXP` | `$CFS/m5238/users/oalter/exp/helix` (S3DF runs: `.../exp_s3df`) | `/sdf/data/neutrino/omara/exp/helix` |
 | bin tables | `HELIX_ARCHIVE` | `$CFS/m5238/users/oalter/archive` | `/sdf/data/neutrino/omara/archive` |
 | campaign | `HELIX_SIM_ROOT` | none | `.../doraemon_2026_1M_lartpc/data/jaxtpc_wire` |
-| pimm | `HELIX_PIMM_ROOT` | `$HOME/nu/pimm-pin` (pinned) | `/sdf/group/neutrino/omara/pimm-fm` |
+| pimm | `HELIX_PIMM_ROOT` | `$HOME/nu/pimm-pin2` (pinned) | `/sdf/group/neutrino/omara/pimm-fm` |
+| transient | `HELIX_SCRATCH` | `$SCRATCH/helix`: `launcher-venv/`, `trees/`, `cache/` (XDG_CACHE_HOME) | not set |
 
 **NERSC containers:** shifter in batch (submit.sh jobs, `corpus.sh`, `HELIX_INTERACTIVE=0`),
 podman-hpc on an interactive TTY; `HDF5_USE_FILE_LOCKING=FALSE` comes from the profile. The
-image tag `helix-nersc:jax-cuda12` is stale: rebuild and repoint before relying on a new
-dependency.
+image is pinned by digest (`container.image`); a new one is built by `docker.yml` on push, then
+`shifterimg pull <ref>` and `podman-hpc pull <ref>`, and the digest edited into the profile.

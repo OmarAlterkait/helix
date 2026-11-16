@@ -220,9 +220,11 @@ local commits on the site's pinned checkout (`docs/STATUS.md`). A config's
 | SCHEDULERS | `WSDStableLR`, `WSDCooldownLR`, `WarmupCosineLR` |
 | HOOKS | `HelixProvenance` (provenance.json; refuses a resume on another corpus), `FiniteGuard`, `StepWatchdog` |
 
-`StepWatchdog` (300 s, `faulthandler`) makes a stuck rank dump its stacks and exit before
-NCCL's 600 s timeout; `configs/launch/_common.yaml` turns on the NCCL flight recorder and puts
-helix and pimm on `PYTHONPATH` on every link. Checkpoints are pimm's standard (DCP), written
+`StepWatchdog` (300 s, `faulthandler`, listed after the saver so saves are not timed) makes a
+stuck rank dump its stacks and exit before NCCL's 600 s timeout; `configs/launch/_common.yaml`
+turns on the NCCL flight recorder. helix and pimm reach every link on the `PYTHONPATH`
+`scripts/submit.sh` exports: the job inherits the submitting environment (sbatch for a batch
+chain; pimm's scron driver restores it from `env.sh` for an interactive one). Checkpoints are pimm's standard (DCP), written
 by `CheckpointSaverIteration` to `model/last` only. There is no in-training evaluation, no
 `model_best`, no EMA.
 
@@ -270,7 +272,8 @@ its corpus (`helix.eval.denoise`):
 the site profile `helix/sites/<site>.yaml` (`HELIX_SITE`, or detected: `/sdf` -> s3df,
 `$NERSC_HOST` -> nersc). Roots: `HELIX_CORPUS_ROOT`, `HELIX_CORPUS` (one run dir; its parent is
 the corpus), `HELIX_SIM_ROOT`, `HELIX_ARCHIVE` (bin tables), `HELIX_EXP` (runs),
-`HELIX_PIMM_ROOT`, `HELIX_JAXTPC_ROOT`. A root a site lacks is `null`, and asking for it raises
+`HELIX_PIMM_ROOT`, `HELIX_JAXTPC_ROOT`, `HELIX_SCRATCH` (transient: the launcher venv, frozen
+code trees, caches). A root a site lacks is `null`, and asking for it raises
 `SiteError`. The profile also holds the container (runtime, image, in-image python, binds,
 NERSC's interactive runtime) and scheduler facts per job kind (`train`, `eval`, `corpus`;
 `train.pimm_rev` pins pimm).
@@ -284,7 +287,7 @@ runtime. `container/install.sh` is the one image recipe (`helix-train.def`, `Doc
 
 | | S3DF (`s3df.yaml`) | NERSC (`nersc.yaml`) |
 |---|---|---|
-| container | apptainer `helix-train.sif` | shifter `helix-nersc:jax-cuda12` (stale tag); podman-hpc interactive |
+| container | apptainer `helix-train.sif` | shifter `helix-nersc@sha256:8a4fbb6f...` (by digest); podman-hpc interactive |
 | train | `mli:cider-ml`, ampere, QOS normal; pimm not pinned | `m5238_g`, `-C gpu`, QOS preempt (2 h `time_min`); pimm pinned |
 | eval | ampere, 1 GPU, 32 cores, 64 GB | QOS shared, 2 GPUs' share (64 cores, 112 GB) |
 | corpus | `mli:default`, turing, preemptable, `--requeue` | `m5238_g`, `-C gpu`, QOS shared |

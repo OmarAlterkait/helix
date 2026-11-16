@@ -207,6 +207,10 @@ for _gone in ("pimm_data.noise", "pimm_data.noise_jax", "pimm_data.coeff",
         f"{_gone} was deleted from pimm-data but is installed -- a stale "
         f"build/lib leaked into the wheel")
 
+# helix has no jax backend: an image built with one (the old helix-nersc:jax-cuda12) carried
+# ~GBs of jaxlib and CUDA wheels nothing imports.
+assert _iu.find_spec("jax") is None, "jax is installed; nothing in helix uses it"
+
 print(f"OK: pywt {pywt.__version__}, pimm_data {pimm_data.__version__}, "
       f"pytest {_pt.__version__}, torch {_t.__version__}, "
       f"{len(names)} transforms, forward model absent as expected")

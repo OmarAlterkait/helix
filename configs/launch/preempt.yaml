@@ -7,5 +7,10 @@ resources:
   time: "24:00:00"
   nnodes: 1
   nproc_per_node: 4
+  # A link held by --dependency (scripts/sweep.py's `then` stage) whose predecessor failed is
+  # cancelled, not left pending forever: NERSC's slurm.conf sets no kill_invalid_depend.
+  # sbatch only (salloc has no such flag), hence here and not in _common.yaml.
+  scheduler_options:
+    kill-on-invalid-dep: "yes"
 chain:
   jobs: 8

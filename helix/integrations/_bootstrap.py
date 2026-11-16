@@ -6,14 +6,27 @@ the same record.
 
 The module once also generated a ``sys.path`` block that a hook wrote back into pimm's dumped
 config, on the belief that pimm's ``scripts/train.sh`` PINNED ``PYTHONPATH`` to its code
-snapshot on resume. It prepends the snapshot to the environment's ``PYTHONPATH`` instead, and the
-launch recipe's ``setup:`` (``configs/launch/_common.yaml``) exports helix there, so every link
-of a chain can import helix without help.
+snapshot on resume. It prepends the snapshot to the environment's ``PYTHONPATH`` instead, and
+``scripts/submit.sh`` exports helix there (``configs/launch/_common.yaml``), so every link of a
+chain can import helix without help.
 """
 
 from __future__ import annotations
 
 __all__ = ["provenance", "running_roots"]
+
+
+def _installed_vcs_commit(dist):
+    """The commit an installed distribution was built from, when pip/uv installed it from a git
+    URL (PEP 610 ``direct_url.json``); None otherwise."""
+    import json
+    from importlib import metadata
+
+    try:
+        return json.loads(metadata.distribution(dist).read_text("direct_url.json") or "{}") \
+            .get("vcs_info", {}).get("commit_id")
+    except Exception:
+        return None
 
 
 def running_roots():
@@ -53,14 +66,22 @@ def provenance():
         "python": sys.version.split()[0],
         "hostname": platform.node(),
     }
+    if info["pimm_data"]["commit"] is None:         # the image installs it from git, not a checkout
+        info["pimm_data"]["commit"] = _installed_vcs_commit("pimm-data")
     try:
         import pimm
         info["pimm"] = describe_checkout(
             os.path.dirname(os.path.dirname(os.path.abspath(pimm.__file__))))
+        # A launched run imports pimm's code snapshot (<run>/code), which is no git checkout: the
+        # commit is the pinned worktree's it was copied from (scripts/submit.sh checked it clean).
+        if info["pimm"]["commit"] is None and os.environ.get("HELIX_PIMM_ROOT"):
+            info["pimm"]["source"] = describe_checkout(os.environ["HELIX_PIMM_ROOT"])
     except Exception:
         info["pimm"] = None
-    for env in ("SLURM_JOB_ID", "SLURM_JOB_NODELIST", "APPTAINER_NAME",
-                "SINGULARITY_NAME", "SLURM_NTASKS"):
+    # The container: the site's image reference (helix_env.sh exports it; pinned by digest) and
+    # what the runtime itself reports.
+    for env in ("SLURM_JOB_ID", "SLURM_JOB_NODELIST", "SLURM_NTASKS", "HELIX_CONTAINER_IMAGE",
+                "SHIFTER_IMAGEREQUEST", "SHIFTER_IMAGE", "APPTAINER_NAME", "SINGULARITY_NAME"):
         if os.environ.get(env):
             info.setdefault("env", {})[env] = os.environ[env]
     try:

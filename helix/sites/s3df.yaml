@@ -27,6 +27,9 @@ roots:
   HELIX_EXP:           /sdf/data/neutrino/omara/exp/helix
   HELIX_PIMM_ROOT:     /sdf/group/neutrino/omara/pimm-fm
   HELIX_JAXTPC_ROOT:   /sdf/group/neutrino/omara/JAXTPC
+  # Not chosen here (training at S3DF is not set up): set HELIX_SCRATCH, or HELIX_HOST_VENV
+  # for scripts/make_host_env.sh alone.
+  HELIX_SCRATCH:       null
 
 # The container, as four facts rather than one path. `HELIX_IMAGE` used to be a
 # single root typed as a filesystem path to a .sif, which cannot describe a site

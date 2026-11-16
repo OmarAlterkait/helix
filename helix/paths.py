@@ -21,6 +21,7 @@ per job KIND -- at S3DF the corpus build and training need different accounts).
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ ROOTS: dict[str, str] = {
     "HELIX_ARCHIVE":       "bin tables, converted checkpoints",
     "HELIX_EXP":           "run outputs (save_path, logs, exports)",
     "HELIX_PIMM_ROOT":     "the pimm checkout training runs (the site's pinned worktree)",
+    "HELIX_SCRATCH":       "transient, rebuildable state: the launcher venv, frozen code trees, caches",
     "HELIX_JAXTPC_ROOT":   "JAXTPC checkout (noise spectrum, geometry)",
 }
 
@@ -170,9 +172,20 @@ def container(key: str | None = None) -> Any:
 def site_env() -> dict[str, str]:
     """The site's ``env:`` block: variables some library reads directly, above all
     ``HDF5_USE_FILE_LOCKING=FALSE`` (GPFS has no POSIX locks, so every ``h5py.File()`` on the
-    corpus fails without it). A value already in the environment wins."""
-    return {str(k): os.environ.get(str(k), str(v)) for k, v in (site().get("env") or {}).items()
-            if v is not None}
+    corpus fails without it). A value may name a root (``$HELIX_SCRATCH/cache``) or an
+    environment variable; a value already in the environment wins."""
+    out = {}
+    for k, v in (site().get("env") or {}).items():
+        if v is None:
+            continue
+        if str(k) in os.environ:
+            out[str(k)] = os.environ[str(k)]
+            continue
+        # roots first: a root need not be exported to be named
+        v = re.sub(r"\$\{?(HELIX_\w+?)\}?(?!\w)",
+                   lambda m: str(root(m.group(1))) if m.group(1) in ROOTS else m.group(0), str(v))
+        out[str(k)] = _expand(v)
+    return out
 
 
 def apply_site_env() -> dict[str, str]:
