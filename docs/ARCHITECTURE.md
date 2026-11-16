@@ -228,7 +228,7 @@ by `CheckpointSaverIteration` to `model/last` only. There is no in-training eval
 
 Configs (`configs/pimm/`) state intent and hold one rank's batch; `scripts/submit.sh` appends
 the batch for nodes x GPUs. `fm.py` is the stable phase; `fm_cooldown.py` the WSD cooldown
-(warm start `model.init=$HELIX_EXP/fm`, first `COOLDOWN_RUNS` runs, one epoch); `fm_smoke.py`
+(warm start `model.init=$HELIX_EXP/fm`, the first 57,600 training events, one pass); `fm_smoke.py`
 a wiring check; `denoise.py` the denoiser on `model.fm`; `ft_eval.py` the evaluation protocol.
 
 ## 10. Evaluation (`helix/eval`)

@@ -129,8 +129,8 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
   `plan` overwrite the global table and the plan, so build new groups with j000000's table and
   an appended plan (needs a small `corpus.sh` change). NERSC has no campaign copy, so truth is
   built at S3DF.
-- **Cooldown subset:** on a one-run corpus `COOLDOWN_RUNS` cannot set the length and `max_len`
-  takes a file-order prefix; replace both with a hashed fraction or a length in steps.
+- **Cooldown subset:** `fm_cooldown`'s `max_len` (57,600 events, the recipe run) takes a
+  file-order prefix; replace it with a hashed fraction.
 - **RoPE re-test:** a full-width single-axis path, then `wire_rope=False` / `rope_split=True`.
 - **Multi-event batching:** design at the archive tag (`MULTI_EVENT_BATCHING`).
 - **Optical** is not fed to the model; a joint model needs a light simulation paired with the
