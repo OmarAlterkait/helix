@@ -220,6 +220,28 @@ def test_file_layout_resume_and_atomic_write(corpus):
     assert os.stat(corpus["cells"]).st_mtime_ns == before
 
 
+def test_the_truth_script_builds_every_shard_of_a_run(corpus, tmp_path):
+    """scripts/build_truth.py --corpus RUN_DIR: a cells file beside each coeff shard, its events the
+    shard's, read from the campaign at HELIX_SIM_ROOT -- the same records build_shard writes."""
+    import subprocess
+    run = tmp_path / RUN
+    run.mkdir()
+    _coeff_shard(run / "sim_wire_coeff_0000.h5", [EV0, EV0 + 1])
+    _coeff_shard(run / "sim_wire_coeff_0001.h5", [EV0 + 2])
+    script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "build_truth.py")
+    r = subprocess.run([sys.executable, script, "--corpus", str(run)], capture_output=True, text=True,
+                       env=dict(os.environ, HELIX_SIM_ROOT=str(corpus["dir"] / "sim")))
+    assert r.returncode == 0, r.stderr
+    for k, events in ((0, [EV0, EV0 + 1]), (1, [EV0 + 2])):
+        path = run / f"sim_wire_cells_{k:04d}.h5"
+        for pos, ev in enumerate(events):
+            rec, ident = _event(path, pos)
+            want, _ = _event(corpus["cells"], ev - EV0)
+            assert ident["event"] == ev and set(rec) == set(want)
+            for n in want:
+                np.testing.assert_array_equal(rec[n], want[n], err_msg=n)       # NaN == NaN here
+
+
 def test_reader_refuses_another_format(corpus, tmp_path):
     p = tmp_path / "sim_wire_cells_0000.h5"
     p.write_bytes(open(corpus["cells"], "rb").read())

@@ -15,11 +15,15 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-pytest.importorskip("pimm_data")          # the derivation reads the corpus through CoeffTPCDataset
-
 from helix.data import bins as binlib                            # noqa: E402
 
 from _fixtures import CORPUS                                        # noqa: E402
+
+import importlib.util                                               # noqa: E402
+
+#: The derivation reads the corpus through CoeffTPCDataset; the rest of the module needs neither.
+needs_pimm_data = pytest.mark.skipif(importlib.util.find_spec("pimm_data") is None,
+                                     reason="pimm_data not installed (derive reads through CoeffTPCDataset)")
 
 
 def _table(seed=0, K=8, n_bands=2, corpus="/somewhere/run_1", events=120):
@@ -71,6 +75,7 @@ def test_save_load_roundtrip_is_exact(tmp_path):
 
 
 @pytest.mark.skipif(not os.path.isdir(CORPUS), reason=f"corpus absent: {CORPUS}")
+@needs_pimm_data
 def test_rederiving_the_production_grid_reproduces_it_bit_identically():
     """The handover claim, against the real corpus.
 
@@ -145,6 +150,7 @@ def test_check_reference_flags_a_same_shape_grid_that_is_not_the_reference():
 
 
 @pytest.mark.skipif(not os.path.isdir(CORPUS), reason=f"corpus absent: {CORPUS}")
+@needs_pimm_data
 def test_the_production_grid_matches_its_own_packaged_fingerprint():
     """Closes the loop: rederive from the corpus, and the packaged fingerprint
     -- with no reference .pt anywhere -- confirms it is the released grid."""
