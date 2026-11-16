@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from helix.model.tokenize import assemble, PatchConfig
-from helix.model.tokenize import (assemble, detokenize, decode_prediction,
+from helix.model.tokenize import (assemble, detokenize,
                             PatchConfig, sigma_for_rows)
 
 
@@ -311,12 +311,8 @@ def test_to_fm_supplies_every_key_the_model_gathers():
 # helix owns both directions: splitting a transform from its inverse across repos
 # would put half the representation in pimm.
 #
-# Two entry points, deliberately separate:
-#
-#   detokenize          exact inverse, occupancy KNOWN. Verifiable, so it is what
-#                       pins the other one.
-#   decode_prediction   model output, occupancy PREDICTED from a logit. Cannot be
-#                       checked against ground truth, so it is built on the first.
+# `detokenize` is the exact inverse (occupancy known); a round trip through it pins
+# `assemble`'s geometry from the other side.
 
 GIDS = np.array([0, 1, 2, 4, 5], np.int32)          # deliberately NON-contiguous
 # Deliberately NOT multiples of pw=16 / pt=8: partial blocks at the edges are
@@ -406,53 +402,6 @@ def test_dropped_bands_are_not_resurrected():
     back = detokenize(tok, gids=GIDS, norm_sigma=ns, cfg=CFG)
     assert int(back["band"].max()) < CFG.n_bands
     assert len(back["band"]) == int((band < CFG.n_bands).sum())
-
-
-# ---- prediction decoding --------------------------------------------------
-
-def test_decode_prediction_threshold_selects_slots():
-    band, gid, wire, tau, val = _inv_rows(seed=11)
-    ns = _norm_sigma()
-    tok = assemble(band, gid, wire, tau, val, gids=GIDS, n_wires=N_WIRES,
-                   band_lengths=BAND_LENGTHS, norm_sigma=ns, cfg=CFG)
-    occ = np.asarray(tok["occ"]).astype(bool)
-    logit = np.where(occ, 5.0, -5.0).astype(np.float32)   # a perfect predictor
-
-    got = decode_prediction(logit, tok["inp"], tok, gids=GIDS, norm_sigma=ns, cfg=CFG)
-    ref = detokenize(tok, gids=GIDS, norm_sigma=ns, cfg=CFG)
-    for k in ("band", "plane_gid", "wire", "tau"):
-        np.testing.assert_array_equal(got[k][_sorted(got)], ref[k][_sorted(ref)])
-
-    # everything on -> more rows; everything off -> none
-    allon = decode_prediction(np.full_like(logit, 9.0), tok["inp"], tok,
-                              gids=GIDS, norm_sigma=ns, cfg=CFG)
-    assert len(allon["band"]) > len(ref["band"])
-    alloff = decode_prediction(np.full_like(logit, -9.0), tok["inp"], tok,
-                               gids=GIDS, norm_sigma=ns, cfg=CFG)
-    assert len(alloff["band"]) == 0
-
-
-def test_decode_prediction_respects_geometric_validity():
-    """A slot past the plane's wire count or the band's length cannot hold a
-    coefficient however confident the head is."""
-    band, gid, wire, tau, val = _inv_rows(seed=13)
-    ns = _norm_sigma()
-    tok = assemble(band, gid, wire, tau, val, gids=GIDS, n_wires=N_WIRES,
-                   band_lengths=BAND_LENGTHS, norm_sigma=ns, cfg=CFG)
-    logit = np.full(np.asarray(tok["occ"]).shape, 9.0, np.float32)
-
-    kept = decode_prediction(logit, tok["inp"], tok, gids=GIDS, norm_sigma=ns, cfg=CFG)
-    loose = decode_prediction(logit, tok["inp"], tok, gids=GIDS, norm_sigma=ns,
-                              cfg=CFG, respect_valid=False)
-    assert len(kept["band"]) == int(np.asarray(tok["valid"]).sum())
-    assert len(loose["band"]) > len(kept["band"])
-    # every kept row is inside its plane and band
-    for i, g in enumerate(GIDS):
-        sel = kept["plane_gid"] == g
-        assert kept["wire"][sel].max(initial=-1) < N_WIRES[i]
-    for b in range(CFG.n_bands):
-        sel = kept["band"] == b
-        assert kept["tau"][sel].max(initial=-1) < BAND_LENGTHS[b]
 
 
 def test_dead_wire_augmentation_is_not_invertible():
