@@ -160,7 +160,17 @@ def _batch(n=48, seed=0):
     g = torch.Generator().manual_seed(seed)
     return dict(n_cells=n, plane_id=torch.arange(n) % 6,
                 wire_pos=torch.rand(n, generator=g) * 1900,
-                band_id=torch.randint(0, 4, (n,), generator=g))
+                band_id=torch.randint(0, 4, (n,), generator=g),
+                t_phys=torch.rand(n, generator=g) * 3000 - 100)
+
+
+def _loc_batch(n=6000, seed=0):
+    """Tokens of all four bands on 16-wire patch columns, so locations hold several bands."""
+    g = torch.Generator().manual_seed(seed)
+    return dict(n_cells=n, plane_id=torch.randint(0, 6, (n,), generator=g),
+                wire_pos=torch.randint(0, 8, (n,), generator=g).float() * 16,
+                band_id=torch.randint(0, 4, (n,), generator=g),
+                t_phys=torch.rand(n, generator=g) * 2000 - 100)
 
 
 # ---------------------------------------------------------------- muP contract
@@ -175,6 +185,20 @@ def test_hidden_lr_scales_as_one_over_width_multiplier(d, d_base):
     mult = d / d_base
     lrs = sorted({g["lr"] for g in groups})
     assert lrs == sorted({1e-3, 1e-3 / mult}) if mult != 1 else lrs == [1e-3]
+
+
+def test_mup_leaves_the_init_at_the_default():
+    """muP's hidden init is variance ~ 1/fan_in, which PyTorch's default already is; one more
+    1/m on top made it 1/(fan_in m), 6x too small in variance at d768. So muP changes the LRs
+    and the readout multiplier, never a drawn weight."""
+    torch.manual_seed(0)
+    a = build_fm(dict(SMALL, d=256, heads=16, mup=True, d_base=64))
+    torch.manual_seed(0)
+    b = build_fm(dict(SMALL, d=256, heads=16, mup=False))
+    for (n, p), q in zip(a.named_parameters(), b.parameters()):
+        assert torch.equal(p, q), n
+    w = a.enc[0].mlp[0].weight
+    assert float(w.var()) == pytest.approx(1 / (3 * w.shape[1]), rel=0.05)
 
 
 def test_weight_decay_is_decoupled_from_the_mup_lr_scaling():
@@ -211,7 +235,7 @@ def test_every_trainable_parameter_lands_in_exactly_one_group():
 
 # ------------------------------------------------------- mask reproducibility
 
-@pytest.mark.parametrize("mode", ["random", "plane"])
+@pytest.mark.parametrize("mode", ["random", "loc", "plane"])
 def test_the_same_generator_seed_gives_the_same_mask(mode):
     """Reproducibility is the contract; the exact token selection is NOT.
 
@@ -238,6 +262,49 @@ def test_random_mode_honours_the_ratio():
     for ratio in (0.25, 0.75):
         m = make_mask(B, "random", ratio, 1, torch.Generator().manual_seed(3))
         assert abs(float(m.float().mean()) - ratio) < 0.03
+
+
+def _mixed_at(B, m, ticks):
+    """Locations (plane, patch column, ``ticks`` bin of t_phys) that ``m`` hides only partly."""
+    t = torch.div(B["t_phys"], ticks, rounding_mode="floor").long()
+    loc = torch.unique(torch.stack([B["plane_id"], B["wire_pos"].long(), t], 1),
+                       dim=0, return_inverse=True)[1]
+    n = int(loc.max()) + 1
+    hid = torch.zeros(n).index_add_(0, loc, m.float())
+    return int(((hid > 0) & (hid < torch.bincount(loc, minlength=n))).sum())
+
+
+def test_loc_mode_hides_every_band_at_a_location_together():
+    """No location is partly hidden: a hidden token never has another band's token visible in
+    its (plane, patch column, 128-tick bin). Random masking leaves most of them partly hidden."""
+    B = _loc_batch()
+    gen = lambda: torch.Generator().manual_seed(1)
+    m = make_mask(B, "loc", 0.75, 1, gen())
+    assert _mixed_at(B, m, 128.0) == 0
+    assert abs(float(m.float().mean()) - 0.75) < 0.05
+    assert _mixed_at(B, make_mask(B, "random", 0.75, 1, gen()), 128.0) > 500
+    # loc_ticks sets the location's length
+    m2 = make_mask(B, "loc", 0.75, 1, gen(), loc_ticks=256.0)
+    assert _mixed_at(B, m2, 256.0) == 0 and _mixed_at(B, m2, 128.0) == 0
+
+
+def test_loc_frac_mixes_location_steps_with_the_others():
+    """plane_frac, loc_frac and mask_mode share one draw per step."""
+    B = _loc_batch()
+    model = build_fm(dict(SMALL, plane_frac=0.2, loc_frac=0.4))
+    torch.manual_seed(0)
+    gid = B["plane_id"]
+    kinds = {"plane": 0, "loc": 0, "random": 0}
+    for _ in range(300):
+        m = model.make_mask(B)
+        if all(bool(m[gid == g].all()) or bool((~m[gid == g]).all()) for g in gid.unique()):
+            kinds["plane"] += 1
+        elif _mixed_at(B, m, 128.0) == 0:
+            kinds["loc"] += 1
+        else:
+            kinds["random"] += 1
+    assert 30 < kinds["plane"] < 90 and 90 < kinds["loc"] < 150 and 90 < kinds["random"] < 150, kinds
+    assert build_fm(dict(SMALL, mask_mode="loc")).make_mask(B).any()
 
 
 # --------------------------------------------------------- full-step wiring

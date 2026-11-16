@@ -3,8 +3,9 @@
 A masked autoencoder over patch tokens of sparse wavelet coefficients: the
 encoder runs on the visible tokens only, in grouped attention along four token
 orders (:mod:`helix.model.blocks`); a CrossMAE decoder's masked queries
-cross-attend the encoded visible tokens in drift-time groups; a categorical head
-predicts each slot's occupancy and its value's bin. ``forward`` implements the
+cross-attend the encoded visible tokens in drift-time groups bounded by the
+keys' times; a categorical head predicts each slot's occupancy and its value's
+bin. ``forward`` implements the
 pimm Trainer contract (``model(batch) -> dict`` with a ``loss`` key).
 """
 import torch
@@ -19,9 +20,10 @@ from helix.model.loss import cat_head_sparse
 # the architecture, which keeps a checkpoint's architecture metadata and its
 # parameter tree in exact correspondence. build_fm() sets them as attributes.
 #
-# plane_frac mixes the two masking modes PER STEP: whole-plane masking with that
-# probability, mask_mode otherwise. It is NOT the same as mask_mode="plane",
-# which would mask planes every step.
+# plane_frac and loc_frac mix the masking modes PER STEP: whole-plane masking
+# with probability plane_frac, whole-location masking with loc_frac, mask_mode
+# otherwise. They are NOT mask_mode="plane" / "loc", which mask that way every
+# step. loc_ticks is a location's length in time (make_mask).
 #
 # act_ckpt recomputes each block's activations in the backward pass instead of
 # storing them: ~1.3x the step for a fraction of the activation memory, which is
@@ -36,8 +38,8 @@ from helix.model.loss import cat_head_sparse
 # (helix.model.kernels); the same arithmetic to ~1e-5, so it is an
 # implementation choice, not an architecture one. Needs qk_norm and head dim 64.
 _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
-                   plane_frac=0.0, compile_blocks=False, act_ckpt=False,
-                   fused_qk=False)
+                   plane_frac=0.0, loc_frac=0.0, loc_ticks=128.0,
+                   compile_blocks=False, act_ckpt=False, fused_qk=False)
 
 
 # ---- MAE token masking ----------------------------------------------------------------------
@@ -50,10 +52,16 @@ _TRAIN_OPTS = dict(mask_mode="random", mask_ratio=0.75, n_planes=1,
 VIEWS_PER_VOLUME = 3
 
 
-def make_mask(B, mode, ratio, n_planes, gen=None):
-    """mode: random | plane.
+def make_mask(B, mode, ratio, n_planes, gen=None, loc_ticks=128.0):
+    """mode: random | loc | plane.
 
     * ``random`` — ``ratio`` of tokens, drawn independently.
+    * ``loc``    — ``ratio`` of LOCATIONS, each hidden with every band's tokens in
+      it. A location is one plane's 16-wire patch column (``wire_pos``, which all
+      bands share) over a ``loc_ticks`` bin of ``t_phys``; 128 ticks is the
+      coarsest band's patch (8 ticks at level 4). A token belongs to the bin of
+      its time, so a coarse token centred next door can still reach up to half
+      its span (64 ticks) into a hidden location.
     * ``plane``  — ``n_planes`` whole planes PER VOLUME; every volume punctured
       (``ratio`` is unused).
     """
@@ -62,8 +70,16 @@ def make_mask(B, mode, ratio, n_planes, gen=None):
         else (lambda *s: torch.rand(*s, device=dev))
     if mode == "random":
         return rnd(n) < ratio
+    if mode == "loc":
+        # Random per-token masking leaves 57% of hidden tokens overlapping, in ticks, a
+        # visible token of another band in their patch column -- the same signal at
+        # another scale; whole locations leave 18%, at their edges (d1m, 120 events).
+        t = torch.div(B["t_phys"].double(), loc_ticks, rounding_mode="floor").long()
+        loc = torch.stack([B["plane_id"].long(), B["wire_pos"].long(), t], 1)
+        u, inv = torch.unique(loc, dim=0, return_inverse=True)
+        return (rnd(u.shape[0]) < ratio)[inv]
     if mode != "plane":
-        raise ValueError(f"mask mode must be 'random' or 'plane', got {mode!r}")
+        raise ValueError(f"mask mode must be 'random', 'loc' or 'plane', got {mode!r}")
     # Cross-plane: hide whole planes. Puncturing EVERY volume, measured on a real
     # R1 event (gids 0..5 = 2 volumes x 3 views):
     #
@@ -145,15 +161,15 @@ class FMModel(nn.Module):
             self.register_buffer(_nm, torch.full((n_band, n_bins), float("nan")))
         # --- muP (Yang & Hu, Tensor Programs V, arXiv:2203.03466) ---
         # m = d/d_base is the width multiplier. Under muP the optimal Adam LR is
-        # width-invariant: hidden init var and Adam LR are divided by m; readout
-        # forward is divided by m; input/embedding untouched.
+        # width-invariant: hidden init var ~ 1/fan_in (PyTorch's default init
+        # already is, so it is left alone) and hidden Adam LR / m; readout
+        # forward / m; input/embedding untouched.
         #
         # ATTENTION SCALE: muP replaces 1/sqrt(d_head) with 1/d_head ("8/d_head" in
         # the mup pkg, backward-compatible at d_head=64) ONLY when d_head GROWS with
         # width. HERE d_head is FIXED (=64; heads=d/64), so q.k over a fixed d_head is
         # already O(1) under the standard 1/sqrt(d_head) — that scaling is width-correct
-        # and we keep it (forcing 1/d_head would just shrink logits ~8x, verified by the
-        # coord check). So attention keeps SDPA's default 1/sqrt(head_dim).
+        # and we keep it. So attention keeps SDPA's default 1/sqrt(head_dim).
         self.mup, self.d_base = mup, d_base
         self.m = d / d_base if mup else 1.0
         self.readout_mult = 1.0 / self.m         # output multiplier (1 if mup=False)
@@ -167,8 +183,6 @@ class FMModel(nn.Module):
         self.dec_norm = nn.LayerNorm(d)
         self.occ_head = nn.Linear(d, n_slot)
         self.val_head = nn.Linear(d, n_slot * n_bins)        # K logits per slot
-        if mup:
-            self._mup_init()
         # Widened LAST, so every other parameter draws the same random numbers as at S = 0;
         # the old columns are the S = 0 embedding's, the amplitude columns zero.
         self.lin_amp_scale = float(lin_amp_scale)
@@ -182,8 +196,10 @@ class FMModel(nn.Module):
 
     # ---- muP machinery (Tensor Programs V, arXiv:2203.03466; mup pkg; EleutherAI guide) ----
     # Category map for THIS model. INPUT = fixed-fan_in maps into width-d space
-    # (LR const, init unchanged). HIDDEN = fan_in,fan_out both O(d) (init var /m, LR /m).
-    # OUTPUT = fixed-fan_out readouts (init unchanged, forward mult 1/m, LR const).
+    # (LR const). HIDDEN = fan_in,fan_out both O(d) (LR /m). OUTPUT = fixed-fan_out
+    # readouts (forward mult 1/m, LR const). Every init is PyTorch's default, var
+    # 1/(3 fan_in): muP's for input and hidden weights; for the readout, with the 1/m
+    # multiplier, below muP's, which is allowed (zero-init readouts are the limit).
     # LayerNorm gains/biases and all biases: no width treatment (LR const).
     def _mup_categories(self):
         """-> dict name->('input'|'hidden'|'output') for WEIGHT params (2-D).
@@ -200,19 +216,6 @@ class FMModel(nn.Module):
             elif n in output:     cats[n] = "output"
             else:                 cats[n] = "input"     # embed/emb/mask_tok/film/all biases/LN
         return cats
-
-    def _mup_init(self):
-        """Rescale hidden WEIGHT init so var = base_var / m (std /= sqrt(m)).
-        Input/output init left at the framework default (= base param at m=1 => the
-        mup=False path is reproduced exactly when d==d_base). Query/readout are NOT
-        zero-init'd here: FiLM is already zero-init'd, and a plain (non-zero)
-        readout is a valid muP choice as long as the 1/m multiplier is applied."""
-        import math as _m
-        cats = self._mup_categories()
-        with torch.no_grad():
-            for n, p in self.named_parameters():
-                if cats.get(n) == "hidden" and p.dim() == 2:
-                    p.mul_(1.0 / _m.sqrt(self.m))       # var -> var / m
 
     def param_groups(self, base_lr, weight_decay=None):
         """AdamW param groups with muP per-category LR multipliers.
@@ -327,18 +330,31 @@ class FMModel(nn.Module):
         return _permute(xp, inv), out
 
     def _decode(self, qm, xv, qpos, kpos):
-        """The grouped-cross decoder with even time groups. ``qpos`` / ``kpos``
-        are (t_phys, ang_t, ang_w) of the queries / keys.
+        """The grouped-cross decoder. ``qpos`` / ``kpos`` are (t_phys, ang_t, ang_w)
+        of the queries / keys.
+
+        The visible keys, in time order, form ``nb`` near-equal groups; group j
+        covers the times from its first key to the next group's first key (the
+        first and last groups are open-ended), and each query attends the group
+        covering ITS time. The boundaries are the keys', never the queries' own
+        quantiles: a hidden view is not distributed in time like the views left
+        visible, and splitting the queries into equal counts as well put 61% of
+        hidden-Y queries outside their keys' time range. Query groups are
+        therefore uneven and may be empty; the varlen ``cu`` boundaries carry both.
 
         ``rope_split`` does not reach the decoder: it keeps the wire rotation,
         since it needs the wire address to know which wire it reconstructs
         (dropping it froze reconstruction, var_expl ~2%)."""
         (qt, qat, qaw), (kt, kat, kaw) = qpos, kpos
         Tq, Tk, dev = qm.shape[0], xv.shape[0], xv.device
-        oq = torch.argsort(qt.double()); okv = torch.argsort(kt.double())
-        nb = max(1, min((max(Tq, Tk) + self.gd - 1) // self.gd, Tq, Tk))
-        cuq, cuk = _cu_even(Tq, nb, dev), _cu_even(Tk, nb, dev)
-        mq, mk = (Tq + nb - 1) // nb, (Tk + nb - 1) // nb
+        qts, oq = torch.sort(qt.double()); kts, okv = torch.sort(kt.double())
+        nb = max(1, min((max(Tq, Tk) + self.gd - 1) // self.gd, Tk))
+        cuk = _cu_even(Tk, nb, dev)
+        # cuq[j] = the queries earlier than key group j's first key
+        cuq = torch.cat([cuk.new_zeros(1),
+                         torch.searchsorted(qts, kts[cuk[1:-1].long()]).to(torch.int32),
+                         cuk.new_full((1,), Tq)])
+        mq, mk = int((cuq[1:] - cuq[:-1]).max()), (Tk + nb - 1) // nb
         qcos, qsin = rope_tables(qat[oq], None if qaw is None else qaw[oq], qm.dtype)
         kcos, ksin = rope_tables(kat[okv], None if kaw is None else kaw[okv], xv.dtype)
         cross_blk, fused = _ckpt(_blocks(self)[1], self), self._fused()
@@ -435,29 +451,32 @@ class FMModel(nn.Module):
     def make_mask(self, B, ratio=None, mode=None, n_planes=None, gen=None):
         """Draw a token mask for this batch under the model's configured policy.
 
-        ``plane_frac`` mixes the two modes PER STEP: with that probability the
-        step masks whole planes (``"plane"``), otherwise it uses ``mask_mode``.
-        That mix is the point — a run that only ever masks randomly never has to
-        reconstruct a plane it cannot see, so nothing forces cross-plane
-        triangulation, and a run that only ever masks planes never learns the
-        within-plane task.
+        ``plane_frac`` and ``loc_frac`` mix the modes PER STEP: with those
+        probabilities the step masks whole planes (``"plane"``) or whole
+        locations (``"loc"``), otherwise it uses ``mask_mode``. That mix is the
+        point — a run that only ever masks randomly never has to reconstruct a
+        plane it cannot see, so nothing forces cross-plane triangulation, and a
+        run that only ever masks planes never learns the within-plane task.
 
         An explicit ``mode=`` overrides the policy and skips the draw, so callers
         that want one specific mode (evaluation, tests) are unaffected.
         """
         m = self.mask_mode if mode is None else mode
-        if mode is None and self.plane_frac > 0:
+        if mode is None and (self.plane_frac > 0 or self.loc_frac > 0):
             # torch, not numpy's global RNG: the draw stays on the batch's device
             # and honours `gen`.
             dev = B["plane_id"].device
-            r = (torch.rand((), generator=gen, device=dev)
-                 if (gen is not None and gen.device.type == dev.type)
-                 else torch.rand((), device=dev))
-            if float(r) < self.plane_frac:
+            r = float(torch.rand((), generator=gen, device=dev)
+                      if (gen is not None and gen.device.type == dev.type)
+                      else torch.rand((), device=dev))
+            if r < self.plane_frac:
                 m = "plane"
+            elif r < self.plane_frac + self.loc_frac:
+                m = "loc"
         return make_mask(B, m,
                          self.mask_ratio if ratio is None else ratio,
-                         self.n_planes if n_planes is None else n_planes, gen=gen)
+                         self.n_planes if n_planes is None else n_planes, gen=gen,
+                         loc_ticks=self.loc_ticks)
 
     def require_batch_keys(self, B):
         """Raise a named KeyError for anything the objective needs and lacks.

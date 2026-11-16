@@ -1,0 +1,26 @@
+# Whole-location masking against random masking on d1m. Random per-token masking leaves 57% of
+# hidden tokens overlapping, in ticks, a visible token of another band in their patch column
+# (d1m, 120 probe events): partly a cross-band copy task. Whole locations leave 18%, at their edges. `mask_mode: loc` hides 75% of LOCATIONS instead -- a plane's 16-wire
+# patch column over a 128-tick bin of time (the coarsest band's patch), every band's tokens
+# together; plane_frac's 10% whole-view steps are unchanged.
+#
+# Both arms, not the loc arm alone: a run from this tree differs from lr4.4e-3 in the muP init
+# (hidden weights no longer 1/sqrt(m) under the default) and the decoder's time groups, so the
+# random-mask control is retrained beside it. Recipe otherwise fm.py's (4.4e-3 at 16 GPUs, 3
+# epochs of j000000), each cooled by fm_cooldown with its arm's overrides; judged by the ft_eval
+# fine-tune (configs/sweeps/ft_eval.yaml) and the uprobe below.
+#
+#   python scripts/sweep.py configs/sweeps/d1m_locmask.yaml --dry-run
+config: fm
+submit: [--resources.nnodes, "4"]
+arms:
+  mask_rand: {overrides: {model.mask_mode: random}}
+  mask_loc:  {overrides: {model.mask_mode: loc}}
+then:
+  config: fm_cooldown
+  suffix: _cool
+  submit: [--resources.nnodes, "4", --chain.jobs, "2"]
+  overrides: {model.init: "$HELIX_EXP/{run}"}
+after_each:
+  command: python -m helix.eval --uprobe $HELIX_EXP/{run} --weights last --out $HELIX_EXP/{run}/eval.json
+  time: "04:00:00"

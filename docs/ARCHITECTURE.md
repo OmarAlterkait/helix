@@ -169,8 +169,10 @@ scale of every `log1p(q / Q0)`) is defined here once. ~197 MB per 200-event shar
   re-test, because a disabled axis leaves its half of each head unrotated (`rope_tables`).
 - **Masking** (`make_mask`): 75% of tokens at random; with probability `plane_frac` (0.1) a
   step hides whole planes instead. Grouped by `plane_id`, the token set is order-free.
+  `mask_mode="loc"` (or `loc_frac` per step) hides 75% of locations -- a plane's 16-wire patch
+  column over a `loc_ticks` (128) bin of time -- with every band's tokens in each.
 - **Decoder:** 4 CrossMAE blocks; masked queries cross-attend the visible encoded tokens in
-  drift-time groups.
+  drift-time groups: the keys in equal counts, each query in the group covering its time.
 - **Head and loss** (`loss.py`): per slot an occupancy logit and a **categorical value head**
   over K = 128 bins; loss = occupancy BCE + value cross-entropy, each over its own support
   (masked, valid; the value term on occupied slots only). The grid (`helix.data.bins`) is uniform
@@ -230,7 +232,7 @@ by `CheckpointSaverIteration` to `model/last` only. There is no in-training eval
 
 Configs (`configs/pimm/`) state intent and hold one rank's batch; `scripts/submit.sh` appends
 the batch for nodes x GPUs. `fm.py` is the stable phase; `fm_cooldown.py` the WSD cooldown
-(warm start `model.init=$HELIX_EXP/fm`, first `COOLDOWN_RUNS` runs, one epoch); `fm_smoke.py`
+(warm start `model.init=$HELIX_EXP/fm`, the first 57,600 training events, one pass); `fm_smoke.py`
 a wiring check; `denoise.py` the denoiser on `model.fm`; `ft_eval.py` the evaluation protocol.
 
 ## 10. Evaluation (`helix/eval`)
