@@ -1,0 +1,27 @@
+# Pretraining round 1 on d1m (2026-11-17): what does pretraining contribute, spectral completion
+# or spatial / cross-plane context? One seed per arm.
+#
+# - r1_rand: the recipe (random masking 0.75, whole-view steps plane_frac 0.1). The control: a run
+#   from this tree differs from the lr4.4e-3 encoders in the decoder's time groups (69fc22b) and the
+#   muP init (72a82e3), so it is retrained here, not borrowed.
+# - r1_loc: whole-location masking (`mask_mode: loc`: a plane's 16-wire column over a 128-tick bin,
+#   every band together). Random masking leaves 57% of hidden tokens overlapping a visible token
+#   of another band; whole locations leave 18%.
+# - r1_xp0 / r1_xp03: the whole-view (cross-plane) fraction 0 and 0.3 instead of 0.1.
+#
+# Recipe otherwise fm.py's (4.4e-3 at 16 GPUs, 3 epochs of j000000; the LR was tuned under the old
+# init), each cooled by fm_cooldown with its arm's overrides. Judged by the ft_eval fine-tune.
+#
+#   python scripts/sweep.py configs/sweeps/d1m_r1.yaml --dry-run
+config: fm
+submit: [--resources.nnodes, "4"]
+arms:
+  r1_rand:  {overrides: {model.mask_mode: random}}
+  r1_loc:   {overrides: {model.mask_mode: loc}}
+  r1_xp0:   {overrides: {model.mask_mode: random, model.plane_frac: 0.0}}
+  r1_xp03:  {overrides: {model.mask_mode: random, model.plane_frac: 0.3}}
+then:
+  config: fm_cooldown
+  suffix: _cool
+  submit: [--resources.nnodes, "4", --chain.jobs, "2"]
+  overrides: {model.init: "$HELIX_EXP/{run}"}

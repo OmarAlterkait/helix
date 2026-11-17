@@ -88,7 +88,7 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
 - Charge, binned by the CALLED charge over all covered cells: calls below 1k e- are 35-58% on cells without charge. 43% of 25-1k e- truth cells are detected, and 39% of their charge has no kept coefficient. Closure over all cells 1.02 (haze 0.024).
 - Calibration on natural cells: ECE 0.054 raw, 0.003 after one global log-odds offset (a prior shift).
 
-**Fixed in the training code 2026-11-16 (affect new runs only):** the decoder's time groups (above); the muP hidden init, which was 2.45x too small in std (72a82e3; the 4.4e-3 LR was tuned under the old init); `fm_cooldown.py` states the 57,600-event cooldown that was run (327907c). New: whole-location masking (`mask_mode="loc"`, `configs/sweeps/d1m_locmask.yaml`).
+**Fixed in the training code 2026-11-16 (affect new runs only):** the decoder's time groups (above); the muP hidden init, which was 2.45x too small in std (72a82e3; the 4.4e-3 LR was tuned under the old init); `fm_cooldown.py` states the 57,600-event cooldown that was run (327907c). New: whole-location masking (`mask_mode="loc"`; round 1: `configs/sweeps/d1m_r1.yaml`).
 
 ## Open work
 

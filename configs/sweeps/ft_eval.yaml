@@ -31,6 +31,9 @@ arms:
   ft_lr22_s1:    {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/lr2.2e-3_cool/model/last, seed: 1}}
   ft_scratch:    {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false}}
   ft_scratch_s1: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false, seed: 1}}
+  # scratch at 4x the steps: at 16 epochs it was still improving while the pretrained arms already
+  # overfit, so the 16-epoch scratch arm is not a converged floor
+  ft_scratch_e64: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false, epoch: 64}}
 after_each:
   command: python -m helix.eval $HELIX_EXP/{run} --out $HELIX_EXP/{run}/eval.json
   time: "04:00:00"
