@@ -93,7 +93,7 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
 ## Open work
 
 - **Next pretraining round (d1m, one seed per arm, ~60 GPU-h each):** the current recipe with the fixes, whole-location masking, plane_frac 0 and 0.3; scored on the fine-tune with held-out checkpoint selection and a converged scratch arm.
-- **1x4 truth:** the grid is a property of the truth file and finer truths sum exactly to 2x16 (414b3e0). The full-corpus build needs the campaign hits, which are only at S3DF (`scripts/truth.sh`; ~130-270 CPU-h, ~640 GB, 130 GB key+q only). The 2,000 finetruth events can be summed to 1x4 at NERSC now.
+- **1x4 truth: built (2026-11-17).** All 1,000 d1m shards on the 1 wire x 4 tick grid, `helix-cells-3`, from the campaign hits (25 e- per-entry cut, as cells-3), helix dc16365 clean, JAXTPC f0d2ed39. `$CFS/m5238/users/oalter/truth_1x4_d1m/cells` (621 GiB; scratch copy `$SCRATCH/truth_1x4_d1m/cells`). Summed to 2x16 it equals the stored cells-3 (identical cells in every event, q within 1 float32 ulp) on 10 shards checked. Inputs: j000000 hits/step/labl copied from S3DF by Globus (`HELIX_SIM_ROOT`). To use it: `<root>/coeff` -> the corpus run, `<root>/cells` -> this directory, `data_root=<root>`.
 
 - **LR:** run the 6.2e-3 arm. The "training-seed noise 0.04" seen on the presence probe is not
   seen on the MSE probe (s0 0.350 vs s1 0.346), so it was likely probe noise.
