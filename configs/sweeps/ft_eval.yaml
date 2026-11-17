@@ -36,4 +36,4 @@ arms:
   ft_scratch_e64: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false, epoch: 64}}
 after_each:
   command: python -m helix.eval $HELIX_EXP/{run} --out $HELIX_EXP/{run}/eval.json
-  time: "04:00:00"
+  time: "08:00:00"                  # the full probe split (4,113 events) has run past 4 h

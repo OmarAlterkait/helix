@@ -22,4 +22,4 @@ arms:
   cat_l30:   {overrides: {model.dist: cat, model.lin_amp_scale: 30.0}}
 after_each:
   command: python -m helix.eval $HELIX_EXP/{run} --out $HELIX_EXP/{run}/eval_denoise.json
-  time: "04:00:00"
+  time: "08:00:00"                  # the full probe split (4,113 events) has run past 4 h
