@@ -1372,3 +1372,115 @@ def test_cell_charge_reads_the_truth_and_zeros_the_rest():
     cells = dict(key=np.array([5, 2, 9], np.int64), q=np.array([50.0, 20.0, 90.0]))
     assert W.cell_charge(cells, [2, 3, 9, 5]).tolist() == [20.0, 0.0, 90.0, 50.0]
     assert W.cell_charge(dict(key=np.zeros(0, np.int64), q=np.zeros(0)), [1]).tolist() == [0.0]
+
+
+# ---- a fine-grid denoiser on a coarse truth ----------------------------------------------------
+
+def _fake_fine(y, lg, qm):
+    """A predictor on the 1 x 4 grid answering fixed per-sub-cell outputs, ``(n, 8)`` in
+    :func:`sub_cells` order of the keys it was built for."""
+    from helix.eval.denoise import sub_cells
+
+    def predict(ev, keys, grid=None):
+        assert C.Grid(*grid) == C.Grid(1, 4)
+        want = sub_cells(predict.parents, GRID, (1, 4)).ravel()
+        pos = {k: i for i, k in enumerate(want.tolist())}
+        j = np.array([pos[k] for k in np.asarray(keys).tolist()], np.int64)
+        return (y.ravel()[j].astype(np.float32), lg.ravel()[j].astype(np.float32), qm.ravel()[j],
+                np.full(len(j), np.nan))
+    predict.conditional = True
+    return predict
+
+
+def test_sub_cells_tile_their_parent():
+    from helix.eval.denoise import sub_cells
+    keys = C.fkey(np.array([0, 4, 5]), np.array([0, 7, 300]), np.array([-3, 0, 250]))
+    sk = sub_cells(keys, GRID, (1, 4))
+    assert sk.shape == (3, 8) and len(np.unique(sk)) == 24
+    g, w, t = C.unkey(sk.ravel())
+    pg, pw, pt = C.unkey(keys)
+    assert (g == np.repeat(pg, 8)).all() and (w // 2 == np.repeat(pw, 8)).all() and (t // 4 == np.repeat(pt, 8)).all()
+    assert (sub_cells(keys, GRID, GRID).ravel() == keys).all()
+    with pytest.raises(ValueError, match="whole number"):
+        sub_cells(keys, GRID, (3, 4))
+
+
+def test_coarsen_is_the_noisy_or_and_keeps_the_expected_charge():
+    """Presence is 1 - prod(1 - p_i) as log-odds, finite at saturated and uncovered sub-cells; the
+    cell's expected charge P q_mean is the sub-cells' summed p_i q_mean_i; y is the same mean with
+    the point charges; a cell with no covered sub-cell is uncovered; the fine grid is the identity."""
+    from types import SimpleNamespace
+
+    from helix.eval.denoise import UNCOVERED_LOGIT, coarsen, sigmoid
+    rng = np.random.default_rng(0)
+    n = 6
+    parents = C.fkey(np.zeros(n, np.int64), np.arange(n) * 3, np.arange(n) * 5)
+    y = rng.uniform(0, 3, (n, 8)); lg = rng.uniform(-4, 4, (n, 8)); qm = rng.uniform(100, 9000, (n, 8))
+    lg[1, :] = UNCOVERED_LOGIT; y[1] = 0; qm[1] = 0                 # no covered sub-cell
+    lg[2, 3:] = UNCOVERED_LOGIT; y[2, 3:] = 0; qm[2, 3:] = 0         # some
+    lg[3, 0] = 60.0                                                  # one certain sub-cell
+    lg[4, :] = -50.0                                                 # all near-certainly empty
+    fine = _fake_fine(y, lg, qm)
+    fine.parents = parents
+    ev = SimpleNamespace(grid=GRID)
+    co = coarsen(fine, (1, 4))
+    Y, L, QM, SD = co(ev, parents)
+    p = np.where(lg > UNCOVERED_LOGIT, sigmoid(lg), 0.0)
+    P = 1 - np.prod(1 - p, 1)
+    for i in (0, 2, 5):
+        assert L[i] == pytest.approx(np.log(P[i] / (1 - P[i])), rel=1e-5)
+        assert sigmoid(L[i]) * QM[i] == pytest.approx((p[i] * qm[i]).sum(), rel=1e-5)
+        assert Y[i] == pytest.approx(np.log1p((p[i] * C.Q0 * np.expm1(y[i])).sum() / P[i] / C.Q0), rel=1e-5)
+    assert L[1] == UNCOVERED_LOGIT and Y[1] == 0 and QM[1] == 0
+    assert np.isfinite(L).all() and L[3] > 55
+    assert L[4] == pytest.approx(-50 + np.log(8), abs=1e-4)          # P ~ sum p_i, not 0
+    assert QM[4] == pytest.approx(qm[4].mean(), rel=1e-6)            # the equal-p_i weights
+    assert np.isnan(SD).all()
+    fine.parents = C.fkey(np.zeros(1, np.int64), np.zeros(1, np.int64), np.zeros(1, np.int64))
+    k = C.fkey(np.zeros(2, np.int64), np.zeros(2, np.int64), np.array([0, 1]))   # two of its sub-cells
+    out = co(ev, k, grid=(1, 4))
+    np.testing.assert_array_equal(out[1], lg[0, :2].astype(np.float32))
+    fine.conditional = False
+    with pytest.raises(ValueError, match="cond_charge"):
+        coarsen(fine, (1, 4))
+
+
+def test_subcell_scores_the_fine_charge_against_the_even_spread():
+    """On a 1 x 4 truth: a fine predictor at 1.1 x each sub-cell's charge errs by log 1.1 on every
+    scored sub-cell; a coarse predictor at the TRUE parent charge, spread evenly, is the
+    even-truth floor exactly; the scored sub-cells are the occupied ones of the covered bright
+    parents."""
+    from helix.eval.denoise import UNCOVERED_LOGIT, SubCell
+    from helix.eval.events import events
+    cfg = patch_config(TOK)
+    s = _sample(np.random.default_rng(3), 0, grid=C.Grid(1, 4))
+    ev = next(events(_DS([s]), cfg, torch.device("cpu")))
+    fk, fq = np.asarray(ev.cells["key"], np.int64), np.asarray(ev.cells["q"], np.float64)
+    coarse_rec = C.aggregate(ev.cells, GRID)
+
+    def fine(e, keys, grid=None):
+        assert C.Grid(*grid) == C.Grid(1, 4)
+        q = W.cell_charge(e.cells, keys)
+        return np.log1p(1.1 * q / C.Q0).astype(np.float32), np.full(len(keys), 20.0, np.float32)
+
+    def coarse(e, keys, grid=None):
+        assert C.Grid(*grid) == GRID
+        ok = (J.cell_inputs(keys, e.cell_key, e.band_lengths, cfg, GRID)[0] >= 0).any(1)
+        q = W.cell_charge(coarse_rec, keys)
+        return np.where(ok, np.log1p(q / C.Q0), 0).astype(np.float32), np.where(ok, 20.0, UNCOVERED_LOGIT)
+
+    m = SubCell(fine, coarse, GRID, bright_q=2000.0, n_boot=10)
+    m.add(ev)
+    out = m.result()
+    ck, cq = np.asarray(coarse_rec["key"], np.int64), np.asarray(coarse_rec["q"], np.float64)
+    cov = (J.cell_inputs(ck, ev.cell_key, ev.band_lengths, cfg, GRID)[0] >= 0).any(1)
+    g, w, t = C.unkey(fk)
+    par = C.fkey(g, w // 2, t // 4)
+    want = (fq > 25) & np.isin(par, ck[(cq >= 2000) & cov])
+    assert out["all"]["n"] == int(want.sum()) > 0 and out["n_events"] == 1
+    assert sum(out[v]["n"] for v in ("U", "V", "Y")) == out["all"]["n"]
+    e = out["all"]["median_abs_log_err"]
+    assert e["fine"][0] == pytest.approx(np.log(1.1), abs=1e-4)
+    assert e["even"][0] == pytest.approx(e["even_truth"][0], abs=1e-4) and e["even"][0] > 0.2
+    assert out["all"]["even_over_fine"][0] == pytest.approx(e["even"][0] / e["fine"][0], rel=1e-3)
+    assert out["all"]["frac_called"] == 1.0

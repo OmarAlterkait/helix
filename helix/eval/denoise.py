@@ -363,15 +363,17 @@ def load_denoiser(path, device=None, *, weights="last", fm=None):
     dev = next(model.parameters()).device
     t = lambda a: torch.as_tensor(a).to(dev)                            # noqa: E731
 
-    def predict(ev, keys):
+    def predict(ev, keys, grid=None):
+        """``grid``: the grid ``keys`` are on, default the event truth's."""
         keys = np.asarray(keys, np.int64)
-        idx, aux = cell_inputs(keys, ev.cell_key, ev.band_lengths, cfg, ev.grid)
+        grid = ev.grid if grid is None else Grid(*grid)
+        idx, aux = cell_inputs(keys, ev.cell_key, ev.band_lengths, cfg, grid)
         ok = (idx >= 0).any(1)
         y = np.zeros(len(keys), np.float32)
         logit = np.full(len(keys), UNCOVERED_LOGIT, np.float32)
         qm, sd = np.zeros(len(keys)), np.full(len(keys), np.nan)
         if ok.any():
-            nbr = cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg, ev.grid)
+            nbr = cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg, grid)
             feats = ev.features(model.fm)                            # what DenoiseModel.outputs encodes
             with torch.no_grad(), autocast(dev):
                 out = model.head(feats, t(idx[ok]), t(aux[ok]), t(nbr), ev.batch)
@@ -385,6 +387,75 @@ def load_denoiser(path, device=None, *, weights="last", fm=None):
     predict.dist = getattr(model.head, "dist", "point")
     predict.conditional = bool(getattr(model, "cond_charge", True))
     return predict, cfg
+
+
+def sub_cells(keys, coarse, fine):
+    """``(n, m)``: the keys, on the ``fine`` grid, of the ``m`` sub-cells of each cell of ``keys``
+    (on the ``coarse`` grid, each side a multiple of ``fine``'s), wire-major."""
+    coarse, fine = Grid(*coarse), Grid(*fine)
+    if coarse.fw % fine.fw or coarse.ft % fine.ft:
+        raise ValueError(f"a {coarse} cell is not a whole number of {fine} cells")
+    nw, nt = coarse.fw // fine.fw, coarse.ft // fine.ft
+    g, w, t = unkey(np.asarray(keys, np.int64))
+    i, j = np.meshgrid(np.arange(nw), np.arange(nt), indexing="ij")
+    return fkey(g[:, None], w[:, None] * nw + i.ravel()[None], t[:, None] * nt + j.ravel()[None])
+
+
+def _log_sigmoid(x):
+    return -np.logaddexp(0.0, -x)
+
+
+def coarsen(predict, fine, chunk=200_000):
+    """A predictor on a truth grid coarser than ``fine``, the grid ``predict`` was trained on (its
+    run's truth): each cell's prediction is aggregated from its sub-cells' (:func:`sub_cells`),
+    treating them as independent given the event --
+
+      presence  noisy-OR, ``P = 1 - prod(1 - p_i)``, returned as its log-odds (exact at any p_i)
+      q_mean    the mean of the summed charge given the cell is charged, ``sum p_i q_mean_i / P``
+      y         the same with each sub-cell's point charge ``Q0 expm1(y_i)``, as ``log1p(. / Q0)``
+      y_sd      NaN (the sum has no width here)
+
+    so the cell's expected charge ``P q_mean`` is its sub-cells' summed expected charge, and the
+    closure is the fine predictor's. A sub-cell no token covers is ``p_i = 0``; a cell none of
+    whose sub-cells is covered is uncovered (``y = 0``, :data:`UNCOVERED_LOGIT`). On ``fine``
+    itself it is ``predict``. Conditional heads only: an unconditional head's charge is not given
+    presence, and these sums would not hold. ``chunk``: sub-cells per ``predict`` call, at most."""
+    fine = Grid(*fine)
+    if not getattr(predict, "conditional", True):
+        raise ValueError("coarsen: the head's charge is not given presence (cond_charge=False), so its "
+                         "sub-cells do not aggregate as a hurdle")
+
+    def coarse(ev, keys, grid=None):
+        grid = ev.grid if grid is None else Grid(*grid)
+        keys = np.asarray(keys, np.int64)
+        if grid == fine:
+            return predict(ev, keys, grid=fine)
+        sk = sub_cells(keys, grid, fine)
+        n, m = sk.shape
+        flat = sk.ravel()
+        parts = [predict(ev, flat[s:s + chunk], grid=fine) for s in range(0, len(flat), chunk)]
+        y, lg, qm = (np.concatenate([np.asarray(p[i], np.float64) for p in parts]).reshape(n, m) if parts
+                     else np.zeros((n, m)) for i in range(3))
+        cov = lg > UNCOVERED_LOGIT
+        anyc = cov.any(1)
+        lp = np.where(cov, _log_sigmoid(lg), -np.inf)               # log p_i
+        s = np.where(cov, _log_sigmoid(-lg), 0.0).sum(1)            # log(1 - P) = sum log(1 - p_i)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # log P: log(-expm1(s)); where 1 - P rounds to 1, log(sum p_i), its limit
+            logp = np.where(s < 0, np.log(-np.expm1(np.minimum(s, -1e-300))), np.logaddexp.reduce(lp, 1))
+            w = np.where(cov, np.exp(lp - logp[:, None]), 0.0)     # p_i / P
+        w = np.where(anyc[:, None], w, 0.0)
+        qp = Q0 * np.expm1(np.maximum(y, 0.0))
+        out_y = np.where(anyc, np.log1p((w * qp).sum(1) / Q0), 0.0).astype(np.float32)
+        out_l = np.where(anyc, logp - s, UNCOVERED_LOGIT).astype(np.float32)
+        out_q = np.where(anyc, (w * qm).sum(1), 0.0)
+        return out_y, out_l, out_q, np.full(n, np.nan)
+
+    for k in ("provenance", "run", "dist", "conditional"):
+        if hasattr(predict, k):
+            setattr(coarse, k, getattr(predict, k))
+    coarse.grid = fine
+    return coarse
 
 
 class Denoise:
@@ -583,4 +654,93 @@ class Denoise:
                             conditional=bool(getattr(c.denoiser, "conditional", True)), level=level,
                             frac_uncovered=charge["all"]["frac_uncovered"],
                             detection=det, calibration=calib, charge=charge)
+        return out
+
+
+#: A bright parent of the sub-cell score: its truth charge (e-) at least this (the 2026-11 share
+#: review's selection, /pscratch/sd/o/oalter/helix_work/decide/denoise/share_probe.py).
+BRIGHT_Q = 5000.0
+
+
+class SubCell:
+    """How a fine-grid denoiser shares a coarse cell's charge over its sub-cells, against spreading
+    a coarse-grid denoiser's charge evenly over them.
+
+    Events carry the FINE truth (``ev.grid``, the ``fine`` predictor's grid); each fine cell's
+    parent is its cell on ``coarse`` (the coarse predictor's grid), with the summed truth charge
+    (:func:`helix.data.cells.aggregate`'s rule). Scored: every OCCUPIED sub-cell (q >
+    ``presence_q``) of every BRIGHT parent (q >= ``bright_q``) that the coarse predictor covers.
+    Per sub-cell, with ``pred`` floored at 1 e- as in that review::
+
+        err = |log(max(pred, 1) / q)|
+        fine         pred = Q0 expm1(y), the fine predictor's charge given presence
+        even         pred = Q0 expm1(y_parent) / m, the coarse predictor's spread over its m sub-cells
+        even_truth   pred = q_parent / m: the even spread of the TRUE parent charge (its floor)
+
+    ``result()``: per view and pooled, ``n`` and each arm's median ``err`` ([point, lo, hi] over an
+    event bootstrap), and ``even_over_fine`` = median even / median fine. Also the fine
+    predictor's ``frac_called`` (p > :data:`CALL_P`) on the scored sub-cells."""
+    ARMS = ("fine", "even", "even_truth")
+
+    def __init__(self, fine, coarse, coarse_grid, *, bright_q=BRIGHT_Q, presence_q=PRESENCE_Q, n_boot=200,
+                 seed=0, level=LEVEL):
+        self.fine, self.coarse, self.coarse_grid = fine, coarse, Grid(*coarse_grid)
+        self.bright_q, self.presence_q = float(bright_q), float(presence_q)
+        self.n_boot, self.seed, self.level = int(n_boot), int(seed), float(level)
+        self.rows = dict(ev=[], view=[], called=[], **{a: [] for a in self.ARMS})
+
+    def add(self, ev):
+        G, fg = self.coarse_grid, ev.grid
+        m = sub_cells(np.zeros(1, np.int64), G, fg).shape[1]
+        keys, q = np.asarray(ev.cells["key"], np.int64), np.asarray(ev.cells["q"], np.float64)
+        g, w, t = unkey(keys)
+        par = fkey(g, w // (G.fw // fg.fw), t // (G.ft // fg.ft))
+        up, inv = np.unique(par, return_inverse=True)
+        inv = inv.ravel()
+        qpar = np.bincount(inv, q, len(up))
+        bright = np.nonzero(qpar >= self.bright_q)[0]
+        yc, lc = self.coarse(ev, up[bright], grid=G)[:2]
+        ok = np.zeros(len(up), bool)
+        ok[bright[np.asarray(lc) > UNCOVERED_LOGIT]] = True
+        even = np.zeros(len(up))
+        even[bright] = Q0 * np.expm1(np.maximum(np.asarray(yc, np.float64), 0)) / m
+        occ = (q > self.presence_q) & ok[inv]
+        if not occ.any():
+            return
+        yf, lf = self.fine(ev, keys[occ], grid=fg)[:2]
+        qo, po = q[occ], inv[occ]
+        err = lambda pred: np.abs(np.log(np.maximum(pred, 1.0) / qo)).astype(np.float32)   # noqa: E731
+        r = self.rows
+        r["fine"].append(err(Q0 * np.expm1(np.maximum(np.asarray(yf, np.float64), 0))))
+        r["even"].append(err(even[po]))
+        r["even_truth"].append(err(qpar[po] / m))
+        r["called"].append(sigmoid(np.asarray(lf, np.float64)) > CALL_P)
+        r["view"].append((g[occ] % 3).astype(np.uint8))
+        r["ev"].append(np.full(int(occ.sum()), ev.index, np.int64))
+
+    def result(self):
+        r = {k: np.concatenate(v) if v else np.zeros(0) for k, v in self.rows.items()}
+        evs, ev = np.unique(r["ev"].astype(np.int64), return_inverse=True)
+        out = dict(bright_q=self.bright_q, presence_q=self.presence_q, coarse_grid=str(self.coarse_grid),
+                   n_events=int(len(evs)), level=self.level)
+        if not len(evs):
+            return out
+        for name, v in [("all", None)] + [(VIEWS[j], j) for j in range(3)]:
+            sel = np.ones(len(ev), bool) if v is None else r["view"] == v
+            srt = {}
+            for a in self.ARMS:                                     # each arm's errors sorted, with their events
+                o = np.argsort(r[a][sel], kind="stable")
+                srt[a] = (r[a][sel][o], ev[sel][o])
+
+            def stat(mult, srt=srt):
+                res = {}
+                for a, (x, e) in srt.items():                       # the event-weighted median
+                    cw = np.cumsum(mult[e])
+                    res[a] = float(x[min(np.searchsorted(cw, 0.5 * cw[-1]), len(x) - 1)]) \
+                        if len(x) and cw[-1] > 0 else float("nan")
+                res["even_over_fine"] = res["even"] / res["fine"] if res["fine"] > 0 else float("nan")
+                return res
+            b = bootstrap(stat, len(evs), self.n_boot, self.seed, level=self.level)
+            out[name] = dict(n=int(sel.sum()), frac_called=_ratio(r["called"][sel].sum(), sel.sum()),
+                             median_abs_log_err={a: b[a] for a in self.ARMS}, even_over_fine=b["even_over_fine"])
         return out

@@ -3,6 +3,14 @@
     python -m helix.eval DENOISER_RUN --out e.json          # the evaluation
     python -m helix.eval --uprobe FM_RUN --out u.json       # the frozen along-wire probe
     python -m helix.eval compare --a A.windows.npz [A2 ...] [--b B.windows.npz ...] --out d.json
+    python -m helix.eval FINE_RUN --corpus COARSE_ROOT --model-grid 1x4 --out e.json   # aggregated
+    python -m helix.eval subcell --fine FINE_RUN --coarse COARSE_RUN --out s.json      # sub-cell charge
+
+A denoiser trained on a finer truth than the one evaluated (``--model-grid``) is scored on each
+truth cell's aggregate of its sub-cells' predictions (:func:`helix.eval.denoise.coarsen`), so
+it compares with a coarse-grid run on the same windows. ``subcell``
+(:class:`helix.eval.denoise.SubCell`) scores how such a run shares a bright coarse cell's charge
+over its sub-cells, against spreading a coarse run's charge evenly.
 
 The evaluation of a pretrained encoder is a fixed-budget FINE-TUNE: the denoiser trained on
 1,024 labelled events (``configs/pimm/ft_eval.py``; a study is ``configs/sweeps/ft_eval.yaml``),
@@ -37,7 +45,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass
 
-__all__ = ["Context", "evaluate", "evaluate_uprobe", "resolve_exp"]
+__all__ = ["Context", "evaluate", "evaluate_subcell", "evaluate_uprobe", "resolve_exp"]
 
 
 @dataclass
@@ -123,28 +131,72 @@ def _record(run, n, rejected, ident, corpus, seed, n_boot):
                 truth=dict(q_cut=ident["truth_q_cut"], q_cut_source=ident["truth_q_cut_source"]))
 
 
-def evaluate(path, *, weights="last", corpus=None, fm=None, max_events=None, seed=0, n_boot=200,
-             presence_q=25.0, empty_frac=0.05, level=0.95, dump_cells=None, device=None, log=print):
-    """Score the fine-tuned denoiser at ``path`` on its own probe events; returns the results as
-    one JSON-able dict, the window scores under ``metrics.denoise._windows``; ``dump_cells`` a
-    directory for each event's per-cell outputs (:meth:`helix.eval.denoise.Denoise.dump`)."""
+def _load(path, weights, fm, device):
+    """``(predict, fm record)``: :func:`helix.eval.denoise.load_denoiser` on the denoiser run at
+    ``path``, its FM run found at this site (:func:`resolve_exp`)."""
     import json
 
-    from helix.eval.denoise import Denoise, load_denoiser
+    from helix.eval.denoise import load_denoiser
     from helix.model.checkpoint import run_dir
 
     recorded = (json.load(open(os.path.join(run_dir(path), "resolved_config.json"))).get("model") or {}).get("fm")
     fm_path, fm_note = resolve_exp(recorded, override=fm) if recorded or fm else (None, "none recorded")
     predict, _ = load_denoiser(path, device, weights=weights, fm=fm_path)
+    return predict, dict(recorded=recorded, resolved=fm_path, note=fm_note)
+
+
+def evaluate(path, *, weights="last", corpus=None, fm=None, max_events=None, seed=0, n_boot=200,
+             presence_q=25.0, empty_frac=0.05, level=0.95, dump_cells=None, model_grid=None, device=None,
+             log=print):
+    """Score the fine-tuned denoiser at ``path`` on its own probe events; returns the results as
+    one JSON-able dict, the window scores under ``metrics.denoise._windows``; ``dump_cells`` a
+    directory for each event's per-cell outputs (:meth:`helix.eval.denoise.Denoise.dump`).
+
+    ``model_grid`` (``"1x4"``): the grid the denoiser was trained on, when the evaluated truth's
+    (``corpus``) is coarser -- each truth cell is then scored on the aggregate of its sub-cells'
+    predictions (:func:`helix.eval.denoise.coarsen`). Default: the truth's own grid. Nothing
+    checks it against the run's training truth: a run does not record its grid."""
+    from helix.data.cells import parse_grid
+    from helix.eval.denoise import Denoise, coarsen
+
+    predict, fmrec = _load(path, weights, fm, device)
     run = predict.run
+    if model_grid:
+        predict = coarsen(predict, parse_grid(model_grid))
     ds, cinfo = _corpus(run, corpus)
     log(f"[helix.eval] {run.provenance['run']} weights={run.provenance['weights']} step={run.provenance['step']}"
-        f" corpus={cinfo['resolved']} ({cinfo['check']}) fm={fm_path} ({fm_note})")
+        f" corpus={cinfo['resolved']} ({cinfo['check']}) fm={fmrec['resolved']} ({fmrec['note']})"
+        + (f" model_grid={model_grid} (aggregated)" if model_grid else ""))
     m = Denoise(Context(run, predict, seed, n_boot, float(presence_q), float(empty_frac), float(level), dump_cells))
     n, rejected, ident = _score(run, ds, m, max_events, log)
     out = _record(run, n, rejected, ident, cinfo, seed, n_boot)
-    out.update(fm=dict(recorded=recorded, resolved=fm_path, note=fm_note), presence_q=float(presence_q),
-               level=float(level), dump_cells=dump_cells, metrics={"denoise": m.result()})
+    out.update(fm=fmrec, presence_q=float(presence_q), level=float(level), dump_cells=dump_cells,
+               model_grid=str(parse_grid(model_grid)) if model_grid else None, metrics={"denoise": m.result()})
+    return out
+
+
+def evaluate_subcell(fine, coarse, *, coarse_grid="2x16", weights="last", corpus=None, fm=None, max_events=None,
+                     seed=0, n_boot=200, presence_q=25.0, bright_q=None, level=0.95, device=None, log=print):
+    """The sub-cell charge score (:class:`helix.eval.denoise.SubCell`) of the denoiser run
+    ``fine`` against the even spread of the run ``coarse`` (trained on ``coarse_grid``), on the
+    probe events of ``fine``'s corpus (its fine truth). Both must tokenize alike: one event's
+    tokens serve both encoders."""
+    from helix.data.cells import parse_grid
+    from helix.eval.denoise import BRIGHT_Q, SubCell
+
+    pf, fmf = _load(fine, weights, fm, device)
+    pc, fmc = _load(coarse, weights, fm, device)
+    run = pf.run
+    if run.tokenizer != pc.run.tokenizer:
+        raise ValueError(f"{fine} and {coarse} tokenize differently; the sub-cell score encodes one event for both")
+    ds, cinfo = _corpus(run, corpus)
+    log(f"[helix.eval subcell] fine={run.provenance['run']} coarse={pc.run.provenance['run']} ({coarse_grid}) "
+        f"weights={weights} corpus={cinfo['resolved']} ({cinfo['check']})")
+    m = SubCell(pf, pc, parse_grid(coarse_grid), bright_q=BRIGHT_Q if bright_q is None else bright_q,
+                presence_q=presence_q, n_boot=n_boot, seed=seed, level=level)
+    n, rejected, ident = _score(run, ds, m, max_events, log)
+    out = _record(run, n, rejected, ident, cinfo, seed, n_boot)
+    out.update(fm=fmf, coarse=dict(run=pc.run.provenance, fm=fmc), metrics={"subcell": m.result()})
     return out
 
 
