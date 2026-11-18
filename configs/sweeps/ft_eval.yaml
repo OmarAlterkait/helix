@@ -33,6 +33,11 @@ arms:
   ft_scratch_s1: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false, seed: 1}}
   # scratch at 4x the steps: at 16 epochs it was still improving while the pretrained arms already
   # overfit, so the 16-epoch scratch arm is not a converged floor
+  # pretraining round 1 (configs/sweeps/d1m_r1.yaml), each cooled encoder at `last`
+  ft_r1_rand: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/r1_rand_cool/model/last}}
+  ft_r1_loc: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/r1_loc_cool/model/last}}
+  ft_r1_xp0: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/r1_xp0_cool/model/last}}
+  ft_r1_xp03: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp/helix/r1_xp03_cool/model/last}}
   ft_scratch_e64: {overrides: {model.fm: /global/cfs/cdirs/m5238/users/oalter/exp_s3df/fm_cooldown/model/last, model.pretrained: false, epoch: 64}}
 after_each:
   command: python -m helix.eval $HELIX_EXP/{run} --out $HELIX_EXP/{run}/eval.json
