@@ -44,6 +44,18 @@ def test_identity_is_read_from_the_shard_and_matching_digests_pass(tmp_path):
     assert "OK" in check_corpus_matches(got, got, where="x")
 
 
+def test_identity_reads_a_root_with_one_directory_per_modality(tmp_path):
+    """``<root>/coeff/<run>`` beside ``<root>/cells/<run>`` (a corpus paired with another truth):
+    the identity is read where the dataset reads the coefficients."""
+    run = tmp_path / "corpus" / "run_a"; run.mkdir(parents=True)
+    _shard(run, *R1)
+    root = tmp_path / "root"; (root / "cells" / "run_a").mkdir(parents=True)
+    os.symlink(tmp_path / "corpus", root / "coeff")
+    assert corpus_identity(str(root), split="run_a")["basis_digest"] == R1[0]
+    assert corpus_identity(str(root))["basis_digest"] == R1[0]
+    assert corpus_identity(str(root), split="run_b") is None
+
+
 def test_a_missing_corpus_is_not_a_mismatch(tmp_path):
     """'not a corpus' and 'the wrong corpus' are different failures."""
     assert corpus_identity(str(tmp_path)) is None

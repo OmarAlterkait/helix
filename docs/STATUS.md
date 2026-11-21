@@ -93,7 +93,37 @@ uprobe (frozen, along-wire R^2): `fm_cooldown` 0.534; NERSC arms 0.445 (2.2e-3) 
 ## Open work
 
 - **Next pretraining round (d1m, one seed per arm, ~60 GPU-h each):** the current recipe with the fixes, whole-location masking, plane_frac 0 and 0.3; scored on the fine-tune with held-out checkpoint selection and a converged scratch arm.
-- **1x4 truth: built (2026-11-17).** All 1,000 d1m shards on the 1 wire x 4 tick grid, `helix-cells-3`, from the campaign hits (25 e- per-entry cut, as cells-3), helix dc16365 clean, JAXTPC f0d2ed39. `$CFS/m5238/users/oalter/truth_1x4_d1m/cells` (621 GiB; scratch copy `$SCRATCH/truth_1x4_d1m/cells`). Summed to 2x16 it equals the stored cells-3 (identical cells in every event, q within 1 float32 ulp) on 10 shards checked. Inputs: j000000 hits/step/labl copied from S3DF by Globus (`HELIX_SIM_ROOT`). To use it: `<root>/coeff` -> the corpus run, `<root>/cells` -> this directory, `data_root=<root>`.
+- **1x4 truth: built (2026-11-17).** All 1,000 d1m shards on the 1 wire x 4 tick grid, `helix-cells-3`, from the campaign hits (25 e- per-entry cut, as cells-3), helix dc16365 clean, JAXTPC f0d2ed39. `$CFS/m5238/users/oalter/truth_1x4_d1m/cells` (621 GiB; scratch copy `$SCRATCH/truth_1x4_d1m/cells`). Summed to 2x16 it equals the stored cells-3 (identical cells in every event, q within 1 float32 ulp) on 10 shards checked. Inputs: j000000 hits/step/labl copied from S3DF by Globus (`HELIX_SIM_ROOT`). To use it: `<root>/coeff` -> the corpus (`$SCRATCH/coeff_tpc_d1m`), `<root>/cells/j000000` -> this directory, `data_root=<root>` with the configs' own `split` (the run list; an empty split cannot be passed through `pimm submit`). Built: `$SCRATCH/helix/data_1x4_d1m`.
+- **1x4 denoiser (`dn1x4_cat`, branch denoise-1x4).** The default denoiser (cat, lin_amp 30,
+  cond_charge, fm_cooldown) trained directly on the 1x4 truth: the queries are 1x4 cells, same
+  recipe and length as cat_l30 (4 epochs, 16 GPUs). Success criterion, written before the run
+  finished, on the probe split, per view (U, V, Y each):
+  - (a) `python -m helix.eval subcell --fine dn1x4_cat --coarse cat_l30`: on the occupied
+    (q > 25 e-) 1x4 sub-cells of bright (q >= 5000 e-, covered) 2x16 parents, the median
+    |log(max(pred, 1) / q)| of the 1x4 charge given presence is at most 1/3 of that of cat_l30's
+    charge spread evenly over the parent's 8 sub-cells (`even_over_fine` >= 3).
+  - (b) `python -m helix.eval dn1x4_cat --corpus $SCRATCH/coeff_tpc_d1m --model-grid 1x4`: the 1x4
+    prediction summed to 2x16 (noisy-OR presence; charge = the sub-cells' summed expected charge
+    given presence, `helix.eval.denoise.coarsen`) is not worse than cat_l30 scored by the same
+    code on the same events and seed: detection -- LAUC headline and eff@1% FPR, per view, from
+    `compare` (A = 1x4, B = cat_l30; "not worse" = the difference's 95% interval reaches 0 or
+    above); charge -- bias and resolution in bins of the called charge (`cells.charge.<view>.
+    pred_bins`) not worse, bin by bin over the bins with n >= 1000 (|bias| and resolution each no
+    larger than cat_l30's by more than 0.005; these tables carry no interval).
+
+  What changed for 1x4: nothing in the labels or the sampling (every box is physical; the same
+  train events at both grids, truth sums equal). Per event the queries are 152k (85k at 2x16; the
+  20k charged-cell cap binds at both grids, 47/48 events), positives 22% (34%): the noise windows
+  are the same boxes with 8x the cells, 36% of the rows (8%). The head's activations then ran a
+  40 GB A100 out of memory, hence `model.checkpoint_decoder=True` (peak 25.6 GB, 1 GPU). The data
+  root is `$SCRATCH/helix/data_1x4_d1m` (`corpus_identity` taught its layout). Pilot
+  (`$HELIX_EXP/dn1x4_pilot3`: 1 node, 8,000 events, 2,000 steps): CE 1.45 -> ~0.8, mse 0.74 ->
+  0.08, 0.61 s/step, data 0.003 s; on 40 probe events (sub-cell) fine 0.20 against even 0.93
+  (`even_over_fine` 4.7; U / V / Y 4.5 / 4.7 / 4.9). The noisy-OR sum in (b) calls many faint parents (its
+  100-1k e- bins at bias +2.6 to +3.1 on the pilot, against cat_l30's +0.5 to +1.2): watch it in
+  the full run. Full run: job 61541311, `$HELIX_EXP/dn1x4_cat`, frozen tree run-0b81234; its
+  evaluations are queued `afterok` (61542978: (b) + compare; 61542979: (a)), outputs in
+  `$HELIX_EXP/dn1x4_eval/`, where cat_l30 is re-scored by today's code (`cat_l30.json`).
 
 - **LR:** run the 6.2e-3 arm. The "training-seed noise 0.04" seen on the presence probe is not
   seen on the MSE probe (s0 0.350 vs s1 0.346), so it was likely probe noise.

@@ -20,7 +20,12 @@ pooled difference carried by one view shows (``same_sign``).
     python -m helix.eval rescore A.windows.npz [A_s1.windows.npz ...] --out a.json
 
 re-scores dumps with the current window numbers -- an arm's seeds averaged, seeds then events
-resampled -- so a past evaluation reads in today's definitions without a GPU."""
+resampled -- so a past evaluation reads in today's definitions without a GPU.
+
+    python -m helix.eval subcell --fine FINE_RUN --coarse COARSE_RUN [--coarse-grid 2x16] --out s.json
+
+scores how a fine-grid denoiser shares each bright coarse cell's charge over its sub-cells,
+against the even spread of a coarse-grid run (helix.eval.denoise.SubCell)."""
 
 from __future__ import annotations
 
@@ -163,6 +168,42 @@ def rescore(argv):
     return 0
 
 
+def _write(res, out):
+    tmp = out + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(res, fh, indent=1, sort_keys=True, default=str)
+    os.replace(tmp, out)
+
+
+def subcell(argv):
+    """The sub-cell charge score (helix.eval.denoise.SubCell) of a fine-grid denoiser run against
+    the even spread of a coarse-grid one, on the fine run's probe events and fine truth."""
+    import helix.eval as E
+
+    ap = argparse.ArgumentParser(prog="python -m helix.eval subcell", description=subcell.__doc__)
+    ap.add_argument("--fine", required=True, help="the fine-grid denoiser run (its corpus holds the fine truth)")
+    ap.add_argument("--coarse", required=True, help="the coarse-grid denoiser run")
+    ap.add_argument("--coarse-grid", default="2x16", help="the grid --coarse was trained on")
+    ap.add_argument("--weights", default="last", choices=("last", "best"))
+    ap.add_argument("--corpus", default=None, help="the fine run's corpus root at this site")
+    ap.add_argument("--fm", default=None, help="the runs' FM run at this site")
+    ap.add_argument("--max-events", type=int, default=None)
+    ap.add_argument("--bright-q", type=float, default=None, help="a bright parent's truth charge, e- (default BRIGHT_Q)")
+    ap.add_argument("--presence-q", type=float, default=25.0)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--boot", type=int, default=200)
+    ap.add_argument("--level", type=float, default=0.95)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+    res = E.evaluate_subcell(a.fine, a.coarse, coarse_grid=a.coarse_grid, weights=a.weights, corpus=a.corpus,
+                             fm=a.fm, max_events=a.max_events, seed=a.seed, n_boot=a.boot,
+                             presence_q=a.presence_q, bright_q=a.bright_q, level=a.level)
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    _write(res, a.out)
+    print(f"[helix.eval subcell] -> {a.out}", flush=True)
+    return 0
+
+
 def main(argv=None):
     import sys
     argv = sys.argv[1:] if argv is None else list(argv)
@@ -170,6 +211,8 @@ def main(argv=None):
         return compare(argv[1:])
     if argv[:1] == ["rescore"]:
         return rescore(argv[1:])
+    if argv[:1] == ["subcell"]:
+        return subcell(argv[1:])
     import helix.eval as E
 
     ap = argparse.ArgumentParser(prog="python -m helix.eval", description=__doc__,
@@ -194,17 +237,21 @@ def main(argv=None):
     ap.add_argument("--dump-cells", default=None, metavar="DIR",
                     help="write each event's per-cell outputs (charged, window and sampled cells, with "
                     "weights) to DIR/ev<index>.npz")
+    ap.add_argument("--model-grid", default=None, metavar="WxT",
+                    help="the grid the denoiser was trained on, when the evaluated truth (--corpus) is coarser: "
+                    "each truth cell is scored on its sub-cells' aggregated predictions")
     ap.add_argument("--probe-seeds", type=int, default=2, help="--uprobe: fits per arm (seeds seed+k, same rows)")
     a = ap.parse_args(argv)
 
     common = dict(corpus=a.corpus, max_events=a.max_events, seed=a.seed, n_boot=a.boot)
     if a.uprobe:
-        if a.fm:
-            raise SystemExit("--fm relocates a denoiser's FM run; --uprobe reads the FM run itself")
+        if a.fm or a.model_grid:
+            raise SystemExit("--fm and --model-grid are a denoiser's; --uprobe reads an FM run")
         res = E.evaluate_uprobe(a.run, weights=a.weights or "last", probe_seeds=a.probe_seeds, **common)
     else:
         res = E.evaluate(a.run, weights=a.weights or "last", fm=a.fm, presence_q=a.presence_q,
-                         empty_frac=a.empty_frac, level=a.level, dump_cells=a.dump_cells, **common)
+                         empty_frac=a.empty_frac, level=a.level, dump_cells=a.dump_cells,
+                         model_grid=a.model_grid, **common)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     win = {}
     for r in (res.get("metrics") or {}).values():
@@ -213,10 +260,7 @@ def main(argv=None):
     if win:
         import numpy as np
         np.savez_compressed(os.path.splitext(a.out)[0] + ".windows.npz", **win)
-    tmp = a.out + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(res, fh, indent=1, sort_keys=True, default=str)
-    os.replace(tmp, a.out)
+    _write(res, a.out)
     print(f"[helix.eval] -> {a.out}", flush=True)
     return 0
 

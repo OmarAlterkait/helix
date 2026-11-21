@@ -36,8 +36,13 @@ import numpy as np
 
 def corpus_identity(data_root, dataset_name="sim_wire", split=None):
     """``{'basis_digest', 'removal_json', 'sigma_norm', 'shard'}`` of the first shard, or ``None``
-    when there is none ("not a corpus" and "a corpus that disagrees" are different failures)."""
-    roots = [os.path.join(data_root, split)] if split else [data_root]
+    when there is none ("not a corpus" and "a corpus that disagrees" are different failures).
+    ``data_root`` is laid out as the dataset reads it: the coefficients under ``<root>/coeff``
+    when that directory exists (one directory per modality, e.g. a root pairing the corpus with
+    another truth), else under the root itself; ``split`` one run directory below that."""
+    coeff = os.path.join(data_root, "coeff")
+    base = coeff if os.path.isdir(coeff) else data_root
+    roots = [os.path.join(base, split)] if split else [base]
     for r in roots:
         for pat in (f"{dataset_name}_coeff_*.h5", f"*/{dataset_name}_coeff_*.h5"):
             hits = sorted(glob.glob(os.path.join(r, pat)))

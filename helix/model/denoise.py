@@ -75,14 +75,21 @@ class CellDecoder(nn.Module):
     smoothed by a Gaussian of ``hl_sigma`` bin widths. ``dist="gauss"``: ``dist_out`` starts at
     zero (log-width 0), so a point head's weights loaded into it (``strict=False``: ``dist_out``
     is the only key they lack) start at the point head's charge.
+
+    ``checkpoint``: recompute each attention block in the backward pass instead of keeping its
+    activations (``torch.utils.checkpoint``), the same numbers. A block keeps its gathered keys
+    and values, two (n, 37, proj) fp32 tensors -- 2.8 GB each at the ~150k query cells of a 1 x 4
+    truth's event, which ran a 40 GB A100 out of memory; with it a block's are freed as the
+    forward moves on.
     """
 
     def __init__(self, d, n_bands=4, n_nbr=9, n_slot=128, proj=128, heads=4, layers=2, hidden=512,
-                 dist="point", n_bins=256, support_min_q=25.0, y_hi=7.5, hl_sigma=0.75):
+                 dist="point", n_bins=256, support_min_q=25.0, y_hi=7.5, hl_sigma=0.75, checkpoint=False):
         super().__init__()
         if dist not in DISTS:
             raise ValueError(f"dist must be one of {DISTS}, got {dist!r}")
         self.n_bands, self.n_nbr, self.heads, self.dist = n_bands, n_nbr, heads, dist
+        self.checkpoint = bool(checkpoint)
         n_aux = 13 * n_bands                                                    # helix.model.cells_join.cell_inputs
         self.norm = nn.LayerNorm(d)
         self.kv = nn.Linear(d, proj)
@@ -132,20 +139,12 @@ class CellDecoder(nn.Module):
         raw = torch.cat([B["inp"], B["occ"].to(B["inp"].dtype)], -1)            # (N_tok, 2*n_slot)
         r = raw[idx.clamp(min=0)] * (idx >= 0).unsqueeze(-1).to(raw.dtype)      # (n, nb, 2*n_slot)
         q = self.q0(torch.cat([aux.to(r.dtype), r.flatten(1)], 1)).float()
-        h, P = self.heads, q.shape[-1]
-        L = flat.shape[1]
         for blk in self.blocks:
-            zn, nn_ = blk["nk"](z), blk["nk"](self.null)
-            Kt, Vt = blk["k"](zn).float(), blk["v"](zn).float()                # (N_tok, P), gathered in fp32
-            kp, vp = blk["k"](self.pos).float(), blk["v"](self.pos).float()    # (L+1, P)
-            K = torch.cat([Kt[gidx] + kp[:L], (blk["k"](nn_).float() + kp[L]).expand(n, 1, P)], 1)
-            V = torch.cat([Vt[gidx] + vp[:L], (blk["v"](nn_).float() + vp[L]).expand(n, 1, P)], 1)
-            Qh = blk["q"](blk["nq"](q)).float().view(n, h, P // h)
-            s = torch.einsum("nhd,nlhd->nhl", Qh, K.view(n, L + 1, h, P // h)) * (P // h) ** -0.5
-            a = s.masked_fill(~keep[:, None, :], float("-inf")).softmax(-1)
-            att = torch.einsum("nhl,nlhd->nhd", a, V.view(n, L + 1, h, P // h)).reshape(n, P)
-            q = q + blk["o"](att).float()
-            q = q + blk["mlp"](blk["nm"](q)).float()
+            if self.checkpoint and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+                q = checkpoint(self._block, blk, q, z, gidx, keep, use_reentrant=False)
+            else:
+                q = self._block(blk, q, z, gidx, keep)
         # The readout in fp32: under bf16 autocast a Linear's OUTPUT is bf16, and a later .float()
         # keeps its rounding -- a 0.031 step in y above y = 4 (~110k e-), ~3% in charge.
         with torch.autocast(q.device.type, enabled=False):
@@ -155,6 +154,23 @@ class CellDecoder(nn.Module):
             if self.dist == "gauss":
                 return out[:, 0], out[:, 1], self.dist_out(q.float()).squeeze(-1)
         return out[:, 0], out[:, 1]
+
+    def _block(self, blk, q, z, gidx, keep):
+        """One attention block: the cells' queries ``q`` (n, P) attend their gathered neighbourhood
+        of the projected tokens ``z`` (``gidx``, ``keep``: :meth:`forward`) and the null key."""
+        n, P = q.shape
+        h, L = self.heads, gidx.shape[1]
+        zn, nn_ = blk["nk"](z), blk["nk"](self.null)
+        Kt, Vt = blk["k"](zn).float(), blk["v"](zn).float()                # (N_tok, P), gathered in fp32
+        kp, vp = blk["k"](self.pos).float(), blk["v"](self.pos).float()    # (L+1, P)
+        K = torch.cat([Kt[gidx] + kp[:L], (blk["k"](nn_).float() + kp[L]).expand(n, 1, P)], 1)
+        V = torch.cat([Vt[gidx] + vp[:L], (blk["v"](nn_).float() + vp[L]).expand(n, 1, P)], 1)
+        Qh = blk["q"](blk["nq"](q)).float().view(n, h, P // h)
+        s = torch.einsum("nhd,nlhd->nhl", Qh, K.view(n, L + 1, h, P // h)) * (P // h) ** -0.5
+        a = s.masked_fill(~keep[:, None, :], float("-inf")).softmax(-1)
+        att = torch.einsum("nhl,nlhd->nhd", a, V.view(n, L + 1, h, P // h)).reshape(n, P)
+        q = q + blk["o"](att).float()
+        return q + blk["mlp"](blk["nm"](q)).float()
 
 
 class DenoiseModel(nn.Module):
@@ -343,7 +359,8 @@ def pad_input_columns(module, state_dict):
 
 
 def build_denoise(fm, *, pretrained=True, freeze_encoder=False, cond_charge=False, lr_head=1e-2,
-                  compile_blocks=True, lin_amp_scale=0.0, dist="point", support_min_q=25.0):
+                  compile_blocks=True, lin_amp_scale=0.0, dist="point", support_min_q=25.0,
+                  checkpoint_decoder=False):
     """A :class:`DenoiseModel` on the FM run ``fm`` (a run directory, or one checkpoint of it).
 
     The encoder takes the run's architecture and tokenizer and, with ``pretrained``, its weights
@@ -353,7 +370,8 @@ def build_denoise(fm, *, pretrained=True, freeze_encoder=False, cond_charge=Fals
     (:func:`pad_input_columns`). ``dist`` is the
     charge head (module docstring); ``support_min_q`` (e-) is the presence threshold of the labels
     (``DenoiseRows``'), the top of cat's bin 0. ``compile_blocks`` is how the encoder executes
-    (``torch.compile`` per block), not what it is.
+    (``torch.compile`` per block) and ``checkpoint_decoder`` how the head trains
+    (:class:`CellDecoder`'s ``checkpoint``), not what either is.
     """
     import json
     import os
@@ -377,6 +395,6 @@ def build_denoise(fm, *, pretrained=True, freeze_encoder=False, cond_charge=Fals
         sd = load_run(fm, device="cpu").model.state_dict()
         enc.load_state_dict(pad_input_columns(enc, sd), strict=True)
     head = CellDecoder(enc.d, n_bands=enc.band_emb.weight.shape[0], n_slot=enc.n_slot, dist=dist,
-                       support_min_q=support_min_q)
+                       support_min_q=support_min_q, checkpoint=checkpoint_decoder)
     return DenoiseModel(enc, head, tokenizer=tokenizer_config(config), freeze_encoder=freeze_encoder,
                         cond_charge=cond_charge, lr_head=lr_head)

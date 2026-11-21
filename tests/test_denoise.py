@@ -236,6 +236,34 @@ def test_cell_decoder_survives_cells_with_no_tokens_and_is_unbounded():
     assert (y2 - y1).abs().max() > 10                               # ...must reach the output
 
 
+def test_a_checkpointed_decoder_computes_and_trains_exactly_as_the_plain_one():
+    """``checkpoint`` recomputes each block in the backward pass: the same outputs and the same
+    gradients, for the head's own parameters and for the token features it reads."""
+    torch.manual_seed(0)
+    plain = CellDecoder(SMALL["d"], n_bands=4, n_slot=SMALL["n_slot"], proj=16, heads=4, layers=2, hidden=32, dist="cat",
+                        n_bins=8)
+    ckpt = CellDecoder(SMALL["d"], n_bands=4, n_slot=SMALL["n_slot"], proj=16, heads=4, layers=2, hidden=32, dist="cat",
+                       n_bins=8, checkpoint=True)
+    ckpt.load_state_dict(plain.state_dict())
+    n_tok = 50
+    B = dict(inp=torch.randn(n_tok, SMALL["n_slot"]), occ=(torch.rand(n_tok, SMALL["n_slot"]) > 0.5).float())
+    idx = torch.randint(-1, n_tok, (30, 4)); nbr = torch.randint(-1, n_tok, (30, 4, 9)); aux = torch.randn(30, 52)
+    feats = torch.randn(n_tok, SMALL["d"])
+    grads = []
+    for head in (plain, ckpt):
+        f = feats.clone().requires_grad_(True)
+        out = head(f, idx, aux, nbr, B)
+        (out[0].sum() + out[1].sum() + out[2].square().mean()).backward()
+        grads.append((out, f.grad, {k: p.grad.clone() for k, p in head.named_parameters()}))
+    (o1, f1, g1), (o2, f2, g2) = grads
+    for a, b in zip(o1, o2):
+        torch.testing.assert_close(a, b)
+    torch.testing.assert_close(f1, f2)
+    assert g1.keys() == g2.keys() and all(torch.allclose(g1[k], g2[k], atol=1e-6) for k in g1)
+    with torch.no_grad():                                           # no grad: no checkpoint, same numbers
+        torch.testing.assert_close(ckpt(feats, idx, aux, nbr, B)[1], o1[1].detach())
+
+
 def test_build_denoise_loads_a_pretrained_fm_into_the_amplitude_channel(fm_run, sample):
     d, last = fm_run
     m = build_denoise(str(d), lin_amp_scale=30.0, compile_blocks=False).eval()
