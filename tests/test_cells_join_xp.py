@@ -61,6 +61,12 @@ def _same_everywhere(keys, ck, bl, cfg, grid):
     assert idx.dtype == nbr.dtype == cov.dtype == np.int64 and aux.dtype == np.float32
     assert (idx >= 0).any() and (~(idx >= 0)).any() and (nbr >= 0).any() and (nbr < 0).any()
     assert np.array_equal(cov, idx) and np.array_equal(nbr[:, :, nbr.shape[2] // 2], idx)
+    rep, group = J.cell_groups(keys, bl, cfg, grid)                 # a neighbourhood per group, exactly
+    assert rep.dtype == group.dtype == np.int64 and len(rep) < len(keys)
+    assert (group[rep] == np.arange(len(rep))).all() and (rep == np.unique(group, return_index=True)[1]).all()
+    assert np.array_equal(pc[rep][group], pc) and len(np.unique(pc[rep], axis=0)) == len(rep)   # the patches' partition
+    assert np.array_equal(J.cell_neighbors(keys[rep], ck, bl, cfg, grid)[group], nbr)
+    assert np.array_equal(J.covering_tokens(keys[rep], ck, bl, cfg, grid)[group], cov)
     for dev in DEVICES:
         T = lambda a: torch.as_tensor(a, device=dev)                  # noqa: E731
         ti, ta = J.cell_inputs(T(keys), T(ck), bl, cfg, grid)
@@ -69,6 +75,8 @@ def _same_everywhere(keys, ck, bl, cfg, grid):
         np.testing.assert_allclose(ta.cpu().numpy(), aux, rtol=0, atol=2e-6, err_msg=dev)
         assert np.array_equal(J.cell_neighbors(T(keys), T(ck), bl, cfg, grid).cpu().numpy(), nbr), dev
         assert np.array_equal(J.covering_tokens(T(keys), T(ck), bl, cfg, grid).cpu().numpy(), cov), dev
+        tr, tg = J.cell_groups(T(keys), bl, cfg, grid)
+        assert np.array_equal(tr.cpu().numpy(), rep) and np.array_equal(tg.cpu().numpy(), group), dev
         assert np.array_equal(footprint_cells(T(ck), bl, cfg, grid).cpu().numpy(), nat), dev
         tg, tw, tt = C.unkey(T(keys))
         assert np.array_equal(pixel_cells(tg, tw * grid.fw, tt * grid.ft + grid.ft // 2, bl, cfg).cpu().numpy(), pc)
@@ -140,9 +148,11 @@ def _reference(model, ev, keys, cfg):
 @pytest.mark.parametrize("chunk", [None, 997])
 @pytest.mark.parametrize("dist", ["cat", "gauss"])
 def test_the_predictor_returns_its_heads_answer_on_the_numpy_inputs(tmp_path, dev, chunk, dist):
-    """The predictor's four outputs are the head's on the numpy-built inputs: to float32 rounding
-    in one chunk, and in many on a CPU. Chunked on CUDA, to bf16 rounding: the head runs under bf16
-    autocast there, and its matmuls round by the kernel the batch size picks."""
+    """The predictor's four outputs are the head's on the numpy-built inputs, per cell: to float32
+    rounding on a CPU, in one chunk or many. On CUDA to bf16 rounding: the head runs under bf16
+    autocast there, and its matmuls round by the kernel their shapes pick -- the batch size, and
+    the predictor's cells grouped by neighbourhood (``CellDecoder``'s ``group``) where the
+    reference's are one per row."""
     from helix.eval.denoise import covered_cells, load_denoiser
     from helix.eval.events import events
     from test_denoise import _write_denoise_run
@@ -161,6 +171,6 @@ def test_the_predictor_returns_its_heads_answer_on_the_numpy_inputs(tmp_path, de
     assert ok.any() and (~ok).any() and ok[np.isin(keys, K)].all() and (chunk is None or ok.sum() > 5 * chunk)
     assert y.dtype == lg.dtype == np.float32 and qm.dtype == sd.dtype == np.float64
     assert (lg[~ok] == rl[~ok]).all() and (y[~ok] == 0).all() and (qm[~ok] == 0).all() and np.isnan(sd[~ok]).all()
-    tol = 1e-2 if (dev == "cuda" and chunk) else 2e-5
+    tol = 1e-2 if dev == "cuda" else 2e-5
     for a, b in ((y, ry), (lg, rl), (qm, rq), (sd, rs)):
         np.testing.assert_allclose(a[ok], b[ok], rtol=tol, atol=tol)

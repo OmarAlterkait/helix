@@ -5,9 +5,10 @@ The evaluation's frozen probes (:mod:`helix.eval`) and the trainable denoising h
 a frozen and a fine-tuned number differ only in what was trained. Next to the tokenizer whose cell
 keys and patch geometry it inverts.
 
-:func:`covering_tokens`, :func:`cell_inputs` and :func:`cell_neighbors` take numpy arrays or torch
-tensors (:mod:`helix.core.xp`) and answer in kind: numpy in the DataLoader workers that build the
-training labels (:mod:`helix.data.denoise`), tensors on the event's device at inference
+:func:`covering_tokens`, :func:`cell_inputs`, :func:`cell_neighbors` and :func:`cell_groups` take
+numpy arrays or torch tensors (:mod:`helix.core.xp`) and answer in kind: numpy in the DataLoader
+workers that build the training labels (:mod:`helix.data.denoise`), tensors on the event's device
+at inference
 (:func:`helix.eval.denoise.load_denoiser`). One implementation; the integer outputs agree exactly
 between the two, ``aux`` to float32 rounding (tests/test_cells_join_xp.py).
 
@@ -117,6 +118,28 @@ def cell_inputs(keys, cell_key, band_lengths, cfg, grid):
         offs += [wo, (tau / pt) % 1.0]
     aux = xp.concat([xp.astype(idx >= 0, xp.float32), _fourier(xp.astype(xp.stack(offs, 1), xp.float32), xp)], 1)
     return idx, aux
+
+
+def cell_groups(keys, band_lengths, cfg, grid):
+    """The cells (keys on ``grid``) grouped by the patch covering them in every band: ``(rep,
+    group)`` int64 -- ``rep`` (G,) the index in ``keys`` of the first cell of each group, ``group``
+    (n,) each cell's group. :func:`cell_neighbors` and :func:`covering_tokens` depend on a cell only
+    through those patches, so ``cell_neighbors(keys[rep], ...)[group]`` is ``cell_neighbors(keys,
+    ...)``, exactly; :class:`helix.model.denoise.CellDecoder` (``group``) computes a
+    neighbourhood's keys and values once for all its cells instead of once per cell. Groups are
+    numbered in the sorted order of their patches, the same on numpy and torch.
+    """
+    xp, _, _, _, _, pc = _place(keys, band_lengths, cfg, grid)
+    n = pc.shape[0]
+    group = xp.full(n, 0, xp.int64)
+    for b in range(pc.shape[1]):                     # each band refines the grouping; ids stay < n
+        u, inv = xp.unique_inverse(pc[:, b])
+        _, group = xp.unique_inverse(group * xp.size(u) + inv.reshape(-1))
+    group = group.reshape(-1)
+    order = xp.argsort(group)
+    s = group[order]
+    first = xp.concat([xp.full(min(n, 1), 1, xp.int64), xp.astype(s[1:] != s[:-1], xp.int64)]) > 0
+    return order[first], group
 
 
 def cell_neighbors(keys, cell_key, band_lengths, cfg, grid, radius=1):
