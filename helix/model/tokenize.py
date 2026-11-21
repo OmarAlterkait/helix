@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from helix.core.xp import namespace
+
 __all__ = ["gid_rows", "sigma_for_rows", "normalize_values", "denormalize_values"]
 
 
@@ -149,10 +151,11 @@ def cell_key(plane_gid, band, wire, tau, cfg=None):
     against the keys :func:`assemble` builds.
     """
     cfg = _require_cfg(cfg)
-    plane_gid = np.asarray(plane_gid, np.int64)
-    band = np.asarray(band, np.int64)
-    wb = np.asarray(wire, np.int64) // cfg.pw
-    tb = np.asarray(tau, np.int64) // cfg.pt
+    xp = namespace(plane_gid, band, wire, tau)
+    plane_gid = xp.asarray(plane_gid, xp.int64)
+    band = xp.asarray(band, xp.int64)
+    wb = xp.asarray(wire, xp.int64) // cfg.pw
+    tb = xp.asarray(tau, xp.int64) // cfg.pt
     # Check BOTH ends of every field. Guarding only .max() left the two cheapest
     # routes to the aliasing this raises about wide open: a single negative tau
     # is all-ones in two's complement, so `| tb` sets every bit and the key
@@ -163,7 +166,7 @@ def cell_key(plane_gid, band, wire, tau, cfg=None):
                         ("tick block", tb, _CELL_BLOCK_MASK),
                         ("band", band, _CELL_BAND_MASK),
                         ("plane_gid", plane_gid, _CELL_GID_MASK)):
-        if not a.size:
+        if not xp.size(a):
             continue
         lo_v, hi_v = int(a.min()), int(a.max())
         if lo_v < 0 or hi_v > hi:
@@ -177,7 +180,8 @@ def cell_key(plane_gid, band, wire, tau, cfg=None):
 
 def unpack_cell_key(key):
     """Inverse of :func:`cell_key`: ``(plane_gid, band, wire_block, tick_block)``."""
-    key = np.asarray(key, np.int64)
+    xp = namespace(key)
+    key = xp.asarray(key, xp.int64)
     return (key >> _CELL_GID_SHIFT,
             (key >> _CELL_BAND_SHIFT) & _CELL_BAND_MASK,
             (key >> _CELL_WB_SHIFT) & _CELL_BLOCK_MASK,
@@ -192,12 +196,13 @@ def tick_of_tau(tau, plane_gid, band, cfg=None):
     :func:`tau_of_tick` inverts it.
     """
     cfg = _require_cfg(cfg)
-    band = np.asarray(band, np.int64)
-    dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float32)
-    delta = np.asarray(cfg.delta, np.float32)
-    toff = np.asarray(cfg.toff, np.float32)
-    return ((np.asarray(tau, np.float32) + delta[band]) * dec[band]
-            - toff[np.asarray(plane_gid, np.int64) % 3]).astype(np.float32)
+    xp = namespace(tau, plane_gid, band)
+    band = xp.asarray(band, xp.int64)
+    dec = xp.asarray([float(1 << int(v)) for v in cfg.lev], xp.float32)
+    delta = xp.asarray(cfg.delta, xp.float32)
+    toff = xp.asarray(cfg.toff, xp.float32)
+    return xp.astype((xp.asarray(tau, xp.float32) + delta[band]) * dec[band]
+                     - toff[xp.asarray(plane_gid, xp.int64) % 3], xp.float32)
 
 
 def tau_of_tick(tick, plane_gid, band, band_lengths, cfg=None):
@@ -214,14 +219,15 @@ def tau_of_tick(tick, plane_gid, band, band_lengths, cfg=None):
     result.
     """
     cfg = _require_cfg(cfg)
-    band = np.asarray(band, np.int64)
-    dec = (1 << np.asarray(cfg.lev, np.int64)).astype(np.float64)
-    delta = np.asarray(cfg.delta, np.float64)
-    toff = np.asarray(cfg.toff, np.float64)
-    lens = np.asarray(band_lengths, np.int64)
-    t_sig = np.asarray(tick, np.float64) + toff[np.asarray(plane_gid, np.int64) % 3]
-    tau = np.round(t_sig / dec[band] - delta[band]).astype(np.int64)
-    return np.clip(tau, 0, lens[band] - 1)
+    xp = namespace(tick, plane_gid, band)
+    band = xp.asarray(band, xp.int64)
+    dec = xp.asarray([float(1 << int(v)) for v in cfg.lev], xp.float64)
+    delta = xp.asarray(cfg.delta, xp.float64)
+    toff = xp.asarray(cfg.toff, xp.float64)
+    lens = xp.asarray(band_lengths, xp.int64)
+    t_sig = xp.asarray(tick, xp.float64) + toff[xp.asarray(plane_gid, xp.int64) % 3]
+    tau = xp.astype(xp.round(t_sig / dec[band] - delta[band]), xp.int64)
+    return xp.clip(tau, 0, lens[band] - 1)
 
 
 def pixel_cells(plane_gid, wire, tick, band_lengths, cfg=None):
@@ -230,16 +236,20 @@ def pixel_cells(plane_gid, wire, tick, band_lengths, cfg=None):
     Public for the same reason :func:`cell_key` is: anything attaching per-cell
     information to a tokenized event — a probe target above all — must agree with
     :func:`assemble` on which cell a pixel lands in, and the only way to agree is
-    to run the same arithmetic. Returns ``(len(pixels), n_bands)`` int64.
+    to run the same arithmetic. Returns ``(len(pixels), n_bands)`` int64. numpy or torch
+    (:mod:`helix.core.xp`), as given -- as are :func:`cell_key`, :func:`unpack_cell_key`,
+    :func:`tick_of_tau` and :func:`tau_of_tick`.
     """
     cfg = _require_cfg(cfg)
-    plane_gid = np.asarray(plane_gid, np.int64)
-    wire = np.asarray(wire, np.int64)
-    out = np.empty((plane_gid.size, cfg.n_bands), np.int64)
+    xp = namespace(plane_gid, wire, tick)
+    plane_gid = xp.asarray(plane_gid, xp.int64).reshape(-1)
+    wire = xp.asarray(wire, xp.int64).reshape(-1)
+    cols = []
     for b in range(cfg.n_bands):
-        tau = tau_of_tick(tick, plane_gid, np.full(plane_gid.shape, b), band_lengths, cfg)
-        out[:, b] = cell_key(plane_gid, np.full(plane_gid.shape, b), wire, tau, cfg)
-    return out
+        band = xp.full(plane_gid.shape, b, xp.int64)
+        tau = tau_of_tick(tick, plane_gid, band, band_lengths, cfg)
+        cols.append(cell_key(plane_gid, band, wire, tau, cfg))
+    return xp.stack(cols, 1)
 
 
 def assemble(band, plane_gid, wire, tau, value, *, gids, n_wires, band_lengths,

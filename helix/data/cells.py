@@ -58,6 +58,8 @@ from typing import NamedTuple
 import h5py
 import numpy as np
 
+from helix.core.xp import namespace
+
 FORMAT = "helix-cells-3"
 
 _TOFF = 4096                         # fine-tick offset inside the packed key
@@ -166,13 +168,15 @@ def read_grid(cfg, where=""):
 def fkey(g, fw, ft):
     """Pack (plane_gid, cell wire, cell tick) -- cell coordinates on the record's grid -- into
     one int64. Coordinates must be >= 0 (wire) / > -4096 (tick): a negative wire sets the plane
-    bits."""
-    return (np.asarray(g, np.int64) << 40) | (np.asarray(fw, np.int64) << 20) \
-        | (np.asarray(ft, np.int64) + _TOFF)
+    bits. numpy or torch (:mod:`helix.core.xp`), as given."""
+    xp = namespace(g, fw, ft)
+    return (xp.asarray(g, xp.int64) << 40) | (xp.asarray(fw, xp.int64) << 20) \
+        | (xp.asarray(ft, xp.int64) + _TOFF)
 
 
 def unkey(k):
-    k = np.asarray(k, np.int64)
+    xp = namespace(k)
+    k = xp.asarray(k, xp.int64)
     return k >> 40, (k >> 20) & 0xFFFFF, (k & 0xFFFFF) - _TOFF
 
 

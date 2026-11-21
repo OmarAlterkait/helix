@@ -2,8 +2,14 @@
 
 The evaluation's frozen probes (:mod:`helix.eval`) and the trainable denoising head
 (:mod:`helix.model.denoise`, labels from :mod:`helix.data.denoise`) read exactly these features, so
-a frozen and a fine-tuned number differ only in what was trained. numpy only; next to the
-tokenizer whose cell keys and patch geometry it inverts.
+a frozen and a fine-tuned number differ only in what was trained. Next to the tokenizer whose cell
+keys and patch geometry it inverts.
+
+:func:`covering_tokens`, :func:`cell_inputs` and :func:`cell_neighbors` take numpy arrays or torch
+tensors (:mod:`helix.core.xp`) and answer in kind: numpy in the DataLoader workers that build the
+training labels (:mod:`helix.data.denoise`), tensors on the event's device at inference
+(:func:`helix.eval.denoise.load_denoiser`). One implementation; the integer outputs agree exactly
+between the two, ``aux`` to float32 rounding (tests/test_cells_join_xp.py).
 
 Every function takes the cell ``grid`` (:class:`helix.data.cells.Grid`) the keys are on: it is
 the truth's (``grid_of(cells_record)``), never a constant of this module.
@@ -12,6 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from helix.core.xp import namespace
 from helix.data.cells import Grid, fkey, unkey
 from helix.model.tokenize import cell_key as pack, pixel_cells, sigma_for_rows, tick_of_tau, unpack_cell_key
 
@@ -47,24 +54,43 @@ def coeff_amplitude(c, cfg, grid):
     return keys, amp
 
 
-def _fourier(x):
-    ang = 2 * np.pi * x[..., None] * np.array([1, 2, 3], np.float32)
-    return np.concatenate([np.sin(ang), np.cos(ang)], -1).reshape(x.shape[0], -1)
+def _fourier(x, xp):
+    ang = 2 * np.pi * x[..., None] * xp.asarray([1, 2, 3], xp.float32)
+    return xp.concat([xp.sin(ang), xp.cos(ang)], -1).reshape(x.shape[0], -1)
+
+
+def _place(keys, band_lengths, cfg, grid):
+    """``(xp, keys, g, w, t, pc)``: a cell's plane, first wire and centre tick, and its covering
+    patches' cell keys (n, n_bands) through the tokenizer's own :func:`pixel_cells`."""
+    xp = namespace(keys)
+    grid = Grid(*grid)
+    keys = xp.asarray(keys, xp.int64)
+    g, fw, ft = unkey(keys)
+    w, t = fw * grid.fw, ft * grid.ft + grid.ft // 2
+    return xp, keys, g, w, t, pixel_cells(g, w, t, band_lengths, cfg)
+
+
+def _rows(xp, cell_key):
+    """``row(k)``: the row in ``cell_key`` (the tokens' keys, unique) of each key of ``k``, -1
+    where it is absent."""
+    ck = xp.asarray(cell_key, xp.int64)
+    order = xp.argsort(ck)
+    cks = ck[order]
+
+    def row(k):
+        if not xp.size(cks):
+            return xp.full(tuple(k.shape), -1, xp.int64)
+        pos = xp.clip(xp.searchsorted(cks, k), 0, xp.size(cks) - 1)
+        return xp.where(cks[pos] == k, order[pos], -1)
+    return row
 
 
 def covering_tokens(keys, cell_key, band_lengths, cfg, grid):
     """Per cell (``keys``, on ``grid``), the row of the token covering it in each band, -1 where
     none: ``(n, n_bands)`` int64 -- :func:`cell_inputs`' ``idx`` alone. A cell is placed by its
     first wire and its centre tick, through the tokenizer's own :func:`pixel_cells`."""
-    grid = Grid(*grid)
-    g, fw, ft = unkey(np.asarray(keys, np.int64))
-    pc = pixel_cells(g, fw * grid.fw, ft * grid.ft + grid.ft // 2, band_lengths, cfg)
-    ck = np.asarray(cell_key, np.int64)
-    order = np.argsort(ck); cks = ck[order]
-    if not len(cks):
-        return np.full(pc.shape, -1, np.int64)
-    pos = np.clip(np.searchsorted(cks, pc), 0, len(cks) - 1)
-    return np.where(cks[pos] == pc, order[pos], -1).astype(np.int64)
+    xp, _, _, _, _, pc = _place(keys, band_lengths, cfg, grid)
+    return _rows(xp, cell_key)(pc)
 
 
 def cell_inputs(keys, cell_key, band_lengths, cfg, grid):
@@ -79,18 +105,18 @@ def cell_inputs(keys, cell_key, band_lengths, cfg, grid):
     exactly this, so a frozen and a fine-tuned number differ only in what was trained.
     """
     nb, pw, pt = cfg.n_bands, cfg.pw, cfg.pt
-    grid = Grid(*grid)
-    g, fw, ft = unkey(np.asarray(keys, np.int64))
-    w, t = fw * grid.fw, ft * grid.ft + grid.ft // 2
-    idx = covering_tokens(keys, cell_key, band_lengths, cfg, grid)
-    dec = (1 << np.asarray(cfg.lev)).astype(np.float64)
-    toff = np.asarray(cfg.toff)[g % 3]
+    xp, keys, g, w, t, pc = _place(keys, band_lengths, cfg, grid)
+    idx = _rows(xp, cell_key)(pc)
+    dec = [float(1 << int(v)) for v in cfg.lev]
+    toff = xp.asarray(cfg.toff, xp.float64)[g % 3]
+    tf = xp.astype(t, xp.float64) + toff
+    wo = (xp.astype(w % pw, xp.float64) + 0.5) / pw
     offs = []
     for b in range(nb):
-        tau = (t + toff) / dec[b] - cfg.delta[b]
-        offs += [(w % pw + 0.5) / pw, (tau / pt) % 1.0]
-    aux = np.concatenate([(idx >= 0).astype(np.float32), _fourier(np.stack(offs, 1).astype(np.float32))], 1)
-    return idx.astype(np.int64), aux.astype(np.float32)
+        tau = tf / dec[b] - cfg.delta[b]
+        offs += [wo, (tau / pt) % 1.0]
+    aux = xp.concat([xp.astype(idx >= 0, xp.float32), _fourier(xp.astype(xp.stack(offs, 1), xp.float32), xp)], 1)
+    return idx, aux
 
 
 def cell_neighbors(keys, cell_key, band_lengths, cfg, grid, radius=1):
@@ -102,21 +128,15 @@ def cell_neighbors(keys, cell_key, band_lengths, cfg, grid, radius=1):
     same index :func:`cell_inputs` returns. Order: wire offset major, tick offset minor, each from
     -r to r.
     """
-    grid = Grid(*grid)
-    g, fw, ft = unkey(np.asarray(keys, np.int64))
-    pc = pixel_cells(g, fw * grid.fw, ft * grid.ft + grid.ft // 2, band_lengths, cfg)          # (n, nb)
-    pg, pb, wb, tb = unpack_cell_key(pc.ravel())
-    ck = np.asarray(cell_key, np.int64)
-    order = np.argsort(ck); cks = ck[order]
-    offs = [(dw, dt) for dw in range(-radius, radius + 1) for dt in range(-radius, radius + 1)]
-    out = np.full((pc.size, len(offs)), -1, np.int64)
-    for j, (dw, dt) in enumerate(offs):
-        w2, t2 = wb + dw, tb + dt
-        ok = (w2 >= 0) & (t2 >= 0)
-        if not ok.any() or not len(cks):
-            continue
-        k2 = pack(pg[ok], pb[ok], w2[ok] * cfg.pw, t2[ok] * cfg.pt, cfg)
-        pos = np.clip(np.searchsorted(cks, k2), 0, len(cks) - 1)
-        out[np.nonzero(ok)[0], j] = np.where(cks[pos] == k2, order[pos], -1)
-    return out.reshape(pc.shape[0], pc.shape[1], len(offs))
-
+    xp, _, _, _, _, pc = _place(keys, band_lengths, cfg, grid)
+    pg, pb, wb, tb = unpack_cell_key(pc.reshape(-1))
+    row = _rows(xp, cell_key)
+    cols = []
+    for dw in range(-radius, radius + 1):
+        for dt in range(-radius, radius + 1):
+            w2, t2 = wb + dw, tb + dt
+            ok = (w2 >= 0) & (t2 >= 0)
+            # a block before the plane's first (w2 or t2 = -1) has no token: packed at 0, then dropped
+            k2 = pack(pg, pb, xp.clip(w2, 0, None) * cfg.pw, xp.clip(t2, 0, None) * cfg.pt, cfg)
+            cols.append(xp.where(ok, row(k2), -1))
+    return xp.stack(cols, 1).reshape(pc.shape[0], pc.shape[1], len(cols))

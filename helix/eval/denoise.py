@@ -91,6 +91,7 @@ import os
 
 import numpy as np
 
+from helix.core.xp import namespace
 from helix.data.cells import Q0, Grid, fkey, unkey
 from helix.model.cells_join import cell_inputs, cell_neighbors, covering_tokens
 from helix.eval.events import HEADLINE, LEVEL, PAD, SECONDARY, VIEWS, Scored, amplitude, bootstrap, cell_charge
@@ -195,33 +196,42 @@ def average_precision(hpos, hneg):
 
 
 def covered_cells(ev, cfg):
-    """The natural covered cells of an event, sorted: every fine cell of a token's footprint in
-    its band -- the token's wires, and the ticks its taus round from, within one cell -- for which
-    :func:`helix.model.cells_join.covering_tokens` (``cell_inputs``' own lookup) finds a token.
-    A cell beyond every footprint (before or past the readout, which ``tau_of_tick``'s clipping
-    would attach to an edge token) is not a natural cell."""
+    """The natural covered cells of an event, sorted (numpy): :func:`footprint_cells` of its
+    tokens (``ev.cell_key``), computed on the event's device (its batch's)."""
+    import torch
+    ck = torch.as_tensor(ev.cell_key, device=ev.batch["plane_id"].device)
+    return namespace(ck).numpy(footprint_cells(ck, ev.band_lengths, cfg, ev.grid))
+
+
+def footprint_cells(cell_key, band_lengths, cfg, grid):
+    """Every fine cell (on ``grid``) of a token's footprint in its band -- the token's wires, and
+    the ticks its taus round from, within one cell -- for which
+    :func:`helix.model.cells_join.covering_tokens` (``cell_inputs``' own lookup) finds a token;
+    sorted, unique. ``cell_key``: the tokens' keys, numpy or a tensor (answered in kind,
+    :mod:`helix.core.xp`). A cell beyond every footprint (before or past the readout, which
+    ``tau_of_tick``'s clipping would attach to an edge token) is not a natural cell."""
     from helix.model.tokenize import tick_of_tau, unpack_cell_key
-    g, b, wb, tb = unpack_cell_key(np.asarray(ev.cell_key, np.int64))
-    if not len(g):
-        return np.zeros(0, np.int64)
-    FW, FT = ev.grid.fw, ev.grid.ft                   # the truth's own grid
+    xp = namespace(cell_key)
+    g, b, wb, tb = unpack_cell_key(cell_key)
+    if not xp.size(g):
+        return xp.full(0, 0, xp.int64)
+    grid = Grid(*grid)
+    FW, FT = grid.fw, grid.ft
     nwc = -(-cfg.pw // FW)
     cand = []
-    for band in np.unique(b).tolist():
+    for band in xp.numpy(xp.unique(b)).tolist():
         s = b == band
         gg = g[s]
-        lo = tick_of_tau(tb[s] * cfg.pt - 0.5, gg, np.full(len(gg), band), cfg)
+        lo = tick_of_tau(xp.astype(tb[s] * cfg.pt, xp.float64) - 0.5, gg, xp.full(tuple(gg.shape), band, xp.int64), cfg)
         nt = int(np.ceil(cfg.pt * (1 << int(cfg.lev[band])) / FT)) + 3      # the span, +-1 cell
-        ft0 = np.floor(lo / FT).astype(np.int64) - 1
+        ft0 = xp.astype(xp.floor(lo / FT), xp.int64) - 1
         fw0 = wb[s] * cfg.pw // FW
-        sh = (len(gg), nwc, nt)
-        cand.append(fkey(np.broadcast_to(gg[:, None, None], sh),
-                         np.broadcast_to(fw0[:, None, None] + np.arange(nwc)[None, :, None], sh),
-                         np.broadcast_to(ft0[:, None, None] + np.arange(nt)[None, None, :], sh)).ravel())
-    cand = np.unique(np.concatenate(cand))
-    keep = np.zeros(len(cand), bool)
-    for s in range(0, len(cand), 500_000):
-        keep[s:s + 500_000] = (covering_tokens(cand[s:s + 500_000], ev.cell_key, ev.band_lengths, cfg, ev.grid) >= 0).any(1)
+        cand.append(fkey(gg[:, None, None], fw0[:, None, None] + xp.arange(nwc)[None, :, None],
+                         ft0[:, None, None] + xp.arange(nt)[None, None, :]).reshape(-1))
+    cand = xp.unique(xp.concat(cand))
+    step = 4_000_000                                  # bounds covering_tokens' temporaries
+    keep = xp.concat([(covering_tokens(cand[i:i + step], cell_key, band_lengths, cfg, grid) >= 0).any(1)
+                      for i in range(0, xp.size(cand), step)])
     return cand[keep]
 
 
@@ -343,7 +353,19 @@ def head_charge(head, out):
     return Q0 * torch.expm1(y.clamp(min=0)), torch.full_like(y, float("nan"))
 
 
-def load_denoiser(path, device=None, *, weights="last", fm=None):
+def head_chunk(head, batch, device, frac=0.5):
+    """Cells per :class:`helix.model.denoise.CellDecoder` call: ``frac`` of the device's free memory
+    (2 GiB on a CPU) over a cell's peak footprint in its forward -- each block's gathered keys and
+    values, about 4 x (n_bands n_nbr + 1) x proj fp32 at once, and its covering tokens' raw inputs,
+    3 x n_bands x 2 n_slot fp32 -- plus 2 KiB for its inputs and their construction."""
+    import torch
+    L, P = head.pos.shape
+    per_cell = 16 * L * P + 24 * head.n_bands * batch["inp"].shape[1] + 2048
+    free = torch.cuda.mem_get_info(device)[0] if torch.device(device).type == "cuda" else 2 ** 31
+    return max(1, int(frac * free) // per_cell)
+
+
+def load_denoiser(path, device=None, *, weights="last", fm=None, chunk=None):
     """``(predict, tokenizer)`` from a denoiser run (``configs/pimm/denoise.py``): its run
     directory -- ``weights`` ``"last"`` (the end of the fixed budget, default) or ``"best"`` (the
     lowest validation loss) -- or one checkpoint in it (:func:`helix.model.checkpoint.load_run`;
@@ -351,7 +373,11 @@ def load_denoiser(path, device=None, *, weights="last", fm=None):
     docstring); the event is encoded once (:meth:`helix.eval.events.Event.features`, cached for
     this encoder) however many calls read it. ``predict.provenance`` is that run's,
     ``predict.run`` the run itself (its config names the corpus), ``predict.dist`` its charge
-    head, ``predict.conditional`` whether its charge is given presence."""
+    head, ``predict.conditional`` whether its charge is given presence.
+
+    ``predict`` takes any number of keys: their inputs (:func:`helix.model.cells_join.cell_inputs`,
+    ``cell_neighbors``) are built on the model's device and the head runs over them ``chunk`` cells
+    at a time, default :func:`head_chunk` (sized to the device's free memory); one copy back."""
     import torch
     from helix.eval.recon import autocast
     from helix.model.checkpoint import load_run
@@ -361,26 +387,31 @@ def load_denoiser(path, device=None, *, weights="last", fm=None):
     if not hasattr(model, "head"):
         raise ValueError(f"{path}: not a denoiser run (model type {run.config['model'].get('type')!r})")
     dev = next(model.parameters()).device
-    t = lambda a: torch.as_tensor(a).to(dev)                            # noqa: E731
 
     def predict(ev, keys, grid=None):
         """``grid``: the grid ``keys`` are on, default the event truth's."""
-        keys = np.asarray(keys, np.int64)
         grid = ev.grid if grid is None else Grid(*grid)
-        idx, aux = cell_inputs(keys, ev.cell_key, ev.band_lengths, cfg, grid)
-        ok = (idx >= 0).any(1)
-        y = np.zeros(len(keys), np.float32)
-        logit = np.full(len(keys), UNCOVERED_LOGIT, np.float32)
-        qm, sd = np.zeros(len(keys)), np.full(len(keys), np.nan)
-        if ok.any():
-            nbr = cell_neighbors(keys[ok], ev.cell_key, ev.band_lengths, cfg, grid)
+        keys = torch.as_tensor(np.asarray(keys, np.int64), device=dev)
+        ck, n = torch.as_tensor(ev.cell_key, device=dev), len(keys)
+        y = torch.zeros(n, dtype=torch.float32, device=dev)
+        logit = torch.full((n,), UNCOVERED_LOGIT, dtype=torch.float32, device=dev)
+        qm = torch.zeros(n, dtype=torch.float64, device=dev)
+        sd = torch.full((n,), float("nan"), dtype=torch.float64, device=dev)
+        step = chunk or head_chunk(model.head, ev.batch, dev)
+        for s in range(0, n, step):
+            k = keys[s:s + step]
+            idx, aux = cell_inputs(k, ck, ev.band_lengths, cfg, grid)
+            ok = (idx >= 0).any(1)
+            if not bool(ok.any()):
+                continue
+            at = s + torch.nonzero(ok).squeeze(1)
+            nbr = cell_neighbors(k[ok], ck, ev.band_lengths, cfg, grid)
             feats = ev.features(model.fm)                            # what DenoiseModel.outputs encodes
             with torch.no_grad(), autocast(dev):
-                out = model.head(feats, t(idx[ok]), t(aux[ok]), t(nbr), ev.batch)
-            y[ok], logit[ok] = out[0].float().cpu().numpy(), out[1].float().cpu().numpy()
-            m, s = head_charge(model.head, out)
-            qm[ok], sd[ok] = m.cpu().numpy(), s.cpu().numpy()
-        return y, logit, qm, sd
+                out = model.head(feats, idx[ok], aux[ok], nbr, ev.batch)
+            y[at], logit[at] = out[0].float(), out[1].float()
+            qm[at], sd[at] = head_charge(model.head, out)
+        return tuple(a.cpu().numpy() for a in (y, logit, qm, sd))
 
     predict.provenance = run.provenance          # which checkpoint (``weights``) it read, for the JSON
     predict.run = run                            # its config names the corpus and the events
@@ -405,7 +436,7 @@ def _log_sigmoid(x):
     return -np.logaddexp(0.0, -x)
 
 
-def coarsen(predict, fine, chunk=200_000):
+def coarsen(predict, fine):
     """A predictor on a truth grid coarser than ``fine``, the grid ``predict`` was trained on (its
     run's truth): each cell's prediction is aggregated from its sub-cells' (:func:`sub_cells`),
     treating them as independent given the event --
@@ -419,7 +450,7 @@ def coarsen(predict, fine, chunk=200_000):
     closure is the fine predictor's. A sub-cell no token covers is ``p_i = 0``; a cell none of
     whose sub-cells is covered is uncovered (``y = 0``, :data:`UNCOVERED_LOGIT`). On ``fine``
     itself it is ``predict``. Conditional heads only: an unconditional head's charge is not given
-    presence, and these sums would not hold. ``chunk``: sub-cells per ``predict`` call, at most."""
+    presence, and these sums would not hold."""
     fine = Grid(*fine)
     if not getattr(predict, "conditional", True):
         raise ValueError("coarsen: the head's charge is not given presence (cond_charge=False), so its "
@@ -432,10 +463,8 @@ def coarsen(predict, fine, chunk=200_000):
             return predict(ev, keys, grid=fine)
         sk = sub_cells(keys, grid, fine)
         n, m = sk.shape
-        flat = sk.ravel()
-        parts = [predict(ev, flat[s:s + chunk], grid=fine) for s in range(0, len(flat), chunk)]
-        y, lg, qm = (np.concatenate([np.asarray(p[i], np.float64) for p in parts]).reshape(n, m) if parts
-                     else np.zeros((n, m)) for i in range(3))
+        r = predict(ev, sk.ravel(), grid=fine)
+        y, lg, qm = (np.asarray(r[i], np.float64).reshape(n, m) for i in range(3))
         cov = lg > UNCOVERED_LOGIT
         anyc = cov.any(1)
         lp = np.where(cov, _log_sigmoid(lg), -np.inf)               # log p_i
@@ -463,8 +492,6 @@ class Denoise:
     ``amplitude``, ``headline``) and ``cells`` -- per-cell detection, charge, closure and the
     presence calibration on the natural covered cells."""
     name = "denoise"
-    #: Cells per predictor call, at most.
-    CHUNK = 200_000
 
     def __init__(self, ctx):
         self.ctx = ctx
@@ -482,20 +509,16 @@ class Denoise:
         self.emp = dict(q=[], qp=[], qm=[], view=[])
 
     def _predict(self, ev, keys):
-        """The predictor on ``keys`` in chunks -> ``(y, logit, q_mean, y_sd)`` (the module
-        docstring's defaults for a predictor returning fewer)."""
+        """The predictor on ``keys`` -> ``(y, logit, q_mean, y_sd)`` (the module docstring's
+        defaults for a predictor returning fewer). One call: a predictor bounds its own memory
+        (:func:`load_denoiser`'s ``chunk``)."""
         keys = np.asarray(keys, np.int64)
         n = len(keys)
-        y, lg = np.zeros(n, np.float32), np.full(n, UNCOVERED_LOGIT, np.float32)
-        qm, sd = np.zeros(n), np.full(n, np.nan)
-        for s in range(0, n, self.CHUNK):
-            r = self.ctx.denoiser(ev, keys[s:s + self.CHUNK])
-            sl = slice(s, s + self.CHUNK)
-            y[sl], lg[sl] = r[0], r[1]
-            qm[sl] = r[2] if len(r) > 2 else Q0 * np.expm1(np.maximum(np.asarray(r[0], np.float64), 0))
-            if len(r) > 3:
-                sd[sl] = r[3]
-        return y, lg, qm, sd
+        r = self.ctx.denoiser(ev, keys)
+        y, lg = np.asarray(r[0], np.float32).reshape(n), np.asarray(r[1], np.float32).reshape(n)
+        qm = np.asarray(r[2], np.float64) if len(r) > 2 else Q0 * np.expm1(np.maximum(y.astype(np.float64), 0))
+        sd = np.asarray(r[3], np.float64) if len(r) > 3 else np.full(n, np.nan)
+        return y, lg, qm.reshape(n), sd.reshape(n)
 
     def add(self, ev):
         c = self.ctx
