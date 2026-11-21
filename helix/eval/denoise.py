@@ -93,7 +93,7 @@ import numpy as np
 
 from helix.core.xp import namespace
 from helix.data.cells import Q0, Grid, fkey, unkey
-from helix.model.cells_join import cell_inputs, cell_neighbors, covering_tokens
+from helix.model.cells_join import cell_groups, cell_inputs, cell_neighbors, covering_tokens
 from helix.eval.events import HEADLINE, LEVEL, PAD, SECONDARY, VIEWS, Scored, amplitude, bootstrap, cell_charge
 
 #: Truth-charge bins of the diagnostic (e-), from the presence label; the last is open.
@@ -354,13 +354,15 @@ def head_charge(head, out):
 
 
 def head_chunk(head, batch, device, frac=0.5):
-    """Cells per :class:`helix.model.denoise.CellDecoder` call: ``frac`` of the device's free memory
-    (2 GiB on a CPU) over a cell's peak footprint in its forward -- each block's gathered keys and
-    values, about 4 x (n_bands n_nbr + 1) x proj fp32 at once, and its covering tokens' raw inputs,
-    3 x n_bands x 2 n_slot fp32 -- plus 2 KiB for its inputs and their construction."""
+    """Cells per :class:`helix.model.denoise.CellDecoder` call with cells grouped by neighbourhood
+    (its ``group``): ``frac`` of the device's free memory (2 GiB on a CPU) over a cell's peak
+    footprint in its forward -- its covering tokens' raw inputs, 3 x n_bands x 2 n_slot fp32; each
+    block's attention scores in their four precisions, 12 bytes x heads x (n_bands n_nbr + 1); and
+    its residual stream and MLP, 16 x proj fp32 -- plus 2 KiB for its inputs, their construction and
+    its share of its group's keys and values."""
     import torch
     L, P = head.pos.shape
-    per_cell = 16 * L * P + 24 * head.n_bands * batch["inp"].shape[1] + 2048
+    per_cell = 12 * head.heads * L + 64 * P + 24 * head.n_bands * batch["inp"].shape[1] + 2048
     free = torch.cuda.mem_get_info(device)[0] if torch.device(device).type == "cuda" else 2 ** 31
     return max(1, int(frac * free) // per_cell)
 
@@ -376,8 +378,10 @@ def load_denoiser(path, device=None, *, weights="last", fm=None, chunk=None):
     head, ``predict.conditional`` whether its charge is given presence.
 
     ``predict`` takes any number of keys: their inputs (:func:`helix.model.cells_join.cell_inputs`,
-    ``cell_neighbors``) are built on the model's device and the head runs over them ``chunk`` cells
-    at a time, default :func:`head_chunk` (sized to the device's free memory); one copy back."""
+    and ``cell_neighbors`` once per neighbourhood, ``cell_groups``) are built on the model's device
+    and the head runs over them ``chunk`` cells at a time, default :func:`head_chunk` (sized to the
+    device's free memory), each neighbourhood's keys and values built once per chunk; one copy
+    back."""
     import torch
     from helix.eval.recon import autocast
     from helix.model.checkpoint import load_run
@@ -405,10 +409,11 @@ def load_denoiser(path, device=None, *, weights="last", fm=None, chunk=None):
             if not bool(ok.any()):
                 continue
             at = s + torch.nonzero(ok).squeeze(1)
-            nbr = cell_neighbors(k[ok], ck, ev.band_lengths, cfg, grid)
+            rep, group = cell_groups(k[ok], ev.band_lengths, cfg, grid)
+            nbr = cell_neighbors(k[ok][rep], ck, ev.band_lengths, cfg, grid)     # one per neighbourhood
             feats = ev.features(model.fm)                            # what DenoiseModel.outputs encodes
             with torch.no_grad(), autocast(dev):
-                out = model.head(feats, idx[ok], aux[ok], nbr, ev.batch)
+                out = model.head(feats, idx[ok], aux[ok], nbr, ev.batch, group=group)
             y[at], logit[at] = out[0].float(), out[1].float()
             qm[at], sd[at] = head_charge(model.head, out)
         return tuple(a.cpu().numpy() for a in (y, logit, qm, sd))

@@ -264,6 +264,52 @@ def test_a_checkpointed_decoder_computes_and_trains_exactly_as_the_plain_one():
         torch.testing.assert_close(ckpt(feats, idx, aux, nbr, B)[1], o1[1].detach())
 
 
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_a_grouped_head_computes_and_trains_as_the_per_cell_one(checkpoint):
+    """Cells given grouped by neighbourhood (``group``: one ``nbr`` row per group) get the outputs,
+    the cat loss and the gradients -- of the head's parameters and of the token features -- of
+    the same cells given one ``nbr`` row each (the training path), to float32 rounding. Groups
+    larger than a tile, an empty group and one with no token near are among them."""
+    from helix.model.denoise import GROUP_TILE
+    torch.manual_seed(0)
+    kw = dict(n_bands=4, n_slot=SMALL["n_slot"], proj=16, heads=4, layers=2, hidden=32, dist="cat", n_bins=8)
+    plain, grouped = CellDecoder(SMALL["d"], **kw), CellDecoder(SMALL["d"], **kw, checkpoint=checkpoint)
+    grouped.load_state_dict(plain.state_dict())
+    n_tok, n, G = 50, 150, 9
+    B = dict(inp=torch.randn(n_tok, SMALL["n_slot"]), occ=(torch.rand(n_tok, SMALL["n_slot"]) > 0.5).float())
+    nbr_g = torch.randint(-1, n_tok, (G, 4, 9))
+    nbr_g[1] = -1                                                   # no token anywhere near
+    group = torch.randint(0, G - 1, (n,))                           # group G - 1 has no cell
+    group[:2 * GROUP_TILE + 5] = 3                                  # one spans three tiles
+    group = group[torch.randperm(n)]
+    idx, aux, feats = nbr_g[group][:, :, 4], torch.randn(n, 52), torch.randn(n_tok, SMALL["d"])
+    y, present = torch.rand(n) * 5, (torch.rand(n) > 0.5).float()
+    res = []
+    for head, nb, gr in ((plain, nbr_g[group], None), (grouped, nbr_g, group)):
+        f = feats.clone().requires_grad_(True)
+        out = head(f, idx, aux, nb, B, group=gr)
+        loss = cat_loss(out[2], y, present, head.edges, head.hl_sigma)
+        loss.backward()
+        res.append((out, loss, f.grad, {k: p.grad.clone() for k, p in head.named_parameters()}))
+    (o1, l1, f1, g1), (o2, l2, f2, g2) = res
+    for a, b in zip(o1, o2):
+        torch.testing.assert_close(a, b)
+    torch.testing.assert_close(l1, l2)
+    torch.testing.assert_close(f1, f2)
+    assert g1.keys() == g2.keys()
+    for k in g1:
+        torch.testing.assert_close(g1[k], g2[k], rtol=1e-4, atol=1e-6, msg=k)
+
+
+def test_group_tiles_lay_each_group_out_in_its_own_tiles():
+    from helix.model.denoise import group_tiles
+    group = torch.tensor([2, 0, 2, 2, 0, 2, 2])                     # group 1 empty
+    pos, tiles = group_tiles(group, 3, 2)
+    assert tiles.tolist() == [0, 2, 2, 2]                            # 2 cells -> 1 tile, 5 -> 3, 0 -> 0
+    assert pos.tolist() == [2, 0, 3, 4, 1, 5, 6]                     # in cell order within a group
+    assert (tiles[pos // 2] == group).all() and len(set(pos.tolist())) == len(group)
+
+
 def test_build_denoise_loads_a_pretrained_fm_into_the_amplitude_channel(fm_run, sample):
     d, last = fm_run
     m = build_denoise(str(d), lin_amp_scale=30.0, compile_blocks=False).eval()

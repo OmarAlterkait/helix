@@ -52,6 +52,11 @@ class _Numpy:
     unique = staticmethod(np.unique)
 
     @staticmethod
+    def unique_inverse(x):
+        """``(values, inverse)``: the sorted unique values and each element's index into them."""
+        return np.unique(x, return_inverse=True)
+
+    @staticmethod
     def astype(x, dtype):
         return x.astype(dtype)
 
@@ -130,6 +135,9 @@ class _Torch:
 
     def unique(self, x):
         return self._t.unique(x, sorted=True)
+
+    def unique_inverse(self, x):
+        return self._t.unique(x, sorted=True, return_inverse=True)
 
     @staticmethod
     def size(x):

@@ -56,6 +56,9 @@ ENCODER_PREFIXES = ("embed.", "film.", "band_emb.", "plane_emb.", "enc.")
 DISTS = ("point", "gauss", "cat")
 #: The gauss head's log-width is clamped here (y units: 1e-3 .. 20) in the loss and in its use.
 LOG_SIGMA_RANGE = (-7.0, 3.0)
+#: Rows per tile when cells come grouped by neighbourhood (``CellDecoder.forward``'s ``group``):
+#: how the attention executes, not what it computes.
+GROUP_TILE = 32
 
 
 class CellDecoder(nn.Module):
@@ -81,6 +84,12 @@ class CellDecoder(nn.Module):
     and values, two (n, 37, proj) fp32 tensors -- 2.8 GB each at the ~150k query cells of a 1 x 4
     truth's event, which ran a 40 GB A100 out of memory; with it a block's are freed as the
     forward moves on.
+
+    Cells grouped by neighbourhood (``forward``'s ``group``; :func:`helix.model.cells_join.
+    cell_groups`) share their keys and values: they are built once per group, and the group's cells
+    attend to them as a tile of queries -- the same function as per cell. Per cell, a block wrote and
+    read those (37, proj) keys and values (~19 KB each) for every cell; scoring every covered cell
+    of a 1 x 4 event (5.6M cells, ~90 per neighbourhood) spent 90% of the head's 3.9 s there.
     """
 
     def __init__(self, d, n_bands=4, n_nbr=9, n_slot=128, proj=128, heads=4, layers=2, hidden=512,
@@ -115,12 +124,17 @@ class CellDecoder(nn.Module):
             self.register_buffer("centers", 0.5 * (edges[1:] + edges[:-1]), persistent=False)
             self.hl_sigma = float(hl_sigma) * float(edges[1] - edges[0])        # in y
 
-    def forward(self, feats, idx, aux, nbr, B):
+    def forward(self, feats, idx, aux, nbr, B, group=None):
         """feats (N_tok, d); idx (n, n_bands) covering token or -1; aux (n, 13 n_bands); nbr
         (n, n_bands, n_nbr) neighbourhood tokens or -1; ``B`` the FM batch (its ``inp``/``occ``).
         -> ``(charge, presence_logit)``, each (n,) float32, + the log-width (n,) (gauss) or the
-        K + 1 logits (n, K + 1) (cat)."""
+        K + 1 logits (n, K + 1) (cat).
+
+        ``group`` (n,) int64: ``nbr`` is instead one row per neighbourhood (G, n_bands, n_nbr) and
+        cell i's is ``nbr[group[i]]`` (:func:`helix.model.cells_join.cell_groups`) -- the same
+        outputs, its keys and values built once per neighbourhood (class docstring)."""
         n = idx.shape[0]
+        m = nbr.shape[0]                                                        # key sets: per cell or per group
         # keys/values are projected once per TOKEN (~30k rows), then gathered for every
         # (cell, neighbour slot) pair (~n x 37) -- projecting after the gather cost 90x the
         # matmul rows and made a step 5x slower; the slot embedding is projected and added
@@ -131,20 +145,26 @@ class CellDecoder(nn.Module):
         # events. Absent slots get spread dummy rows (masked, so their gradients are
         # zero); the null key is appended, not gathered.
         z = self.kv(self.norm(feats))                                           # (N_tok, P)
-        flat = nbr.reshape(n, -1)                                               # (n, nb*K)
+        flat = nbr.reshape(m, -1)                                               # (m, nb*K)
         nt = z.shape[0]
         spread = torch.arange(flat.numel(), device=flat.device).view_as(flat) % nt
         gidx = torch.where(flat >= 0, flat, spread)
-        keep = torch.cat([flat >= 0, torch.ones(n, 1, dtype=torch.bool, device=flat.device)], 1)
+        keep = torch.cat([flat >= 0, torch.ones(m, 1, dtype=torch.bool, device=flat.device)], 1)
         raw = torch.cat([B["inp"], B["occ"].to(B["inp"].dtype)], -1)            # (N_tok, 2*n_slot)
         r = raw[idx.clamp(min=0)] * (idx >= 0).unsqueeze(-1).to(raw.dtype)      # (n, nb, 2*n_slot)
         q = self.q0(torch.cat([aux.to(r.dtype), r.flatten(1)], 1)).float()
+        tile = None
+        if group is not None:                                                   # cells into tiles of their group
+            pos, tile = group_tiles(group, m, GROUP_TILE)
+            q = q.new_zeros(tile.shape[0] * GROUP_TILE, q.shape[1]).index_copy(0, pos, q)
         for blk in self.blocks:
             if self.checkpoint and torch.is_grad_enabled():
                 from torch.utils.checkpoint import checkpoint
-                q = checkpoint(self._block, blk, q, z, gidx, keep, use_reentrant=False)
+                q = checkpoint(self._block, blk, q, z, gidx, keep, tile, use_reentrant=False)
             else:
-                q = self._block(blk, q, z, gidx, keep)
+                q = self._block(blk, q, z, gidx, keep, tile)
+        if tile is not None:
+            q = q[pos]
         # The readout in fp32: under bf16 autocast a Linear's OUTPUT is bf16, and a later .float()
         # keeps its rounding -- a 0.031 step in y above y = 4 (~110k e-), ~3% in charge.
         with torch.autocast(q.device.type, enabled=False):
@@ -155,22 +175,46 @@ class CellDecoder(nn.Module):
                 return out[:, 0], out[:, 1], self.dist_out(q.float()).squeeze(-1)
         return out[:, 0], out[:, 1]
 
-    def _block(self, blk, q, z, gidx, keep):
+    def _block(self, blk, q, z, gidx, keep, tile=None):
         """One attention block: the cells' queries ``q`` (n, P) attend their gathered neighbourhood
-        of the projected tokens ``z`` (``gidx``, ``keep``: :meth:`forward`) and the null key."""
+        of the projected tokens ``z`` (``gidx``, ``keep``: :meth:`forward`, one row per key set)
+        and the null key. ``tile`` None: a key set per cell. Otherwise (n_tiles,) the key set of
+        each tile of ``q``'s rows (:func:`group_tiles`): a tile's queries attend to its set together."""
         n, P = q.shape
-        h, L = self.heads, gidx.shape[1]
+        h, L, m = self.heads, gidx.shape[1], gidx.shape[0]
         zn, nn_ = blk["nk"](z), blk["nk"](self.null)
         Kt, Vt = blk["k"](zn).float(), blk["v"](zn).float()                # (N_tok, P), gathered in fp32
         kp, vp = blk["k"](self.pos).float(), blk["v"](self.pos).float()    # (L+1, P)
-        K = torch.cat([Kt[gidx] + kp[:L], (blk["k"](nn_).float() + kp[L]).expand(n, 1, P)], 1)
-        V = torch.cat([Vt[gidx] + vp[:L], (blk["v"](nn_).float() + vp[L]).expand(n, 1, P)], 1)
-        Qh = blk["q"](blk["nq"](q)).float().view(n, h, P // h)
-        s = torch.einsum("nhd,nlhd->nhl", Qh, K.view(n, L + 1, h, P // h)) * (P // h) ** -0.5
-        a = s.masked_fill(~keep[:, None, :], float("-inf")).softmax(-1)
-        att = torch.einsum("nhl,nlhd->nhd", a, V.view(n, L + 1, h, P // h)).reshape(n, P)
+        K = torch.cat([Kt[gidx] + kp[:L], (blk["k"](nn_).float() + kp[L]).expand(m, 1, P)], 1)
+        V = torch.cat([Vt[gidx] + vp[:L], (blk["v"](nn_).float() + vp[L]).expand(m, 1, P)], 1)
+        if tile is None:
+            Qh = blk["q"](blk["nq"](q)).float().view(n, h, P // h)
+            s = torch.einsum("nhd,nlhd->nhl", Qh, K.view(n, L + 1, h, P // h)) * (P // h) ** -0.5
+            a = s.masked_fill(~keep[:, None, :], float("-inf")).softmax(-1)
+            att = torch.einsum("nhl,nlhd->nhd", a, V.view(n, L + 1, h, P // h)).reshape(n, P)
+        else:
+            nt = tile.shape[0]
+            Qh = blk["q"](blk["nq"](q)).float().view(nt, n // nt, h, P // h)
+            s = torch.einsum("tchd,tlhd->thcl", Qh, K[tile].view(nt, L + 1, h, P // h)) * (P // h) ** -0.5
+            a = s.masked_fill(~keep[tile][:, None, None, :], float("-inf")).softmax(-1)
+            att = torch.einsum("thcl,tlhd->tchd", a, V[tile].view(nt, L + 1, h, P // h)).reshape(n, P)
         q = q + blk["o"](att).float()
         return q + blk["mlp"](blk["nm"](q)).float()
+
+
+def group_tiles(group, n_groups, tile):
+    """Cells grouped by neighbourhood (``group`` (n,) in [0, ``n_groups``)) laid out in tiles of
+    ``tile`` rows, each tile one group's: ``(pos, tiles)`` -- ``pos`` (n,) each cell's row,
+    ``tiles`` (n_tiles,) each tile's group. A group of c cells takes ceil(c / tile) tiles, in cell
+    order; the rest of its last tile is padding, which no cell reads."""
+    cnt = torch.bincount(group, minlength=n_groups)
+    n_tiles = (cnt + tile - 1) // tile
+    first_tile, first_cell = torch.cumsum(n_tiles, 0) - n_tiles, torch.cumsum(cnt, 0) - cnt
+    order = torch.argsort(group, stable=True)
+    rank = torch.empty_like(group)
+    rank[order] = torch.arange(group.shape[0], device=group.device) - first_cell[group[order]]
+    tiles = torch.repeat_interleave(torch.arange(n_groups, device=group.device), n_tiles)
+    return first_tile[group] * tile + rank, tiles
 
 
 class DenoiseModel(nn.Module):
